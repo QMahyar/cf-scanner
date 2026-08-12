@@ -9,7 +9,7 @@ Status legend: [ ] todo · [~] in progress · [x] done
 **Checkpoint A:** build clean, tests green, human review of plan
 
 ## Phase 1: Engine core
-- [ ] Task 3: Ranges (bundled CF, presets, exclusions, custom CIDR)
+- [x] Task 3: Ranges (bundled CF, presets, exclusions, custom CIDR)
 - [ ] Task 4: TLS probe (tokio-rustls, latency, injectable)
 - [ ] Task 5: ScanController (stop conditions, pool, events, results store)
 - [ ] Task 6: Server API (axum, SSE, static embed)

@@ -1,6 +1,8 @@
 use std::process::ExitCode;
 
 mod api;
+mod paths;
+mod ranges;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -40,13 +42,15 @@ enum RangesAction {
     Refresh,
 }
 
-fn main() -> ExitCode {
+#[tokio::main]
+async fn main() -> ExitCode {
+    let _ = rustls::crypto::ring::default_provider().install_default();
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::from_default_env())
         .init();
 
     let cli = Cli::parse();
-    match run(cli) {
+    match run(cli).await {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
             eprintln!("error: {err:#}");
@@ -55,7 +59,7 @@ fn main() -> ExitCode {
     }
 }
 
-fn run(cli: Cli) -> Result<()> {
+async fn run(cli: Cli) -> Result<()> {
     match cli.command {
         Command::Serve { port } => {
             tracing::info!("serve command received (port {port}); server lands in Task 6");
@@ -67,7 +71,11 @@ fn run(cli: Cli) -> Result<()> {
         }
         Command::Ranges { action } => match action {
             RangesAction::Refresh => {
-                tracing::info!("ranges refresh received; lands in Task 3");
+                let n = ranges::refresh_to_disk(&ranges::RealHttp).await?;
+                println!(
+                    "refreshed {n} IPv4 ranges -> {}",
+                    paths::refreshed_ranges_path()?.display()
+                );
                 Ok(())
             }
         },

@@ -8,3 +8,7 @@ Added / Changed / Fixed / Deprecated / Removed / Security, newest on top.
 ### Added
 - Project skeleton: CLI entry (serve/scan/ranges), CI checks workflow,
   bundled Cloudflare IPv4 ranges + WARP endpoint pools + pinned xray version.
+- API contract types (`ScanConfig`, `StopCondition`, `Verdict`, `ScanEvent`)
+  with input validation.
+- Ranges engine: CIDR parsing/normalization, exclusion subtraction, preset
+  and count sampling plans, `ranges refresh` via verified HTTPS fetch.
