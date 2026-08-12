@@ -2,6 +2,7 @@ use std::process::ExitCode;
 
 mod api;
 mod paths;
+mod probe;
 mod ranges;
 
 use anyhow::Result;

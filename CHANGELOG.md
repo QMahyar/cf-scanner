@@ -12,3 +12,5 @@ Added / Changed / Fixed / Deprecated / Removed / Security, newest on top.
   with input validation.
 - Ranges engine: CIDR parsing/normalization, exclusion subtraction, preset
   and count sampling plans, `ranges refresh` via verified HTTPS fetch.
+- Phase-1 probe transport: injectable TCP+TLS latency probe (no cert
+  verification by design; real validation lands with phase-2).
