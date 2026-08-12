@@ -5,11 +5,13 @@
 //! certificates (anycast SNI fronting rarely matches the IP SAN), so the
 //! verifier is bypassed on purpose; real configuration validation is what
 //! phase-2 (Task 11) exists for.
-//! Transport trait is consumed by the ScanController (Task 5); this flag
-//! errors out once nothing in the module is dead anymore.
+//! FakeTransport is only reachable from engine tests (cfg(test)), so the
+//! module keeps a self-revoking dead-code flag until it is used in builds.
 #![expect(dead_code)]
 
+use std::future::Future;
 use std::net::Ipv4Addr;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -38,8 +40,15 @@ pub enum ProbeError {
 }
 
 /// `Ok(latency_ms)` when the endpoint completed TCP+TLS within the budget.
+/// Core type is an explicit future so `Arc<dyn Transport>` stays object-safe
+/// for the server.
 pub trait Transport: Send + Sync {
-    async fn probe(&self, ip: Ipv4Addr, port: u16, timeout_ms: u64) -> Result<u32, ProbeError>;
+    fn probe(
+        &self,
+        ip: Ipv4Addr,
+        port: u16,
+        timeout_ms: u64,
+    ) -> Pin<Box<dyn Future<Output = Result<u32, ProbeError>> + Send + '_>>;
 }
 
 /// Real transport: tokio TcpStream + rustls, no cert verification (see the
@@ -71,28 +80,35 @@ impl Default for TlsTransport {
 }
 
 impl Transport for TlsTransport {
-    async fn probe(&self, ip: Ipv4Addr, port: u16, timeout_ms: u64) -> Result<u32, ProbeError> {
+    fn probe(
+        &self,
+        ip: Ipv4Addr,
+        port: u16,
+        timeout_ms: u64,
+    ) -> Pin<Box<dyn Future<Output = Result<u32, ProbeError>> + Send + '_>> {
         let start = Instant::now();
         let server_name =
             ServerName::try_from(PROBE_SNI.to_owned()).expect("static SNI is a valid hostname");
-        let fut = async {
-            let stream = TcpStream::connect((ip, port))
-                .await
-                .map_err(|e| ProbeError::Refused(e.to_string()))?;
-            let mut tls = self
-                .connector
-                .connect(server_name.clone(), stream)
-                .await
-                .map_err(|e| ProbeError::Tls(e.to_string()))?;
-            // Half-close to signal we want no response data back.
-            let _ = tls.shutdown().await;
-            Ok(())
-        };
-        match timeout(Duration::from_millis(timeout_ms), fut).await {
-            Ok(Ok(())) => Ok(start.elapsed().as_millis() as u32),
-            Ok(Err(e)) => Err(e),
-            Err(_) => Err(ProbeError::Timeout { timeout_ms }),
-        }
+        Box::pin(async move {
+            let fut = async {
+                let stream = TcpStream::connect((ip, port))
+                    .await
+                    .map_err(|e| ProbeError::Refused(e.to_string()))?;
+                let mut tls = self
+                    .connector
+                    .connect(server_name.clone(), stream)
+                    .await
+                    .map_err(|e| ProbeError::Tls(e.to_string()))?;
+                // Half-close to signal we want no response data back.
+                let _ = tls.shutdown().await;
+                Ok(())
+            };
+            match timeout(Duration::from_millis(timeout_ms), fut).await {
+                Ok(Ok(())) => Ok(start.elapsed().as_millis() as u32),
+                Ok(Err(e)) => Err(e),
+                Err(_) => Err(ProbeError::Timeout { timeout_ms }),
+            }
+        })
     }
 }
 
@@ -136,11 +152,19 @@ impl ServerCertVerifier for NoVerify {
     }
 }
 
+/// A scripted outcome plus an optional artificial delay so tests can
+/// exercise cancellation while a probe is in flight.
+#[derive(Clone)]
+struct Scripted {
+    outcome: Result<u32, ProbeError>,
+    delay_ms: u64,
+}
+
 /// Scripted transport for engine tests: each (ip, port) maps to a scripted
 /// outcome. Latencies are returned verbatim so stop-condition math is
 /// observable.
 pub struct FakeTransport {
-    script: std::sync::Mutex<std::collections::HashMap<(u32, u16), Result<u32, ProbeError>>>,
+    script: std::sync::Mutex<std::collections::HashMap<(u32, u16), Scripted>>,
 }
 
 impl FakeTransport {
@@ -150,30 +174,67 @@ impl FakeTransport {
         }
     }
 
+    /// Chainable builder entry.
     pub fn ok(self, ip: Ipv4Addr, port: u16, latency_ms: u32) -> Self {
+        self.insert(ip, port, Ok(latency_ms));
+        self
+    }
+
+    /// Chainable builder entry for an Ok outcome that only resolves after
+    /// `delay_ms` of real time.
+    pub fn ok_slow(self, ip: Ipv4Addr, port: u16, latency_ms: u32, delay_ms: u64) -> Self {
+        self.insert(ip, port, Ok(latency_ms));
         self.script
             .lock()
             .unwrap()
-            .insert((u32::from(ip), port), Ok(latency_ms));
+            .get_mut(&(u32::from(ip), port))
+            .unwrap()
+            .delay_ms = delay_ms;
         self
+    }
+
+    /// Mutable insert for tests that script transports incrementally.
+    pub fn insert(&self, ip: Ipv4Addr, port: u16, outcome: Result<u32, ProbeError>) {
+        self.script.lock().unwrap().insert(
+            (u32::from(ip), port),
+            Scripted {
+                outcome,
+                delay_ms: 0,
+            },
+        );
+    }
+
+    pub fn clear(&self) {
+        self.script.lock().unwrap().clear();
     }
 
     #[cfg(test)]
     pub fn fail(self, ip: Ipv4Addr, port: u16, err: ProbeError) -> Self {
-        self.script
-            .lock()
-            .unwrap()
-            .insert((u32::from(ip), port), Err(err));
+        self.insert(ip, port, Err(err));
         self
     }
 }
 
 impl Transport for FakeTransport {
-    async fn probe(&self, ip: Ipv4Addr, port: u16, _timeout_ms: u64) -> Result<u32, ProbeError> {
-        match self.script.lock().unwrap().get(&(u32::from(ip), port)) {
-            Some(r) => r.clone(),
-            None => Err(ProbeError::Refused("not scripted".to_owned())),
-        }
+    fn probe(
+        &self,
+        ip: Ipv4Addr,
+        port: u16,
+        _timeout_ms: u64,
+    ) -> Pin<Box<dyn Future<Output = Result<u32, ProbeError>> + Send + '_>> {
+        let scripted = match self.script.lock().unwrap().get(&(u32::from(ip), port)) {
+            Some(s) => s.clone(),
+            None => Scripted {
+                outcome: Err(ProbeError::Refused("not scripted".to_owned())),
+                delay_ms: 0,
+            },
+        };
+        Box::pin(async move {
+            if scripted.delay_ms > 0 {
+                tokio::time::sleep(Duration::from_millis(scripted.delay_ms)).await;
+            }
+            scripted.outcome
+        })
     }
 }
 

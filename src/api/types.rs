@@ -219,8 +219,6 @@ pub enum ConfigError {
     InvalidCount(u32),
     #[error("stop.found must be >= 1, got {0}")]
     InvalidFound(u32),
-    #[error("stop.cap ({0}) must be >= stop.found ({1})")]
-    InvalidCap(u32, u32),
     #[error("invalid CIDR {0:?}: {1}")]
     InvalidCidr(String, String),
     #[error("invalid endpoint {0:?}: {1}")]
@@ -253,11 +251,6 @@ impl ScanConfig {
         }
         if self.stop.found == 0 {
             return Err(ConfigError::InvalidFound(0));
-        }
-        if let Some(cap) = self.stop.cap {
-            if cap < self.stop.found {
-                return Err(ConfigError::InvalidCap(cap, self.stop.found));
-            }
         }
         if !(1..=1000).contains(&self.concurrency) {
             return Err(ConfigError::InvalidConcurrency(self.concurrency));
@@ -439,13 +432,14 @@ mod tests {
     }
 
     #[test]
-    fn rejects_cap_below_found() {
+    fn accepts_cap_below_found() {
+        // A cap below `found` is valid: the cap wins before the found-count is reached.
         let mut c = valid_config();
         c.stop = StopCondition {
             found: 20,
             cap: Some(10),
         };
-        assert_eq!(c.validate(), Err(ConfigError::InvalidCap(10, 20)));
+        assert_eq!(c.validate(), Ok(()));
     }
 
     #[test]

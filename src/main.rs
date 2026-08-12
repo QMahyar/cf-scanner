@@ -1,6 +1,7 @@
 use std::process::ExitCode;
 
 mod api;
+mod engine;
 mod paths;
 mod probe;
 mod ranges;

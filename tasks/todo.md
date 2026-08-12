@@ -11,7 +11,7 @@ Status legend: [ ] todo · [~] in progress · [x] done
 ## Phase 1: Engine core
 - [x] Task 3: Ranges (bundled CF, presets, exclusions, custom CIDR)
 - [x] Task 4: TLS probe (tokio-rustls, latency, injectable)
-- [ ] Task 5: ScanController (stop conditions, pool, events, results store)
+- [x] Task 5: ScanController (stop conditions, pool, events, results store)
 - [ ] Task 6: Server API (axum, SSE, static embed)
 
 **Checkpoint B:** phase-1 end-to-end via API

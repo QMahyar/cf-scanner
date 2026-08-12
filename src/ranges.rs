@@ -2,10 +2,6 @@
 //! CIDRs, dirty-range exclusions, and preset/count sampling plans.
 //! Pure logic here; the network fetch for `ranges refresh` is injected so
 //! tests never touch the wire.
-//! Planning APIs are consumed by the ScanController (Task 5); this flag
-//! errors out the moment nothing in the module is dead anymore, telling us
-//! to drop it and treat dead code as a warning again.
-#![expect(dead_code)]
 
 use std::fs;
 use std::net::Ipv4Addr;
@@ -31,7 +27,7 @@ pub struct Cidr {
 }
 
 impl Cidr {
-    fn host_count(self) -> u64 {
+    pub fn host_count(self) -> u64 {
         1u64 << (32 - self.prefix as u64)
     }
 
@@ -110,16 +106,19 @@ impl CidrPool {
         })
     }
 
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "consumed by the /api/ranges server endpoint in Task 6"
+        )
+    )]
     pub fn ranges(&self) -> &[Cidr] {
         &self.ranges
     }
 
     pub fn host_count(&self) -> u64 {
         self.ranges.iter().map(|c| c.host_count()).sum()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.ranges.is_empty()
     }
 
     pub fn extend(&mut self, more: Vec<Cidr>) {
@@ -531,7 +530,7 @@ mod tests {
             ranges: vec![parse_cidr("10.0.0.0/8").unwrap()],
         };
         let ex = parse_cidr("0.0.0.0/0").unwrap();
-        assert!(pool.excluding(&[ex]).is_empty());
+        assert_eq!(pool.excluding(&[ex]).host_count(), 0);
     }
 
     #[test]
