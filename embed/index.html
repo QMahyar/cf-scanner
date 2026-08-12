@@ -5,13 +5,282 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>CF-Scanner</title>
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@picocss/pico@2.1.1/css/pico.min.css">
+  <script src="https://cdn.jsdelivr.net/npm/htmx.org@2.0.4/dist/htmx.min.js" defer></script>
+  <script src="https://cdn.jsdelivr.net/npm/htmx-ext-sse@2.2.4/sse.js" defer></script>
+  <style>
+    .muted { color: var(--pico-muted-color); }
+    .spacer { margin-top: 1rem; }
+    table { table-layout: fixed; }
+    th.sortable { cursor: pointer; user-select: none; }
+    th .caret { color: var(--pico-muted-color); }
+    #scan-status[data-state="running"] { animation: pulse 1.5s ease-in-out infinite; }
+    @keyframes pulse { 50% { opacity: 0.45; } }
+    details { margin-bottom: 0; }
+  </style>
 </head>
 <body>
   <main class="container">
-    <h1>CF-Scanner</h1>
-    <p>Engine is live. The full UI (config form, live results table, reset) lands in Task 7.</p>
-    <p>Try <a href="/api/ranges">/api/ranges</a>, <a href="/api/results">/api/results</a>, or the
-    <a href="/api/events">/api/events</a> SSE stream.</p>
+    <header>
+      <hgroup>
+        <h1>CF-Scanner</h1>
+        <p class="muted">Find working Cloudflare IPs / endpoints on ISP-restricted networks.</p>
+      </hgroup>
+    </header>
+
+    <section>
+      <details open>
+        <summary>Scan configuration</summary>
+        <form id="scan-form">
+          <div class="grid">
+            <label>Mode
+              <select name="mode">
+                <option value="Cdn" selected>CDN / proxy</option>
+                <option value="Warp">WARP (arrives in a later build)</option>
+              </select>
+            </label>
+            <label>Ports (comma-separated)
+              <input name="ports" type="text" value="443" required>
+            </label>
+            <label>Concurrency (1&ndash;1000)
+              <input name="concurrency" type="number" min="1" max="1000" value="200" required>
+            </label>
+            <label>Probe timeout (ms)
+              <input name="timeout_ms" type="number" min="100" max="30000" value="3000" required>
+            </label>
+          </div>
+          <fieldset>
+            <legend>Target</legend>
+            <label><input type="radio" name="target-radio" value="preset" checked> Preset</label>
+            <div class="grid" id="preset-row">
+              <label>Preset
+                <select name="preset">
+                  <option value="Quick" selected>Quick &mdash; 1 IP per /24 (~4K probes)</option>
+                  <option value="Normal">Normal &mdash; 3 IPs per /24 (~12K probes)</option>
+                  <option value="Full">Full &mdash; every IP (~1.5M probes)</option>
+                </select>
+              </label>
+            </div>
+            <label><input type="radio" name="target-radio" value="count"> Custom count</label>
+            <div class="grid">
+              <label>Candidate count
+                <input name="count" type="number" min="1" max="100000" value="350" disabled>
+              </label>
+            </div>
+          </fieldset>
+          <div class="grid">
+            <label>Stop after N found
+              <input name="found" type="number" min="1" value="20" required>
+            </label>
+            <label>Hard cap on probes (optional)
+              <input name="cap" type="number" min="1" placeholder="none">
+            </label>
+            <label>Custom CIDRs (optional, replaces bundled; one per line)
+              <textarea name="custom_cidrs" rows="3" placeholder="10.0.0.0/24"></textarea>
+            </label>
+            <label>Excluded CIDRs (optional, one per line)
+              <textarea name="exclude" rows="3" placeholder="141.101.64.0/18"></textarea>
+            </label>
+          </div>
+          <button id="start-btn" type="submit">Start scan</button>
+          <button id="cancel-btn" type="button" class="secondary" disabled>Cancel</button>
+          <button id="reset-btn" type="button" class="outline">Reset results</button>
+        </form>
+      </details>
+    </section>
+
+    <section id="scan-status" role="status" aria-live="polite" class="muted">
+      Idle. Configure and start a scan.
+    </section>
+
+    <section class="spacer">
+      <hgroup>
+        <h2>Results <span id="result-count" class="muted"></span></h2>
+        <p class="muted">Last scan only &mdash; in memory, cleared by reset.</p>
+      </hgroup>
+      <div class="grid">
+        <button id="copy-btn" type="button" class="secondary" disabled>Copy</button>
+        <button id="save-btn" type="button" class="secondary" disabled>Save .txt</button>
+      </div>
+      <table>
+        <thead>
+          <tr>
+            <th class="sortable" data-key="ip">IP <span class="caret"></span></th>
+            <th class="sortable" data-key="port">Port <span class="caret"></span></th>
+            <th class="sortable" data-key="latency_ms">Latency (ms) <span class="caret"></span></th>
+          </tr>
+        </thead>
+        <tbody id="results-body">
+          <tr id="empty-row"><td colspan="3" class="muted">No results yet.</td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <footer class="spacer muted">
+      IP geolocation data &copy; <a href="https://db-ip.com" target="_blank" rel="noopener">db-ip.com</a>
+      (db-ip Lite, <a href="https://creativecommons.org/licenses/by/4.0/" target="_blank" rel="noopener">CC BY 4.0</a>)
+      &mdash; CF-Scanner v0.1.0
+    </footer>
   </main>
+
+  <script>
+    "use strict";
+
+    const results = [];
+    let sortKey = null;
+    let sortAsc = true;
+
+    const body = document.getElementById("results-body");
+    const status = document.getElementById("scan-status");
+    const countEl = document.getElementById("result-count");
+    const startBtn = document.getElementById("start-btn");
+    const cancelBtn = document.getElementById("cancel-btn");
+    const copyBtn = document.getElementById("copy-btn");
+    const saveBtn = document.getElementById("save-btn");
+
+    function parseLines(text) {
+      return text.split("\n").map(s => s.trim()).filter(s => s.length > 0);
+    }
+
+    function buildConfig() {
+      const form = document.getElementById("scan-form");
+      const radio = form.elements["target-radio"].value;
+      const ports = parseLines(form.elements["ports"].value)
+        .flatMap(t => t.split(",")).map(t => Number(t.trim()))
+        .filter(n => Number.isInteger(n) && n >= 1 && n <= 65535);
+      if (ports.length === 0) throw new Error("no valid ports");
+
+      const stop = { found: Number(form.elements["found"].value) };
+      const capRaw = form.elements["cap"].value;
+      if (capRaw.trim() !== "") stop.cap = Number(capRaw);
+
+      return {
+        mode: form.elements["mode"].value,
+        target: radio === "preset"
+          ? { Preset: form.elements["preset"].value }
+          : { Count: Number(form.elements["count"].value) },
+        ports,
+        stop,
+        exclude: parseLines(form.elements["exclude"].value),
+        custom_cidrs: parseLines(form.elements["custom_cidrs"].value),
+        concurrency: Number(form.elements["concurrency"].value),
+        timeout_ms: Number(form.elements["timeout_ms"].value),
+        phase2: null,
+        warp: null
+      };
+    }
+
+    function showStatus(text, state) {
+      status.dataset.state = state || "";
+      status.textContent = text;
+    }
+
+    function render() {
+      const rows = results.map(v => v).sort((a, b) => {
+        if (sortKey === null) return 0;
+        const av = a[sortKey], bv = b[sortKey];
+        if (typeof av === "string") return sortAsc ? av.localeCompare(bv) : bv.localeCompare(av);
+        return sortAsc ? (av ?? Infinity) - (bv ?? Infinity) : (bv ?? Infinity) - (av ?? Infinity);
+      });
+      body.replaceChildren();
+      if (rows.length === 0) {
+        const tr = document.createElement("tr");
+        tr.id = "empty-row";
+        tr.innerHTML = '<td colspan="3" class="muted">No results yet.</td>';
+        body.appendChild(tr);
+      } else {
+        for (const v of rows) {
+          const tr = document.createElement("tr");
+          tr.innerHTML = `<td>${v.ip}</td><td>${v.port}</td><td>${v.latency_ms ?? "&mdash;"}</td>`;
+          body.appendChild(tr);
+        }
+      }
+      countEl.textContent = rows.length > 0 ? `(${rows.length})` : "";
+      copyBtn.disabled = saveBtn.disabled = rows.length === 0;
+    }
+
+    document.querySelectorAll("th.sortable").forEach(th => {
+      th.addEventListener("click", () => {
+        const key = th.dataset.key;
+        if (sortKey === key) sortAsc = !sortAsc;
+        else { sortKey = key; sortAsc = key !== "latency_ms"; }
+        document.querySelectorAll("th.sortable .caret").forEach(c => c.textContent = "");
+        th.querySelector(".caret").textContent = sortAsc ? "\u25B4" : "\u25BE";
+        render();
+      });
+    });
+
+    document.getElementById("scan-form").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      let cfg;
+      try { cfg = buildConfig(); } catch (err) { showStatus(err.message); return; }
+      try {
+        const resp = await fetch("/api/scan", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(cfg)
+        });
+        if (!resp.ok) {
+          const detail = await resp.text();
+          showStatus(`Scan rejected: ${detail || resp.status}`);
+          return;
+        }
+        results.length = 0;
+        render();
+        showStatus("Scanning\u2026", "running");
+        cancelBtn.disabled = false;
+      } catch (err) {
+        showStatus(`Server unreachable: ${err}`);
+      }
+    });
+
+    cancelBtn.addEventListener("click", async () => {
+      await fetch("/api/cancel", { method: "POST" });
+    });
+
+    resetBtn.addEventListener("click", async () => {
+      results.length = 0;
+      render();
+      showStatus("Idle. Results cleared.");
+      await fetch("/api/reset", { method: "POST" });
+    });
+
+    copyBtn.addEventListener("click", async () => {
+      const text = results.map(v => `${v.ip}:${v.port}`).join("\n");
+      try { await navigator.clipboard.writeText(text); } catch { /* clipboard denied */ }
+    });
+
+    saveBtn.addEventListener("click", () => {
+      const lines = results.map(v => `${v.ip}:${v.port} ${v.latency_ms ?? "?"}ms`).join("\n");
+      const blob = new Blob([lines + "\n"], { type: "text/plain" });
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(blob);
+      a.download = "cf-scanner-results.txt";
+      a.click();
+      URL.revokeObjectURL(a.href);
+    });
+
+    const es = new EventSource("/api/events");
+    es.addEventListener("progress", (e) => {
+      const p = JSON.parse(e.data);
+      const total = p.total != null ? ` / ${p.total}` : "";
+      showStatus(`Checked ${p.scanned}${total} \u2014 ${p.found} working`, "running");
+    });
+    es.addEventListener("result", (e) => {
+      results.push(JSON.parse(e.data));
+      render();
+    });
+    es.addEventListener("finished", (e) => {
+      const s = JSON.parse(e.data);
+      cancelBtn.disabled = true;
+      showStatus(`Done: ${s.scanned} scanned, ${s.found} found in ${(s.duration_ms / 1000).toFixed(1)}s`);
+    });
+
+    // htmx handles the mode/preset radio toggle for the count input.
+    document.querySelectorAll('input[name="target-radio"]').forEach(r =>
+      r.addEventListener("change", () => {
+        document.getElementById("preset-row").querySelectorAll("input,select").forEach(f => f.disabled = r.value !== "preset");
+        document.getElementById("scan-form").elements["count"].disabled = r.value !== "count";
+      }));
+  </script>
 </body>
 </html>
