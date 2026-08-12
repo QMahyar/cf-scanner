@@ -12,9 +12,10 @@ Status legend: [ ] todo · [~] in progress · [x] done
 - [x] Task 3: Ranges (bundled CF, presets, exclusions, custom CIDR)
 - [x] Task 4: TLS probe (tokio-rustls, latency, injectable)
 - [x] Task 5: ScanController (stop conditions, pool, events, results store)
-- [ ] Task 6: Server API (axum, SSE, static embed)
+- [x] Task 6: Server API (axum, SSE, static embed)
 
-**Checkpoint B:** phase-1 end-to-end via API
+**Checkpoint B:** phase-1 end-to-end via API (verified live: scan → 8 real
+working CF IPs via curl, latency-sorted, with summary)
 
 ## Phase 2: Frontend + CLI
 - [ ] Task 7: Frontend embed (htmx + SSE + Pico, sortable table)

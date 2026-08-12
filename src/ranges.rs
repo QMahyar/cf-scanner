@@ -26,6 +26,12 @@ pub struct Cidr {
     pub prefix: u8,
 }
 
+impl std::fmt::Display for Cidr {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}/{}", self.addr, self.prefix)
+    }
+}
+
 impl Cidr {
     pub fn host_count(self) -> u64 {
         1u64 << (32 - self.prefix as u64)
@@ -106,13 +112,6 @@ impl CidrPool {
         })
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "consumed by the /api/ranges server endpoint in Task 6"
-        )
-    )]
     pub fn ranges(&self) -> &[Cidr] {
         &self.ranges
     }
@@ -310,7 +309,13 @@ pub fn effective_pool_from(
     exclude: &[String],
     runtime_refreshed: Option<&str>,
 ) -> Result<CidrPool> {
-    let mut pool = base_pool(runtime_refreshed)?;
+    // Custom CIDRs REPLACE the official pool: pasting your own ranges means
+    // "scan these, not the internet". Exclusions still apply to them.
+    let mut pool = if custom_cidrs.is_empty() {
+        base_pool(runtime_refreshed)?
+    } else {
+        CidrPool { ranges: Vec::new() }
+    };
     let customs: Vec<Cidr> = custom_cidrs
         .iter()
         .map(|s| parse_cidr(s))

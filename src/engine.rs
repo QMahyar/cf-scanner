@@ -1,8 +1,6 @@
 //! The one in-process scan engine every client drives: pool planning, probe
 //! fan-out, stop conditions, event stream and the last-scan results store.
-//! Used by the HTTP server (Task 6) and CLI (Task 8); the flag below
-//! self-revokes once those land.
-#![expect(dead_code)]
+//! Used by the HTTP server (Task 6) and CLI (Task 8).
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -24,6 +22,7 @@ pub struct ScanController {
     transport: Arc<dyn Transport>,
     events: broadcast::Sender<ScanEvent>,
     store: Store,
+    summary: Mutex<Option<ScanSummary>>,
     cancel_tx: Mutex<Option<watch::Sender<bool>>>,
 }
 
@@ -34,12 +33,18 @@ impl ScanController {
             transport,
             events,
             store: Arc::new(Mutex::new(Vec::new())),
+            summary: Mutex::new(None),
             cancel_tx: Mutex::new(None),
         }
     }
 
     pub fn subscribe(&self) -> broadcast::Receiver<ScanEvent> {
         self.events.subscribe()
+    }
+
+    /// Summary of the last finished scan, if one has run yet.
+    pub fn summary(&self) -> Option<ScanSummary> {
+        self.summary.lock().unwrap().clone()
     }
 
     /// Snapshot of the last scan's working endpoints, sorted by latency.
@@ -49,6 +54,7 @@ impl ScanController {
 
     pub fn reset(&self) {
         self.store.lock().unwrap().clear();
+        self.summary.lock().unwrap().take();
     }
 
     pub fn cancel(&self) {
@@ -184,6 +190,7 @@ impl ScanController {
             found,
             duration_ms: started.elapsed().as_millis() as u64,
         };
+        *self.summary.lock().unwrap() = Some(summary.clone());
         self.emit(ScanEvent::Finished(summary.clone()));
         self.cancel_tx.lock().unwrap().take();
         summary

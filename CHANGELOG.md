@@ -18,7 +18,11 @@ Added / Changed / Fixed / Deprecated / Removed / Security, newest on top.
   concurrency-limited fan-out, SSE-style event stream (progress/results/
   finished), latency-sorted results store, cancellable runs, last-scan-only
   semantics. Phase-2/WARP modes explicitly rejected until Tasks 11/12.
+- Local HTTP server (axum) on 127.0.0.1: scan start, SSE event stream,
+  results+summary, cancel, reset, ranges, embedded placeholder UI.
 
 ### Changed
 - `stop.cap` may now be smaller than `stop.found` (the cap wins first);
   previously such configs were rejected as invalid.
+- `custom_cidrs` now REPLACE the bundled ranges (was: merged in addition);
+  exclusions still apply to custom ranges.

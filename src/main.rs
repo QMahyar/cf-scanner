@@ -1,10 +1,12 @@
 use std::process::ExitCode;
+use std::sync::Arc;
 
 mod api;
 mod engine;
 mod paths;
 mod probe;
 mod ranges;
+mod server;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -63,10 +65,7 @@ async fn main() -> ExitCode {
 
 async fn run(cli: Cli) -> Result<()> {
     match cli.command {
-        Command::Serve { port } => {
-            tracing::info!("serve command received (port {port}); server lands in Task 6");
-            Ok(())
-        }
+        Command::Serve { port } => serve(port).await,
         Command::Scan => {
             tracing::info!("scan command received; engine lands in Task 5");
             Ok(())
@@ -82,4 +81,15 @@ async fn run(cli: Cli) -> Result<()> {
             }
         },
     }
+}
+
+async fn serve(port: u16) -> Result<()> {
+    let controller = Arc::new(engine::ScanController::new(Arc::new(
+        probe::TlsTransport::new(),
+    )));
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", port)).await?;
+    let url = format!("http://127.0.0.1:{port}");
+    tracing::info!("CF-Scanner running at {url}");
+    axum::serve(listener, server::router(controller)).await?;
+    Ok(())
 }
