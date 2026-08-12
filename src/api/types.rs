@@ -7,7 +7,6 @@ use std::net::Ipv4Addr;
 use serde::{Deserialize, Serialize};
 
 pub const DEFAULT_PORT: u16 = 443;
-#[expect(dead_code, reason = "WARP scanning lands in Task 12")]
 pub const DEFAULT_WARP_PORTS: &[u16] = &[2408, 500, 854, 880, 1701, 3138, 4500];
 pub const DEFAULT_CONCURRENCY: u16 = 200;
 pub const DEFAULT_TIMEOUT_MS: u64 = 3_000;

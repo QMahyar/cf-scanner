@@ -71,6 +71,39 @@ impl ScanController {
         self.run_seeded(cfg, seed).await
     }
 
+    /// Runs `cfg` while invoking `on_event` as each event is emitted (the
+    /// subscriber attaches before the run starts, so no event is missed).
+    /// Errors abort before `Finished` is sent; callers still get them here.
+    pub async fn run_streaming(
+        self: &Arc<Self>,
+        cfg: ScanConfig,
+        mut on_event: impl FnMut(ScanEvent),
+    ) -> Result<ScanSummary> {
+        let mut rx = self.subscribe();
+        let controller = self.clone();
+        let mut handle = tokio::spawn(async move { controller.run(cfg).await });
+        loop {
+            tokio::select! {
+                done = &mut handle => {
+                    // The run may have finished with events still buffered;
+                    // deliver them so callers never miss the tail.
+                    while let Ok(e) = rx.try_recv() {
+                        on_event(e);
+                    }
+                    return done?;
+                }
+                recv = rx.recv() => match recv {
+                    Ok(event @ ScanEvent::Finished(_)) => {
+                        on_event(event);
+                        return handle.await?;
+                    }
+                    Ok(event) => on_event(event),
+                    Err(_) => continue, // lagged: keep streaming
+                },
+            }
+        }
+    }
+
     pub async fn run_seeded(&self, cfg: ScanConfig, seed: u64) -> Result<ScanSummary> {
         let pool = ranges::effective_pool(&cfg.custom_cidrs, &cfg.exclude)?;
         self.run_seeded_with_pool(cfg, seed, pool).await
@@ -437,5 +470,38 @@ mod tests {
         let mut cfg = ok_cfg(1, None);
         cfg.ports = vec![0];
         assert!(run_local(&c, cfg, 1).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn run_streaming_delivers_every_event_and_summary() {
+        let t = FakeTransport::new()
+            .ok("10.0.0.1".parse().unwrap(), 443, 50)
+            .ok("10.0.0.2".parse().unwrap(), 443, 10);
+        let c = Arc::new(ScanController::new(Arc::new(t)));
+        // custom_cidrs keeps the scan on the scripted /29, off the filesystem.
+        let mut cfg = ok_cfg(2, None);
+        cfg.custom_cidrs = vec!["10.0.0.0/29".to_owned()];
+        let mut events = vec![];
+        let summary = c.run_streaming(cfg, |e| events.push(e)).await.unwrap();
+        assert_eq!(summary.found, 2);
+        let results = events
+            .iter()
+            .filter(|e| matches!(e, ScanEvent::Result(_)))
+            .count();
+        assert_eq!(
+            results, 2,
+            "every verdict must arrive exactly once: {events:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn run_streaming_reports_errors_without_finished() {
+        let c = Arc::new(ScanController::new(Arc::new(FakeTransport::new())));
+        let mut cfg = ok_cfg(1, None);
+        cfg.mode = Mode::Warp; // unsupported until Task 12; run aborts before Finished
+        let mut events = vec![];
+        let err = c.run_streaming(cfg, |e| events.push(e)).await.unwrap_err();
+        assert!(err.to_string().contains("WARP"));
+        assert!(events.is_empty());
     }
 }
