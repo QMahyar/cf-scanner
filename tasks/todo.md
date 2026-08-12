@@ -3,8 +3,8 @@
 Status legend: [ ] todo · [~] in progress · [x] done
 
 ## Phase 0: Foundation
-- [ ] Task 1: Project skeleton (Cargo.toml, layout, .gitignore, PR CI)
-- [ ] Task 2: API contract types + validation
+- [x] Task 1: Project skeleton (Cargo.toml, layout, .gitignore, PR CI)
+- [x] Task 2: API contract types + validation
 
 **Checkpoint A:** build clean, tests green, human review of plan
 
