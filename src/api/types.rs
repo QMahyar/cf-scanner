@@ -140,6 +140,9 @@ pub struct ScanConfig {
     pub concurrency: u16,
     /// Per-probe timeout in ms (100..=30_000).
     pub timeout_ms: u64,
+    /// Also probe IPv6 candidates (CDN mode). Off by default: IPv4 only.
+    #[serde(default)]
+    pub include_v6: bool,
     pub phase2: Option<Phase2Config>,
     pub warp: Option<WarpConfig>,
 }
@@ -155,6 +158,7 @@ impl Default for ScanConfig {
             custom_cidrs: Vec::new(),
             concurrency: DEFAULT_CONCURRENCY,
             timeout_ms: DEFAULT_TIMEOUT_MS,
+            include_v6: false,
             phase2: None,
             warp: None,
         }
@@ -597,6 +601,21 @@ mod tests {
         let json = serde_json::to_string(&c).unwrap();
         let back: ScanConfig = serde_json::from_str(&json).unwrap();
         assert_eq!(c, back);
+    }
+
+    #[test]
+    fn include_v6_defaults_false_and_round_trips() {
+        // Older clients omit the field; it must decode as IPv4-only.
+        let json = r#"{"mode":"Cdn","target":{"Count":1},"ports":[443],"stop":{"found":1,"cap":null},"exclude":[],"custom_cidrs":[],"concurrency":1,"timeout_ms":3000,"phase2":null,"warp":null}"#;
+        let c: ScanConfig = serde_json::from_str(json).unwrap();
+        assert!(!c.include_v6);
+        // And the field survives a full round trip when set.
+        let c = ScanConfig {
+            include_v6: true,
+            ..valid_config()
+        };
+        let back: ScanConfig = serde_json::from_str(&serde_json::to_string(&c).unwrap()).unwrap();
+        assert!(back.include_v6);
     }
 
     #[test]

@@ -273,6 +273,7 @@ fn build_scan_config(args: &ScanArgs) -> Result<ScanConfig> {
         custom_cidrs: args.custom_cidrs.clone(),
         concurrency: args.concurrency,
         timeout_ms: args.timeout_ms,
+        include_v6: false,
         phase2,
         warp,
     };

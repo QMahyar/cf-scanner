@@ -64,6 +64,8 @@
             <label>Ports (comma-separated)
               <input name="ports" type="text" value="443" required>
             </label>
+            <label id="include-v6-label"><input type="checkbox" name="include_v6">
+              Include IPv6 candidates (default: IPv4 only)</label>
             <label id="warp-probes-label" hidden>Probes per endpoint (1&ndash;10, drives loss %)
               <input name="warp_probes" type="number" min="1" max="10" value="3">
             </label>
@@ -198,7 +200,7 @@
           </tr>
         </thead>
         <tbody id="results-body">
-          <tr id="empty-row"><td colspan="5" class="muted">No results yet.</td></tr>
+          <tr id="empty-row"><td colspan="7" class="muted">No results yet.</td></tr>
         </tbody>
       </table>
     </section>
@@ -357,6 +359,7 @@
         custom_cidrs: parseLines(form.elements["custom_cidrs"].value),
         concurrency: Number(form.elements["concurrency"].value),
         timeout_ms: Number(form.elements["timeout_ms"].value),
+        include_v6: form.elements["include_v6"].checked,
         phase2: mode === "Cdn" ? phase2 : null,
         warp
       };
@@ -597,6 +600,7 @@
       const form = document.getElementById("scan-form");
       document.getElementById("warp-probes-label").hidden = !warpMode;
       document.getElementById("warp-endpoints-row").hidden = !warpMode;
+      document.getElementById("include-v6-label").hidden = warpMode;
       form.elements["phase2_configs"].disabled = warpMode;
       p2Fields.forEach(n => form.elements[n].disabled = warpMode);
       document.getElementById("preset-row").querySelectorAll("input,select")
@@ -726,6 +730,7 @@
       form.elements["ports"].value = Array.isArray(cfg.ports) ? cfg.ports.join(",") : "443";
       form.elements["concurrency"].value = cfg.concurrency ?? 200;
       form.elements["timeout_ms"].value = cfg.timeout_ms ?? 3000;
+      form.elements["include_v6"].checked = !!(cfg.include_v6);
       form.elements["found"].value = (cfg.stop && cfg.stop.found) || 20;
       form.elements["cap"].value = cfg.stop && cfg.stop.cap != null ? cfg.stop.cap : "";
       form.elements["exclude"].value = (cfg.exclude || []).join("\n");
