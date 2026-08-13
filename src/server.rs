@@ -265,11 +265,7 @@ async fn list_profiles(State(state): State<Arc<AppState>>) -> Json<Vec<ProfilePa
     Json(out)
 }
 
-fn sanitize_config(mut cfg: ScanConfig) -> ScanConfig {
-    if let Some(ref mut w) = cfg.warp {
-        w.generate_config = false;
-        w.warp_plus_license = None;
-    }
+fn sanitize_config(cfg: ScanConfig) -> ScanConfig {
     cfg
 }
 
