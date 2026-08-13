@@ -3,7 +3,7 @@
 All notable changes to CF-Scanner are documented here, grouped by
 Added / Changed / Fixed / Deprecated / Removed / Security, newest on top.
 
-## [Unreleased]
+## [0.1.0] - 2026-08-13
 
 ### Added
 - Project skeleton: CLI entry (serve/scan/ranges), CI checks workflow,
