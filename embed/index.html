@@ -4,6 +4,16 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>CF-Scanner</title>
+  <script>
+    // UI preference only (never scan data): no stored choice = follow the OS.
+    (function () {
+      var t = localStorage.getItem("ui-theme");
+      if (t !== "light" && t !== "dark") {
+        t = matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+      }
+      document.documentElement.dataset.theme = t;
+    })();
+  </script>
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@picocss/pico@2.1.1/css/pico.min.css">
   <script src="https://cdn.jsdelivr.net/npm/htmx.org@2.0.4/dist/htmx.min.js" defer></script>
   <script src="https://cdn.jsdelivr.net/npm/htmx-ext-sse@2.2.4/sse.js" defer></script>
@@ -18,15 +28,26 @@
     #scan-status[data-state="running"] { animation: pulse 1.5s ease-in-out infinite; }
     @keyframes pulse { 50% { opacity: 0.45; } }
     details { margin-bottom: 0; }
+    .header-row { display: flex; justify-content: space-between; align-items: flex-start; gap: 1rem; flex-wrap: wrap; }
+    .hist { display: flex; align-items: flex-end; gap: 4px; height: 2.25rem; margin-bottom: 1rem; }
+    .hist-bar { flex: 1 1 0; min-height: 2px; background: var(--pico-primary); }
+    #results-section[data-density="compact"] td,
+    #results-section[data-density="compact"] th { padding: .15rem .4rem; font-size: .875rem; }
+    .profile-row { display: flex; align-items: center; gap: .5rem; }
+    .profile-row span { flex: 1 1 auto; }
+    .profile-row button { width: auto; margin: 0; padding: .25rem .75rem; }
   </style>
 </head>
 <body>
   <main class="container">
     <header>
-      <hgroup>
-        <h1>CF-Scanner</h1>
-        <p class="muted">Find working Cloudflare IPs / endpoints on ISP-restricted networks.</p>
-      </hgroup>
+      <div class="header-row">
+        <hgroup>
+          <h1>CF-Scanner</h1>
+          <p class="muted">Find working Cloudflare IPs / endpoints on ISP-restricted networks.</p>
+        </hgroup>
+        <button id="theme-btn" type="button" class="outline" aria-pressed="false">Dark</button>
+      </div>
     </header>
 
     <section>
@@ -43,6 +64,8 @@
             <label>Ports (comma-separated)
               <input name="ports" type="text" value="443" required>
             </label>
+            <label id="include-v6-label"><input type="checkbox" name="include_v6">
+              Include IPv6 candidates (default: IPv4 only)</label>
             <label id="warp-probes-label" hidden>Probes per endpoint (1&ndash;10, drives loss %)
               <input name="warp_probes" type="number" min="1" max="10" value="3">
             </label>
@@ -93,6 +116,8 @@
             <label>Verify with your own wgconf (real keypair handshake)
               <textarea name="warp_wgconf" rows="3" placeholder="[Interface]&#10;PrivateKey = ..." disabled></textarea>
             </label>
+            <button id="wgconf-file-btn" type="button" class="outline" disabled>Load wgconf from file</button>
+            <input id="wgconf-file" type="file" accept=".conf,.txt,text/plain" hidden>
             <label><input type="checkbox" name="warp_verify" disabled>
               Verify discovered endpoints with the config above</label>
           </div>
@@ -111,9 +136,6 @@
                   <option value="Custom">Custom</option>
                 </select>
               </label>
-              <label>Custom fragment &ldquo;length,interval&rdquo;
-                <input name="phase2_custom" type="text" placeholder="100-200,10-20" disabled>
-              </label>
               <label>SNI variants (comma-separated; empty = each config&rsquo;s own)
                 <input name="phase2_snis" type="text" placeholder="www.cloudflare.com" disabled>
               </label>
@@ -122,6 +144,17 @@
               </label>
               <label>Parallel instances (1&ndash;8)
                 <input name="phase2_concurrency" type="number" min="1" max="8" value="3" disabled>
+              </label>
+            </div>
+            <div class="grid">
+              <label>Packets (custom preset)
+                <input name="phase2_packets" type="text" value="tlshello" disabled>
+              </label>
+              <label>Length in bytes (custom preset, &ldquo;min-max&rdquo;)
+                <input name="phase2_length" type="text" placeholder="100-200" disabled>
+              </label>
+              <label>Interval in ms (custom preset, &ldquo;min-max&rdquo;)
+                <input name="phase2_interval" type="text" placeholder="10-20" disabled>
               </label>
             </div>
           </details>
@@ -136,14 +169,23 @@
       Idle. Configure and start a scan.
     </section>
 
-    <section class="spacer">
+    <section id="ranges-info" class="muted" aria-live="polite"></section>
+
+    <section class="spacer" id="results-section">
       <hgroup>
         <h2>Results <span id="result-count" class="muted"></span></h2>
         <p class="muted">Last scan only &mdash; in memory, cleared by reset.</p>
       </hgroup>
+      <div id="latency-hist" class="hist" role="img" hidden></div>
       <div class="grid">
         <button id="copy-btn" type="button" class="secondary" disabled>Copy</button>
         <button id="save-btn" type="button" class="secondary" disabled>Save .txt</button>
+        <button id="export-btn" type="button" class="secondary" disabled>Export</button>
+        <select id="export-format" aria-label="Export format">
+          <option value="csv">CSV</option>
+          <option value="json">JSON</option>
+        </select>
+        <button id="density-btn" type="button" class="outline" aria-pressed="false">Compact view</button>
       </div>
       <table>
         <thead>
@@ -158,9 +200,23 @@
           </tr>
         </thead>
         <tbody id="results-body">
-          <tr id="empty-row"><td colspan="5" class="muted">No results yet.</td></tr>
+          <tr id="empty-row"><td colspan="7" class="muted">No results yet.</td></tr>
         </tbody>
       </table>
+    </section>
+
+    <section class="spacer">
+      <hgroup>
+        <h2>Profiles</h2>
+        <p class="muted">Named scan configs, held in memory by the server for this session only.</p>
+      </hgroup>
+      <div class="grid">
+        <label>Profile name
+          <input id="profile-name" type="text" placeholder="home-vless" autocomplete="off">
+        </label>
+        <button id="profile-save-btn" type="button" class="secondary">Save current form</button>
+      </div>
+      <ul id="profile-list"></ul>
     </section>
 
     <footer class="spacer muted">
@@ -184,6 +240,61 @@
     const cancelBtn = document.getElementById("cancel-btn");
     const copyBtn = document.getElementById("copy-btn");
     const saveBtn = document.getElementById("save-btn");
+    const themeBtn = document.getElementById("theme-btn");
+    const densityBtn = document.getElementById("density-btn");
+    const histEl = document.getElementById("latency-hist");
+
+    function applyTheme(theme) {
+      document.documentElement.dataset.theme = theme;
+      themeBtn.textContent = theme === "dark" ? "Light" : "Dark";
+      themeBtn.setAttribute("aria-pressed", String(theme === "dark"));
+    }
+    applyTheme(document.documentElement.dataset.theme);
+    themeBtn.addEventListener("click", () => {
+      const next = document.documentElement.dataset.theme === "dark" ? "light" : "dark";
+      localStorage.setItem("ui-theme", next);
+      applyTheme(next);
+    });
+
+    function applyDensity(compact) {
+      document.getElementById("results-section").dataset.density = compact ? "compact" : "normal";
+      densityBtn.textContent = compact ? "Normal view" : "Compact view";
+      densityBtn.setAttribute("aria-pressed", String(compact));
+    }
+    applyDensity(localStorage.getItem("ui-density") === "compact");
+    densityBtn.addEventListener("click", () => {
+      const next = document.getElementById("results-section").dataset.density !== "compact";
+      localStorage.setItem("ui-density", next ? "compact" : "normal");
+      applyDensity(next);
+    });
+
+    const HIST_BUCKETS = [
+      { label: "0-50ms", max: 50 },
+      { label: "50-100ms", max: 100 },
+      { label: "100-200ms", max: 200 },
+      { label: "200-400ms", max: 400 },
+      { label: "400-800ms", max: 800 },
+      { label: "800ms+", max: Infinity }
+    ];
+    function renderHistogram() {
+      const lats = results.map(v => v.latency_ms).filter(l => l != null);
+      if (lats.length === 0) { histEl.hidden = true; return; }
+      const cumulative = HIST_BUCKETS.map(b => lats.filter(l => l <= b.max).length);
+      let prev = 0;
+      const counts = cumulative.map(c => { const n = c - prev; prev = c; return n; });
+      const peak = Math.max(...counts, 1);
+      histEl.replaceChildren();
+      counts.forEach((n, i) => {
+        const bar = document.createElement("div");
+        bar.className = "hist-bar";
+        bar.style.height = Math.max(4, Math.round((n / peak) * 100)) + "%";
+        bar.title = `${HIST_BUCKETS[i].label}: ${n}`;
+        histEl.appendChild(bar);
+      });
+      histEl.setAttribute("aria-label",
+        "Latency histogram: " + counts.map((n, i) => `${HIST_BUCKETS[i].label} ${n}`).join(", "));
+      histEl.hidden = false;
+    }
 
     function parseLines(text) {
       return text.split("\n").map(s => s.trim()).filter(s => s.length > 0);
@@ -207,12 +318,13 @@
         const fragment = form.elements["phase2_fragment"].value;
         let custom_fragment = null;
         if (fragment === "Custom") {
-          const values = form.elements["phase2_custom"].value.trim();
-          const parts = values.split(",");
-          if (parts.length !== 2 || !parts[0].trim() || !parts[1].trim()) {
-            throw new Error('custom fragment needs "length,interval"');
+          const packets = form.elements["phase2_packets"].value.trim();
+          const length = form.elements["phase2_length"].value.trim();
+          const interval = form.elements["phase2_interval"].value.trim();
+          if (!packets || !length || !interval) {
+            throw new Error('custom fragment needs packets, length, and interval');
           }
-          custom_fragment = { packets: "tlshello", length: parts[0].trim(), interval: parts[1].trim() };
+          custom_fragment = { packets, length, interval };
         }
         phase2 = {
           configs: p2configs,
@@ -247,6 +359,7 @@
         custom_cidrs: parseLines(form.elements["custom_cidrs"].value),
         concurrency: Number(form.elements["concurrency"].value),
         timeout_ms: Number(form.elements["timeout_ms"].value),
+        include_v6: form.elements["include_v6"].checked,
         phase2: mode === "Cdn" ? phase2 : null,
         warp
       };
@@ -309,7 +422,8 @@
         }
       }
       countEl.textContent = rows.length > 0 ? `(${rows.length})` : "";
-      copyBtn.disabled = saveBtn.disabled = rows.length === 0;
+      copyBtn.disabled = saveBtn.disabled = exportBtn.disabled = rows.length === 0;
+      renderHistogram();
     }
 
     document.querySelectorAll("th.sortable").forEach(th => {
@@ -373,6 +487,52 @@
       URL.revokeObjectURL(a.href);
     });
 
+    function csvField(v) {
+      if (v == null) return "";
+      const s = String(v);
+      return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+    }
+
+    function toCsv(rows) {
+      const header = ["ip", "port", "latency_ms", "loss_pct", "country", "colo", "phase2_passed", "phase2_fragment", "phase2_sni"];
+      const lines = [header.join(",")];
+      for (const v of rows) {
+        const p2 = v.phase2 || {};
+        lines.push([v.ip, v.port, v.latency_ms, v.loss_pct, v.country, v.colo,
+          p2.passed, p2.fragment, p2.sni].map(csvField).join(","));
+      }
+      return lines.join("\n") + "\n";
+    }
+
+    const exportBtn = document.getElementById("export-btn");
+    exportBtn.addEventListener("click", () => {
+      const fmt = document.getElementById("export-format").value;
+      const blob = fmt === "json"
+        ? new Blob([JSON.stringify(results, null, 2)], { type: "application/json" })
+        : new Blob([toCsv(results)], { type: "text/csv" });
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(blob);
+      a.download = `cf-scanner-results.${fmt}`;
+      a.click();
+      URL.revokeObjectURL(a.href);
+    });
+
+    fetch("/api/ranges")
+      .then(r => (r.ok ? r.json() : null))
+      .then(data => {
+        if (!data) return; // endpoint absent in this build; keep the section empty
+        const el = document.getElementById("ranges-info");
+        let text = "Bundled ranges: "
+          + (data.host_count != null ? data.host_count.toLocaleString() : "\u2014")
+          + " hosts";
+        if (data.last_updated) {
+          const when = new Date(data.last_updated);
+          if (!isNaN(when)) text += ` \u2014 updated ${when.toLocaleString()}`;
+        }
+        el.textContent = text;
+      })
+      .catch(() => { /* ranges endpoint unavailable; nothing to show */ });
+
     const es = new EventSource("/api/events");
     es.addEventListener("progress", (e) => {
       const p = JSON.parse(e.data);
@@ -400,7 +560,36 @@
         document.getElementById("scan-form").elements["count"].disabled = r.value !== "count";
       }));
 
-    const p2Fields = ["phase2_fragment", "phase2_custom", "phase2_snis", "phase2_probe_url", "phase2_concurrency"];
+    const p2Fields = ["phase2_fragment", "phase2_packets", "phase2_length", "phase2_interval", "phase2_snis", "phase2_probe_url", "phase2_concurrency"];
+
+    const FRAGMENT_PRESETS = {
+      Light: { packets: "tlshello", length: "100-200", interval: "10-20" },
+      Medium: { packets: "tlshello", length: "50-200", interval: "10-40" },
+      Heavy: { packets: "tlshello", length: "10-300", interval: "5-50" }
+    };
+    const fragmentForm = document.getElementById("scan-form");
+
+    function fillFragmentFields(values) {
+      fragmentForm.elements["phase2_packets"].value = values.packets;
+      fragmentForm.elements["phase2_length"].value = values.length;
+      fragmentForm.elements["phase2_interval"].value = values.interval;
+    }
+
+    function syncFragmentFields() {
+      const preset = fragmentForm.elements["phase2_fragment"].value;
+      if (preset === "Off") fillFragmentFields({ packets: "tlshello", length: "", interval: "" });
+      else if (FRAGMENT_PRESETS[preset]) fillFragmentFields(FRAGMENT_PRESETS[preset]);
+    }
+    fragmentForm.elements["phase2_fragment"].addEventListener("change", syncFragmentFields);
+    ["phase2_packets", "phase2_length", "phase2_interval"].forEach(name => {
+      fragmentForm.elements[name].addEventListener("input", () => {
+        const preset = fragmentForm.elements["phase2_fragment"].value;
+        if (!FRAGMENT_PRESETS[preset]) return;
+        if (fragmentForm.elements[name].value !== FRAGMENT_PRESETS[preset][name.slice(7)]) {
+          fragmentForm.elements["phase2_fragment"].value = "Custom";
+        }
+      });
+    });
     document.getElementById("scan-form").elements["phase2_configs"].addEventListener("input", (e) => {
       const on = (e.target.value.trim() !== "");
       p2Fields.forEach(n => document.getElementById("scan-form").elements[n].disabled = !on);
@@ -411,6 +600,7 @@
       const form = document.getElementById("scan-form");
       document.getElementById("warp-probes-label").hidden = !warpMode;
       document.getElementById("warp-endpoints-row").hidden = !warpMode;
+      document.getElementById("include-v6-label").hidden = warpMode;
       form.elements["phase2_configs"].disabled = warpMode;
       p2Fields.forEach(n => form.elements[n].disabled = warpMode);
       document.getElementById("preset-row").querySelectorAll("input,select")
@@ -424,19 +614,182 @@
           form.elements["ports"].value = "443";
         }
       }
+      syncWarpVerify();
     });
 
     const verifyBox = document.getElementById("scan-form").elements["warp_verify"];
     const wgconfField = document.getElementById("scan-form").elements["warp_wgconf"];
-    verifyBox.addEventListener("change", () => wgconfField.disabled = !verifyBox.checked);
+    const wgconfFileBtn = document.getElementById("wgconf-file-btn");
+    const wgconfFile = document.getElementById("wgconf-file");
+
+    function syncWarpVerify() {
+      const warpMode = document.getElementById("scan-form").elements["mode"].value === "Warp";
+      wgconfField.disabled = !warpMode || !verifyBox.checked;
+      verifyBox.disabled = !warpMode || !wgconfField.value.trim();
+      wgconfFileBtn.disabled = !warpMode;
+    }
+    syncWarpVerify();
+    verifyBox.addEventListener("change", syncWarpVerify);
     wgconfField.addEventListener("input", () => {
       if (!wgconfField.value.trim()) verifyBox.checked = false;
+      syncWarpVerify();
     });
-    document.getElementById("mode").addEventListener("change", e => {
-      const warpMode = e.target.value === "Warp";
-      verifyBox.disabled = !warpMode || !wgconfField.value.trim();
-      wgconfField.disabled = !warpMode || !verifyBox.checked;
+    wgconfFileBtn.addEventListener("click", () => wgconfFile.click());
+    wgconfFile.addEventListener("change", () => {
+      const file = wgconfFile.files && wgconfFile.files[0];
+      if (!file) return;
+      const reader = new FileReader();
+      reader.onload = () => {
+        wgconfField.value = String(reader.result || "");
+        if (wgconfField.value.trim()) verifyBox.checked = true;
+        syncWarpVerify();
+      };
+      reader.onerror = () => showStatus("Could not read the wgconf file.");
+      reader.readAsText(file);
+      wgconfFile.value = "";
     });
+
+    const profileList = document.getElementById("profile-list");
+    const profileName = document.getElementById("profile-name");
+
+    function profileRow(text) {
+      const li = document.createElement("li");
+      li.className = "profile-row";
+      const span = document.createElement("span");
+      span.textContent = text;
+      li.appendChild(span);
+      return li;
+    }
+
+    async function refreshProfiles() {
+      profileList.replaceChildren();
+      let profiles;
+      try {
+        const resp = await fetch("/api/profiles");
+        if (!resp.ok) {
+          profileList.appendChild(profileRow("Profiles unavailable (server build without profile support)."));
+          return;
+        }
+        const data = await resp.json();
+        profiles = Array.isArray(data) ? data
+          : (data && Array.isArray(data.profiles) ? data.profiles : []);
+      } catch {
+        profileList.appendChild(profileRow("Profiles unavailable (server build without profile support)."));
+        return;
+      }
+      if (profiles.length === 0) {
+        profileList.appendChild(profileRow("No profiles saved yet."));
+        return;
+      }
+      for (const p of profiles) {
+        if (!p || typeof p.name !== "string" || !p.name) continue;
+        const load = document.createElement("button");
+        load.type = "button";
+        load.className = "outline";
+        load.textContent = "Load";
+        load.addEventListener("click", () => loadProfile(p.name));
+        const del = document.createElement("button");
+        del.type = "button";
+        del.className = "secondary";
+        del.textContent = "Delete";
+        del.addEventListener("click", () => deleteProfile(p.name));
+        const li = profileRow(p.name);
+        li.appendChild(load);
+        li.appendChild(del);
+        profileList.appendChild(li);
+      }
+    }
+
+    async function loadProfile(name) {
+      try {
+        const resp = await fetch(`/api/profiles/${encodeURIComponent(name)}`);
+        if (!resp.ok) { showStatus(`Profile load failed: ${resp.status}`); return; }
+        const p = await resp.json();
+        if (!p || !p.config) { showStatus(`Profile "${name}" has no config.`); return; }
+        applyConfig(p.config);
+        showStatus(`Loaded profile "${name}".`);
+      } catch (err) {
+        showStatus(`Profile load failed: ${err}`);
+      }
+    }
+
+    async function deleteProfile(name) {
+      try {
+        const resp = await fetch(`/api/profiles/${encodeURIComponent(name)}`, { method: "DELETE" });
+        if (!resp.ok && resp.status !== 404) { showStatus(`Profile delete failed: ${resp.status}`); return; }
+        showStatus(`Profile "${name}" deleted.`);
+        refreshProfiles();
+      } catch (err) {
+        showStatus(`Profile delete failed: ${err}`);
+      }
+    }
+
+    function applyConfig(cfg) {
+      const form = document.getElementById("scan-form");
+      form.elements["mode"].value = cfg.mode === "Warp" ? "Warp" : "Cdn";
+      form.elements["ports"].value = Array.isArray(cfg.ports) ? cfg.ports.join(",") : "443";
+      form.elements["concurrency"].value = cfg.concurrency ?? 200;
+      form.elements["timeout_ms"].value = cfg.timeout_ms ?? 3000;
+      form.elements["include_v6"].checked = !!(cfg.include_v6);
+      form.elements["found"].value = (cfg.stop && cfg.stop.found) || 20;
+      form.elements["cap"].value = cfg.stop && cfg.stop.cap != null ? cfg.stop.cap : "";
+      form.elements["exclude"].value = (cfg.exclude || []).join("\n");
+      form.elements["custom_cidrs"].value = (cfg.custom_cidrs || []).join("\n");
+
+      const isPreset = cfg.target && cfg.target.Preset != null;
+      form.elements["target-radio"].value = isPreset ? "preset" : "count";
+      if (isPreset) form.elements["preset"].value = cfg.target.Preset;
+      if (!isPreset) form.elements["count"].value = (cfg.target && cfg.target.Count) || 1;
+
+      const w = cfg.warp || null;
+      form.elements["warp_probes"].value = w ? w.probes_per_endpoint : 3;
+      form.elements["warp_endpoints"].value = w ? (w.custom_endpoints || []).join("\n") : "";
+      form.elements["warp_wgconf"].value = w && w.wgconf ? w.wgconf : "";
+      form.elements["warp_verify"].checked = !!(w && w.verify_with_wgconf);
+
+      const p2 = cfg.phase2 || null;
+      form.elements["phase2_configs"].value = p2 ? p2.configs.join("\n") : "";
+      form.elements["phase2_fragment"].value = p2 ? p2.fragment : "Off";
+      const cf = p2 && p2.custom_fragment ? p2.custom_fragment : null;
+      form.elements["phase2_packets"].value = cf ? cf.packets : "tlshello";
+      form.elements["phase2_length"].value = cf ? cf.length : "";
+      form.elements["phase2_interval"].value = cf ? cf.interval : "";
+      form.elements["phase2_snis"].value = p2 ? (p2.snis || []).join(",") : "";
+      form.elements["phase2_probe_url"].value = p2 ? p2.probe_url : "https://cp.cloudflare.com/";
+      form.elements["phase2_concurrency"].value = p2 ? p2.concurrency : 3;
+
+      // Re-run the enable/disable handlers so the form reflects the loaded config.
+      form.elements["target-radio"].dispatchEvent(new Event("change"));
+      form.elements["phase2_configs"].dispatchEvent(new Event("input"));
+      form.elements["mode"].dispatchEvent(new Event("change"));
+      form.elements["phase2_fragment"].dispatchEvent(new Event("change"));
+      syncWarpVerify();
+    }
+
+    document.getElementById("profile-save-btn").addEventListener("click", async () => {
+      const name = profileName.value.trim();
+      if (!name) { showStatus("Profile name required."); return; }
+      let cfg;
+      try { cfg = buildConfig(); } catch (err) { showStatus(`Cannot save profile: ${err}`); return; }
+      try {
+        const resp = await fetch(`/api/profiles/${encodeURIComponent(name)}`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(cfg)
+        });
+        if (!resp.ok) {
+          const detail = await resp.text();
+          showStatus(`Profile save failed: ${detail || resp.status}`);
+          return;
+        }
+        showStatus(`Profile "${name}" saved.`);
+        refreshProfiles();
+      } catch (err) {
+        showStatus(`Profile save failed: ${err}`);
+      }
+    });
+
+    refreshProfiles();
   </script>
 </body>
 </html>
