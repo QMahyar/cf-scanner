@@ -4,6 +4,16 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>CF-Scanner</title>
+  <script>
+    // UI preference only (never scan data): no stored choice = follow the OS.
+    (function () {
+      var t = localStorage.getItem("ui-theme");
+      if (t !== "light" && t !== "dark") {
+        t = matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+      }
+      document.documentElement.dataset.theme = t;
+    })();
+  </script>
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@picocss/pico@2.1.1/css/pico.min.css">
   <script src="https://cdn.jsdelivr.net/npm/htmx.org@2.0.4/dist/htmx.min.js" defer></script>
   <script src="https://cdn.jsdelivr.net/npm/htmx-ext-sse@2.2.4/sse.js" defer></script>
@@ -18,15 +28,26 @@
     #scan-status[data-state="running"] { animation: pulse 1.5s ease-in-out infinite; }
     @keyframes pulse { 50% { opacity: 0.45; } }
     details { margin-bottom: 0; }
+    .header-row { display: flex; justify-content: space-between; align-items: flex-start; gap: 1rem; flex-wrap: wrap; }
+    .hist { display: flex; align-items: flex-end; gap: 4px; height: 2.25rem; margin-bottom: 1rem; }
+    .hist-bar { flex: 1 1 0; min-height: 2px; background: var(--pico-primary); }
+    #results-section[data-density="compact"] td,
+    #results-section[data-density="compact"] th { padding: .15rem .4rem; font-size: .875rem; }
+    .profile-row { display: flex; align-items: center; gap: .5rem; }
+    .profile-row span { flex: 1 1 auto; }
+    .profile-row button { width: auto; margin: 0; padding: .25rem .75rem; }
   </style>
 </head>
 <body>
   <main class="container">
     <header>
-      <hgroup>
-        <h1>CF-Scanner</h1>
-        <p class="muted">Find working Cloudflare IPs / endpoints on ISP-restricted networks.</p>
-      </hgroup>
+      <div class="header-row">
+        <hgroup>
+          <h1>CF-Scanner</h1>
+          <p class="muted">Find working Cloudflare IPs / endpoints on ISP-restricted networks.</p>
+        </hgroup>
+        <button id="theme-btn" type="button" class="outline" aria-pressed="false">Dark</button>
+      </div>
     </header>
 
     <section>
@@ -136,14 +157,16 @@
       Idle. Configure and start a scan.
     </section>
 
-    <section class="spacer">
+    <section class="spacer" id="results-section">
       <hgroup>
         <h2>Results <span id="result-count" class="muted"></span></h2>
         <p class="muted">Last scan only &mdash; in memory, cleared by reset.</p>
       </hgroup>
+      <div id="latency-hist" class="hist" role="img" hidden></div>
       <div class="grid">
         <button id="copy-btn" type="button" class="secondary" disabled>Copy</button>
         <button id="save-btn" type="button" class="secondary" disabled>Save .txt</button>
+        <button id="density-btn" type="button" class="outline" aria-pressed="false">Compact view</button>
       </div>
       <table>
         <thead>
@@ -184,6 +207,61 @@
     const cancelBtn = document.getElementById("cancel-btn");
     const copyBtn = document.getElementById("copy-btn");
     const saveBtn = document.getElementById("save-btn");
+    const themeBtn = document.getElementById("theme-btn");
+    const densityBtn = document.getElementById("density-btn");
+    const histEl = document.getElementById("latency-hist");
+
+    function applyTheme(theme) {
+      document.documentElement.dataset.theme = theme;
+      themeBtn.textContent = theme === "dark" ? "Light" : "Dark";
+      themeBtn.setAttribute("aria-pressed", String(theme === "dark"));
+    }
+    applyTheme(document.documentElement.dataset.theme);
+    themeBtn.addEventListener("click", () => {
+      const next = document.documentElement.dataset.theme === "dark" ? "light" : "dark";
+      localStorage.setItem("ui-theme", next);
+      applyTheme(next);
+    });
+
+    function applyDensity(compact) {
+      document.getElementById("results-section").dataset.density = compact ? "compact" : "normal";
+      densityBtn.textContent = compact ? "Normal view" : "Compact view";
+      densityBtn.setAttribute("aria-pressed", String(compact));
+    }
+    applyDensity(localStorage.getItem("ui-density") === "compact");
+    densityBtn.addEventListener("click", () => {
+      const next = document.getElementById("results-section").dataset.density !== "compact";
+      localStorage.setItem("ui-density", next ? "compact" : "normal");
+      applyDensity(next);
+    });
+
+    const HIST_BUCKETS = [
+      { label: "0-50ms", max: 50 },
+      { label: "50-100ms", max: 100 },
+      { label: "100-200ms", max: 200 },
+      { label: "200-400ms", max: 400 },
+      { label: "400-800ms", max: 800 },
+      { label: "800ms+", max: Infinity }
+    ];
+    function renderHistogram() {
+      const lats = results.map(v => v.latency_ms).filter(l => l != null);
+      if (lats.length === 0) { histEl.hidden = true; return; }
+      const cumulative = HIST_BUCKETS.map(b => lats.filter(l => l <= b.max).length);
+      let prev = 0;
+      const counts = cumulative.map(c => { const n = c - prev; prev = c; return n; });
+      const peak = Math.max(...counts, 1);
+      histEl.replaceChildren();
+      counts.forEach((n, i) => {
+        const bar = document.createElement("div");
+        bar.className = "hist-bar";
+        bar.style.height = Math.max(4, Math.round((n / peak) * 100)) + "%";
+        bar.title = `${HIST_BUCKETS[i].label}: ${n}`;
+        histEl.appendChild(bar);
+      });
+      histEl.setAttribute("aria-label",
+        "Latency histogram: " + counts.map((n, i) => `${HIST_BUCKETS[i].label} ${n}`).join(", "));
+      histEl.hidden = false;
+    }
 
     function parseLines(text) {
       return text.split("\n").map(s => s.trim()).filter(s => s.length > 0);
@@ -310,6 +388,7 @@
       }
       countEl.textContent = rows.length > 0 ? `(${rows.length})` : "";
       copyBtn.disabled = saveBtn.disabled = rows.length === 0;
+      renderHistogram();
     }
 
     document.querySelectorAll("th.sortable").forEach(th => {
