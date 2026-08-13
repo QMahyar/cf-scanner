@@ -3,7 +3,7 @@
 All notable changes to CF-Scanner are documented here, grouped by
 Added / Changed / Fixed / Deprecated / Removed / Security, newest on top.
 
-## [Unreleased]
+## [0.2.0] - 2026-08-13
 
 ### Added
 - IPv6 candidate ranges in phase 1: official Cloudflare v6 list bundled
@@ -27,6 +27,22 @@ Added / Changed / Fixed / Deprecated / Removed / Security, newest on top.
 - Release archives now carry only the target platform's xray binary; the
   foreign 0-byte placeholder is dropped at build time.
 - CI checks updated to `actions/checkout@v6` (Node 20 deprecation).
+- `ScanTarget::Count` is capped at 100 000 (an unauthenticated scan request
+  could otherwise allocate gigabytes and abort the process).
+
+### Fixed
+- `GET /api/profiles/{name}` now exists; the UI's Load button previously
+  404'd because the route only handled PUT/DELETE.
+- A panicking scan run no longer permanently bricks the controller: the
+  busy flag and cancel slot are reset via a RAII guard, and mutex poisoning
+  is tolerated everywhere.
+- IPv6 ranges refresh is atomic (temp file + rename) with a last-updated
+  header, matching the v4 refresh (torn reads could fail concurrent scans).
+- IPv6 entries are dropped from the IPv4 refresh feed (a v4-only scan could
+  otherwise silently scan v6 hosts); v6 `/0` custom ranges are rejected with
+  a clear error instead of producing off-by-one exclusion math.
+- CSV export neutralizes spreadsheet formula injection (`=`, `+`, `-`, `@`
+  lead-ins); copied/saved endpoints bracket IPv6 addresses (`[::1]:443`).
 
 ## [0.1.0] - 2026-08-13
 
