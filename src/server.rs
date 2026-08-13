@@ -13,7 +13,7 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{Html, IntoResponse, Response};
-use axum::routing::{get, post, put};
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::Serialize;
 use tokio::sync::RwLock as TokioRwLock;
@@ -154,7 +154,7 @@ fn router_with(controller: Arc<ScanController>, ranges_state: Arc<RangesState>) 
         .route("/api/profiles", get(list_profiles))
         .route(
             "/api/profiles/{name}",
-            put(put_profile).delete(delete_profile),
+            get(get_profile).put(put_profile).delete(delete_profile),
         )
         // Task 7 iterates on `embed/` without rebuilding; release builds fall
         // back to nothing (the UI is embedded above), which 404s non-UI paths.
@@ -283,6 +283,20 @@ async fn delete_profile(
         Err(ApiError::not_found(format!(
             "profile {name:?} does not exist"
         )))
+    }
+}
+
+/// One stored profile, or 404. The UI loads a saved profile by name.
+async fn get_profile(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+) -> Result<Json<ProfilePayload>, ApiError> {
+    let cfg = state.profiles.read().await.get(&name).cloned();
+    match cfg {
+        Some(cfg) => Ok(Json(ProfilePayload { name, config: cfg })),
+        None => Err(ApiError::not_found(format!(
+            "profile {name:?} does not exist"
+        ))),
     }
 }
 
@@ -689,6 +703,22 @@ mod tests {
         let (_, text) = get_profiles(addr).await;
         assert_eq!(response_body(&text).trim(), "[]", "{text}");
         let (status, _) = delete_profile(addr, "quick").await;
+        assert_eq!(status, 404);
+    }
+
+    #[tokio::test]
+    async fn get_single_profile_returns_stored_config_then_404s() {
+        let addr = serve(FakeTransport::new()).await;
+        let body = serde_json::to_string(&cfg(7, 1)).unwrap();
+        assert_eq!(put_profile(addr, "quick", &body).await.0, 201);
+        let req =
+            "GET /api/profiles/quick HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n";
+        let (status, text) = request(addr, req, None).await;
+        assert_eq!(status, 200, "{text}");
+        assert!(text.contains("\"name\":\"quick\""), "{text}");
+        assert!(text.contains("\"Count\":7"), "{text}");
+        let req = "GET /api/profiles/nope HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n";
+        let (status, _) = request(addr, req, None).await;
         assert_eq!(status, 404);
     }
     #[tokio::test]

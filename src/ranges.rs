@@ -498,16 +498,22 @@ pub async fn refresh_to_disk(http: &impl HttpGet) -> Result<usize> {
 /// rename), tagged with the `last_updated` header that CLI refreshes and the
 /// server's background refresh share as one timestamp source.
 pub fn write_pool(pool: &CidrPool, last_updated: &str) -> Result<()> {
+    write_pool_to(&paths::refreshed_ranges_path()?, pool, last_updated)
+}
+
+/// Atomically replaces `path` with `pool` (temp file + rename), tagged with
+/// the `last_updated` header that CLI refreshes and the server's background
+/// refresh share as one timestamp source.
+pub fn write_pool_to(path: &std::path::Path, pool: &CidrPool, last_updated: &str) -> Result<()> {
     let dir = paths::data_dir()?;
     fs::create_dir_all(&dir).context("create data dir")?;
-    let path = paths::refreshed_ranges_path()?;
     let mut text = format!("{LAST_UPDATED_PREFIX}{last_updated}\n");
     text.push_str(&render_lines(pool.ranges()));
     let tmp = path.with_extension("txt.tmp");
     // Scans read this file at start; a torn write would fail the scan. Rename
     // is atomic on the same volume, so readers see old or new, never partial.
     fs::write(&tmp, text).context("write refreshed ranges")?;
-    fs::rename(&tmp, &path).context("replace refreshed ranges")?;
+    fs::rename(&tmp, path).context("replace refreshed ranges")?;
     Ok(())
 }
 
@@ -558,11 +564,15 @@ pub async fn refresh_v6_to_disk(http: &impl HttpGet) -> Result<usize> {
     if let Some(bad) = cidrs.iter().find(|c| !c.addr.is_ipv6()) {
         bail!("{OFFICIAL_IPS_V6_URL} returned a non-IPv6 CIDR: {bad}");
     }
-    let dir = paths::data_dir()?;
-    fs::create_dir_all(&dir).context("create data dir")?;
-    fs::write(paths::refreshed_ranges_v6_path()?, render_lines(&cidrs))
-        .context("write refreshed v6 ranges")?;
-    Ok(cidrs.len())
+    // Same atomic replace + last-updated header as the v4 refresh, so a
+    // concurrent include_v6 scan never reads a torn file.
+    let pool = CidrPool { ranges: cidrs };
+    write_pool_to(
+        &paths::refreshed_ranges_v6_path()?,
+        &pool,
+        &rfc3339_utc(unix_now()),
+    )?;
+    Ok(pool.ranges().len())
 }
 
 #[derive(Deserialize)]
@@ -591,11 +601,18 @@ pub fn parse_official(body: &str) -> Result<Vec<Cidr>> {
     };
     r.ipv4_cidrs
         .iter()
-        .filter_map(|c| match parse_cidr(c) {
-            Ok(c) => Some(Ok(c)),
-            // IPv6 entries are not addressable by this tool.
-            Err(_) if c.contains(':') => None,
-            Err(e) => Some(Err(e).with_context(|| format!("bad CIDR from API: {c}"))),
+        .filter_map(|c| {
+            // The ipv4_cidrs feed is v4 by contract, but a v6 entry would
+            // otherwise land in the refreshed v4 file and a v4-only scan
+            // would silently scan v6 hosts: skip v6 regardless of parse
+            // success.
+            if c.contains(':') {
+                return None;
+            }
+            match parse_cidr(c) {
+                Ok(c) => Some(Ok(c)),
+                Err(e) => Some(Err(e).with_context(|| format!("bad CIDR from API: {c}"))),
+            }
         })
         .collect()
 }
@@ -1338,8 +1355,9 @@ mod tests {
     }
 
     #[test]
-    fn parses_official_fixture_keeping_v6() {
-        // v6 entries in the response are no longer discarded.
+    fn parses_official_fixture_skipping_v6() {
+        // v6 entries in the response are discarded: the v4 refresh must
+        // never seed v6 hosts into a v4-only scan.
         let body = r#"{
             "success": true,
             "result": {
@@ -1348,13 +1366,7 @@ mod tests {
             "errors": []
         }"#;
         let cidrs = parse_official(body).unwrap();
-        assert_eq!(
-            cidrs,
-            vec![
-                parse_cidr("104.16.0.0/13").unwrap(),
-                parse_cidr("2001:4860::/32").unwrap()
-            ]
-        );
+        assert_eq!(cidrs, vec![parse_cidr("104.16.0.0/13").unwrap()]);
     }
 
     #[test]
@@ -1417,7 +1429,12 @@ mod tests {
         let http = FakeHttp("2606:4700::/32\n2400:cb00::/32\n");
         assert_eq!(refresh_v6_to_disk(&http).await.unwrap(), 2);
         let written = fs::read_to_string(paths::refreshed_ranges_v6_path().unwrap()).unwrap();
-        assert_eq!(written, "2606:4700::/32\n2400:cb00::/32\n");
+        assert!(
+            last_updated_of(&written).is_some(),
+            "v6 refresh must carry a last-updated header like the v4 refresh"
+        );
+        let pool = CidrPool::parse(&written).unwrap();
+        assert_eq!(pool.ranges().len(), 2);
         fs::remove_file(paths::refreshed_ranges_v6_path().unwrap()).unwrap();
     }
 

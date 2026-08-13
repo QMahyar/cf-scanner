@@ -87,17 +87,20 @@ impl ScanController {
 
     /// Summary of the last finished scan, if one has run yet.
     pub fn summary(&self) -> Option<ScanSummary> {
-        self.summary.lock().unwrap().clone()
+        self.summary
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     /// Snapshot of the last scan's working endpoints, sorted by latency.
     pub fn results(&self) -> Vec<Verdict> {
-        self.store.lock().unwrap().clone()
+        self.store.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
     /// True while a run is active; the server rejects new scans then.
     pub fn is_running(&self) -> bool {
-        *self.running.lock().unwrap()
+        *self.running.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     /// Clears the last scan's results. No-op while a run is active so an
@@ -112,12 +115,20 @@ impl ScanController {
     /// Internal reset for run start; bypasses the running guard (the run
     /// itself is the one clearing, not a concurrent caller).
     fn clear_store(&self) {
-        self.store.lock().unwrap().clear();
-        self.summary.lock().unwrap().take();
+        self.store.lock().unwrap_or_else(|e| e.into_inner()).clear();
+        self.summary
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
     }
 
     pub fn cancel(&self) {
-        if let Some(tx) = self.cancel_tx.lock().unwrap().as_ref() {
+        if let Some(tx) = self
+            .cancel_tx
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+        {
             let _ = tx.send(true);
         }
     }
@@ -175,7 +186,7 @@ impl ScanController {
     /// store or the cancel slot.
     pub async fn run_seeded(&self, cfg: ScanConfig, seed: u64) -> Result<ScanSummary> {
         {
-            let mut running = self.running.lock().unwrap();
+            let mut running = self.running.lock().unwrap_or_else(|e| e.into_inner());
             if *running {
                 let err = anyhow!("a scan is already running");
                 self.emit(ScanEvent::Failed(format!("{err:#}")));
@@ -184,11 +195,29 @@ impl ScanController {
             *running = true;
         }
         let result = self.run_seeded_unguarded(cfg, seed).await;
-        self.cancel_tx.lock().unwrap().take();
-        *self.running.lock().unwrap() = false;
         if let Err(err) = &result {
             self.emit(ScanEvent::Failed(format!("{err:#}")));
         }
+        // RAII: clears the busy flag (and the cancel slot) even if the run
+        // panics, so one bad run can never brick the controller for the rest
+        // of the process's life.
+        struct ResetGuard<'a> {
+            running: &'a Mutex<bool>,
+            cancel_tx: &'a Mutex<Option<watch::Sender<bool>>>,
+        }
+        impl Drop for ResetGuard<'_> {
+            fn drop(&mut self) {
+                self.cancel_tx
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .take();
+                *self.running.lock().unwrap_or_else(|e| e.into_inner()) = false;
+            }
+        }
+        let _guard = ResetGuard {
+            running: &self.running,
+            cancel_tx: &self.cancel_tx,
+        };
         result
     }
 
@@ -226,7 +255,7 @@ impl ScanController {
         }
 
         let (cancel_tx, cancel_rx) = watch::channel(false);
-        *self.cancel_tx.lock().unwrap() = Some(cancel_tx);
+        *self.cancel_tx.lock().unwrap_or_else(|e| e.into_inner()) = Some(cancel_tx);
 
         let scanned = Arc::new(AtomicU64::new(0));
         let found = Arc::new(AtomicU64::new(0));
@@ -348,7 +377,7 @@ impl ScanController {
         }
 
         let (cancel_tx, cancel_rx) = watch::channel(false);
-        *self.cancel_tx.lock().unwrap() = Some(cancel_tx);
+        *self.cancel_tx.lock().unwrap_or_else(|e| e.into_inner()) = Some(cancel_tx);
         let scanned = Arc::new(AtomicU64::new(0));
         let found = Arc::new(AtomicU64::new(0));
         let semaphore = Arc::new(Semaphore::new(cfg.concurrency as usize));
@@ -486,13 +515,13 @@ impl ScanController {
         } else {
             p2.snis.iter().map(|s| Some(s.clone())).collect()
         };
-        let candidates = self.store.lock().unwrap().clone();
+        let candidates = self.store.lock().unwrap_or_else(|e| e.into_inner()).clone();
         if candidates.is_empty() {
             return Ok(());
         }
 
         let (cancel_tx, cancel_rx) = watch::channel(false);
-        *self.cancel_tx.lock().unwrap() = Some(cancel_tx);
+        *self.cancel_tx.lock().unwrap_or_else(|e| e.into_inner()) = Some(cancel_tx);
         let semaphore = Arc::new(Semaphore::new(p2.concurrency as usize));
         let passed_ips: Arc<Mutex<HashSet<std::net::Ipv4Addr>>> =
             Arc::new(Mutex::new(HashSet::new()));
@@ -525,7 +554,12 @@ impl ScanController {
                             .acquire_owned()
                             .await
                             .map_err(|_| anyhow!("semaphore closed"))?;
-                        if *cancel.borrow() || passed_ips.lock().unwrap().contains(&ip) {
+                        if *cancel.borrow()
+                            || passed_ips
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .contains(&ip)
+                        {
                             return Ok(());
                         }
                         attempts.fetch_add(1, Ordering::Relaxed);
@@ -551,7 +585,10 @@ impl ScanController {
                                     latency_ms: result.latency_ms,
                                 };
                                 if result.passed {
-                                    passed_ips.lock().unwrap().insert(ip);
+                                    passed_ips
+                                        .lock()
+                                        .unwrap_or_else(|e| e.into_inner())
+                                        .insert(ip);
                                 }
                                 if let Some(updated) =
                                     update_verdict_phase2(&store, ip, verdict, colo)
@@ -560,7 +597,8 @@ impl ScanController {
                                 }
                             }
                             Err(err) => {
-                                let mut slot = first_error.lock().unwrap();
+                                let mut slot =
+                                    first_error.lock().unwrap_or_else(|e| e.into_inner());
                                 if slot.is_none() {
                                     *slot = Some(err.to_string());
                                 }
@@ -576,7 +614,11 @@ impl ScanController {
         }
 
         if attempts.load(Ordering::Relaxed) > 0 && spawned.load(Ordering::Relaxed) == 0 {
-            let reason = first_error.lock().unwrap().clone().unwrap_or_default();
+            let reason = first_error
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone()
+                .unwrap_or_default();
             bail!("phase 2: every attempt failed before a probe ran: {reason}");
         }
         Ok(())
@@ -630,9 +672,12 @@ impl ScanController {
             found,
             duration_ms: started.elapsed().as_millis() as u64,
         };
-        *self.summary.lock().unwrap() = Some(summary.clone());
+        *self.summary.lock().unwrap_or_else(|e| e.into_inner()) = Some(summary.clone());
         self.emit(ScanEvent::Finished(summary.clone()));
-        self.cancel_tx.lock().unwrap().take();
+        self.cancel_tx
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
         summary
     }
 
@@ -718,7 +763,7 @@ fn plan_probe_count(plan: &[PlanItem], ports: &[u16]) -> u64 {
 }
 
 fn insert_sorted(store: &Store, verdict: Verdict) {
-    let mut results = store.lock().unwrap();
+    let mut results = store.lock().unwrap_or_else(|e| e.into_inner());
     let pos = results
         .binary_search_by_key(&verdict.latency_ms, |v| v.latency_ms)
         .unwrap_or_else(|e| e);
@@ -768,7 +813,7 @@ fn update_verdict_phase2(
     p2v: Phase2Verdict,
     colo: Option<String>,
 ) -> Option<Verdict> {
-    let mut results = store.lock().unwrap();
+    let mut results = store.lock().unwrap_or_else(|e| e.into_inner());
     let pos = results.iter().position(|v| v.ip == ip)?;
     results[pos].phase2 = Some(p2v);
     if colo.is_some() {
@@ -780,6 +825,7 @@ fn update_verdict_phase2(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::api::types::MAX_SCAN_COUNT;
     use std::future::Future;
     use std::pin::Pin;
     use std::sync::atomic::AtomicBool;
@@ -837,7 +883,10 @@ mod tests {
         }
 
         fn pass(self, ip: Ipv4Addr) -> Self {
-            self.passed.lock().unwrap().insert(ip);
+            self.passed
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(ip);
             self
         }
     }
@@ -864,7 +913,11 @@ mod tests {
                         });
                     }
                 }
-                let passed = this.passed.lock().unwrap().contains(&dial_ip);
+                let passed = this
+                    .passed
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .contains(&dial_ip);
                 Ok(TunnelResult {
                     passed,
                     latency_ms: passed.then_some(7),
@@ -1203,7 +1256,7 @@ mod tests {
     async fn warp_full_pool_scan_visits_every_endpoint() {
         let (c, _) = warp_controller(FakeTransport::new());
         let mut cfg = warp_cfg(1, &[]);
-        cfg.target = ScanTarget::Count(1_000_000);
+        cfg.target = ScanTarget::Count(MAX_SCAN_COUNT);
         let summary = run_local(&c, cfg, 1).await.unwrap();
         assert_eq!(summary.scanned, 8 * 256, "all bundled pool hosts");
         assert_eq!(summary.found, 0);
