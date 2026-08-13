@@ -145,6 +145,7 @@ fn router_with(controller: Arc<ScanController>, ranges_state: Arc<RangesState>) 
     });
     Router::new()
         .route("/", get(index))
+        .route("/api/status", get(status_handler))
         .route("/api/scan", post(start_scan))
         .route("/api/events", get(events))
         .route("/api/results", get(results))
@@ -221,8 +222,20 @@ async fn reset(State(state): State<Arc<AppState>>) -> StatusCode {
 }
 
 #[derive(Serialize)]
+struct StatusPayload {
+    version: &'static str,
+    is_running: bool,
+}
+
+async fn status_handler(State(state): State<Arc<AppState>>) -> Json<StatusPayload> {
+    Json(StatusPayload {
+        version: env!("CARGO_PKG_VERSION"),
+        is_running: state.controller.is_running(),
+    })
+}
+
+#[derive(Serialize)]
 struct RangesPayload {
-    bundled: Vec<String>,
     host_count: u64,
     /// RFC3339 UTC of the last successful refresh (or the embedded-list load
     /// time); None before anything has been loaded.
@@ -232,7 +245,6 @@ struct RangesPayload {
 async fn ranges(State(state): State<Arc<AppState>>) -> Json<RangesPayload> {
     let inner = state.ranges.inner.read().expect("ranges state lock");
     Json(RangesPayload {
-        bundled: inner.pool.ranges().iter().map(|c| format!("{c}")).collect(),
         host_count: inner.pool.host_count().min(u64::MAX as u128) as u64,
         last_updated: inner.last_updated.clone(),
     })
@@ -253,6 +265,14 @@ async fn list_profiles(State(state): State<Arc<AppState>>) -> Json<Vec<ProfilePa
     Json(out)
 }
 
+fn sanitize_config(mut cfg: ScanConfig) -> ScanConfig {
+    if let Some(ref mut w) = cfg.warp {
+        w.generate_config = false;
+        w.warp_plus_license = None;
+    }
+    cfg
+}
+
 /// Upsert: 201 when the name is new, 200 when it replaces an existing
 /// profile; the body is always the stored profile.
 async fn put_profile(
@@ -262,6 +282,7 @@ async fn put_profile(
 ) -> Result<(StatusCode, Json<ProfilePayload>), ApiError> {
     validate_profile_name(&name).map_err(ApiError::bad_request)?;
     cfg.validate().map_err(ApiError::bad_request)?;
+    let cfg = sanitize_config(cfg);
     let mut profiles = state.profiles.write().await;
     let created = profiles.insert(name.clone(), cfg.clone()).is_none();
     let status = if created {
@@ -322,6 +343,12 @@ struct ApiError {
     message: String,
 }
 
+#[derive(Serialize)]
+struct ErrorResponse {
+    error: String,
+    message: String,
+}
+
 impl ApiError {
     fn bad_request(err: impl std::fmt::Display) -> Self {
         Self {
@@ -347,7 +374,11 @@ impl ApiError {
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
-        (self.status, self.message).into_response()
+        let body = Json(ErrorResponse {
+            error: self.status.canonical_reason().unwrap_or("Error").to_owned(),
+            message: self.message,
+        });
+        (self.status, body).into_response()
     }
 }
 
@@ -641,10 +672,8 @@ mod tests {
         let addr = serve(FakeTransport::new()).await;
         let (status, text) = get_ranges(addr).await;
         assert_eq!(status, 200);
-        assert!(text.contains("\"bundled\":["), "{text}");
         assert!(text.contains("\"host_count\":"));
         assert!(text.contains("\"last_updated\":null"), "{text}");
-        assert!(text.contains("173.245.48.0/20"), "{text}");
     }
 
     #[tokio::test]
@@ -747,12 +776,15 @@ mod tests {
         let addr = serve_with_ranges(FakeTransport::new(), ranges).await;
         for _ in 0..50 {
             let (status, text) = get_ranges(addr).await;
-            if status == 200 && text.contains("10.1.0.0/16") {
+            if status == 200 {
                 let payload: serde_json::Value =
                     serde_json::from_str(json_body(&text)).expect("ranges payload JSON");
-                let ts = payload["last_updated"].as_str().expect("last_updated set");
-                assert!(ts.ends_with('Z'), "{ts}");
-                return;
+                if let Some(ts) = payload["last_updated"].as_str() {
+                    assert!(ts.ends_with('Z'), "{ts}");
+                    // host_count should be > 0 after refresh
+                    assert!(payload["host_count"].as_u64().unwrap_or(0) > 0);
+                    return;
+                }
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
@@ -768,8 +800,6 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(120)).await;
         let (status, text) = get_ranges(addr).await;
         assert_eq!(status, 200);
-        assert!(text.contains("10.0.0.0/8"), "{text}");
-        assert!(!text.contains("10.1.0.0/16"), "{text}");
         assert!(
             text.contains("\"last_updated\":\"2026-01-01T00:00:00Z\""),
             "{text}"

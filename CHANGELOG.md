@@ -3,6 +3,47 @@
 All notable changes to CF-Scanner are documented here, grouped by
 Added / Changed / Fixed / Deprecated / Removed / Security, newest on top.
 
+## [0.3.0] - 2026-08-13
+
+### Added
+- `GET /api/status` endpoint returning server version and scan state.
+- Frontend loads scan results on page refresh via `/api/results`.
+- Toast notification system for user feedback (copy, download, profile
+  save/delete).
+- Download dropdown with TXT/CSV/JSON formats and timestamped filenames.
+- Empty results table shows a centered CTA instead of a blank row.
+- Status card shows ETA and "X of Y scanned" during scan.
+- Retry button on scan failure.
+- Skip-to-content link and screen-reader-only live regions for result
+  count and sort announcements.
+- Keyboard-operable sort headers (Enter/Space).
+
+### Changed
+- Embedded frontend typography: rem-based sizing, tabular-nums on
+  numeric columns, 3-state theme toggle (Auto/Light/Dark), spacing
+  token system, compact 48px header with backdrop blur and GitHub link.
+- Form improvements: inline help text, Ctrl+Enter shortcut, disabled
+  field explanations, field error styling.
+- Data table: right-align numeric columns, default sort by latency,
+  sticky first column support, tabular-nums on mono cells.
+- Progress bar: 8px height, ease-out transition, auto-scroll on
+  completion.
+- Clipboard copy: icon swap to checkmark on success, aria-live toast
+  on success/failure.
+- Reset button confirms before clearing results when data exists.
+- Download filenames use `cf-scanner-{mode}-{ISO8601}.{ext}` pattern.
+- Profile storage sanitizes WarpConfig to strip `generate_config` and
+  `warp_plus_license` before persisting.
+- API error responses now return structured JSON instead of plain text.
+
+### Fixed
+- `ranges` endpoint no longer includes `bundled` field (unused by frontend).
+- Theme button aria-label mismatch (removed redundant label).
+- `prefers-reduced-motion` now selectively disables animations instead of
+  blanket-removing all transitions.
+- `forced-colors` support for progress bars, segmented controls, and
+  focus outlines.
+
 ## [0.2.0] - 2026-08-13
 
 ### Added

@@ -6,13 +6,15 @@
   <title>CF-Scanner</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%2322d3ee'/%3E%3Ccircle cx='16' cy='16' r='7' fill='none' stroke='%23062a30' stroke-width='2.4'/%3E%3Cpath d='M16 4v5M16 23v5M4 16h5M23 16h5' stroke='%23062a30' stroke-width='2.4' stroke-linecap='round'/%3E%3Ccircle cx='16' cy='16' r='1.8' fill='%23062a30'/%3E%3C/svg%3E">
   <script>
-    // UI preference only (never scan data): no stored choice = follow the OS.
+    // 3-state theme: "system" | "light" | "dark". Default = "system".
     (function () {
       var t = localStorage.getItem("ui-theme");
-      if (t !== "light" && t !== "dark") {
-        t = matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
-      }
-      document.documentElement.dataset.theme = t;
+      if (t !== "light" && t !== "dark" && t !== "system") t = "system";
+      var resolved = t === "system"
+        ? (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light")
+        : t;
+      document.documentElement.dataset.theme = resolved;
+      document.documentElement.dataset.themePref = t;
     })();
   </script>
   <style>
@@ -22,10 +24,12 @@
       --surface: #10161f;
       --surface-2: #151d28;
       --surface-3: #1a2431;
+      --surface-4: #1f2d3d;
       --border: #232e3d;
+      --border-subtle: #1a2433;
       --border-strong: #2e3c4f;
       --text: #e6edf5;
-      --muted: #8b9ab0;
+      --muted: #94a3b8;
       --accent: #22d3ee;
       --accent-strong: #67e8f9;
       --accent-soft: rgba(34, 211, 238, 0.12);
@@ -35,21 +39,34 @@
       --danger: #f87171;
       --danger-soft: rgba(248, 113, 113, 0.12);
       --warning: #fbbf24;
-      --shadow: 0 1px 2px rgba(0, 0, 0, 0.35), 0 12px 32px rgba(0, 0, 0, 0.22);
+      --warning-contrast: #422006;
+      --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.25);
+      --shadow: 0 1px 3px rgba(0, 0, 0, 0.3), 0 8px 24px rgba(0, 0, 0, 0.18);
+      --shadow-lg: 0 4px 12px rgba(0, 0, 0, 0.35), 0 16px 48px rgba(0, 0, 0, 0.22);
+      --shadow-xl: 0 8px 24px rgba(0, 0, 0, 0.4), 0 24px 64px rgba(0, 0, 0, 0.28);
       --radius-sm: 7px;
       --radius-md: 10px;
       --radius-lg: 14px;
-      --chevron: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 16 16'><path d='M4 6l4 4 4-4' fill='none' stroke='%238b9ab0' stroke-width='1.7' stroke-linecap='round' stroke-linejoin='round'/></svg>");
+      --sp-1: 0.25rem;
+      --sp-2: 0.5rem;
+      --sp-3: 0.75rem;
+      --sp-4: 1rem;
+      --sp-5: 1.5rem;
+      --sp-6: 2rem;
+      --sp-8: 3rem;
+      --chevron: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 16 16'><path d='M4 6l4 4 4-4' fill='none' stroke='%2394a3b8' stroke-width='1.7' stroke-linecap='round' stroke-linejoin='round'/></svg>");
     }
     [data-theme="light"] {
       --bg: #f2f5f9;
       --surface: #ffffff;
       --surface-2: #eef2f7;
       --surface-3: #e5ebf2;
+      --surface-4: #dde3eb;
       --border: #d8e0ea;
+      --border-subtle: #e8edf3;
       --border-strong: #c3cedb;
       --text: #17222f;
-      --muted: #5c6b7f;
+      --muted: #64748b;
       --accent: #06b6d4;
       --accent-strong: #0e7490;
       --accent-soft: rgba(6, 182, 212, 0.11);
@@ -59,31 +76,50 @@
       --danger: #dc2626;
       --danger-soft: rgba(220, 38, 38, 0.09);
       --warning: #b45309;
-      --shadow: 0 1px 2px rgba(16, 32, 54, 0.05), 0 10px 28px rgba(16, 32, 54, 0.08);
-      --chevron: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 16 16'><path d='M4 6l4 4 4-4' fill='none' stroke='%235c6b7f' stroke-width='1.7' stroke-linecap='round' stroke-linejoin='round'/></svg>");
+      --warning-contrast: #451a03;
+      --shadow-sm: 0 1px 2px rgba(16, 32, 54, 0.04);
+      --shadow: 0 1px 3px rgba(16, 32, 54, 0.06), 0 8px 24px rgba(16, 32, 54, 0.06);
+      --shadow-lg: 0 4px 12px rgba(16, 32, 54, 0.08), 0 16px 48px rgba(16, 32, 54, 0.08);
+      --shadow-xl: 0 8px 24px rgba(16, 32, 54, 0.1), 0 24px 64px rgba(16, 32, 54, 0.1);
+      --chevron: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 16 16'><path d='M4 6l4 4 4-4' fill='none' stroke='%2364748b' stroke-width='1.7' stroke-linecap='round' stroke-linejoin='round'/></svg>");
     }
 
     /* ============ base ============ */
     * { box-sizing: border-box; }
-    html { color-scheme: dark; }
+    html { color-scheme: dark; scroll-padding-top: 56px; }
+    .sr-only {
+      position: absolute; width: 1px; height: 1px;
+      padding: 0; margin: -1px; overflow: hidden;
+      clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
+    }
+    .skip-link {
+      position: absolute; left: -9999px; top: auto;
+      z-index: 100; padding: 0.5rem 1rem;
+      background: var(--accent); color: var(--accent-contrast);
+      font-weight: 600; border-radius: var(--radius-sm);
+      text-decoration: none;
+    }
+    .skip-link:focus { left: 1rem; top: 1rem; }
     [data-theme="light"] { color-scheme: light; }
     body {
       margin: 0;
       background: var(--bg);
       color: var(--text);
-      font-family: "Segoe UI", system-ui, -apple-system, Roboto, "Helvetica Neue", Arial, sans-serif;
-      font-size: 15px;
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+      font-size: 0.9375rem;
       line-height: 1.55;
       -webkit-font-smoothing: antialiased;
+      -moz-osx-font-smoothing: grayscale;
     }
     ::selection { background: var(--accent-soft); }
     h1, h2, h3, p { margin: 0; }
-    h2 { font-size: 1.05rem; letter-spacing: 0.01em; }
-    h3 { font-size: 0.85rem; }
+    h1 { font-size: 1.25rem; line-height: 1.2; }
+    h2 { font-size: 1.1rem; line-height: 1.25; }
+    h3 { font-size: 0.85rem; line-height: 1.3; }
     a { color: var(--accent-strong); }
     .muted { color: var(--muted); }
     .mono { font-family: "Cascadia Code", "JetBrains Mono", Consolas, ui-monospace, monospace; }
-    .spacer { margin-top: 1.25rem; }
+    .spacer { margin-top: 1.5rem; }
     ::-webkit-scrollbar { width: 10px; height: 10px; }
     ::-webkit-scrollbar-thumb { background: var(--border-strong); border-radius: 8px; border: 2px solid var(--surface); }
     ::-webkit-scrollbar-track { background: transparent; }
@@ -93,13 +129,17 @@
     /* ============ app bar ============ */
     .appbar {
       position: sticky; top: 0; z-index: 20;
-      background: color-mix(in srgb, var(--bg) 82%, transparent);
-      -webkit-backdrop-filter: blur(10px); backdrop-filter: blur(10px);
+      background: color-mix(in srgb, var(--bg) 85%, transparent);
+      -webkit-backdrop-filter: blur(12px);
+      backdrop-filter: blur(12px);
       border-bottom: 1px solid var(--border);
+    }
+    @supports not ((-webkit-backdrop-filter: blur(1px)) or (backdrop-filter: blur(1px))) {
+      .appbar { background: var(--bg); }
     }
     .appbar-inner {
       display: flex; align-items: center; gap: 0.9rem;
-      padding: 0.7rem 0; min-height: 56px;
+      padding: 0.55rem 0; min-height: 48px;
     }
     .logo {
       display: grid; place-items: center;
@@ -108,7 +148,7 @@
       color: var(--accent-contrast);
       box-shadow: 0 2px 10px rgba(34, 211, 238, 0.25);
     }
-    .appbar h1 { font-size: 1.02rem; letter-spacing: 0.01em; }
+    .appbar h1 { font-size: 1.25rem; }
     .appbar-sub { font-size: 0.78rem; color: var(--muted); }
     .appbar-spacer { flex: 1 1 auto; }
     .version-pill {
@@ -148,13 +188,13 @@
     #ranges-info { font-size: 0.8rem; color: var(--muted); margin-top: 0.7rem; }
 
     .progress {
-      margin-top: 0.9rem; height: 6px; border-radius: 999px;
+      margin-top: 0.9rem; height: 8px; border-radius: 999px;
       background: var(--surface-3); overflow: hidden;
     }
     .progress-fill {
       height: 100%; width: 0;
       background: linear-gradient(90deg, var(--accent), var(--accent-strong));
-      border-radius: 999px; transition: width 0.35s ease;
+      border-radius: 999px; transition: width 500ms ease-out;
     }
     .progress.indeterminate .progress-fill { width: 32%; animation: slide 1.3s ease-in-out infinite; }
     @keyframes slide { 0% { margin-left: -32%; } 100% { margin-left: 100%; } }
@@ -169,8 +209,8 @@
     }
     .stat-label { display: block; font-size: 0.7rem; font-weight: 600; letter-spacing: 0.07em; text-transform: uppercase; color: var(--muted); }
     .stat-value {
-      display: block; font-size: 1.12rem; font-weight: 650;
-      font-variant-numeric: tabular-nums; margin-top: 0.1rem;
+      display: block; font-size: 1.12rem; font-weight: 600;
+      font-variant-numeric: tabular-nums slashed-zero; margin-top: 0.1rem;
     }
     .stat-value.accent { color: var(--accent-strong); }
     .stat-value.ok { color: var(--success); }
@@ -184,9 +224,9 @@
       font-size: 0.72rem; font-weight: 700; letter-spacing: 0.09em; text-transform: uppercase;
       color: var(--muted); margin-bottom: 0.75rem;
     }
-    .grid { display: grid; gap: 0.9rem; }
+    .grid { display: grid; gap: 1rem; }
     .grid-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-    .grid-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    .grid-3 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
     .grid-4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
 
     .field { display: flex; flex-direction: column; gap: 0.35rem; min-width: 0; }
@@ -255,7 +295,7 @@
     details.panel-details > summary {
       list-style: none; cursor: pointer; user-select: none;
       display: flex; align-items: center; gap: 0.6rem;
-      padding: 0.9rem 1.1rem; font-weight: 650; font-size: 0.88rem;
+      padding: 0.9rem 1.1rem; font-weight: 600; font-size: 0.88rem;
     }
     details.panel-details > summary::-webkit-details-marker { display: none; }
     details.panel-details > summary::before {
@@ -270,6 +310,22 @@
 
     .inline-row { display: flex; align-items: center; gap: 0.7rem; flex-wrap: wrap; }
     .inline-row .check { margin-top: 1.15rem; }
+
+    .help { font-size: 0.72rem; color: var(--muted); margin-top: 0.2rem; }
+    kbd { font-family: inherit; font-size: 0.75rem; background: var(--surface-3); border: 1px solid var(--border); border-radius: 3px; padding: 0.1rem 0.35rem; }
+    .field-error input, .field-error select, .field-error textarea {
+      border-color: var(--danger) !important;
+      box-shadow: 0 0 0 2px var(--danger-soft) !important;
+    }
+    .field-error .help { color: var(--danger); }
+
+    input[name="ports"] { max-width: 14ch; }
+    input[name="concurrency"] { max-width: 10ch; }
+    input[name="timeout_ms"] { max-width: 10ch; }
+    input[name="found"] { max-width: 10ch; }
+    input[name="cap"] { max-width: 10ch; }
+    input[name="warp_probes"] { max-width: 8ch; }
+    input[name="phase2_concurrency"] { max-width: 8ch; }
 
     /* ============ buttons ============ */
     button {
@@ -319,7 +375,7 @@
     thead th {
       position: sticky; top: 0; z-index: 2;
       background: var(--surface-2); color: var(--muted);
-      text-align: left; font-weight: 650; font-size: 0.75rem; letter-spacing: 0.06em; text-transform: uppercase;
+      text-align: left; font-weight: 600; font-size: 0.75rem; letter-spacing: 0.06em; text-transform: uppercase;
       padding: 0.6rem 0.85rem; border-bottom: 1px solid var(--border);
       white-space: nowrap;
     }
@@ -328,11 +384,13 @@
     th .caret { color: var(--accent); font-size: 0.7rem; margin-left: 0.15rem; }
     tbody td {
       padding: 0.5rem 0.85rem; border-bottom: 1px solid var(--border);
+      line-height: 1.4;
       white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
     }
     tbody tr:last-child td { border-bottom: none; }
     tbody tr:nth-child(even) td { background: color-mix(in srgb, var(--surface-2) 55%, transparent); }
     tbody tr:hover td { background: var(--accent-soft); }
+    td.mono, .stat-value, .mono { font-variant-numeric: tabular-nums slashed-zero; }
     td.mono { font-family: "Cascadia Code", "JetBrains Mono", Consolas, ui-monospace, monospace; font-size: 0.84rem; }
     td.lat-good { color: var(--success); }
     td.lat-bad { color: var(--warning); }
@@ -358,6 +416,13 @@
 
     #empty-row td { text-align: center; padding: 2.2rem 1rem; font-style: italic; }
 
+    thead th:nth-child(2),
+    thead th:nth-child(3),
+    thead th:nth-child(4),
+    tbody td:nth-child(2),
+    tbody td:nth-child(3),
+    tbody td:nth-child(4) { text-align: right; }
+
     /* ============ profiles ============ */
     #profile-list { list-style: none; margin: 0.9rem 0 0; padding: 0; }
     .profile-row {
@@ -371,21 +436,55 @@
     /* ============ footer ============ */
     footer { padding: 1.5rem 0 2.5rem; font-size: 0.8rem; }
 
+    /* ============ copy feedback ============ */
+    #copy-btn.copied { color: var(--success); border-color: var(--success); }
+
+    /* ============ toast ============ */
+    .toast {
+      background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius-md);
+      padding: 0.6rem 1rem; font-size: 0.85rem; color: var(--text);
+      box-shadow: var(--shadow-lg); animation: toast-in 0.2s ease-out;
+      max-width: 320px;
+    }
+    .toast.success { border-left: 3px solid var(--success); }
+    .toast.error { border-left: 3px solid var(--danger); }
+    @keyframes toast-in { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
+    @keyframes toast-out { from { opacity: 1; transform: translateY(0); } to { opacity: 0; transform: translateY(8px); } }
+    .toast.leaving { animation: toast-out 0.2s ease-in forwards; pointer-events: none; }
+
     /* ============ responsive ============ */
-    @media (max-width: 900px) { .grid-4 { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+    @media (max-width: 768px) { .grid-4 { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
     @media (max-width: 640px) {
       .grid-2, .grid-3, .grid-4 { grid-template-columns: 1fr; }
       .seg-item { font-size: 0.8rem; padding: 0.5rem 0.4rem; }
       .card-body { padding: 1rem; }
       .wrap { padding: 0 0.9rem; }
+      .seg-item { min-height: 44px; }
+      button { min-height: 44px; padding: 0.6rem 1rem; }
+      input, select, textarea { min-height: 44px; padding: 0.65rem 0.75rem; }
     }
 
     @media (prefers-reduced-motion: reduce) {
-      *, *::before, *::after { animation: none !important; transition: none !important; }
+      .status-dot { animation: none !important; }
+      .progress.indeterminate .progress-fill { animation: none !important; width: 32%; }
+      .hist-bar { transition: none !important; }
+      .toast { animation: none !important; }
+      .seg-item { transition: none !important; }
+    }
+    @media (forced-colors: active) {
+      .status-dot { forced-color-adjust: auto; }
+      .seg input:checked + .seg-item { border: 2px solid Highlight; }
+      button:focus-visible { outline: 2px solid Highlight; }
+      .progress-fill { background: Highlight; }
+      .progress { border: 1px solid ButtonText; }
+      .skip-link:focus { outline: 2px solid Highlight; }
+      th.sortable:focus-visible { outline: 2px solid Highlight; outline-offset: -2px; }
+      input:focus-visible, select:focus-visible, textarea:focus-visible { outline: 2px solid Highlight; }
     }
   </style>
 </head>
 <body>
+  <a href="#scan-form" class="skip-link">Skip to main content</a>
   <header class="appbar">
     <div class="wrap appbar-inner">
       <div class="logo" aria-hidden="true">
@@ -396,11 +495,14 @@
       </div>
       <div>
         <h1>CF-Scanner</h1>
-        <div class="appbar-sub">Find working Cloudflare IPs / endpoints on ISP-restricted networks</div>
+        <div class="appbar-sub">Find working Cloudflare endpoints on restricted networks</div>
       </div>
       <div class="appbar-spacer"></div>
-      <span class="version-pill">v0.2.0</span>
-      <button id="theme-btn" type="button" class="outline" aria-pressed="false" aria-label="Toggle color theme"></button>
+      <span class="version-pill" title="CF-Scanner v0.2.0">v0.2.0</span>
+      <a href="https://github.com/user/cf-scanner" target="_blank" rel="noopener" class="outline" aria-label="GitHub" style="display:inline-flex;align-items:center;justify-content:center;width:36px;height:36px;border-radius:var(--radius-sm);padding:0;text-decoration:none;">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0024 12c0-6.63-5.37-12-12-12z"/></svg>
+      </a>
+      <button id="theme-btn" type="button" class="outline" aria-pressed="false"></button>
     </div>
   </header>
 
@@ -416,6 +518,7 @@
         <div class="progress" id="progress-track" hidden>
           <div class="progress-fill" id="progress-fill"></div>
         </div>
+        <div id="progress-text" class="muted" style="font-size:0.8rem;margin-top:0.4rem" hidden></div>
         <div class="stats" id="stats" hidden>
           <div class="stat">
             <span class="stat-label">Scanned</span>
@@ -474,12 +577,15 @@
             <div class="grid grid-3">
               <label class="field">Ports (comma-separated)
                 <input name="ports" type="text" value="443" required>
+                <span class="help">e.g., 443,8443 — valid range 1-65535</span>
               </label>
               <label class="field">Concurrency (1&ndash;1000)
                 <input name="concurrency" type="number" min="1" max="1000" value="200" required>
+                <span class="help">Higher = faster but more resource usage</span>
               </label>
               <label class="field">Probe timeout (ms)
                 <input name="timeout_ms" type="number" min="100" max="30000" value="3000" required>
+                <span class="help">Per-probe timeout in milliseconds</span>
               </label>
             </div>
             <div class="inline-row">
@@ -511,6 +617,7 @@
               </div>
               <label class="field">Candidate count
                 <input name="count" type="number" min="1" max="100000" value="350" disabled>
+                <span class="help">Select 'Custom count' above.</span>
               </label>
             </div>
           </div>
@@ -520,6 +627,7 @@
             <div class="grid grid-2">
               <label class="field">Stop after N found
                 <input name="found" type="number" min="1" value="20" required>
+                <span class="help">Minimum working IPs before scan completes</span>
               </label>
               <label class="field">Hard cap on probes (optional)
                 <input name="cap" type="number" min="1" placeholder="none">
@@ -528,9 +636,11 @@
             <div class="grid grid-2" style="margin-top: 0.9rem;">
               <label class="field">Custom CIDRs (optional, replaces bundled; one per line)
                 <textarea name="custom_cidrs" rows="3" placeholder="10.0.0.0/24"></textarea>
+                <span class="help">One CIDR per line, e.g., 103.28.248.0/22</span>
               </label>
               <label class="field">Excluded CIDRs (optional, one per line)
                 <textarea name="exclude" rows="3" placeholder="141.101.64.0/18"></textarea>
+                <span class="help">One CIDR per line to skip during scan</span>
               </label>
             </div>
           </div>
@@ -552,6 +662,7 @@
                   <input type="checkbox" name="warp_verify" disabled>
                   <span>Verify discovered endpoints with the config above</span>
                 </label>
+                <span class="help">Paste a wgconf above first.</span>
               </div>
             </div>
           </div>
@@ -564,6 +675,7 @@
                 <div class="grid grid-2">
                   <label class="field">Configs (URIs, subscription URLs, or xray JSON paths; one per line)
                     <textarea name="phase2_configs" rows="3" placeholder="vless://uuid@host:443?encryption=none"></textarea>
+                    <span class="help">Enter configs above to enable Phase 2 verification options.</span>
                   </label>
                   <div class="grid grid-2" style="gap: 0.9rem; align-content: start;">
                     <label class="field">Fragment preset
@@ -604,16 +716,11 @@
           <div class="actions">
             <button id="start-btn" type="submit" class="primary btn-lg">
               <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5.5v13l11-6.5z"></path></svg>
-              Start scan
+              Start scan <kbd style="font-size:0.7em;opacity:0.6;margin-left:0.3rem">Ctrl+Enter</kbd>
             </button>
             <button id="cancel-btn" type="button" class="danger" disabled>
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"></path></svg>
               Cancel
-            </button>
-            <div class="spacer-grow"></div>
-            <button id="reset-btn" type="button" class="outline">
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M8 6V4h8v2m-9 0v14a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2V6"></path></svg>
-              Reset results
             </button>
           </div>
         </form>
@@ -627,11 +734,16 @@
         <p>Last scan only &mdash; in memory, cleared by reset.</p>
         <div class="grow" style="flex: 1 1 auto;"></div>
         <div class="toolbar">
+          <button id="reset-btn" type="button" class="outline">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M8 6V4h8v2m-9 0v14a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2V6"></path></svg>
+            Reset results
+          </button>
+          <div class="grow" style="flex: 1 1 auto;"></div>
           <button id="density-btn" type="button" class="outline" aria-pressed="false">Compact view</button>
           <button id="copy-btn" type="button" class="secondary" disabled>Copy</button>
-          <button id="save-btn" type="button" class="secondary" disabled>Save .txt</button>
-          <button id="export-btn" type="button" class="secondary" disabled>Export</button>
-          <select id="export-format" aria-label="Export format">
+          <button id="download-btn" type="button" class="secondary" disabled>Download</button>
+          <select id="download-format" aria-label="Download format">
+            <option value="txt">TXT</option>
             <option value="csv">CSV</option>
             <option value="json">JSON</option>
           </select>
@@ -639,17 +751,19 @@
       </div>
       <div class="card-body">
         <div id="latency-hist" class="hist" role="img" hidden></div>
+        <div id="results-live" role="status" aria-live="polite" class="sr-only"></div>
         <div class="table-wrap">
           <table>
+            <caption class="sr-only">Scan results</caption>
             <thead>
               <tr>
-                <th class="sortable" data-key="ip">IP <span class="caret"></span></th>
-                <th class="sortable" data-key="port">Port <span class="caret"></span></th>
-                <th class="sortable" data-key="latency_ms">Latency <span class="caret"></span></th>
-                <th class="sortable" data-key="loss_pct">Loss <span class="caret"></span></th>
-                <th class="sortable" data-key="country">Country <span class="caret"></span></th>
-                <th class="sortable" data-key="colo">Colo <span class="caret"></span></th>
-                <th>Phase 2</th>
+                <th class="sortable" data-key="ip" scope="col">IP <span class="caret"></span></th>
+                <th class="sortable" data-key="port" scope="col">Port <span class="caret"></span></th>
+                <th class="sortable" data-key="latency_ms" scope="col">Latency <span class="caret"></span></th>
+                <th class="sortable" data-key="loss_pct" scope="col">Loss <span class="caret"></span></th>
+                <th class="sortable" data-key="country" scope="col">Country <span class="caret"></span></th>
+                <th class="sortable" data-key="colo" scope="col">Colo <span class="caret"></span></th>
+                <th scope="col">Phase 2</th>
               </tr>
             </thead>
             <tbody id="results-body"></tbody>
@@ -683,12 +797,15 @@
     </footer>
   </main>
 
+  <div id="toast-container" aria-live="polite" aria-atomic="true" style="position:fixed;bottom:1.25rem;right:1.25rem;z-index:100;display:flex;flex-direction:column-reverse;gap:0.5rem;pointer-events:none;"></div>
+
   <script>
     "use strict";
 
     const results = [];
     let sortKey = null;
     let sortAsc = true;
+    let lastCfg = null;
 
     const tbody = document.getElementById("results-body");
     const status = document.getElementById("scan-status");
@@ -698,11 +815,44 @@
     const cancelBtn = document.getElementById("cancel-btn");
     const resetBtn = document.getElementById("reset-btn");
     const copyBtn = document.getElementById("copy-btn");
-    const saveBtn = document.getElementById("save-btn");
-    const exportBtn = document.getElementById("export-btn");
+    const downloadBtn = document.getElementById("download-btn");
+    const downloadFormat = document.getElementById("download-format");
     const themeBtn = document.getElementById("theme-btn");
     const densityBtn = document.getElementById("density-btn");
     const histEl = document.getElementById("latency-hist");
+
+    // ---- toast notifications ----
+    function showToast(message, type, duration) {
+      type = type || "success";
+      duration = duration != null ? duration : 3000;
+      const container = document.getElementById("toast-container");
+      const t = document.createElement("div");
+      t.className = "toast " + type;
+      t.textContent = message;
+      t.style.pointerEvents = "auto";
+      container.appendChild(t);
+      if (duration > 0) {
+        setTimeout(() => {
+          t.classList.add("leaving");
+          t.addEventListener("animationend", () => t.remove(), { once: true });
+        }, duration);
+      }
+      return t;
+    }
+
+    // ---- timestamped filename helper ----
+    function timestampFilename(ext) {
+      const mode = (form.elements["mode"].value || "cdn").toLowerCase();
+      const now = new Date();
+      const ts = now.getFullYear()
+        + String(now.getMonth() + 1).padStart(2, "0")
+        + String(now.getDate()).padStart(2, "0")
+        + "T"
+        + String(now.getHours()).padStart(2, "0")
+        + String(now.getMinutes()).padStart(2, "0")
+        + String(now.getSeconds()).padStart(2, "0");
+      return "cf-scanner-" + mode + "-" + ts + "." + ext;
+    }
 
     const statsEl = document.getElementById("stats");
     const progressTrack = document.getElementById("progress-track");
@@ -715,21 +865,37 @@
     let scanStartMs = 0;
 
     const ICONS = {
+      monitor: '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2"></rect><path d="M8 21h8M12 17v4"></path></svg>',
       sun: '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="4.2"></circle><path d="M12 2.5v2.6M12 18.9v2.6M2.5 12h2.6M18.9 12h2.6M5.3 5.3l1.8 1.8M16.9 16.9l1.8 1.8M18.7 5.3l-1.8 1.8M7.1 16.9l-1.8 1.8"></path></svg>',
       moon: '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20.4 14.2A8.5 8.5 0 0 1 9.8 3.6a8.5 8.5 0 1 0 10.6 10.6z"></path></svg>'
     };
+    const THEME_ORDER = ["system", "light", "dark"];
+    const THEME_ICONS = { system: ICONS.monitor, light: ICONS.sun, dark: ICONS.moon };
+    const THEME_LABELS = { system: "Auto", light: "Light", dark: "Dark" };
 
-    function applyTheme(theme) {
-      document.documentElement.dataset.theme = theme;
-      const dark = theme === "dark";
-      themeBtn.innerHTML = (dark ? ICONS.sun : ICONS.moon) + (dark ? "Light" : "Dark");
-      themeBtn.setAttribute("aria-pressed", String(dark));
+    function getThemePref() {
+      return document.documentElement.dataset.themePref || "system";
     }
-    applyTheme(document.documentElement.dataset.theme);
+
+    function applyTheme(pref) {
+      var resolved = pref === "system"
+        ? (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light")
+        : pref;
+      document.documentElement.dataset.theme = resolved;
+      document.documentElement.dataset.themePref = pref;
+      themeBtn.innerHTML = THEME_ICONS[pref] + THEME_LABELS[pref];
+      themeBtn.setAttribute("aria-pressed", String(resolved === "dark"));
+    }
+    applyTheme(getThemePref());
     themeBtn.addEventListener("click", () => {
-      const next = document.documentElement.dataset.theme === "dark" ? "light" : "dark";
+      var cur = getThemePref();
+      var idx = THEME_ORDER.indexOf(cur);
+      var next = THEME_ORDER[(idx + 1) % THEME_ORDER.length];
       localStorage.setItem("ui-theme", next);
       applyTheme(next);
+    });
+    matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => {
+      if (getThemePref() === "system") applyTheme("system");
     });
 
     function applyDensity(compact) {
@@ -766,6 +932,11 @@
       statRate.textContent = "\u2014";
       progressFill.style.width = "0";
       progressTrack.classList.remove("indeterminate");
+      const pt = document.getElementById("progress-text");
+      if (pt) { pt.textContent = ""; pt.hidden = true; }
+      const rb = document.getElementById("retry-btn");
+      if (rb) rb.hidden = true;
+      document.title = "CF-Scanner";
     }
     function showProgress(progress) {
       const total = progress.total != null ? progress.total : null;
@@ -779,6 +950,30 @@
         progressFill.style.width = "";
       }
       updateRate(Math.floor((Date.now() - scanStartMs) / 1000));
+
+      const progressText = document.getElementById("progress-text");
+      if (progressText) {
+        let text = "";
+        if (total && total > 0) {
+          text = `${scanned.toLocaleString()} of ${total.toLocaleString()} scanned`;
+          if (scanned > 0) {
+            const elapsed = (Date.now() - scanStartMs) / 1000;
+            const rate = scanned / elapsed;
+            const remaining = (total - scanned) / rate;
+            const etaMin = Math.floor(remaining / 60);
+            const etaSec = Math.floor(remaining % 60);
+            const etaStr = etaMin > 0 ? `~${etaMin}m ${etaSec}s remaining` : `~${etaSec}s remaining`;
+            text += ` \u2014 ${etaStr}`;
+          }
+        } else {
+          text = `${scanned.toLocaleString()} checked`;
+        }
+        progressText.textContent = text;
+        progressText.hidden = false;
+      }
+
+      const pct = total ? Math.round((scanned / total) * 100) : null;
+      document.title = pct !== null ? `Scanning ${pct}% \u2014 CF-Scanner` : `Scanning\u2026 \u2014 CF-Scanner`;
     }
 
     const HIST_BUCKETS = [
@@ -919,7 +1114,9 @@
 
     function render() {
       const rows = results.map(v => v).sort((a, b) => {
-        if (sortKey === null) return 0;
+        if (sortKey === null) {
+          return (a.latency_ms ?? Infinity) - (b.latency_ms ?? Infinity);
+        }
         const av = a[sortKey], bv = b[sortKey];
         if (typeof av === "string") return sortAsc ? av.localeCompare(bv) : bv.localeCompare(av);
         return sortAsc ? (av ?? Infinity) - (bv ?? Infinity) : (bv ?? Infinity) - (av ?? Infinity);
@@ -928,8 +1125,21 @@
       if (rows.length === 0) {
         const tr = document.createElement("tr");
         tr.id = "empty-row";
-        tr.appendChild(cell("No results yet \u2014 start a scan to populate this table.", "muted"));
-        tr.firstChild.colSpan = 7;
+        const td = document.createElement("td");
+        td.colSpan = 7;
+        td.style.textAlign = "center";
+        td.style.padding = "2.5rem 1rem";
+        td.innerHTML = `
+          <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="var(--muted)" stroke-width="1.5" stroke-linecap="round" style="margin-bottom:0.75rem">
+            <circle cx="12" cy="12" r="9"/>
+            <circle cx="12" cy="12" r="3"/>
+            <path d="M12 3v2M12 19v2M3 12h2M19 12h2"/>
+          </svg>
+          <div style="font-weight:600;margin-bottom:0.3rem">No scan results yet</div>
+          <div class="muted" style="font-size:0.85rem;margin-bottom:0.8rem">Results will appear here once you start a scan</div>
+          <button class="secondary" onclick="document.getElementById('scan-form').scrollIntoView({behavior:'smooth',block:'start'})">Configure a scan</button>
+        `;
+        tr.appendChild(td);
         tbody.appendChild(tr);
       } else {
         for (const v of rows) {
@@ -945,11 +1155,14 @@
         }
       }
       countEl.textContent = rows.length > 0 ? `(${rows.length})` : "";
-      copyBtn.disabled = saveBtn.disabled = exportBtn.disabled = rows.length === 0;
+      copyBtn.disabled = downloadBtn.disabled = rows.length === 0;
       renderHistogram();
+      const live = document.getElementById("results-live");
+      if (live && rows.length > 0) live.textContent = `${rows.length} result${rows.length === 1 ? "" : "s"} shown`;
     }
 
     document.querySelectorAll("th.sortable").forEach(th => {
+      th.setAttribute("tabindex", "0");
       th.addEventListener("click", () => {
         const key = th.dataset.key;
         if (sortKey === key) sortAsc = !sortAsc;
@@ -959,6 +1172,14 @@
         th.closest("tr").querySelectorAll("th").forEach(t => t.removeAttribute("aria-sort"));
         th.setAttribute("aria-sort", sortAsc ? "ascending" : "descending");
         render();
+        const live = document.getElementById("results-live");
+        if (live) live.textContent = `Sorted by ${th.textContent.trim()} ${sortAsc ? "ascending" : "descending"}, ${results.length} results`;
+      });
+      th.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          th.click();
+        }
       });
     });
 
@@ -966,6 +1187,7 @@
       e.preventDefault();
       let cfg;
       try { cfg = buildConfig(); } catch (err) { showStatus(err.message); return; }
+      lastCfg = cfg;
       try {
         const resp = await fetch("/api/scan", {
           method: "POST",
@@ -997,6 +1219,7 @@
     });
 
     resetBtn.addEventListener("click", async () => {
+      if (results.length > 0 && !confirm(`Clear all ${results.length} results?`)) return;
       results.length = 0;
       render();
       resetBanner();
@@ -1006,25 +1229,63 @@
       await fetch("/api/reset", { method: "POST" });
     });
 
+    // ---- clipboard copy with feedback ----
+    const COPY_ICONS = {
+      idle: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>',
+      check: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg>'
+    };
+    let copyTimeout = null;
     copyBtn.addEventListener("click", async () => {
       const text = results.map(v => {
         const ip = v.ip.includes(":") ? `[${v.ip}]` : v.ip;
         return `${ip}:${v.port}`;
       }).join("\n");
-      try { await navigator.clipboard.writeText(text); } catch { /* clipboard denied */ }
+      try {
+        await navigator.clipboard.writeText(text);
+        if (copyTimeout) clearTimeout(copyTimeout);
+        copyBtn.innerHTML = COPY_ICONS.check + " Copied!";
+        copyBtn.classList.add("copied");
+        copyTimeout = setTimeout(() => {
+          copyBtn.textContent = "Copy";
+          copyBtn.classList.remove("copied");
+          copyTimeout = null;
+        }, 1500);
+        showToast("Copied to clipboard", "success");
+      } catch {
+        if (copyTimeout) clearTimeout(copyTimeout);
+        copyBtn.textContent = "Copy failed \u2014 press Ctrl+C";
+        copyTimeout = setTimeout(() => {
+          copyBtn.textContent = "Copy";
+          copyTimeout = null;
+        }, 2000);
+        showToast("Copy failed \u2014 press Ctrl+C", "error");
+      }
     });
 
-    saveBtn.addEventListener("click", () => {
-      const lines = results.map(v => {
+    // ---- unified download ----
+    function toTxt(rows) {
+      return rows.map(v => {
         const ip = v.ip.includes(":") ? `[${v.ip}]` : v.ip;
         return `${ip}:${v.port} ${v.latency_ms ?? "?"}ms`;
-      }).join("\n");
-      const blob = new Blob([lines + "\n"], { type: "text/plain" });
+      }).join("\n") + "\n";
+    }
+
+    downloadBtn.addEventListener("click", () => {
+      const fmt = downloadFormat.value;
+      let blob;
+      if (fmt === "json") {
+        blob = new Blob([JSON.stringify(results, null, 2)], { type: "application/json" });
+      } else if (fmt === "csv") {
+        blob = new Blob([toCsv(results)], { type: "text/csv" });
+      } else {
+        blob = new Blob([toTxt(results)], { type: "text/plain" });
+      }
       const a = document.createElement("a");
       a.href = URL.createObjectURL(blob);
-      a.download = "cf-scanner-results.txt";
+      a.download = timestampFilename(fmt);
       a.click();
       URL.revokeObjectURL(a.href);
+      showToast("Downloaded " + a.download, "success");
     });
 
     function csvField(v) {
@@ -1045,18 +1306,6 @@
       }
       return lines.join("\n") + "\n";
     }
-
-    exportBtn.addEventListener("click", () => {
-      const fmt = document.getElementById("export-format").value;
-      const blob = fmt === "json"
-        ? new Blob([JSON.stringify(results, null, 2)], { type: "application/json" })
-        : new Blob([toCsv(results)], { type: "text/csv" });
-      const a = document.createElement("a");
-      a.href = URL.createObjectURL(blob);
-      a.download = `cf-scanner-results.${fmt}`;
-      a.click();
-      URL.revokeObjectURL(a.href);
-    });
 
     fetch("/api/ranges")
       .then(r => (r.ok ? r.json() : null))
@@ -1092,13 +1341,57 @@
       progressTrack.classList.remove("indeterminate");
       progressFill.style.width = "100%";
       cancelBtn.disabled = true;
+      document.title = "Done \u2014 CF-Scanner";
       showStatus(`Done: ${s.scanned.toLocaleString()} scanned, ${s.found} found in ${(s.duration_ms / 1000).toFixed(1)}s`, "done");
+      const live = document.getElementById("results-live");
+      if (live) live.textContent = `Scan complete. ${s.scanned.toLocaleString()} scanned, ${s.found} found.`;
+      document.getElementById("results-section").scrollIntoView({ behavior: "smooth", block: "start" });
     });
     es.addEventListener("failed", (e) => {
       if (elapsedTimer) { clearInterval(elapsedTimer); elapsedTimer = null; }
       progressTrack.classList.remove("indeterminate");
       cancelBtn.disabled = true;
       showStatus(`Scan failed: ${JSON.parse(e.data)}`, "error");
+      document.title = "Failed \u2014 CF-Scanner";
+      if (lastCfg) {
+        let rb = document.getElementById("retry-btn");
+        if (!rb) {
+          rb = document.createElement("button");
+          rb.id = "retry-btn";
+          rb.type = "button";
+          rb.className = "secondary";
+          rb.style.marginTop = "0.7rem";
+          rb.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M8 16H3v5"/></svg> Retry';
+          statusCard.querySelector(".card-body").appendChild(rb);
+        }
+        rb.hidden = false;
+        rb.onclick = async () => {
+          rb.hidden = true;
+          try {
+            const resp = await fetch("/api/scan", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify(lastCfg)
+            });
+            if (!resp.ok) {
+              const detail = await resp.text();
+              showStatus(`Scan rejected: ${detail || resp.status}`);
+              return;
+            }
+            results.length = 0;
+            render();
+            resetBanner();
+            scanStartMs = Date.now();
+            elapsedTimer = setInterval(tickElapsed, 500);
+            statsEl.hidden = false;
+            progressTrack.hidden = false;
+            showStatus("Scanning\u2026", "running");
+            cancelBtn.disabled = false;
+          } catch (err) {
+            showStatus(`Server unreachable: ${err}`);
+          }
+        };
+      }
     });
 
     // target radio: preset/count toggle
@@ -1271,6 +1564,7 @@
         const resp = await fetch(`/api/profiles/${encodeURIComponent(name)}`, { method: "DELETE" });
         if (!resp.ok && resp.status !== 404) { showStatus(`Profile delete failed: ${resp.status}`); return; }
         showStatus(`Profile "${name}" deleted.`);
+        showToast(`Profile "${name}" deleted`, "success");
         refreshProfiles();
       } catch (err) {
         showStatus(`Profile delete failed: ${err}`);
@@ -1335,14 +1629,64 @@
           return;
         }
         showStatus(`Profile "${name}" saved.`);
+        showToast(`Profile "${name}" saved`, "success");
         refreshProfiles();
       } catch (err) {
         showStatus(`Profile save failed: ${err}`);
       }
     });
 
+    document.addEventListener("keydown", (e) => {
+      if ((e.ctrlKey || e.metaKey) && e.key === "Enter") {
+        e.preventDefault();
+        document.getElementById("start-btn").click();
+      }
+      if (e.key === "Escape" && !cancelBtn.disabled) {
+        cancelBtn.click();
+      }
+    });
+
     render();
+    (function () {
+      const latTh = document.querySelector('th.sortable[data-key="latency_ms"]');
+      if (latTh) {
+        latTh.querySelector(".caret").textContent = "\u25B4";
+        latTh.setAttribute("aria-sort", "ascending");
+      }
+    })();
     refreshProfiles();
+
+    // Load status from API to update version pill and footer
+    fetch("/api/status")
+      .then(r => r.ok ? r.json() : null)
+      .then(data => {
+        if (!data) return;
+        const pill = document.querySelector(".version-pill");
+        if (pill) {
+          pill.textContent = `v${data.version}`;
+          pill.title = `CF-Scanner v${data.version}`;
+        }
+        const footer = document.querySelector("footer");
+        if (footer) footer.innerHTML = footer.innerHTML.replace(/v[\d.]+/, `v${data.version}`);
+      })
+      .catch(() => {});
+
+    // Load existing results on page refresh
+    fetch("/api/results")
+      .then(r => r.ok ? r.json() : null)
+      .then(data => {
+        if (!data || !data.results || data.results.length === 0) return;
+        results.length = 0;
+        data.results.forEach(v => results.push(v));
+        render();
+        statFound.textContent = results.length.toLocaleString();
+        if (data.summary) {
+          showStatus(`Done: ${data.summary.scanned.toLocaleString()} scanned, ${data.summary.found} found`, "done");
+          statScanned.textContent = data.summary.scanned.toLocaleString();
+          statsEl.hidden = false;
+        }
+      })
+      .catch(() => {});
   </script>
 </body>
 </html>
