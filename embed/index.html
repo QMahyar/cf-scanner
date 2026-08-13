@@ -66,22 +66,22 @@
       --border-subtle: #e8edf3;
       --border-strong: #c3cedb;
       --text: #17222f;
-      --muted: #64748b;
+      --muted: #5b6b84;
       --accent: #06b6d4;
       --accent-strong: #0e7490;
       --accent-soft: rgba(6, 182, 212, 0.11);
       --accent-contrast: #04303c;
-      --success: #059669;
-      --success-soft: rgba(5, 150, 105, 0.11);
-      --danger: #dc2626;
-      --danger-soft: rgba(220, 38, 38, 0.09);
+      --success: #047857;
+      --success-soft: rgba(4, 120, 87, 0.11);
+      --danger: #b91c1c;
+      --danger-soft: rgba(185, 28, 28, 0.09);
       --warning: #b45309;
       --warning-contrast: #451a03;
       --shadow-sm: 0 1px 2px rgba(16, 32, 54, 0.04);
       --shadow: 0 1px 3px rgba(16, 32, 54, 0.06), 0 8px 24px rgba(16, 32, 54, 0.06);
       --shadow-lg: 0 4px 12px rgba(16, 32, 54, 0.08), 0 16px 48px rgba(16, 32, 54, 0.08);
       --shadow-xl: 0 8px 24px rgba(16, 32, 54, 0.1), 0 24px 64px rgba(16, 32, 54, 0.1);
-      --chevron: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 16 16'><path d='M4 6l4 4 4-4' fill='none' stroke='%2364748b' stroke-width='1.7' stroke-linecap='round' stroke-linejoin='round'/></svg>");
+      --chevron: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 16 16'><path d='M4 6l4 4 4-4' fill='none' stroke='%235b6b84' stroke-width='1.7' stroke-linecap='round' stroke-linejoin='round'/></svg>");
     }
 
     /* ============ base ============ */
@@ -129,6 +129,7 @@
     /* ============ app bar ============ */
     .appbar {
       position: sticky; top: 0; z-index: 20;
+      background: var(--bg);
       background: color-mix(in srgb, var(--bg) 85%, transparent);
       -webkit-backdrop-filter: blur(12px);
       backdrop-filter: blur(12px);
@@ -172,9 +173,11 @@
     .card-body { padding: 1.25rem; }
 
     /* ============ status banner ============ */
-    .status-card[data-state="running"] { border-color: color-mix(in srgb, var(--accent) 45%, var(--border)); }
-    .status-card[data-state="done"] { border-color: color-mix(in srgb, var(--success) 45%, var(--border)); }
-    .status-card[data-state="error"] { border-color: color-mix(in srgb, var(--danger) 45%, var(--border)); }
+    .status-card[data-state="running"] { border-color: var(--border); border-color: color-mix(in srgb, var(--accent) 45%, var(--border)); }
+    .status-card[data-state="done"] { border-color: var(--border); border-color: color-mix(in srgb, var(--success) 45%, var(--border)); }
+    .status-card[data-state="error"] { border-color: var(--border); border-color: color-mix(in srgb, var(--danger) 45%, var(--border)); }
+    .status-card[data-state="cancelled"] { border-color: var(--border); border-color: color-mix(in srgb, var(--warning) 45%, var(--border)); }
+    .status-card[data-state="reconnecting"] { border-color: var(--border); border-color: color-mix(in srgb, var(--warning) 45%, var(--border)); }
     .status-row { display: flex; align-items: center; gap: 0.7rem; }
     .status-dot {
       width: 9px; height: 9px; border-radius: 50%; flex: none;
@@ -183,9 +186,19 @@
     .status-card[data-state="running"] .status-dot { background: var(--accent); box-shadow: 0 0 0 4px var(--accent-soft); animation: pulse 1.6s ease-in-out infinite; }
     .status-card[data-state="done"] .status-dot { background: var(--success); }
     .status-card[data-state="error"] .status-dot { background: var(--danger); }
+    .status-card[data-state="cancelled"] .status-dot { background: var(--warning); }
+    .status-card[data-state="reconnecting"] .status-dot { background: var(--warning); animation: pulse 1.6s ease-in-out infinite; }
     @keyframes pulse { 50% { opacity: 0.4; } }
     #scan-status { font-weight: 600; font-size: 0.95rem; }
     #ranges-info { font-size: 0.8rem; color: var(--muted); margin-top: 0.7rem; }
+    .error-note {
+      margin-top: 0.8rem; padding: 0.6rem 0.85rem;
+      background: var(--danger-soft);
+      border: 1px solid var(--border);
+      border-color: color-mix(in srgb, var(--danger) 45%, var(--border));
+      border-radius: var(--radius-sm);
+      color: var(--danger); font-size: 0.85rem;
+    }
 
     .progress {
       margin-top: 0.9rem; height: 8px; border-radius: 999px;
@@ -253,7 +266,7 @@
       border-color: var(--accent);
     }
     input:disabled, select:disabled, textarea:disabled { opacity: 0.45; cursor: not-allowed; }
-    input::placeholder, textarea::placeholder { color: color-mix(in srgb, var(--muted) 70%, transparent); }
+    input::placeholder, textarea::placeholder { color: var(--muted); color: color-mix(in srgb, var(--muted) 70%, transparent); }
 
     .check { display: flex; align-items: center; gap: 0.5rem; font-size: 0.85rem; color: var(--muted); cursor: pointer; user-select: none; }
     .check input { margin: 0; flex: none; }
@@ -313,7 +326,8 @@
 
     .help { font-size: 0.72rem; color: var(--muted); margin-top: 0.2rem; }
     kbd { font-family: inherit; font-size: 0.75rem; background: var(--surface-3); border: 1px solid var(--border); border-radius: 3px; padding: 0.1rem 0.35rem; }
-    .field-error input, .field-error select, .field-error textarea {
+    .field-error input, .field-error select, .field-error textarea,
+    .check.field-error input {
       border-color: var(--danger) !important;
       box-shadow: 0 0 0 2px var(--danger-soft) !important;
     }
@@ -336,7 +350,7 @@
       padding: 0.5rem 0.95rem; cursor: pointer;
       transition: background 0.15s, border-color 0.15s, transform 0.05s;
     }
-    button:hover { background: color-mix(in srgb, var(--surface-3) 80%, var(--accent) 8%); }
+    button:hover { background: var(--surface-3); background: color-mix(in srgb, var(--surface-3) 80%, var(--accent) 8%); }
     button:active { transform: translateY(1px); }
     button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
     button:disabled { opacity: 0.45; cursor: not-allowed; transform: none; }
@@ -346,12 +360,12 @@
     }
     button.primary:hover { background: var(--accent-strong); }
     button.primary:disabled { box-shadow: none; }
-    button.secondary { background: var(--accent-soft); border-color: color-mix(in srgb, var(--accent) 35%, var(--border)); color: var(--accent-strong); }
-    button.secondary:hover { background: color-mix(in srgb, var(--accent-soft) 70%, var(--accent) 12%); }
+    button.secondary { background: var(--accent-soft); border-color: var(--border); border-color: color-mix(in srgb, var(--accent) 35%, var(--border)); color: var(--accent-strong); }
+    button.secondary:hover { background: var(--accent-soft); background: color-mix(in srgb, var(--accent-soft) 70%, var(--accent) 12%); }
     button.outline { background: transparent; }
     button.outline:hover { background: var(--surface-2); }
-    button.danger { background: var(--danger-soft); border-color: color-mix(in srgb, var(--danger) 40%, var(--border)); color: var(--danger); }
-    button.danger:hover { background: color-mix(in srgb, var(--danger-soft) 70%, var(--danger) 14%); }
+    button.danger { background: var(--danger-soft); border-color: var(--border); border-color: color-mix(in srgb, var(--danger) 40%, var(--border)); color: var(--danger); }
+    button.danger:hover { background: var(--danger-soft); background: color-mix(in srgb, var(--danger-soft) 70%, var(--danger) 14%); }
     .btn-lg { padding: 0.62rem 1.4rem; font-size: 0.95rem; }
 
     .actions { display: flex; gap: 0.7rem; margin-top: 1.25rem; flex-wrap: wrap; }
@@ -365,11 +379,13 @@
     .hist { display: flex; align-items: flex-end; gap: 3px; height: 2.6rem; margin: 0.8rem 0 1rem; }
     .hist-bar {
       flex: 1 1 0; min-height: 3px; border-radius: 3px 3px 0 0;
+      background: var(--accent);
       background: linear-gradient(180deg, var(--accent), color-mix(in srgb, var(--accent) 45%, transparent));
       transition: filter 0.15s; cursor: default;
     }
     .hist-bar:hover { filter: brightness(1.25); }
 
+    .scroll-hint { display: none; font-size: 0.72rem; color: var(--muted); margin: 0 0 0.55rem; }
     .table-wrap { max-height: min(62vh, 620px); overflow: auto; border: 1px solid var(--border); border-radius: var(--radius-md); }
     table { width: 100%; border-collapse: separate; border-spacing: 0; table-layout: fixed; font-size: 0.87rem; }
     thead th {
@@ -381,14 +397,14 @@
     }
     th.sortable { cursor: pointer; user-select: none; }
     th.sortable:hover { color: var(--text); }
-    th .caret { color: var(--accent); font-size: 0.7rem; margin-left: 0.15rem; }
+    th .caret { color: var(--accent-strong); font-size: 0.7rem; margin-left: 0.15rem; }
     tbody td {
       padding: 0.5rem 0.85rem; border-bottom: 1px solid var(--border);
       line-height: 1.4;
       white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
     }
     tbody tr:last-child td { border-bottom: none; }
-    tbody tr:nth-child(even) td { background: color-mix(in srgb, var(--surface-2) 55%, transparent); }
+    tbody tr:nth-child(even) td { background: var(--surface-2); background: color-mix(in srgb, var(--surface-2) 55%, transparent); }
     tbody tr:hover td { background: var(--accent-soft); }
     td.mono, .stat-value, .mono { font-variant-numeric: tabular-nums slashed-zero; }
     td.mono { font-family: "Cascadia Code", "JetBrains Mono", Consolas, ui-monospace, monospace; font-size: 0.84rem; }
@@ -441,13 +457,22 @@
 
     /* ============ toast ============ */
     .toast {
+      display: flex; align-items: flex-start; gap: 0.6rem;
       background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius-md);
-      padding: 0.6rem 1rem; font-size: 0.85rem; color: var(--text);
+      padding: 0.6rem 0.9rem; font-size: 0.85rem; color: var(--text);
       box-shadow: var(--shadow-lg); animation: toast-in 0.2s ease-out;
       max-width: 320px;
     }
     .toast.success { border-left: 3px solid var(--success); }
     .toast.error { border-left: 3px solid var(--danger); }
+    .toast-close {
+      flex: none; align-self: flex-start; margin-left: auto; margin-right: -0.3rem;
+      min-width: 1.6rem; min-height: 1.6rem; padding: 0;
+      background: transparent; border: none;
+      color: var(--muted); font-size: 1.05rem; line-height: 1;
+      border-radius: 5px; cursor: pointer;
+    }
+    .toast-close:hover { background: var(--surface-3); color: var(--text); }
     @keyframes toast-in { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
     @keyframes toast-out { from { opacity: 1; transform: translateY(0); } to { opacity: 0; transform: translateY(8px); } }
     .toast.leaving { animation: toast-out 0.2s ease-in forwards; pointer-events: none; }
@@ -462,6 +487,14 @@
       .seg-item { min-height: 44px; }
       button { min-height: 44px; padding: 0.6rem 1rem; }
       input, select, textarea { min-height: 44px; padding: 0.65rem 0.75rem; }
+      .scroll-hint:not([data-empty]) { display: block; }
+      table { min-width: 560px; }
+      thead th:first-child,
+      tbody td:first-child { position: sticky; left: 0; }
+      thead th:first-child { z-index: 3; }
+      tbody td:first-child { z-index: 1; background: var(--surface); }
+      tbody tr:nth-child(even) td:first-child { background: var(--surface-2); }
+      tbody tr:hover td:first-child { background: var(--accent-soft); }
     }
 
     @media (prefers-reduced-motion: reduce) {
@@ -498,8 +531,8 @@
         <div class="appbar-sub">Find working Cloudflare endpoints on restricted networks</div>
       </div>
       <div class="appbar-spacer"></div>
-      <span class="version-pill" title="CF-Scanner v0.2.0">v0.2.0</span>
-      <a href="https://github.com/user/cf-scanner" target="_blank" rel="noopener" class="outline" aria-label="GitHub" style="display:inline-flex;align-items:center;justify-content:center;width:36px;height:36px;border-radius:var(--radius-sm);padding:0;text-decoration:none;">
+      <span class="version-pill" title="CF-Scanner version">v&ndash;</span>
+      <a href="https://github.com/QMahyar/cf-scanner" target="_blank" rel="noopener" class="outline" aria-label="GitHub" style="display:inline-flex;align-items:center;justify-content:center;width:36px;height:36px;border-radius:var(--radius-sm);padding:0;text-decoration:none;">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0024 12c0-6.63-5.37-12-12-12z"/></svg>
       </a>
       <button id="theme-btn" type="button" class="outline" aria-pressed="false"></button>
@@ -515,10 +548,11 @@
           <span class="status-dot" aria-hidden="true"></span>
           <span id="scan-status" role="status" aria-live="polite">Idle &mdash; configure and start a scan.</span>
         </div>
-        <div class="progress" id="progress-track" hidden>
+        <div id="scan-error" class="error-note" role="alert" hidden></div>
+        <div class="progress" id="progress-track" role="progressbar" aria-label="Scan progress" aria-valuemin="0" aria-valuemax="100" hidden>
           <div class="progress-fill" id="progress-fill"></div>
         </div>
-        <div id="progress-text" class="muted" style="font-size:0.8rem;margin-top:0.4rem" hidden></div>
+        <div id="progress-text" class="muted" role="status" style="font-size:0.8rem;margin-top:0.4rem" hidden></div>
         <div class="stats" id="stats" hidden>
           <div class="stat">
             <span class="stat-label">Scanned</span>
@@ -576,16 +610,16 @@
             <h3 class="panel-title">Connection</h3>
             <div class="grid grid-3">
               <label class="field">Ports (comma-separated)
-                <input name="ports" type="text" value="443" required>
-                <span class="help">e.g., 443,8443 — valid range 1-65535</span>
+                <input name="ports" type="text" value="443" required aria-describedby="help-ports">
+                <span class="help" id="help-ports">e.g., 443,8443 — valid range 1-65535</span>
               </label>
               <label class="field">Concurrency (1&ndash;1000)
-                <input name="concurrency" type="number" min="1" max="1000" value="200" required>
-                <span class="help">Higher = faster but more resource usage</span>
+                <input name="concurrency" type="number" min="1" max="1000" value="200" required aria-describedby="help-concurrency">
+                <span class="help" id="help-concurrency">Higher = faster but more resource usage</span>
               </label>
               <label class="field">Probe timeout (ms)
-                <input name="timeout_ms" type="number" min="100" max="30000" value="3000" required>
-                <span class="help">Per-probe timeout in milliseconds</span>
+                <input name="timeout_ms" type="number" min="100" max="30000" value="3000" required aria-describedby="help-timeout">
+                <span class="help" id="help-timeout">Per-probe timeout in milliseconds</span>
               </label>
             </div>
             <div class="inline-row">
@@ -616,8 +650,8 @@
                 </select>
               </div>
               <label class="field">Candidate count
-                <input name="count" type="number" min="1" max="100000" value="350" disabled>
-                <span class="help">Select 'Custom count' above.</span>
+                <input name="count" type="number" min="1" max="100000" value="350" disabled aria-describedby="help-count">
+                <span class="help" id="help-count">Select 'Custom count' above.</span>
               </label>
             </div>
           </div>
@@ -626,8 +660,8 @@
             <h3 class="panel-title">Stopping &amp; ranges</h3>
             <div class="grid grid-2">
               <label class="field">Stop after N found
-                <input name="found" type="number" min="1" value="20" required>
-                <span class="help">Minimum working IPs before scan completes</span>
+                <input name="found" type="number" min="1" value="20" required aria-describedby="help-found">
+                <span class="help" id="help-found">Minimum working IPs before scan completes</span>
               </label>
               <label class="field">Hard cap on probes (optional)
                 <input name="cap" type="number" min="1" placeholder="none">
@@ -635,12 +669,12 @@
             </div>
             <div class="grid grid-2" style="margin-top: 0.9rem;">
               <label class="field">Custom CIDRs (optional, replaces bundled; one per line)
-                <textarea name="custom_cidrs" rows="3" placeholder="10.0.0.0/24"></textarea>
-                <span class="help">One CIDR per line, e.g., 103.28.248.0/22</span>
+                <textarea name="custom_cidrs" rows="3" placeholder="10.0.0.0/24" aria-describedby="help-cidrs"></textarea>
+                <span class="help" id="help-cidrs">One CIDR per line, e.g., 103.28.248.0/22</span>
               </label>
               <label class="field">Excluded CIDRs (optional, one per line)
-                <textarea name="exclude" rows="3" placeholder="141.101.64.0/18"></textarea>
-                <span class="help">One CIDR per line to skip during scan</span>
+                <textarea name="exclude" rows="3" placeholder="141.101.64.0/18" aria-describedby="help-exclude"></textarea>
+                <span class="help" id="help-exclude">One CIDR per line to skip during scan</span>
               </label>
             </div>
           </div>
@@ -648,11 +682,12 @@
           <div class="panel" id="warp-endpoints-row" hidden>
             <h3 class="panel-title">WARP endpoints &amp; verification</h3>
             <label class="field">Custom endpoints (ip or ip:port, one per line; empty = bundled pools)
-              <textarea name="warp_endpoints" rows="3" placeholder="162.159.192.5&#10;188.114.99.7:2408"></textarea>
+              <textarea name="warp_endpoints" rows="3" placeholder="162.159.192.5&#10;188.114.99.7:2408" aria-describedby="help-warp-endpoints"></textarea>
+              <span class="help" id="help-warp-endpoints">One ip or ip:port per line</span>
             </label>
             <div class="grid grid-2" style="margin-top: 0.9rem;">
               <label class="field">Verify with your own wgconf (real keypair handshake)
-                <textarea name="warp_wgconf" rows="3" placeholder="[Interface]&#10;PrivateKey = ..." disabled></textarea>
+                <textarea name="warp_wgconf" rows="3" placeholder="[Interface]&#10;PrivateKey = ..." disabled aria-describedby="help-wgconf"></textarea>
               </label>
               <div class="field">
                 <span>wgconf file</span>
@@ -662,8 +697,19 @@
                   <input type="checkbox" name="warp_verify" disabled>
                   <span>Verify discovered endpoints with the config above</span>
                 </label>
-                <span class="help">Paste a wgconf above first.</span>
+                <span class="help" id="help-wgconf">Paste a wgconf above first.</span>
               </div>
+            </div>
+            <div style="margin-top: 1rem; padding-top: 1rem; border-top: 1px solid var(--border);">
+              <h4 class="panel-title">Generate WARP config (optional)</h4>
+              <div class="inline-row">
+                <label class="field" style="flex: 1 1 280px; max-width: 420px;">
+                  <span>WARP+ license key (optional)</span>
+                  <input id="warp-license" type="text" placeholder="Paste a WARP+ license key, or leave empty" autocomplete="off">
+                </label>
+                <button id="warp-gen-btn" type="button" class="secondary" style="margin-top: 1.15rem;">Generate WARP config</button>
+              </div>
+              <p class="help" id="help-warp-gen">Registers a fresh endpoint key with Cloudflare and loads the resulting wgconf above. The private key never leaves this machine.</p>
             </div>
           </div>
 
@@ -674,8 +720,8 @@
                 <h3 class="panel-title">Verification</h3>
                 <div class="grid grid-2">
                   <label class="field">Configs (URIs, subscription URLs, or xray JSON paths; one per line)
-                    <textarea name="phase2_configs" rows="3" placeholder="vless://uuid@host:443?encryption=none"></textarea>
-                    <span class="help">Enter configs above to enable Phase 2 verification options.</span>
+                    <textarea name="phase2_configs" rows="3" placeholder="vless://uuid@host:443?encryption=none" aria-describedby="help-phase2-configs"></textarea>
+                    <span class="help" id="help-phase2-configs">Enter configs above to enable Phase 2 verification options.</span>
                   </label>
                   <div class="grid grid-2" style="gap: 0.9rem; align-content: start;">
                     <label class="field">Fragment preset
@@ -752,6 +798,7 @@
       <div class="card-body">
         <div id="latency-hist" class="hist" role="img" hidden></div>
         <div id="results-live" role="status" aria-live="polite" class="sr-only"></div>
+        <p class="scroll-hint" id="scroll-hint">The table scrolls sideways on narrow screens &mdash; the IP column stays pinned.</p>
         <div class="table-wrap">
           <table>
             <caption class="sr-only">Scan results</caption>
@@ -793,7 +840,7 @@
     <footer class="muted">
       IP geolocation data &copy; <a href="https://db-ip.com" target="_blank" rel="noopener">db-ip.com</a>
       (db-ip Lite, <a href="https://creativecommons.org/licenses/by/4.0/" target="_blank" rel="noopener">CC BY 4.0</a>)
-      &mdash; CF-Scanner v0.2.0
+      &mdash; CF-Scanner <span id="footer-version">v&ndash;</span>
     </footer>
   </main>
 
@@ -803,13 +850,23 @@
     "use strict";
 
     const results = [];
+    const seenKeys = new Set();
     let sortKey = null;
     let sortAsc = true;
     let lastCfg = null;
+    let scanState = "idle"; // idle | starting | running | cancelled | done | failed
+    let localCancel = false;
+    let reconnectLost = false;
+    let latestProgress = null;
+    let scannedCount = 0;
+    let scanStartMs = 0;
+    let elapsedTimer = null;
 
+    const form = document.getElementById("scan-form");
     const tbody = document.getElementById("results-body");
     const status = document.getElementById("scan-status");
     const statusCard = status.closest(".status-card");
+    const errorCard = document.getElementById("scan-error");
     const countEl = document.getElementById("result-count");
     const startBtn = document.getElementById("start-btn");
     const cancelBtn = document.getElementById("cancel-btn");
@@ -820,22 +877,45 @@
     const themeBtn = document.getElementById("theme-btn");
     const densityBtn = document.getElementById("density-btn");
     const histEl = document.getElementById("latency-hist");
+    const scrollHint = document.getElementById("scroll-hint");
+    const statsEl = document.getElementById("stats");
+    const progressTrack = document.getElementById("progress-track");
+    const progressFill = document.getElementById("progress-fill");
+    const progressText = document.getElementById("progress-text");
+    const statScanned = document.getElementById("stat-scanned");
+    const statFound = document.getElementById("stat-found");
+    const statElapsed = document.getElementById("stat-elapsed");
+    const statRate = document.getElementById("stat-rate");
+    const START_LABEL_HTML = startBtn.innerHTML;
 
     // ---- toast notifications ----
+    function dismissToast(t) {
+      if (t.dataset.dismissed) return;
+      t.dataset.dismissed = "1";
+      if (t._timer) { clearTimeout(t._timer); t._timer = null; }
+      t.classList.add("leaving");
+      t.addEventListener("animationend", () => t.remove(), { once: true });
+    }
     function showToast(message, type, duration) {
       type = type || "success";
       duration = duration != null ? duration : 3000;
       const container = document.getElementById("toast-container");
       const t = document.createElement("div");
       t.className = "toast " + type;
-      t.textContent = message;
+      const msg = document.createElement("span");
+      msg.textContent = message;
+      t.appendChild(msg);
+      const close = document.createElement("button");
+      close.type = "button";
+      close.className = "toast-close";
+      close.setAttribute("aria-label", "Dismiss notification");
+      close.textContent = "\u00d7";
+      close.addEventListener("click", () => dismissToast(t));
+      t.appendChild(close);
       t.style.pointerEvents = "auto";
       container.appendChild(t);
       if (duration > 0) {
-        setTimeout(() => {
-          t.classList.add("leaving");
-          t.addEventListener("animationend", () => t.remove(), { once: true });
-        }, duration);
+        t._timer = setTimeout(() => dismissToast(t), duration);
       }
       return t;
     }
@@ -853,16 +933,6 @@
         + String(now.getSeconds()).padStart(2, "0");
       return "cf-scanner-" + mode + "-" + ts + "." + ext;
     }
-
-    const statsEl = document.getElementById("stats");
-    const progressTrack = document.getElementById("progress-track");
-    const progressFill = document.getElementById("progress-fill");
-    const statScanned = document.getElementById("stat-scanned");
-    const statFound = document.getElementById("stat-found");
-    const statElapsed = document.getElementById("stat-elapsed");
-    const statRate = document.getElementById("stat-rate");
-    let elapsedTimer = null;
-    let scanStartMs = 0;
 
     const ICONS = {
       monitor: '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2"></rect><path d="M8 21h8M12 17v4"></path></svg>',
@@ -915,65 +985,343 @@
       const m = Math.floor(secs / 60), s = secs % 60;
       return m + ":" + String(s).padStart(2, "0");
     }
+    function stopElapsed() {
+      if (elapsedTimer) { clearInterval(elapsedTimer); elapsedTimer = null; }
+    }
     function tickElapsed() {
       const secs = Math.floor((Date.now() - scanStartMs) / 1000);
       statElapsed.textContent = fmtTime(secs);
-      updateRate(secs);
+      statRate.textContent = secs > 0 ? Math.round(scannedCount / secs).toLocaleString() + "/s" : "\u2014";
     }
-    function updateRate(secs) {
-      const scanned = Number(statScanned.textContent.replace(/,/g, "")) || 0;
-      statRate.textContent = secs > 0 ? Math.round(scanned / secs).toLocaleString() + "/s" : "\u2014";
+    function setVersion(v) {
+      const pill = document.querySelector(".version-pill");
+      const fv = document.getElementById("footer-version");
+      if (pill) { pill.textContent = "v" + v; pill.title = "CF-Scanner v" + v; }
+      if (fv) fv.textContent = "v" + v;
+    }
+    function showErrorCard(msg) {
+      errorCard.textContent = msg;
+      errorCard.hidden = false;
+    }
+    function hideErrorCard() {
+      errorCard.hidden = true;
+      errorCard.textContent = "";
+    }
+    // #scan-status is role=status; only ever called on state transitions.
+    function showStatus(text, state) {
+      status.dataset.state = state || "";
+      statusCard.dataset.state = state || "";
+      statusCard.setAttribute("aria-busy", String(state === "running"));
+      status.textContent = text;
     }
     function resetBanner() {
-      if (elapsedTimer) { clearInterval(elapsedTimer); elapsedTimer = null; }
+      stopElapsed();
+      stopPolling();
+      scanState = "idle";
+      localCancel = false;
+      reconnectLost = false;
       statScanned.textContent = "0";
       statFound.textContent = "0";
       statElapsed.textContent = "0:00";
       statRate.textContent = "\u2014";
       progressFill.style.width = "0";
       progressTrack.classList.remove("indeterminate");
-      const pt = document.getElementById("progress-text");
-      if (pt) { pt.textContent = ""; pt.hidden = true; }
-      const rb = document.getElementById("retry-btn");
-      if (rb) rb.hidden = true;
+      progressTrack.removeAttribute("aria-valuenow");
+      progressText.textContent = "";
+      progressText.hidden = true;
+      hideRetry();
+      startBtn.disabled = false;
+      startBtn.innerHTML = START_LABEL_HTML;
+      cancelBtn.disabled = true;
+      resetBtn.disabled = false;
       document.title = "CF-Scanner";
+      statusCard.setAttribute("aria-busy", "false");
     }
-    function showProgress(progress) {
-      const total = progress.total != null ? progress.total : null;
-      const scanned = progress.scanned != null ? progress.scanned : 0;
+    function beginRun() {
+      scanState = "running";
+      localCancel = false;
+      reconnectLost = false;
+      results.length = 0;
+      seenKeys.clear();
+      histBuiltFor = -1;
+      latestProgress = null;
+      scannedCount = 0;
+      statsEl.hidden = false;
+      progressTrack.hidden = false;
+      progressTrack.classList.remove("indeterminate");
+      progressTrack.classList.add("indeterminate");
+      progressTrack.removeAttribute("aria-valuenow");
+      progressFill.style.width = "";
+      statScanned.textContent = "0";
+      statFound.textContent = "0";
+      statElapsed.textContent = "0:00";
+      statRate.textContent = "\u2014";
+      progressText.textContent = "";
+      progressText.hidden = true;
+      scanStartMs = Date.now();
+      elapsedTimer = setInterval(tickElapsed, 500);
+      cancelBtn.disabled = false;
+      resetBtn.disabled = true;
+      startBtn.disabled = true;
+      startBtn.textContent = "Scanning\u2026";
+      hideErrorCard();
+      hideRetry();
+      showStatus("Scanning\u2026", "running");
+      document.title = "Scanning\u2026 \u2014 CF-Scanner";
+      scheduleRender();
+    }
+    // Terminal states: bar never fills to 100% for cancelled runs.
+    function finishScan(s, cancelled) {
+      stopElapsed();
+      stopPolling();
+      const found = s && s.found != null ? s.found : results.length;
+      const scanned = s && s.scanned != null ? s.scanned : scannedCount;
+      if (found != null) statFound.textContent = Number(found).toLocaleString();
+      if (s && s.duration_ms != null) statElapsed.textContent = fmtTime(Math.round(s.duration_ms / 1000));
+      progressTrack.classList.remove("indeterminate");
+      if (cancelled) {
+        scanState = "cancelled";
+        const total = latestProgress && latestProgress.total != null ? latestProgress.total : null;
+        const pct = total && total > 0 ? Math.min(100, Math.round((scanned / total) * 100)) : null;
+        if (pct != null) {
+          progressFill.style.width = pct + "%";
+          progressTrack.setAttribute("aria-valuenow", String(pct));
+        } else {
+          progressTrack.removeAttribute("aria-valuenow");
+        }
+        const msg = `Cancelled \u2014 ${found} working retained`;
+        showStatus(msg, "cancelled");
+        document.title = "Cancelled \u2014 CF-Scanner";
+      } else {
+        scanState = "done";
+        progressFill.style.width = "100%";
+        progressTrack.setAttribute("aria-valuenow", "100");
+        const dur = s && s.duration_ms != null ? (s.duration_ms / 1000).toFixed(1) : "0.0";
+        const msg = `Done: ${Number(scanned).toLocaleString()} scanned, ${found} found in ${dur}s`;
+        showStatus(msg, "done");
+        document.title = "Done \u2014 CF-Scanner";
+      }
+      cancelBtn.disabled = true;
+      resetBtn.disabled = false;
+      startBtn.disabled = false;
+      startBtn.innerHTML = START_LABEL_HTML;
+      hideRetry();
+      const live = document.getElementById("results-live");
+      if (live) {
+        live.textContent = cancelled
+          ? `Scan cancelled. ${found} results retained.`
+          : `Scan complete. ${Number(scanned).toLocaleString()} scanned, ${found} found.`;
+      }
+      flushNow();
+      statFound.textContent = Number(found).toLocaleString();
+    }
+    function failScan(msg) {
+      stopElapsed();
+      stopPolling();
+      scanState = "failed";
+      progressTrack.classList.remove("indeterminate");
+      cancelBtn.disabled = true;
+      resetBtn.disabled = false;
+      startBtn.disabled = false;
+      startBtn.innerHTML = START_LABEL_HTML;
+      showStatus(msg, "error");
+      document.title = "Failed \u2014 CF-Scanner";
+      showRetry();
+      flushNow();
+    }
+    let retryBtn = null;
+    function showRetry() {
+      if (!lastCfg) return;
+      if (!retryBtn) {
+        retryBtn = document.createElement("button");
+        retryBtn.id = "retry-btn";
+        retryBtn.type = "button";
+        retryBtn.className = "secondary";
+        retryBtn.style.marginTop = "0.7rem";
+        retryBtn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M8 16H3v5"/></svg> Retry';
+        statusCard.querySelector(".card-body").appendChild(retryBtn);
+      }
+      retryBtn.hidden = false;
+      retryBtn.onclick = () => { retryBtn.hidden = true; startScan(lastCfg); };
+    }
+    function hideRetry() {
+      if (retryBtn) retryBtn.hidden = true;
+    }
+    async function startScan(cfg) {
+      scanState = "starting";
+      startBtn.disabled = true;
+      resetBtn.disabled = true;
+      hideErrorCard();
+      try {
+        const resp = await fetch("/api/scan", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(cfg)
+        });
+        if (!resp.ok) {
+          const msg = await apiErrorMessage(resp, "HTTP " + resp.status);
+          scanState = "idle";
+          startBtn.disabled = false;
+          startBtn.innerHTML = START_LABEL_HTML;
+          resetBtn.disabled = false;
+          showErrorCard(msg);
+          if (resp.status === 409) startPolling();
+          return;
+        }
+        if (scanState === "starting") beginRun();
+      } catch (err) {
+        scanState = "idle";
+        startBtn.disabled = false;
+        startBtn.innerHTML = START_LABEL_HTML;
+        resetBtn.disabled = false;
+        showErrorCard("Server unreachable: " + err);
+      }
+    }
+
+    // ---- throttled render pipeline ----
+    let flushQueued = false;
+    let flushTimer = null;
+    let histBuiltFor = -1;
+
+    function rowKey(v) {
+      return v.ip + "|" + v.port;
+    }
+    function addResult(v) {
+      const k = rowKey(v);
+      if (seenKeys.has(k)) return false;
+      seenKeys.add(k);
+      results.push(v);
+      return true;
+    }
+    function sortedResults() {
+      return results.slice().sort(compareRows);
+    }
+    function compareRows(a, b) {
+      if (sortKey === null) {
+        return (a.latency_ms ?? Infinity) - (b.latency_ms ?? Infinity);
+      }
+      const av = a[sortKey], bv = b[sortKey];
+      if (typeof av === "string") return sortAsc ? av.localeCompare(bv) : bv.localeCompare(av);
+      return sortAsc ? (av ?? Infinity) - (bv ?? Infinity) : (bv ?? Infinity) - (av ?? Infinity);
+    }
+    function scheduleRender() {
+      if (flushQueued) return;
+      flushQueued = true;
+      flushTimer = setTimeout(flushRender, 100);
+    }
+    function flushNow() {
+      if (flushTimer) { clearTimeout(flushTimer); flushTimer = null; }
+      flushQueued = false;
+      flushRender();
+    }
+    function flushRender() {
+      flushQueued = false;
+      flushTimer = null;
+      renderTable();
+      renderHistogram();
+      statFound.textContent = results.length.toLocaleString();
+      applyProgress();
+    }
+
+    function buildEmptyRow() {
+      const tr = document.createElement("tr");
+      tr.id = "empty-row";
+      const td = document.createElement("td");
+      td.colSpan = 7;
+      td.style.textAlign = "center";
+      td.style.padding = "2.5rem 1rem";
+      td.innerHTML = `
+        <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="var(--muted)" stroke-width="1.5" stroke-linecap="round" style="margin-bottom:0.75rem">
+          <circle cx="12" cy="12" r="9"/>
+          <circle cx="12" cy="12" r="3"/>
+          <path d="M12 3v2M12 19v2M3 12h2M19 12h2"/>
+        </svg>
+        <div style="font-weight:600;margin-bottom:0.3rem">No scan results yet</div>
+        <div class="muted" style="font-size:0.85rem;margin-bottom:0.8rem">Results will appear here once you start a scan</div>
+        <button class="secondary" onclick="document.getElementById('scan-form').scrollIntoView({behavior:'smooth',block:'start'})">Configure a scan</button>
+      `;
+      tr.appendChild(td);
+      return tr;
+    }
+
+    // Keyed row reconciliation: reuses rows by ip:port, only creates/removes diffs.
+    function renderTable() {
+      const rows = sortedResults();
+      const keyed = new Map();
+      for (const tr of Array.from(tbody.children)) {
+        if (tr.dataset.key) keyed.set(tr.dataset.key, tr);
+      }
+      const keep = new Set();
+      for (const v of rows) keep.add(rowKey(v));
+      for (const [k, tr] of keyed) {
+        if (!keep.has(k)) tr.remove();
+      }
+      let i = 0;
+      for (const v of rows) {
+        const k = rowKey(v);
+        let tr = keyed.get(k);
+        if (!tr) {
+          tr = document.createElement("tr");
+          tr.dataset.key = k;
+          tr.appendChild(cell(v.ip, "mono"));
+          tr.appendChild(cell(v.port, "mono"));
+          tr.appendChild(cell(v.latency_ms, latencyCls(v.latency_ms)));
+          tr.appendChild(lossCell(v));
+          tr.appendChild(cell(v.country));
+          tr.appendChild(cell(v.colo));
+          tr.appendChild(phase2Cell(v));
+        }
+        const cur = tbody.children[i];
+        if (cur !== tr) tbody.insertBefore(tr, cur);
+        i++;
+      }
+      const empty = tbody.querySelector("#empty-row");
+      if (rows.length === 0) {
+        if (!empty) tbody.appendChild(buildEmptyRow());
+      } else if (empty) {
+        empty.remove();
+      }
+      countEl.textContent = rows.length > 0 ? `(${rows.length})` : "";
+      copyBtn.disabled = downloadBtn.disabled = rows.length === 0;
+      scrollHint.toggleAttribute("data-empty", rows.length === 0);
+    }
+
+    function applyProgress() {
+      const p = latestProgress;
+      if (!p) return;
+      const total = p.total != null ? p.total : null;
+      const scanned = p.scanned != null ? p.scanned : 0;
+      scannedCount = scanned;
       statScanned.textContent = scanned.toLocaleString();
-      if (total && total > 0) {
+      const pct = total && total > 0 ? Math.min(100, Math.round((scanned / total) * 100)) : null;
+      if (pct != null) {
         progressTrack.classList.remove("indeterminate");
-        progressFill.style.width = Math.min(100, (scanned / total) * 100) + "%";
+        progressFill.style.width = pct + "%";
+        progressTrack.setAttribute("aria-valuenow", String(pct));
       } else {
         progressTrack.classList.add("indeterminate");
         progressFill.style.width = "";
+        progressTrack.removeAttribute("aria-valuenow");
       }
-      updateRate(Math.floor((Date.now() - scanStartMs) / 1000));
-
-      const progressText = document.getElementById("progress-text");
-      if (progressText) {
-        let text = "";
-        if (total && total > 0) {
-          text = `${scanned.toLocaleString()} of ${total.toLocaleString()} scanned`;
-          if (scanned > 0) {
-            const elapsed = (Date.now() - scanStartMs) / 1000;
-            const rate = scanned / elapsed;
-            const remaining = (total - scanned) / rate;
-            const etaMin = Math.floor(remaining / 60);
-            const etaSec = Math.floor(remaining % 60);
-            const etaStr = etaMin > 0 ? `~${etaMin}m ${etaSec}s remaining` : `~${etaSec}s remaining`;
-            text += ` \u2014 ${etaStr}`;
-          }
-        } else {
-          text = `${scanned.toLocaleString()} checked`;
+      let text = "";
+      if (total && total > 0) {
+        text = `${scanned.toLocaleString()} of ${total.toLocaleString()} scanned`;
+        if (scanned > 0) {
+          const elapsed = (Date.now() - scanStartMs) / 1000;
+          const rate = scanned / elapsed;
+          const remaining = (total - scanned) / rate;
+          const etaMin = Math.floor(remaining / 60);
+          const etaSec = Math.floor(remaining % 60);
+          const etaStr = etaMin > 0 ? `~${etaMin}m ${etaSec}s remaining` : `~${etaSec}s remaining`;
+          text += ` \u2014 ${etaStr}`;
         }
-        progressText.textContent = text;
-        progressText.hidden = false;
+      } else {
+        text = `${scanned.toLocaleString()} checked`;
       }
-
-      const pct = total ? Math.round((scanned / total) * 100) : null;
-      document.title = pct !== null ? `Scanning ${pct}% \u2014 CF-Scanner` : `Scanning\u2026 \u2014 CF-Scanner`;
+      progressText.textContent = text;
+      progressText.hidden = false;
+      const pctTitle = pct != null ? pct : null;
+      document.title = pctTitle !== null ? `Scanning ${pctTitle}% \u2014 CF-Scanner` : `Scanning\u2026 \u2014 CF-Scanner`;
     }
 
     const HIST_BUCKETS = [
@@ -985,6 +1333,8 @@
       { label: "800ms+", max: Infinity }
     ];
     function renderHistogram() {
+      if (results.length === histBuiltFor) return;
+      histBuiltFor = results.length;
       const lats = results.map(v => v.latency_ms).filter(l => l != null);
       if (lats.length === 0) { histEl.hidden = true; return; }
       const cumulative = HIST_BUCKETS.map(b => lats.filter(l => l <= b.max).length);
@@ -1004,12 +1354,43 @@
       histEl.hidden = false;
     }
 
+    function cell(value, cls) {
+      const td = document.createElement("td");
+      if (cls) td.className = cls;
+      if (value == null) {
+        td.textContent = "\u2014";
+        td.className = (td.className ? td.className + " " : "") + "muted";
+      } else {
+        td.textContent = String(value);
+      }
+      return td;
+    }
+
+    function lossCell(v) {
+      if (v.loss_pct == null) return cell(null, "muted");
+      const cls = v.loss_pct > 0 ? "lat-bad" : "";
+      return cell(v.loss_pct > 0 ? v.loss_pct.toFixed(1) + "%" : "0%", cls);
+    }
+
+    function phase2Cell(v) {
+      const p2 = v.phase2;
+      if (!p2) return cell(null, "muted");
+      if (p2.passed) return cell("\u2713 " + p2.fragment + (p2.sni ? " " + p2.sni : ""), "v-ok");
+      return cell("\u2717", "v-bad");
+    }
+
+    function latencyCls(l) {
+      if (l == null) return "muted";
+      if (l < 150) return "lat-good mono";
+      if (l >= 800) return "lat-bad mono";
+      return "mono";
+    }
+
     function parseLines(text) {
       return text.split("\n").map(s => s.trim()).filter(s => s.length > 0);
     }
 
     function buildConfig() {
-      const form = document.getElementById("scan-form");
       const radio = form.elements["target-radio"].value;
       const ports = parseLines(form.elements["ports"].value)
         .flatMap(t => t.split(",")).map(t => Number(t.trim()))
@@ -1051,9 +1432,7 @@
         wgconf: form.elements["warp_verify"].checked
           ? form.elements["warp_wgconf"].value
           : null,
-        verify_with_wgconf: form.elements["warp_verify"].checked,
-        generate_config: false,
-        warp_plus_license: null
+        verify_with_wgconf: form.elements["warp_verify"].checked
       } : null;
 
       return {
@@ -1073,94 +1452,176 @@
       };
     }
 
-    function showStatus(text, state) {
-      status.dataset.state = state || "";
-      statusCard.dataset.state = state || "";
-      statusCard.setAttribute("aria-busy", String(state === "running"));
-      status.textContent = text;
+    // ---- field-level validation ----
+    function intRange(min, max, msg) {
+      return (v) => {
+        const s = String(v).trim();
+        if (s === "") return msg;
+        const n = Number(s);
+        if (!Number.isInteger(n) || n < min || n > max) return msg;
+        return null;
+      };
     }
-
-    function cell(value, cls) {
-      const td = document.createElement("td");
-      if (cls) td.className = cls;
-      if (value == null) {
-        td.textContent = "\u2014";
-        td.className = (td.className ? td.className + " " : "") + "muted";
-      } else {
-        td.textContent = String(value);
-      }
-      return td;
-    }
-
-    function lossCell(v) {
-      if (v.loss_pct == null) return cell(null, "muted");
-      const cls = v.loss_pct > 0 ? "lat-bad" : "";
-      return cell(v.loss_pct > 0 ? v.loss_pct.toFixed(1) + "%" : "0%", cls);
-    }
-
-    function phase2Cell(v) {
-      const p2 = v.phase2;
-      if (!p2) return cell(null, "muted");
-      if (p2.passed) return cell("\u2713 " + p2.fragment + (p2.sni ? " " + p2.sni : ""), "v-ok");
-      return cell("\u2717", "v-bad");
-    }
-
-    function latencyCls(l) {
-      if (l == null) return "muted";
-      if (l < 150) return "lat-good mono";
-      if (l >= 800) return "lat-bad mono";
-      return "mono";
-    }
-
-    function render() {
-      const rows = results.map(v => v).sort((a, b) => {
-        if (sortKey === null) {
-          return (a.latency_ms ?? Infinity) - (b.latency_ms ?? Infinity);
+    function customRange(label, min, max) {
+      return (v, f) => {
+        if (f.elements["phase2_fragment"].value !== "Custom") return null;
+        if (!v.trim()) return `Custom fragment needs ${label.toLowerCase()}`;
+        const m = v.match(/^(\d+)-(\d+)$/);
+        if (!m) return `${label} must be "min-max"`;
+        if (Number(m[1]) < min || Number(m[2]) > max || Number(m[1]) > Number(m[2])) {
+          return `${label} range out of bounds`;
         }
-        const av = a[sortKey], bv = b[sortKey];
-        if (typeof av === "string") return sortAsc ? av.localeCompare(bv) : bv.localeCompare(av);
-        return sortAsc ? (av ?? Infinity) - (bv ?? Infinity) : (bv ?? Infinity) - (av ?? Infinity);
+        return null;
+      };
+    }
+    function isValidCidr(s) {
+      const m4 = s.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})\/(\d{1,2})$/);
+      if (m4) {
+        if (m4.slice(1, 5).some(o => Number(o) > 255)) return false;
+        return Number(m4[5]) <= 32;
+      }
+      const m6 = s.match(/^([0-9a-fA-F:]+)\/(\d{1,3})$/);
+      if (m6) {
+        if (Number(m6[2]) > 128) return false;
+        return m6[1].includes(":") && /^[0-9a-fA-F:.]+$/.test(m6[1]);
+      }
+      return false;
+    }
+    function isEndpoint(s) {
+      const m4 = s.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})(?::(\d{1,5}))?$/);
+      if (m4) {
+        if (m4.slice(1, 5).some(o => Number(o) > 255)) return false;
+        return !m4[5] || Number(m4[5]) <= 65535;
+      }
+      const m6 = s.match(/^\[([0-9a-fA-F:]+)\](?::(\d{1,5}))?$/);
+      if (m6) {
+        if (!m6[1].includes(":")) return false;
+        return !m6[2] || Number(m6[2]) <= 65535;
+      }
+      if (s.includes(":")) {
+        const parts = s.split(":");
+        const last = parts[parts.length - 1];
+        const rest = parts.slice(0, -1).join(":");
+        if (/^\d{1,5}$/.test(last) && rest.includes(":")) {
+          return Number(last) <= 65535 && /^[0-9a-fA-F:]+$/.test(rest);
+        }
+        return /^[0-9a-fA-F:]+$/.test(s);
+      }
+      return false;
+    }
+    function cidrList(label) {
+      return (v) => {
+        const lines = parseLines(v);
+        if (lines.length === 0) return null;
+        for (const line of lines) {
+          if (!isValidCidr(line)) return `Invalid ${label} "${line}" \u2014 use a.b.c.d/prefix or ipv6::/prefix`;
+        }
+        return null;
+      };
+    }
+    function endpointList(v) {
+      const lines = parseLines(v);
+      if (lines.length === 0) return null;
+      for (const line of lines) {
+        if (!isEndpoint(line)) return `Invalid endpoint "${line}" \u2014 use ip or ip:port`;
+      }
+      return null;
+    }
+    const VALIDATORS = {
+      ports: (v) => {
+        const parts = v.split(",").map(s => s.trim()).filter(Boolean);
+        if (parts.length === 0) return "Enter at least one port";
+        for (const p of parts) {
+          if (!/^\d{1,5}$/.test(p) || Number(p) < 1 || Number(p) > 65535) {
+            return `Invalid port "${p}" \u2014 use 1-65535`;
+          }
+        }
+        return null;
+      },
+      concurrency: intRange(1, 1000, "Concurrency must be 1-1000"),
+      timeout_ms: intRange(100, 30000, "Timeout must be 100-30000 ms"),
+      count: (v, f) => f.elements["count"].disabled ? null : intRange(1, 100000, "Count must be 1-100000")(v),
+      found: intRange(1, 100000000, "Stop-after must be at least 1"),
+      cap: (v) => v.trim() === "" ? null : intRange(1, 100000000, "Cap must be at least 1")(v),
+      warp_probes: (v, f) => f.elements["mode"].value !== "Warp" ? null : intRange(1, 10, "Probes per endpoint must be 1-10")(v),
+      phase2_concurrency: (v, f) => f.elements["phase2_concurrency"].disabled ? null : intRange(1, 8, "Parallel instances must be 1-8")(v),
+      custom_cidrs: cidrList("custom CIDR"),
+      exclude: cidrList("excluded CIDR"),
+      warp_endpoints: (v, f) => f.elements["mode"].value === "Warp" ? endpointList(v) : null,
+      phase2_snis: (v, f) => {
+        if (f.elements["phase2_snis"].disabled) return null;
+        const parts = v.split(",").map(s => s.trim()).filter(Boolean);
+        for (const p of parts) {
+          if (!/^[a-zA-Z0-9.-]+$/.test(p)) return `Invalid SNI "${p}"`;
+        }
+        return null;
+      },
+      phase2_packets: (v, f) => {
+        if (f.elements["phase2_fragment"].value !== "Custom") return null;
+        if (!v.trim()) return "Custom fragment needs packets";
+        return null;
+      },
+      phase2_length: customRange("Length", 1, 65535),
+      phase2_interval: customRange("Interval", 1, 60000),
+      phase2_probe_url: (v) => {
+        if (!v.trim()) return null;
+        try {
+          const u = new URL(v);
+          if (u.protocol !== "http:" && u.protocol !== "https:") return "Probe URL must be http(s)";
+          return null;
+        } catch { return "Probe URL must be http(s)"; }
+      }
+    };
+    function setFieldError(name, msg) {
+      const el = form.elements[name];
+      if (!el) return;
+      const wrap = el.closest(".field, .check");
+      el.setAttribute("aria-invalid", msg ? "true" : "false");
+      if (!wrap) return;
+      wrap.classList.toggle("field-error", !!msg);
+      const help = wrap.querySelector(".help");
+      if (help) help.textContent = msg || (help.dataset.original || "");
+    }
+    function validateForm() {
+      let firstBad = null;
+      for (const name of Object.keys(VALIDATORS)) {
+        const el = form.elements[name];
+        if (!el || el.disabled) continue;
+        const msg = VALIDATORS[name](el.value, form);
+        setFieldError(name, msg);
+        if (msg && !firstBad) firstBad = el;
+      }
+      return firstBad;
+    }
+    document.querySelectorAll(".field .help, .check .help").forEach(h => {
+      if (!h.dataset.original) h.dataset.original = h.textContent;
+    });
+    Object.keys(VALIDATORS).forEach(name => {
+      const el = form.elements[name];
+      if (!el) return;
+      el.addEventListener("blur", () => {
+        if (el.disabled) return;
+        setFieldError(name, VALIDATORS[name](el.value, form));
       });
-      tbody.replaceChildren();
-      if (rows.length === 0) {
-        const tr = document.createElement("tr");
-        tr.id = "empty-row";
-        const td = document.createElement("td");
-        td.colSpan = 7;
-        td.style.textAlign = "center";
-        td.style.padding = "2.5rem 1rem";
-        td.innerHTML = `
-          <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="var(--muted)" stroke-width="1.5" stroke-linecap="round" style="margin-bottom:0.75rem">
-            <circle cx="12" cy="12" r="9"/>
-            <circle cx="12" cy="12" r="3"/>
-            <path d="M12 3v2M12 19v2M3 12h2M19 12h2"/>
-          </svg>
-          <div style="font-weight:600;margin-bottom:0.3rem">No scan results yet</div>
-          <div class="muted" style="font-size:0.85rem;margin-bottom:0.8rem">Results will appear here once you start a scan</div>
-          <button class="secondary" onclick="document.getElementById('scan-form').scrollIntoView({behavior:'smooth',block:'start'})">Configure a scan</button>
-        `;
-        tr.appendChild(td);
-        tbody.appendChild(tr);
-      } else {
-        for (const v of rows) {
-          const tr = document.createElement("tr");
-          tr.appendChild(cell(v.ip, "mono"));
-          tr.appendChild(cell(v.port, "mono"));
-          tr.appendChild(cell(v.latency_ms, latencyCls(v.latency_ms)));
-          tr.appendChild(lossCell(v));
-          tr.appendChild(cell(v.country));
-          tr.appendChild(cell(v.colo));
-          tr.appendChild(phase2Cell(v));
-          tbody.appendChild(tr);
-        }
+      el.addEventListener("input", () => {
+        if (el.disabled || el.getAttribute("aria-invalid") !== "true") return;
+        setFieldError(name, VALIDATORS[name](el.value, form));
+      });
+    });
+
+    // ---- API error body parsing: {"error","message"} ----
+    async function apiErrorMessage(resp, fallback) {
+      try {
+        const data = await resp.json();
+        if (data && typeof data.message === "string" && data.message) return data.message;
+        if (data && typeof data.error === "string" && data.error) return data.error;
+        return fallback;
+      } catch {
+        return fallback;
       }
-      countEl.textContent = rows.length > 0 ? `(${rows.length})` : "";
-      copyBtn.disabled = downloadBtn.disabled = rows.length === 0;
-      renderHistogram();
-      const live = document.getElementById("results-live");
-      if (live && rows.length > 0) live.textContent = `${rows.length} result${rows.length === 1 ? "" : "s"} shown`;
     }
 
+    // ---- sortable headers ----
     document.querySelectorAll("th.sortable").forEach(th => {
       th.setAttribute("tabindex", "0");
       th.addEventListener("click", () => {
@@ -1171,7 +1632,7 @@
         th.querySelector(".caret").textContent = sortAsc ? "\u25B4" : "\u25BE";
         th.closest("tr").querySelectorAll("th").forEach(t => t.removeAttribute("aria-sort"));
         th.setAttribute("aria-sort", sortAsc ? "ascending" : "descending");
-        render();
+        flushNow();
         const live = document.getElementById("results-live");
         if (live) live.textContent = `Sorted by ${th.textContent.trim()} ${sortAsc ? "ascending" : "descending"}, ${results.length} results`;
       });
@@ -1183,50 +1644,40 @@
       });
     });
 
-    document.getElementById("scan-form").addEventListener("submit", async (e) => {
+    // ---- scan actions ----
+    form.addEventListener("submit", (e) => {
       e.preventDefault();
+      if (scanState === "starting" || scanState === "running") return;
+      const bad = validateForm();
+      if (bad) { bad.focus(); showStatus("Fix the highlighted fields to start."); return; }
       let cfg;
-      try { cfg = buildConfig(); } catch (err) { showStatus(err.message); return; }
+      try { cfg = buildConfig(); } catch (err) { showErrorCard(err.message); return; }
       lastCfg = cfg;
-      try {
-        const resp = await fetch("/api/scan", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(cfg)
-        });
-        if (!resp.ok) {
-          const detail = await resp.text();
-          showStatus(`Scan rejected: ${detail || resp.status}`);
-          return;
-        }
-        results.length = 0;
-        render();
-        resetBanner();
-        scanStartMs = Date.now();
-        elapsedTimer = setInterval(tickElapsed, 500);
-        statsEl.hidden = false;
-        progressTrack.hidden = false;
-        showStatus("Scanning\u2026", "running");
-        cancelBtn.disabled = false;
-      } catch (err) {
-        showStatus(`Server unreachable: ${err}`);
-      }
+      startScan(cfg);
     });
 
     cancelBtn.addEventListener("click", async () => {
+      if (scanState !== "running" && scanState !== "starting") return;
+      localCancel = true;
       showStatus("Cancelling\u2026", "running");
-      await fetch("/api/cancel", { method: "POST" });
+      try { await fetch("/api/cancel", { method: "POST" }); } catch { /* poller reconciles */ }
     });
 
     resetBtn.addEventListener("click", async () => {
+      if (scanState === "running" || scanState === "starting") return;
       if (results.length > 0 && !confirm(`Clear all ${results.length} results?`)) return;
       results.length = 0;
-      render();
+      seenKeys.clear();
+      histBuiltFor = -1;
+      latestProgress = null;
+      scannedCount = 0;
       resetBanner();
       statsEl.hidden = true;
       progressTrack.hidden = true;
+      hideErrorCard();
       showStatus("Idle. Results cleared.");
-      await fetch("/api/reset", { method: "POST" });
+      flushNow();
+      try { await fetch("/api/reset", { method: "POST" }); } catch { /* best effort */ }
     });
 
     // ---- clipboard copy with feedback ----
@@ -1236,7 +1687,7 @@
     };
     let copyTimeout = null;
     copyBtn.addEventListener("click", async () => {
-      const text = results.map(v => {
+      const text = sortedResults().map(v => {
         const ip = v.ip.includes(":") ? `[${v.ip}]` : v.ip;
         return `${ip}:${v.port}`;
       }).join("\n");
@@ -1323,86 +1774,136 @@
       })
       .catch(() => { /* ranges endpoint unavailable; nothing to show */ });
 
+    // ---- SSE with reconnect recovery ----
     const es = new EventSource("/api/events");
     es.addEventListener("progress", (e) => {
-      const p = JSON.parse(e.data);
-      showProgress(p);
-      showStatus(`Checked ${statScanned.textContent} \u2014 ${p.found} working`, "running");
+      let p = null;
+      try { p = JSON.parse(e.data); } catch { return; }
+      if (!p || typeof p !== "object") return;
+      latestProgress = p;
+      scheduleRender();
     });
     es.addEventListener("result", (e) => {
-      results.push(JSON.parse(e.data));
-      render();
-      statFound.textContent = results.length.toLocaleString();
+      let v = null;
+      try { v = JSON.parse(e.data); } catch { return; }
+      if (!v || typeof v !== "object" || typeof v.ip !== "string") return;
+      if (addResult(v)) scheduleRender();
     });
     es.addEventListener("finished", (e) => {
-      const s = JSON.parse(e.data);
-      if (elapsedTimer) { clearInterval(elapsedTimer); elapsedTimer = null; }
-      statFound.textContent = s.found.toLocaleString();
-      progressTrack.classList.remove("indeterminate");
-      progressFill.style.width = "100%";
-      cancelBtn.disabled = true;
-      document.title = "Done \u2014 CF-Scanner";
-      showStatus(`Done: ${s.scanned.toLocaleString()} scanned, ${s.found} found in ${(s.duration_ms / 1000).toFixed(1)}s`, "done");
-      const live = document.getElementById("results-live");
-      if (live) live.textContent = `Scan complete. ${s.scanned.toLocaleString()} scanned, ${s.found} found.`;
-      document.getElementById("results-section").scrollIntoView({ behavior: "smooth", block: "start" });
+      let s = null;
+      try { s = JSON.parse(e.data); } catch { /* keep null */ }
+      finishScan(s, localCancel || !!(s && s.cancelled === true));
     });
     es.addEventListener("failed", (e) => {
-      if (elapsedTimer) { clearInterval(elapsedTimer); elapsedTimer = null; }
-      progressTrack.classList.remove("indeterminate");
-      cancelBtn.disabled = true;
-      showStatus(`Scan failed: ${JSON.parse(e.data)}`, "error");
-      document.title = "Failed \u2014 CF-Scanner";
-      if (lastCfg) {
-        let rb = document.getElementById("retry-btn");
-        if (!rb) {
-          rb = document.createElement("button");
-          rb.id = "retry-btn";
-          rb.type = "button";
-          rb.className = "secondary";
-          rb.style.marginTop = "0.7rem";
-          rb.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M8 16H3v5"/></svg> Retry';
-          statusCard.querySelector(".card-body").appendChild(rb);
-        }
-        rb.hidden = false;
-        rb.onclick = async () => {
-          rb.hidden = true;
-          try {
-            const resp = await fetch("/api/scan", {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify(lastCfg)
-            });
-            if (!resp.ok) {
-              const detail = await resp.text();
-              showStatus(`Scan rejected: ${detail || resp.status}`);
-              return;
-            }
-            results.length = 0;
-            render();
-            resetBanner();
-            scanStartMs = Date.now();
-            elapsedTimer = setInterval(tickElapsed, 500);
-            statsEl.hidden = false;
-            progressTrack.hidden = false;
-            showStatus("Scanning\u2026", "running");
-            cancelBtn.disabled = false;
-          } catch (err) {
-            showStatus(`Server unreachable: ${err}`);
-          }
-        };
-      }
+      let msg = "Scan failed";
+      try {
+        const d = JSON.parse(e.data);
+        if (typeof d === "string" && d) msg = d;
+        else if (d && typeof d.message === "string" && d.message) msg = d.message;
+        else if (d && typeof d.error === "string" && d.error) msg = d.error;
+      } catch { /* keep default */ }
+      failScan(msg);
     });
+    es.onopen = () => {
+      if (reconnectLost && (scanState === "running" || scanState === "starting")) {
+        reconnectLost = false;
+        showStatus("Scanning\u2026", "running");
+      }
+    };
+    es.onerror = () => {
+      if (scanState !== "running" && scanState !== "starting") return;
+      if (!reconnectLost) {
+        reconnectLost = true;
+        showStatus("Connection lost \u2014 reconnecting\u2026", "reconnecting");
+      }
+      startPolling();
+    };
+
+    // ---- /api/status + /api/results polling (reconciles a stuck banner) ----
+    let pollTimer = null;
+    let pollBusy = false;
+    function startPolling() {
+      if (!pollTimer) pollTimer = setInterval(pollState, 2000);
+    }
+    function stopPolling() {
+      if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+    }
+    async function loadResults() {
+      try {
+        const resp = await fetch("/api/results");
+        if (!resp.ok) return;
+        const data = await resp.json();
+        if (!data || !Array.isArray(data.results) || data.results.length === 0) return;
+        results.length = 0;
+        seenKeys.clear();
+        data.results.forEach(v => {
+          if (v && typeof v === "object" && typeof v.ip === "string") addResult(v);
+        });
+        flushNow();
+        statFound.textContent = results.length.toLocaleString();
+      } catch { /* best effort */ }
+    }
+    async function reconcileTerminal() {
+      let data = null;
+      try {
+        const resp = await fetch("/api/results");
+        if (resp.ok) data = await resp.json();
+      } catch { /* fall through */ }
+      if (data && Array.isArray(data.results)) {
+        results.length = 0;
+        seenKeys.clear();
+        data.results.forEach(v => {
+          if (v && typeof v === "object" && typeof v.ip === "string") addResult(v);
+        });
+        statFound.textContent = results.length.toLocaleString();
+        flushNow();
+      }
+      if (data && data.summary) {
+        finishScan(data.summary, localCancel || data.summary.cancelled === true);
+        return;
+      }
+      stopElapsed();
+      stopPolling();
+      scanState = "failed";
+      cancelBtn.disabled = true;
+      resetBtn.disabled = false;
+      startBtn.disabled = false;
+      startBtn.innerHTML = START_LABEL_HTML;
+      showStatus("Scan ended \u2014 live updates were lost; results below may be partial.", "error");
+      document.title = "Scan ended \u2014 CF-Scanner";
+      showRetry();
+    }
+    async function pollState() {
+      if (pollBusy) return;
+      pollBusy = true;
+      try {
+        const resp = await fetch("/api/status");
+        if (!resp.ok) return;
+        const data = await resp.json();
+        if (!data || typeof data !== "object") return;
+        if (data.is_running === true) {
+          if (scanState !== "running" && scanState !== "starting") {
+            beginRun();
+            loadResults();
+          } else if (reconnectLost) {
+            reconnectLost = false;
+            showStatus("Scanning\u2026", "running");
+          }
+        } else if (scanState === "running") {
+          await reconcileTerminal();
+        }
+      } catch { /* keep polling */ }
+      pollBusy = false;
+    }
 
     // target radio: preset/count toggle
     document.querySelectorAll('input[name="target-radio"]').forEach(r =>
       r.addEventListener("change", () => {
         document.getElementById("preset-row").querySelectorAll("input,select").forEach(f => f.disabled = r.value !== "preset");
-        document.getElementById("scan-form").elements["count"].disabled = r.value !== "count";
+        form.elements["count"].disabled = r.value !== "count";
       }));
 
     const p2Fields = ["phase2_fragment", "phase2_packets", "phase2_length", "phase2_interval", "phase2_snis", "phase2_probe_url", "phase2_concurrency"];
-    const form = document.getElementById("scan-form");
 
     const FRAGMENT_PRESETS = {
       Light: { packets: "tlshello", length: "100-200", interval: "10-20" },
@@ -1495,8 +1996,45 @@
       wgconfFile.value = "";
     });
 
+    // ---- WARP registration (endpoint may be absent in some builds) ----
+    const warpGenBtn = document.getElementById("warp-gen-btn");
+    const warpLicense = document.getElementById("warp-license");
+    warpGenBtn.addEventListener("click", async () => {
+      if (warpGenBtn.disabled) return;
+      warpGenBtn.disabled = true;
+      hideErrorCard();
+      try {
+        const resp = await fetch("/api/warp/register", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ license: warpLicense.value.trim() || null })
+        });
+        if (!resp.ok) {
+          if (resp.status === 404) {
+            showErrorCard("WARP registration is not available in this build (endpoint missing).");
+          } else {
+            showErrorCard(await apiErrorMessage(resp, "WARP registration failed (HTTP " + resp.status + ")"));
+          }
+          return;
+        }
+        const data = await resp.json();
+        if (!data || typeof data.wgconf !== "string" || !data.wgconf) {
+          showErrorCard("WARP registration returned an unexpected response.");
+          return;
+        }
+        wgconfField.value = data.wgconf;
+        syncWarpVerify();
+        showToast("WARP config generated and loaded", "success");
+      } catch (err) {
+        showErrorCard("WARP registration failed: " + err);
+      } finally {
+        warpGenBtn.disabled = false;
+      }
+    });
+
     const profileList = document.getElementById("profile-list");
     const profileName = document.getElementById("profile-name");
+    let profileNames = new Set();
 
     function profileRow(text) {
       const li = document.createElement("li");
@@ -1522,6 +2060,11 @@
       } catch {
         profileList.appendChild(profileRow("Profiles unavailable (server build without profile support)."));
         return;
+      }
+      profileNames = new Set();
+      for (const p of profiles) {
+        if (!p || typeof p.name !== "string" || !p.name) continue;
+        profileNames.add(p.name);
       }
       if (profiles.length === 0) {
         profileList.appendChild(profileRow("No profiles saved yet."));
@@ -1615,8 +2158,11 @@
     document.getElementById("profile-save-btn").addEventListener("click", async () => {
       const name = profileName.value.trim();
       if (!name) { showStatus("Profile name required."); return; }
+      const bad = validateForm();
+      if (bad) { bad.focus(); showStatus("Cannot save profile \u2014 fix the highlighted fields."); return; }
       let cfg;
       try { cfg = buildConfig(); } catch (err) { showStatus(`Cannot save profile: ${err}`); return; }
+      if (profileNames.has(name) && !confirm(`Replacing existing profile '${name}'. Continue?`)) return;
       try {
         const resp = await fetch(`/api/profiles/${encodeURIComponent(name)}`, {
           method: "PUT",
@@ -1624,8 +2170,7 @@
           body: JSON.stringify(cfg)
         });
         if (!resp.ok) {
-          const detail = await resp.text();
-          showStatus(`Profile save failed: ${detail || resp.status}`);
+          showStatus(await apiErrorMessage(resp, `Profile save failed: HTTP ${resp.status}`));
           return;
         }
         showStatus(`Profile "${name}" saved.`);
@@ -1646,7 +2191,7 @@
       }
     });
 
-    render();
+    flushNow();
     (function () {
       const latTh = document.querySelector('th.sortable[data-key="latency_ms"]');
       if (latTh) {
@@ -1656,34 +2201,41 @@
     })();
     refreshProfiles();
 
-    // Load status from API to update version pill and footer
+    // /api/status is the sole version authority and tells us if a scan is live.
+    let scanRunningAtLoad = false;
     fetch("/api/status")
       .then(r => r.ok ? r.json() : null)
       .then(data => {
         if (!data) return;
-        const pill = document.querySelector(".version-pill");
-        if (pill) {
-          pill.textContent = `v${data.version}`;
-          pill.title = `CF-Scanner v${data.version}`;
+        setVersion(data.version);
+        if (data.is_running === true) {
+          scanRunningAtLoad = true;
+          beginRun();
+          startPolling();
+          loadResults();
         }
-        const footer = document.querySelector("footer");
-        if (footer) footer.innerHTML = footer.innerHTML.replace(/v[\d.]+/, `v${data.version}`);
       })
       .catch(() => {});
 
-    // Load existing results on page refresh
+    // Load existing results on page refresh.
     fetch("/api/results")
       .then(r => r.ok ? r.json() : null)
       .then(data => {
-        if (!data || !data.results || data.results.length === 0) return;
-        results.length = 0;
-        data.results.forEach(v => results.push(v));
-        render();
-        statFound.textContent = results.length.toLocaleString();
+        if (!data) return;
+        if (scanRunningAtLoad || scanState === "running" || scanState === "starting") return;
+        if (Array.isArray(data.results) && data.results.length > 0) {
+          results.length = 0;
+          seenKeys.clear();
+          data.results.forEach(v => {
+            if (v && typeof v === "object" && typeof v.ip === "string") addResult(v);
+          });
+          flushNow();
+          statFound.textContent = results.length.toLocaleString();
+        }
         if (data.summary) {
-          showStatus(`Done: ${data.summary.scanned.toLocaleString()} scanned, ${data.summary.found} found`, "done");
-          statScanned.textContent = data.summary.scanned.toLocaleString();
           statsEl.hidden = false;
+          statScanned.textContent = data.summary.scanned != null ? Number(data.summary.scanned).toLocaleString() : "0";
+          finishScan(data.summary, data.summary.cancelled === true);
         }
       })
       .catch(() => {});
