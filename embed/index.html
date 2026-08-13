@@ -4,6 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>CF-Scanner</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%2322d3ee'/%3E%3Ccircle cx='16' cy='16' r='7' fill='none' stroke='%23062a30' stroke-width='2.4'/%3E%3Cpath d='M16 4v5M16 23v5M4 16h5M23 16h5' stroke='%23062a30' stroke-width='2.4' stroke-linecap='round'/%3E%3Ccircle cx='16' cy='16' r='1.8' fill='%23062a30'/%3E%3C/svg%3E">
   <script>
     // UI preference only (never scan data): no stored choice = follow the OS.
     (function () {
@@ -14,212 +15,668 @@
       document.documentElement.dataset.theme = t;
     })();
   </script>
-  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@picocss/pico@2.1.1/css/pico.min.css">
-  <script src="https://cdn.jsdelivr.net/npm/htmx.org@2.0.4/dist/htmx.min.js" defer></script>
-  <script src="https://cdn.jsdelivr.net/npm/htmx-ext-sse@2.2.4/sse.js" defer></script>
   <style>
-    .muted { color: var(--pico-muted-color); }
-    .v-ok { color: var(--pico-primary); }
-    .v-bad { color: var(--pico-del-color); }
-    .spacer { margin-top: 1rem; }
-    table { table-layout: fixed; }
+    /* ============ design tokens ============ */
+    :root {
+      --bg: #0a0e14;
+      --surface: #10161f;
+      --surface-2: #151d28;
+      --surface-3: #1a2431;
+      --border: #232e3d;
+      --border-strong: #2e3c4f;
+      --text: #e6edf5;
+      --muted: #8b9ab0;
+      --accent: #22d3ee;
+      --accent-strong: #67e8f9;
+      --accent-soft: rgba(34, 211, 238, 0.12);
+      --accent-contrast: #04222b;
+      --success: #34d399;
+      --success-soft: rgba(52, 211, 153, 0.12);
+      --danger: #f87171;
+      --danger-soft: rgba(248, 113, 113, 0.12);
+      --warning: #fbbf24;
+      --shadow: 0 1px 2px rgba(0, 0, 0, 0.35), 0 12px 32px rgba(0, 0, 0, 0.22);
+      --radius-sm: 7px;
+      --radius-md: 10px;
+      --radius-lg: 14px;
+      --chevron: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 16 16'><path d='M4 6l4 4 4-4' fill='none' stroke='%238b9ab0' stroke-width='1.7' stroke-linecap='round' stroke-linejoin='round'/></svg>");
+    }
+    [data-theme="light"] {
+      --bg: #f2f5f9;
+      --surface: #ffffff;
+      --surface-2: #eef2f7;
+      --surface-3: #e5ebf2;
+      --border: #d8e0ea;
+      --border-strong: #c3cedb;
+      --text: #17222f;
+      --muted: #5c6b7f;
+      --accent: #06b6d4;
+      --accent-strong: #0e7490;
+      --accent-soft: rgba(6, 182, 212, 0.11);
+      --accent-contrast: #04303c;
+      --success: #059669;
+      --success-soft: rgba(5, 150, 105, 0.11);
+      --danger: #dc2626;
+      --danger-soft: rgba(220, 38, 38, 0.09);
+      --warning: #b45309;
+      --shadow: 0 1px 2px rgba(16, 32, 54, 0.05), 0 10px 28px rgba(16, 32, 54, 0.08);
+      --chevron: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 16 16'><path d='M4 6l4 4 4-4' fill='none' stroke='%235c6b7f' stroke-width='1.7' stroke-linecap='round' stroke-linejoin='round'/></svg>");
+    }
+
+    /* ============ base ============ */
+    * { box-sizing: border-box; }
+    html { color-scheme: dark; }
+    [data-theme="light"] { color-scheme: light; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font-family: "Segoe UI", system-ui, -apple-system, Roboto, "Helvetica Neue", Arial, sans-serif;
+      font-size: 15px;
+      line-height: 1.55;
+      -webkit-font-smoothing: antialiased;
+    }
+    ::selection { background: var(--accent-soft); }
+    h1, h2, h3, p { margin: 0; }
+    h2 { font-size: 1.05rem; letter-spacing: 0.01em; }
+    h3 { font-size: 0.85rem; }
+    a { color: var(--accent-strong); }
+    .muted { color: var(--muted); }
+    .mono { font-family: "Cascadia Code", "JetBrains Mono", Consolas, ui-monospace, monospace; }
+    .spacer { margin-top: 1.25rem; }
+    ::-webkit-scrollbar { width: 10px; height: 10px; }
+    ::-webkit-scrollbar-thumb { background: var(--border-strong); border-radius: 8px; border: 2px solid var(--surface); }
+    ::-webkit-scrollbar-track { background: transparent; }
+
+    .wrap { max-width: 1080px; margin: 0 auto; padding: 0 1.25rem; }
+
+    /* ============ app bar ============ */
+    .appbar {
+      position: sticky; top: 0; z-index: 20;
+      background: color-mix(in srgb, var(--bg) 82%, transparent);
+      -webkit-backdrop-filter: blur(10px); backdrop-filter: blur(10px);
+      border-bottom: 1px solid var(--border);
+    }
+    .appbar-inner {
+      display: flex; align-items: center; gap: 0.9rem;
+      padding: 0.7rem 0; min-height: 56px;
+    }
+    .logo {
+      display: grid; place-items: center;
+      width: 34px; height: 34px; border-radius: 9px; flex: none;
+      background: linear-gradient(135deg, var(--accent), var(--accent-strong));
+      color: var(--accent-contrast);
+      box-shadow: 0 2px 10px rgba(34, 211, 238, 0.25);
+    }
+    .appbar h1 { font-size: 1.02rem; letter-spacing: 0.01em; }
+    .appbar-sub { font-size: 0.78rem; color: var(--muted); }
+    .appbar-spacer { flex: 1 1 auto; }
+    .version-pill {
+      font-size: 0.72rem; font-weight: 600; letter-spacing: 0.04em;
+      color: var(--muted); background: var(--surface-2);
+      border: 1px solid var(--border); border-radius: 999px; padding: 0.22rem 0.6rem;
+    }
+
+    /* ============ cards ============ */
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-lg);
+      box-shadow: var(--shadow);
+    }
+    .card-head {
+      display: flex; align-items: baseline; gap: 0.6rem; flex-wrap: wrap;
+      padding: 1rem 1.25rem; border-bottom: 1px solid var(--border);
+    }
+    .card-head p { font-size: 0.82rem; color: var(--muted); }
+    .card-body { padding: 1.25rem; }
+
+    /* ============ status banner ============ */
+    .status-card[data-state="running"] { border-color: color-mix(in srgb, var(--accent) 45%, var(--border)); }
+    .status-card[data-state="done"] { border-color: color-mix(in srgb, var(--success) 45%, var(--border)); }
+    .status-card[data-state="error"] { border-color: color-mix(in srgb, var(--danger) 45%, var(--border)); }
+    .status-row { display: flex; align-items: center; gap: 0.7rem; }
+    .status-dot {
+      width: 9px; height: 9px; border-radius: 50%; flex: none;
+      background: var(--border-strong); transition: background 0.2s;
+    }
+    .status-card[data-state="running"] .status-dot { background: var(--accent); box-shadow: 0 0 0 4px var(--accent-soft); animation: pulse 1.6s ease-in-out infinite; }
+    .status-card[data-state="done"] .status-dot { background: var(--success); }
+    .status-card[data-state="error"] .status-dot { background: var(--danger); }
+    @keyframes pulse { 50% { opacity: 0.4; } }
+    #scan-status { font-weight: 600; font-size: 0.95rem; }
+    #ranges-info { font-size: 0.8rem; color: var(--muted); margin-top: 0.7rem; }
+
+    .progress {
+      margin-top: 0.9rem; height: 6px; border-radius: 999px;
+      background: var(--surface-3); overflow: hidden;
+    }
+    .progress-fill {
+      height: 100%; width: 0;
+      background: linear-gradient(90deg, var(--accent), var(--accent-strong));
+      border-radius: 999px; transition: width 0.35s ease;
+    }
+    .progress.indeterminate .progress-fill { width: 32%; animation: slide 1.3s ease-in-out infinite; }
+    @keyframes slide { 0% { margin-left: -32%; } 100% { margin-left: 100%; } }
+
+    .stats {
+      display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+      gap: 0.6rem; margin-top: 0.9rem;
+    }
+    .stat {
+      background: var(--surface-2); border: 1px solid var(--border);
+      border-radius: var(--radius-sm); padding: 0.5rem 0.75rem;
+    }
+    .stat-label { display: block; font-size: 0.7rem; font-weight: 600; letter-spacing: 0.07em; text-transform: uppercase; color: var(--muted); }
+    .stat-value {
+      display: block; font-size: 1.12rem; font-weight: 650;
+      font-variant-numeric: tabular-nums; margin-top: 0.1rem;
+    }
+    .stat-value.accent { color: var(--accent-strong); }
+    .stat-value.ok { color: var(--success); }
+
+    /* ============ forms ============ */
+    .panel {
+      background: var(--surface-2); border: 1px solid var(--border);
+      border-radius: var(--radius-md); padding: 1rem 1.1rem; margin-top: 1rem;
+    }
+    .panel-title {
+      font-size: 0.72rem; font-weight: 700; letter-spacing: 0.09em; text-transform: uppercase;
+      color: var(--muted); margin-bottom: 0.75rem;
+    }
+    .grid { display: grid; gap: 0.9rem; }
+    .grid-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .grid-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    .grid-4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+
+    .field { display: flex; flex-direction: column; gap: 0.35rem; min-width: 0; }
+    .field > :first-child { font-size: 0.78rem; font-weight: 600; color: var(--muted); }
+    input, select, textarea {
+      font: inherit; color: var(--text);
+      background: var(--surface);
+      border: 1px solid var(--border-strong);
+      border-radius: var(--radius-sm);
+      padding: 0.5rem 0.7rem;
+      width: 100%;
+      transition: border-color 0.15s, box-shadow 0.15s;
+    }
+    textarea { resize: vertical; min-height: 3.2rem; line-height: 1.45; }
+    select {
+      appearance: none; -webkit-appearance: none; cursor: pointer;
+      padding-right: 2rem;
+      background-image: var(--chevron);
+      background-repeat: no-repeat; background-position: right 0.65rem center;
+    }
+    input[type="checkbox"], input[type="radio"] { width: auto; accent-color: var(--accent); }
+    input:focus-visible, select:focus-visible, textarea:focus-visible {
+      outline: 2px solid var(--accent); outline-offset: 1px;
+      border-color: var(--accent);
+    }
+    input:disabled, select:disabled, textarea:disabled { opacity: 0.45; cursor: not-allowed; }
+    input::placeholder, textarea::placeholder { color: color-mix(in srgb, var(--muted) 70%, transparent); }
+
+    .check { display: flex; align-items: center; gap: 0.5rem; font-size: 0.85rem; color: var(--muted); cursor: pointer; user-select: none; }
+    .check input { margin: 0; flex: none; }
+
+    .seg {
+      display: flex; gap: 4px; padding: 4px;
+      background: var(--surface-2); border: 1px solid var(--border);
+      border-radius: var(--radius-md);
+    }
+    .seg label { position: relative; flex: 1 1 0; }
+    .seg input { position: absolute; opacity: 0; pointer-events: none; }
+    .seg-item {
+      display: flex; align-items: center; justify-content: center; gap: 0.5rem;
+      padding: 0.6rem 0.75rem; border-radius: 8px;
+      font-size: 0.88rem; font-weight: 600; color: var(--muted);
+      cursor: pointer; transition: background 0.15s, color 0.15s;
+      white-space: nowrap;
+    }
+    .seg-item svg { flex: none; }
+    .seg label:hover .seg-item { color: var(--text); }
+    .seg input:checked + .seg-item {
+      background: var(--accent); color: var(--accent-contrast);
+      box-shadow: 0 2px 8px rgba(34, 211, 238, 0.25);
+    }
+    .seg input:focus-visible + .seg-item { outline: 2px solid var(--accent); outline-offset: 2px; }
+    .seg input:disabled + .seg-item { opacity: 0.45; cursor: not-allowed; }
+
+    .radio-row { display: flex; gap: 1.4rem; margin-bottom: 0.75rem; flex-wrap: wrap; }
+    .radio {
+      display: inline-flex; align-items: center; gap: 0.45rem;
+      font-size: 0.88rem; font-weight: 600; color: var(--text); cursor: pointer; user-select: none;
+    }
+    .radio input { margin: 0; }
+
+    details.panel-details {
+      background: var(--surface-2); border: 1px solid var(--border);
+      border-radius: var(--radius-md); margin-top: 1rem;
+    }
+    details.panel-details > summary {
+      list-style: none; cursor: pointer; user-select: none;
+      display: flex; align-items: center; gap: 0.6rem;
+      padding: 0.9rem 1.1rem; font-weight: 650; font-size: 0.88rem;
+    }
+    details.panel-details > summary::-webkit-details-marker { display: none; }
+    details.panel-details > summary::before {
+      content: ""; width: 8px; height: 8px; flex: none;
+      border-right: 2px solid var(--muted); border-bottom: 2px solid var(--muted);
+      transform: rotate(-45deg); transition: transform 0.18s;
+    }
+    details.panel-details[open] > summary::before { transform: rotate(45deg); }
+    details.panel-details > summary:hover { color: var(--accent-strong); }
+    details.panel-details > .details-body { padding: 0 1.1rem 1.1rem; }
+    details.panel-details > .details-body > .panel { margin-top: 0; }
+
+    .inline-row { display: flex; align-items: center; gap: 0.7rem; flex-wrap: wrap; }
+    .inline-row .check { margin-top: 1.15rem; }
+
+    /* ============ buttons ============ */
+    button {
+      font: inherit; font-weight: 600; font-size: 0.88rem;
+      display: inline-flex; align-items: center; justify-content: center; gap: 0.45rem;
+      background: var(--surface-3); color: var(--text);
+      border: 1px solid var(--border-strong); border-radius: var(--radius-sm);
+      padding: 0.5rem 0.95rem; cursor: pointer;
+      transition: background 0.15s, border-color 0.15s, transform 0.05s;
+    }
+    button:hover { background: color-mix(in srgb, var(--surface-3) 80%, var(--accent) 8%); }
+    button:active { transform: translateY(1px); }
+    button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+    button:disabled { opacity: 0.45; cursor: not-allowed; transform: none; }
+    button.primary {
+      background: var(--accent); border-color: transparent; color: var(--accent-contrast);
+      box-shadow: 0 2px 10px rgba(34, 211, 238, 0.28);
+    }
+    button.primary:hover { background: var(--accent-strong); }
+    button.primary:disabled { box-shadow: none; }
+    button.secondary { background: var(--accent-soft); border-color: color-mix(in srgb, var(--accent) 35%, var(--border)); color: var(--accent-strong); }
+    button.secondary:hover { background: color-mix(in srgb, var(--accent-soft) 70%, var(--accent) 12%); }
+    button.outline { background: transparent; }
+    button.outline:hover { background: var(--surface-2); }
+    button.danger { background: var(--danger-soft); border-color: color-mix(in srgb, var(--danger) 40%, var(--border)); color: var(--danger); }
+    button.danger:hover { background: color-mix(in srgb, var(--danger-soft) 70%, var(--danger) 14%); }
+    .btn-lg { padding: 0.62rem 1.4rem; font-size: 0.95rem; }
+
+    .actions { display: flex; gap: 0.7rem; margin-top: 1.25rem; flex-wrap: wrap; }
+    .actions .spacer-grow { flex: 1 1 auto; }
+
+    /* ============ results ============ */
+    .toolbar { display: flex; align-items: center; gap: 0.55rem; flex-wrap: wrap; }
+    .toolbar .grow { flex: 1 1 auto; }
+    .toolbar select { width: auto; padding: 0.42rem 1.9rem 0.42rem 0.65rem; }
+
+    .hist { display: flex; align-items: flex-end; gap: 3px; height: 2.6rem; margin: 0.8rem 0 1rem; }
+    .hist-bar {
+      flex: 1 1 0; min-height: 3px; border-radius: 3px 3px 0 0;
+      background: linear-gradient(180deg, var(--accent), color-mix(in srgb, var(--accent) 45%, transparent));
+      transition: filter 0.15s; cursor: default;
+    }
+    .hist-bar:hover { filter: brightness(1.25); }
+
+    .table-wrap { max-height: min(62vh, 620px); overflow: auto; border: 1px solid var(--border); border-radius: var(--radius-md); }
+    table { width: 100%; border-collapse: separate; border-spacing: 0; table-layout: fixed; font-size: 0.87rem; }
+    thead th {
+      position: sticky; top: 0; z-index: 2;
+      background: var(--surface-2); color: var(--muted);
+      text-align: left; font-weight: 650; font-size: 0.75rem; letter-spacing: 0.06em; text-transform: uppercase;
+      padding: 0.6rem 0.85rem; border-bottom: 1px solid var(--border);
+      white-space: nowrap;
+    }
     th.sortable { cursor: pointer; user-select: none; }
-    th .caret { color: var(--pico-muted-color); }
-    #scan-status[data-state="running"] { animation: pulse 1.5s ease-in-out infinite; }
-    @keyframes pulse { 50% { opacity: 0.45; } }
-    details { margin-bottom: 0; }
-    .header-row { display: flex; justify-content: space-between; align-items: flex-start; gap: 1rem; flex-wrap: wrap; }
-    .hist { display: flex; align-items: flex-end; gap: 4px; height: 2.25rem; margin-bottom: 1rem; }
-    .hist-bar { flex: 1 1 0; min-height: 2px; background: var(--pico-primary); }
+    th.sortable:hover { color: var(--text); }
+    th .caret { color: var(--accent); font-size: 0.7rem; margin-left: 0.15rem; }
+    tbody td {
+      padding: 0.5rem 0.85rem; border-bottom: 1px solid var(--border);
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    tbody tr:last-child td { border-bottom: none; }
+    tbody tr:nth-child(even) td { background: color-mix(in srgb, var(--surface-2) 55%, transparent); }
+    tbody tr:hover td { background: var(--accent-soft); }
+    td.mono { font-family: "Cascadia Code", "JetBrains Mono", Consolas, ui-monospace, monospace; font-size: 0.84rem; }
+    td.lat-good { color: var(--success); }
+    td.lat-bad { color: var(--warning); }
+    td.v-ok {
+      color: var(--success); background: var(--success-soft);
+      border-radius: 999px; padding: 0.15rem 0.6rem; display: inline-block;
+      font-size: 0.78rem; font-weight: 600; max-width: 100%;
+    }
+    td.v-bad {
+      color: var(--danger); background: var(--danger-soft);
+      border-radius: 999px; padding: 0.15rem 0.6rem; display: inline-block;
+      font-size: 0.78rem; font-weight: 600;
+    }
+    thead th:nth-child(1) { width: 26%; }
+    thead th:nth-child(2) { width: 9%; }
+    thead th:nth-child(3) { width: 13%; }
+    thead th:nth-child(4) { width: 10%; }
+    thead th:nth-child(5) { width: 12%; }
+    thead th:nth-child(6) { width: 10%; }
+    thead th:nth-child(7) { width: 20%; }
     #results-section[data-density="compact"] td,
-    #results-section[data-density="compact"] th { padding: .15rem .4rem; font-size: .875rem; }
-    .profile-row { display: flex; align-items: center; gap: .5rem; }
-    .profile-row span { flex: 1 1 auto; }
-    .profile-row button { width: auto; margin: 0; padding: .25rem .75rem; }
+    #results-section[data-density="compact"] th { padding: 0.28rem 0.55rem; font-size: 0.79rem; }
+
+    #empty-row td { text-align: center; padding: 2.2rem 1rem; font-style: italic; }
+
+    /* ============ profiles ============ */
+    #profile-list { list-style: none; margin: 0.9rem 0 0; padding: 0; }
+    .profile-row {
+      display: flex; align-items: center; gap: 0.5rem;
+      padding: 0.5rem 0.4rem; border-bottom: 1px solid var(--border);
+    }
+    .profile-row:last-child { border-bottom: none; }
+    .profile-row span { flex: 1 1 auto; font-size: 0.88rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .profile-row button { width: auto; padding: 0.3rem 0.7rem; font-size: 0.8rem; }
+
+    /* ============ footer ============ */
+    footer { padding: 1.5rem 0 2.5rem; font-size: 0.8rem; }
+
+    /* ============ responsive ============ */
+    @media (max-width: 900px) { .grid-4 { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+    @media (max-width: 640px) {
+      .grid-2, .grid-3, .grid-4 { grid-template-columns: 1fr; }
+      .seg-item { font-size: 0.8rem; padding: 0.5rem 0.4rem; }
+      .card-body { padding: 1rem; }
+      .wrap { padding: 0 0.9rem; }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after { animation: none !important; transition: none !important; }
+    }
   </style>
 </head>
 <body>
-  <main class="container">
-    <header>
-      <div class="header-row">
-        <hgroup>
-          <h1>CF-Scanner</h1>
-          <p class="muted">Find working Cloudflare IPs / endpoints on ISP-restricted networks.</p>
-        </hgroup>
-        <button id="theme-btn" type="button" class="outline" aria-pressed="false">Dark</button>
+  <header class="appbar">
+    <div class="wrap appbar-inner">
+      <div class="logo" aria-hidden="true">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round">
+          <circle cx="12" cy="12" r="5.5"></circle>
+          <path d="M12 1.5v4M12 18.5v4M1.5 12h4M18.5 12h4"></path>
+        </svg>
       </div>
-    </header>
+      <div>
+        <h1>CF-Scanner</h1>
+        <div class="appbar-sub">Find working Cloudflare IPs / endpoints on ISP-restricted networks</div>
+      </div>
+      <div class="appbar-spacer"></div>
+      <span class="version-pill">v0.2.0</span>
+      <button id="theme-btn" type="button" class="outline" aria-pressed="false" aria-label="Toggle color theme"></button>
+    </div>
+  </header>
 
-    <section>
-      <details open>
-        <summary>Scan configuration</summary>
+  <main class="wrap">
+
+    <!-- live scan status -->
+    <section class="card status-card spacer" data-state="" aria-busy="false">
+      <div class="card-body">
+        <div class="status-row">
+          <span class="status-dot" aria-hidden="true"></span>
+          <span id="scan-status" role="status" aria-live="polite">Idle &mdash; configure and start a scan.</span>
+        </div>
+        <div class="progress" id="progress-track" hidden>
+          <div class="progress-fill" id="progress-fill"></div>
+        </div>
+        <div class="stats" id="stats" hidden>
+          <div class="stat">
+            <span class="stat-label">Scanned</span>
+            <span class="stat-value mono" id="stat-scanned">0</span>
+          </div>
+          <div class="stat">
+            <span class="stat-label">Working</span>
+            <span class="stat-value mono ok" id="stat-found">0</span>
+          </div>
+          <div class="stat">
+            <span class="stat-label">Elapsed</span>
+            <span class="stat-value mono" id="stat-elapsed">0:00</span>
+          </div>
+          <div class="stat">
+            <span class="stat-label">Rate</span>
+            <span class="stat-value mono" id="stat-rate">&mdash;</span>
+          </div>
+        </div>
+        <div id="ranges-info" aria-live="polite"></div>
+      </div>
+    </section>
+
+    <!-- scan configuration -->
+    <section class="card spacer">
+      <div class="card-head">
+        <h2>Scan configuration</h2>
+        <p>Localhost only &mdash; nothing leaves this machine.</p>
+      </div>
+      <div class="card-body">
         <form id="scan-form">
-          <div class="grid">
-            <label>Mode
-              <select name="mode">
-                <option value="Cdn" selected>CDN / proxy</option>
-                <option value="Warp">WARP &mdash; UDP endpoint discovery</option>
-              </select>
+          <div class="seg" role="radiogroup" aria-label="Scan mode">
+            <label>
+              <input type="radio" name="mode" value="Cdn" checked>
+              <span class="seg-item">
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <circle cx="12" cy="12" r="3"></circle>
+                  <path d="M5.6 5.6a9 9 0 0 0 0 12.8M18.4 5.6a9 9 0 0 1 0 12.8"></path>
+                </svg>
+                CDN / proxy
+              </span>
             </label>
-            <label>Ports (comma-separated)
-              <input name="ports" type="text" value="443" required>
-            </label>
-            <label id="include-v6-label"><input type="checkbox" name="include_v6">
-              Include IPv6 candidates (default: IPv4 only)</label>
-            <label id="warp-probes-label" hidden>Probes per endpoint (1&ndash;10, drives loss %)
-              <input name="warp_probes" type="number" min="1" max="10" value="3">
-            </label>
-            <label>Concurrency (1&ndash;1000)
-              <input name="concurrency" type="number" min="1" max="1000" value="200" required>
-            </label>
-            <label>Probe timeout (ms)
-              <input name="timeout_ms" type="number" min="100" max="30000" value="3000" required>
+            <label>
+              <input type="radio" name="mode" value="Warp">
+              <span class="seg-item">
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <circle cx="12" cy="12" r="2.2"></circle>
+                  <path d="M7.2 7.2a6.8 6.8 0 0 0 0 9.6M16.8 7.2a6.8 6.8 0 0 1 0 9.6"></path>
+                </svg>
+                WARP &mdash; UDP endpoints
+              </span>
             </label>
           </div>
-          <fieldset>
-            <legend>Target</legend>
-            <label><input type="radio" name="target-radio" value="preset" checked> Preset</label>
-            <div class="grid" id="preset-row">
-              <label>Preset
-                <select name="preset">
+
+          <div class="panel">
+            <h3 class="panel-title">Connection</h3>
+            <div class="grid grid-3">
+              <label class="field">Ports (comma-separated)
+                <input name="ports" type="text" value="443" required>
+              </label>
+              <label class="field">Concurrency (1&ndash;1000)
+                <input name="concurrency" type="number" min="1" max="1000" value="200" required>
+              </label>
+              <label class="field">Probe timeout (ms)
+                <input name="timeout_ms" type="number" min="100" max="30000" value="3000" required>
+              </label>
+            </div>
+            <div class="inline-row">
+              <label class="check" id="include-v6-label">
+                <input type="checkbox" name="include_v6">
+                <span>Include IPv6 candidates (default: IPv4 only)</span>
+              </label>
+              <label class="check" id="warp-probes-label" hidden>
+                <span>Probes per endpoint (1&ndash;10, drives loss %)</span>
+                <input name="warp_probes" type="number" min="1" max="10" value="3">
+              </label>
+            </div>
+          </div>
+
+          <div class="panel">
+            <h3 class="panel-title">Target</h3>
+            <div class="radio-row">
+              <label class="radio"><input type="radio" name="target-radio" value="preset" checked> Preset</label>
+              <label class="radio"><input type="radio" name="target-radio" value="count"> Custom count</label>
+            </div>
+            <div class="grid grid-2">
+              <div class="field" id="preset-row">
+                <label for="preset">Preset</label>
+                <select name="preset" id="preset">
                   <option value="Quick" selected>Quick &mdash; 1 IP per /24 (~4K probes)</option>
                   <option value="Normal">Normal &mdash; 3 IPs per /24 (~12K probes)</option>
                   <option value="Full">Full &mdash; every IP (~1.5M probes)</option>
                 </select>
-              </label>
-            </div>
-            <label><input type="radio" name="target-radio" value="count"> Custom count</label>
-            <div class="grid">
-              <label>Candidate count
+              </div>
+              <label class="field">Candidate count
                 <input name="count" type="number" min="1" max="100000" value="350" disabled>
               </label>
             </div>
-          </fieldset>
-          <div class="grid">
-            <label>Stop after N found
-              <input name="found" type="number" min="1" value="20" required>
-            </label>
-            <label>Hard cap on probes (optional)
-              <input name="cap" type="number" min="1" placeholder="none">
-            </label>
-            <label>Custom CIDRs (optional, replaces bundled; one per line)
-              <textarea name="custom_cidrs" rows="3" placeholder="10.0.0.0/24"></textarea>
-            </label>
-            <label>Excluded CIDRs (optional, one per line)
-              <textarea name="exclude" rows="3" placeholder="141.101.64.0/18"></textarea>
-            </label>
           </div>
-          <div class="grid" id="warp-endpoints-row" hidden>
-            <label>WARP custom endpoints (ip or ip:port, one per line; empty = bundled pools)
+
+          <div class="panel">
+            <h3 class="panel-title">Stopping &amp; ranges</h3>
+            <div class="grid grid-2">
+              <label class="field">Stop after N found
+                <input name="found" type="number" min="1" value="20" required>
+              </label>
+              <label class="field">Hard cap on probes (optional)
+                <input name="cap" type="number" min="1" placeholder="none">
+              </label>
+            </div>
+            <div class="grid grid-2" style="margin-top: 0.9rem;">
+              <label class="field">Custom CIDRs (optional, replaces bundled; one per line)
+                <textarea name="custom_cidrs" rows="3" placeholder="10.0.0.0/24"></textarea>
+              </label>
+              <label class="field">Excluded CIDRs (optional, one per line)
+                <textarea name="exclude" rows="3" placeholder="141.101.64.0/18"></textarea>
+              </label>
+            </div>
+          </div>
+
+          <div class="panel" id="warp-endpoints-row" hidden>
+            <h3 class="panel-title">WARP endpoints &amp; verification</h3>
+            <label class="field">Custom endpoints (ip or ip:port, one per line; empty = bundled pools)
               <textarea name="warp_endpoints" rows="3" placeholder="162.159.192.5&#10;188.114.99.7:2408"></textarea>
             </label>
-            <label>Verify with your own wgconf (real keypair handshake)
-              <textarea name="warp_wgconf" rows="3" placeholder="[Interface]&#10;PrivateKey = ..." disabled></textarea>
-            </label>
-            <button id="wgconf-file-btn" type="button" class="outline" disabled>Load wgconf from file</button>
-            <input id="wgconf-file" type="file" accept=".conf,.txt,text/plain" hidden>
-            <label><input type="checkbox" name="warp_verify" disabled>
-              Verify discovered endpoints with the config above</label>
-          </div>
-          <details id="phase2-details">
-            <summary>Phase 2 &mdash; verify candidates through xray</summary>
-            <div class="grid">
-              <label>Configs (URIs, subscription URLs, or xray JSON paths; one per line)
-                <textarea name="phase2_configs" rows="3" placeholder="vless://uuid@host:443?encryption=none"></textarea>
+            <div class="grid grid-2" style="margin-top: 0.9rem;">
+              <label class="field">Verify with your own wgconf (real keypair handshake)
+                <textarea name="warp_wgconf" rows="3" placeholder="[Interface]&#10;PrivateKey = ..." disabled></textarea>
               </label>
-              <label>Fragment preset
-                <select name="phase2_fragment" disabled>
-                  <option value="Off" selected>Off</option>
-                  <option value="Light">Light (100-200 bytes / 10-20 ms)</option>
-                  <option value="Medium">Medium (50-200 bytes / 10-40 ms)</option>
-                  <option value="Heavy">Heavy (10-300 bytes / 5-50 ms)</option>
-                  <option value="Custom">Custom</option>
-                </select>
-              </label>
-              <label>SNI variants (comma-separated; empty = each config&rsquo;s own)
-                <input name="phase2_snis" type="text" placeholder="www.cloudflare.com" disabled>
-              </label>
-              <label>Probe URL
-                <input name="phase2_probe_url" type="url" value="https://cp.cloudflare.com/" disabled>
-              </label>
-              <label>Parallel instances (1&ndash;8)
-                <input name="phase2_concurrency" type="number" min="1" max="8" value="3" disabled>
-              </label>
+              <div class="field">
+                <span>wgconf file</span>
+                <button id="wgconf-file-btn" type="button" class="outline" disabled>Load wgconf from file</button>
+                <input id="wgconf-file" type="file" accept=".conf,.txt,text/plain" hidden>
+                <label class="check">
+                  <input type="checkbox" name="warp_verify" disabled>
+                  <span>Verify discovered endpoints with the config above</span>
+                </label>
+              </div>
             </div>
-            <div class="grid">
-              <label>Packets (custom preset)
-                <input name="phase2_packets" type="text" value="tlshello" disabled>
-              </label>
-              <label>Length in bytes (custom preset, &ldquo;min-max&rdquo;)
-                <input name="phase2_length" type="text" placeholder="100-200" disabled>
-              </label>
-              <label>Interval in ms (custom preset, &ldquo;min-max&rdquo;)
-                <input name="phase2_interval" type="text" placeholder="10-20" disabled>
-              </label>
+          </div>
+
+          <details id="phase2-details" class="panel-details">
+            <summary>Phase 2 &mdash; verify candidates through xray</summary>
+            <div class="details-body">
+              <div class="panel">
+                <h3 class="panel-title">Verification</h3>
+                <div class="grid grid-2">
+                  <label class="field">Configs (URIs, subscription URLs, or xray JSON paths; one per line)
+                    <textarea name="phase2_configs" rows="3" placeholder="vless://uuid@host:443?encryption=none"></textarea>
+                  </label>
+                  <div class="grid grid-2" style="gap: 0.9rem; align-content: start;">
+                    <label class="field">Fragment preset
+                      <select name="phase2_fragment" disabled>
+                        <option value="Off" selected>Off</option>
+                        <option value="Light">Light (100-200 / 10-20)</option>
+                        <option value="Medium">Medium (50-200 / 10-40)</option>
+                        <option value="Heavy">Heavy (10-300 / 5-50)</option>
+                        <option value="Custom">Custom</option>
+                      </select>
+                    </label>
+                    <label class="field">Parallel instances (1&ndash;8)
+                      <input name="phase2_concurrency" type="number" min="1" max="8" value="3" disabled>
+                    </label>
+                    <label class="field">SNI variants (comma-separated; empty = config&rsquo;s own)
+                      <input name="phase2_snis" type="text" placeholder="www.cloudflare.com" disabled>
+                    </label>
+                    <label class="field">Probe URL
+                      <input name="phase2_probe_url" type="url" value="https://cp.cloudflare.com/" disabled>
+                    </label>
+                  </div>
+                </div>
+                <div class="grid grid-3" style="margin-top: 0.9rem;">
+                  <label class="field">Packets (custom preset)
+                    <input name="phase2_packets" type="text" value="tlshello" disabled>
+                  </label>
+                  <label class="field">Length in bytes (custom preset, &ldquo;min-max&rdquo;)
+                    <input name="phase2_length" type="text" placeholder="100-200" disabled>
+                  </label>
+                  <label class="field">Interval in ms (custom preset, &ldquo;min-max&rdquo;)
+                    <input name="phase2_interval" type="text" placeholder="10-20" disabled>
+                  </label>
+                </div>
+              </div>
             </div>
           </details>
-          <button id="start-btn" type="submit">Start scan</button>
-          <button id="cancel-btn" type="button" class="secondary" disabled>Cancel</button>
-          <button id="reset-btn" type="button" class="outline">Reset results</button>
+
+          <div class="actions">
+            <button id="start-btn" type="submit" class="primary btn-lg">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5.5v13l11-6.5z"></path></svg>
+              Start scan
+            </button>
+            <button id="cancel-btn" type="button" class="danger" disabled>
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"></path></svg>
+              Cancel
+            </button>
+            <div class="spacer-grow"></div>
+            <button id="reset-btn" type="button" class="outline">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M8 6V4h8v2m-9 0v14a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2V6"></path></svg>
+              Reset results
+            </button>
+          </div>
         </form>
-      </details>
+      </div>
     </section>
 
-    <section id="scan-status" role="status" aria-live="polite" class="muted">
-      Idle. Configure and start a scan.
-    </section>
-
-    <section id="ranges-info" class="muted" aria-live="polite"></section>
-
-    <section class="spacer" id="results-section">
-      <hgroup>
+    <!-- results -->
+    <section class="card spacer" id="results-section" data-density="normal">
+      <div class="card-head">
         <h2>Results <span id="result-count" class="muted"></span></h2>
-        <p class="muted">Last scan only &mdash; in memory, cleared by reset.</p>
-      </hgroup>
-      <div id="latency-hist" class="hist" role="img" hidden></div>
-      <div class="grid">
-        <button id="copy-btn" type="button" class="secondary" disabled>Copy</button>
-        <button id="save-btn" type="button" class="secondary" disabled>Save .txt</button>
-        <button id="export-btn" type="button" class="secondary" disabled>Export</button>
-        <select id="export-format" aria-label="Export format">
-          <option value="csv">CSV</option>
-          <option value="json">JSON</option>
-        </select>
-        <button id="density-btn" type="button" class="outline" aria-pressed="false">Compact view</button>
+        <p>Last scan only &mdash; in memory, cleared by reset.</p>
+        <div class="grow" style="flex: 1 1 auto;"></div>
+        <div class="toolbar">
+          <button id="density-btn" type="button" class="outline" aria-pressed="false">Compact view</button>
+          <button id="copy-btn" type="button" class="secondary" disabled>Copy</button>
+          <button id="save-btn" type="button" class="secondary" disabled>Save .txt</button>
+          <button id="export-btn" type="button" class="secondary" disabled>Export</button>
+          <select id="export-format" aria-label="Export format">
+            <option value="csv">CSV</option>
+            <option value="json">JSON</option>
+          </select>
+        </div>
       </div>
-      <table>
-        <thead>
-          <tr>
-            <th class="sortable" data-key="ip">IP <span class="caret"></span></th>
-            <th class="sortable" data-key="port">Port <span class="caret"></span></th>
-<th class="sortable" data-key="latency_ms">Latency (ms) <span class="caret"></span></th>
-<th class="sortable" data-key="loss_pct">Loss % <span class="caret"></span></th>
-<th class="sortable" data-key="country">Country <span class="caret"></span></th>
-<th class="sortable" data-key="colo">Colo <span class="caret"></span></th>
-<th>Phase 2</th>
-          </tr>
-        </thead>
-        <tbody id="results-body">
-          <tr id="empty-row"><td colspan="7" class="muted">No results yet.</td></tr>
-        </tbody>
-      </table>
+      <div class="card-body">
+        <div id="latency-hist" class="hist" role="img" hidden></div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th class="sortable" data-key="ip">IP <span class="caret"></span></th>
+                <th class="sortable" data-key="port">Port <span class="caret"></span></th>
+                <th class="sortable" data-key="latency_ms">Latency <span class="caret"></span></th>
+                <th class="sortable" data-key="loss_pct">Loss <span class="caret"></span></th>
+                <th class="sortable" data-key="country">Country <span class="caret"></span></th>
+                <th class="sortable" data-key="colo">Colo <span class="caret"></span></th>
+                <th>Phase 2</th>
+              </tr>
+            </thead>
+            <tbody id="results-body"></tbody>
+          </table>
+        </div>
+      </div>
     </section>
 
-    <section class="spacer">
-      <hgroup>
+    <!-- profiles -->
+    <section class="card spacer">
+      <div class="card-head">
         <h2>Profiles</h2>
-        <p class="muted">Named scan configs, held in memory by the server for this session only.</p>
-      </hgroup>
-      <div class="grid">
-        <label>Profile name
-          <input id="profile-name" type="text" placeholder="home-vless" autocomplete="off">
-        </label>
-        <button id="profile-save-btn" type="button" class="secondary">Save current form</button>
+        <p>Named scan configs, held in memory by the server for this session only.</p>
       </div>
-      <ul id="profile-list"></ul>
+      <div class="card-body">
+        <div class="inline-row">
+          <label class="field" style="flex: 1 1 260px; max-width: 380px;">
+            <span>Profile name</span>
+            <input id="profile-name" type="text" placeholder="home-vless" autocomplete="off">
+          </label>
+          <button id="profile-save-btn" type="button" class="secondary" style="margin-top: 1.25rem;">Save current form</button>
+        </div>
+        <ul id="profile-list"></ul>
+      </div>
     </section>
 
-    <footer class="spacer muted">
+    <footer class="muted">
       IP geolocation data &copy; <a href="https://db-ip.com" target="_blank" rel="noopener">db-ip.com</a>
       (db-ip Lite, <a href="https://creativecommons.org/licenses/by/4.0/" target="_blank" rel="noopener">CC BY 4.0</a>)
       &mdash; CF-Scanner v0.2.0
@@ -233,21 +690,40 @@
     let sortKey = null;
     let sortAsc = true;
 
-    const body = document.getElementById("results-body");
+    const tbody = document.getElementById("results-body");
     const status = document.getElementById("scan-status");
+    const statusCard = status.closest(".status-card");
     const countEl = document.getElementById("result-count");
     const startBtn = document.getElementById("start-btn");
     const cancelBtn = document.getElementById("cancel-btn");
+    const resetBtn = document.getElementById("reset-btn");
     const copyBtn = document.getElementById("copy-btn");
     const saveBtn = document.getElementById("save-btn");
+    const exportBtn = document.getElementById("export-btn");
     const themeBtn = document.getElementById("theme-btn");
     const densityBtn = document.getElementById("density-btn");
     const histEl = document.getElementById("latency-hist");
 
+    const statsEl = document.getElementById("stats");
+    const progressTrack = document.getElementById("progress-track");
+    const progressFill = document.getElementById("progress-fill");
+    const statScanned = document.getElementById("stat-scanned");
+    const statFound = document.getElementById("stat-found");
+    const statElapsed = document.getElementById("stat-elapsed");
+    const statRate = document.getElementById("stat-rate");
+    let elapsedTimer = null;
+    let scanStartMs = 0;
+
+    const ICONS = {
+      sun: '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="4.2"></circle><path d="M12 2.5v2.6M12 18.9v2.6M2.5 12h2.6M18.9 12h2.6M5.3 5.3l1.8 1.8M16.9 16.9l1.8 1.8M18.7 5.3l-1.8 1.8M7.1 16.9l-1.8 1.8"></path></svg>',
+      moon: '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20.4 14.2A8.5 8.5 0 0 1 9.8 3.6a8.5 8.5 0 1 0 10.6 10.6z"></path></svg>'
+    };
+
     function applyTheme(theme) {
       document.documentElement.dataset.theme = theme;
-      themeBtn.textContent = theme === "dark" ? "Light" : "Dark";
-      themeBtn.setAttribute("aria-pressed", String(theme === "dark"));
+      const dark = theme === "dark";
+      themeBtn.innerHTML = (dark ? ICONS.sun : ICONS.moon) + (dark ? "Light" : "Dark");
+      themeBtn.setAttribute("aria-pressed", String(dark));
     }
     applyTheme(document.documentElement.dataset.theme);
     themeBtn.addEventListener("click", () => {
@@ -267,6 +743,43 @@
       localStorage.setItem("ui-density", next ? "compact" : "normal");
       applyDensity(next);
     });
+
+    // ---- live status banner ----
+    function fmtTime(secs) {
+      const m = Math.floor(secs / 60), s = secs % 60;
+      return m + ":" + String(s).padStart(2, "0");
+    }
+    function tickElapsed() {
+      const secs = Math.floor((Date.now() - scanStartMs) / 1000);
+      statElapsed.textContent = fmtTime(secs);
+      updateRate(secs);
+    }
+    function updateRate(secs) {
+      const scanned = Number(statScanned.textContent.replace(/,/g, "")) || 0;
+      statRate.textContent = secs > 0 ? Math.round(scanned / secs).toLocaleString() + "/s" : "\u2014";
+    }
+    function resetBanner() {
+      if (elapsedTimer) { clearInterval(elapsedTimer); elapsedTimer = null; }
+      statScanned.textContent = "0";
+      statFound.textContent = "0";
+      statElapsed.textContent = "0:00";
+      statRate.textContent = "\u2014";
+      progressFill.style.width = "0";
+      progressTrack.classList.remove("indeterminate");
+    }
+    function showProgress(progress) {
+      const total = progress.total != null ? progress.total : null;
+      const scanned = progress.scanned != null ? progress.scanned : 0;
+      statScanned.textContent = scanned.toLocaleString();
+      if (total && total > 0) {
+        progressTrack.classList.remove("indeterminate");
+        progressFill.style.width = Math.min(100, (scanned / total) * 100) + "%";
+      } else {
+        progressTrack.classList.add("indeterminate");
+        progressFill.style.width = "";
+      }
+      updateRate(Math.floor((Date.now() - scanStartMs) / 1000));
+    }
 
     const HIST_BUCKETS = [
       { label: "0-50ms", max: 50 },
@@ -367,6 +880,8 @@
 
     function showStatus(text, state) {
       status.dataset.state = state || "";
+      statusCard.dataset.state = state || "";
+      statusCard.setAttribute("aria-busy", String(state === "running"));
       status.textContent = text;
     }
 
@@ -384,14 +899,22 @@
 
     function lossCell(v) {
       if (v.loss_pct == null) return cell(null, "muted");
-      return cell(`${v.loss_pct.toFixed(1)}%`);
+      const cls = v.loss_pct > 0 ? "lat-bad" : "";
+      return cell(v.loss_pct > 0 ? v.loss_pct.toFixed(1) + "%" : "0%", cls);
     }
 
     function phase2Cell(v) {
       const p2 = v.phase2;
       if (!p2) return cell(null, "muted");
-      if (p2.passed) return cell(`\u2713 ${p2.fragment} ${p2.sni}`, "v-ok");
+      if (p2.passed) return cell("\u2713 " + p2.fragment + (p2.sni ? " " + p2.sni : ""), "v-ok");
       return cell("\u2717", "v-bad");
+    }
+
+    function latencyCls(l) {
+      if (l == null) return "muted";
+      if (l < 150) return "lat-good mono";
+      if (l >= 800) return "lat-bad mono";
+      return "mono";
     }
 
     function render() {
@@ -401,24 +924,24 @@
         if (typeof av === "string") return sortAsc ? av.localeCompare(bv) : bv.localeCompare(av);
         return sortAsc ? (av ?? Infinity) - (bv ?? Infinity) : (bv ?? Infinity) - (av ?? Infinity);
       });
-      body.replaceChildren();
+      tbody.replaceChildren();
       if (rows.length === 0) {
         const tr = document.createElement("tr");
         tr.id = "empty-row";
-        tr.appendChild(cell("No results yet.", "muted"));
+        tr.appendChild(cell("No results yet \u2014 start a scan to populate this table.", "muted"));
         tr.firstChild.colSpan = 7;
-        body.appendChild(tr);
+        tbody.appendChild(tr);
       } else {
         for (const v of rows) {
           const tr = document.createElement("tr");
-          tr.appendChild(cell(v.ip));
-          tr.appendChild(cell(v.port));
-          tr.appendChild(cell(v.latency_ms));
+          tr.appendChild(cell(v.ip, "mono"));
+          tr.appendChild(cell(v.port, "mono"));
+          tr.appendChild(cell(v.latency_ms, latencyCls(v.latency_ms)));
           tr.appendChild(lossCell(v));
           tr.appendChild(cell(v.country));
           tr.appendChild(cell(v.colo));
           tr.appendChild(phase2Cell(v));
-          body.appendChild(tr);
+          tbody.appendChild(tr);
         }
       }
       countEl.textContent = rows.length > 0 ? `(${rows.length})` : "";
@@ -433,6 +956,8 @@
         else { sortKey = key; sortAsc = key !== "latency_ms"; }
         document.querySelectorAll("th.sortable .caret").forEach(c => c.textContent = "");
         th.querySelector(".caret").textContent = sortAsc ? "\u25B4" : "\u25BE";
+        th.closest("tr").querySelectorAll("th").forEach(t => t.removeAttribute("aria-sort"));
+        th.setAttribute("aria-sort", sortAsc ? "ascending" : "descending");
         render();
       });
     });
@@ -454,6 +979,11 @@
         }
         results.length = 0;
         render();
+        resetBanner();
+        scanStartMs = Date.now();
+        elapsedTimer = setInterval(tickElapsed, 500);
+        statsEl.hidden = false;
+        progressTrack.hidden = false;
         showStatus("Scanning\u2026", "running");
         cancelBtn.disabled = false;
       } catch (err) {
@@ -462,12 +992,16 @@
     });
 
     cancelBtn.addEventListener("click", async () => {
+      showStatus("Cancelling\u2026", "running");
       await fetch("/api/cancel", { method: "POST" });
     });
 
     resetBtn.addEventListener("click", async () => {
       results.length = 0;
       render();
+      resetBanner();
+      statsEl.hidden = true;
+      progressTrack.hidden = true;
       showStatus("Idle. Results cleared.");
       await fetch("/api/reset", { method: "POST" });
     });
@@ -512,7 +1046,6 @@
       return lines.join("\n") + "\n";
     }
 
-    const exportBtn = document.getElementById("export-btn");
     exportBtn.addEventListener("click", () => {
       const fmt = document.getElementById("export-format").value;
       const blob = fmt === "json"
@@ -544,24 +1077,31 @@
     const es = new EventSource("/api/events");
     es.addEventListener("progress", (e) => {
       const p = JSON.parse(e.data);
-      const total = p.total != null ? ` / ${p.total}` : "";
-      showStatus(`Checked ${p.scanned}${total} \u2014 ${p.found} working`, "running");
+      showProgress(p);
+      showStatus(`Checked ${statScanned.textContent} \u2014 ${p.found} working`, "running");
     });
     es.addEventListener("result", (e) => {
       results.push(JSON.parse(e.data));
       render();
+      statFound.textContent = results.length.toLocaleString();
     });
     es.addEventListener("finished", (e) => {
       const s = JSON.parse(e.data);
+      if (elapsedTimer) { clearInterval(elapsedTimer); elapsedTimer = null; }
+      statFound.textContent = s.found.toLocaleString();
+      progressTrack.classList.remove("indeterminate");
+      progressFill.style.width = "100%";
       cancelBtn.disabled = true;
-      showStatus(`Done: ${s.scanned} scanned, ${s.found} found in ${(s.duration_ms / 1000).toFixed(1)}s`);
+      showStatus(`Done: ${s.scanned.toLocaleString()} scanned, ${s.found} found in ${(s.duration_ms / 1000).toFixed(1)}s`, "done");
     });
     es.addEventListener("failed", (e) => {
+      if (elapsedTimer) { clearInterval(elapsedTimer); elapsedTimer = null; }
+      progressTrack.classList.remove("indeterminate");
       cancelBtn.disabled = true;
-      showStatus(`Scan failed: ${JSON.parse(e.data)}`);
+      showStatus(`Scan failed: ${JSON.parse(e.data)}`, "error");
     });
 
-    // htmx handles the mode/preset radio toggle for the count input.
+    // target radio: preset/count toggle
     document.querySelectorAll('input[name="target-radio"]').forEach(r =>
       r.addEventListener("change", () => {
         document.getElementById("preset-row").querySelectorAll("input,select").forEach(f => f.disabled = r.value !== "preset");
@@ -569,50 +1109,54 @@
       }));
 
     const p2Fields = ["phase2_fragment", "phase2_packets", "phase2_length", "phase2_interval", "phase2_snis", "phase2_probe_url", "phase2_concurrency"];
+    const form = document.getElementById("scan-form");
 
     const FRAGMENT_PRESETS = {
       Light: { packets: "tlshello", length: "100-200", interval: "10-20" },
       Medium: { packets: "tlshello", length: "50-200", interval: "10-40" },
       Heavy: { packets: "tlshello", length: "10-300", interval: "5-50" }
     };
-    const fragmentForm = document.getElementById("scan-form");
 
     function fillFragmentFields(values) {
-      fragmentForm.elements["phase2_packets"].value = values.packets;
-      fragmentForm.elements["phase2_length"].value = values.length;
-      fragmentForm.elements["phase2_interval"].value = values.interval;
+      form.elements["phase2_packets"].value = values.packets;
+      form.elements["phase2_length"].value = values.length;
+      form.elements["phase2_interval"].value = values.interval;
     }
 
     function syncFragmentFields() {
-      const preset = fragmentForm.elements["phase2_fragment"].value;
+      const preset = form.elements["phase2_fragment"].value;
       if (preset === "Off") fillFragmentFields({ packets: "tlshello", length: "", interval: "" });
       else if (FRAGMENT_PRESETS[preset]) fillFragmentFields(FRAGMENT_PRESETS[preset]);
     }
-    fragmentForm.elements["phase2_fragment"].addEventListener("change", syncFragmentFields);
+    form.elements["phase2_fragment"].addEventListener("change", syncFragmentFields);
     ["phase2_packets", "phase2_length", "phase2_interval"].forEach(name => {
-      fragmentForm.elements[name].addEventListener("input", () => {
-        const preset = fragmentForm.elements["phase2_fragment"].value;
+      form.elements[name].addEventListener("input", () => {
+        const preset = form.elements["phase2_fragment"].value;
         if (!FRAGMENT_PRESETS[preset]) return;
-        if (fragmentForm.elements[name].value !== FRAGMENT_PRESETS[preset][name.slice(7)]) {
-          fragmentForm.elements["phase2_fragment"].value = "Custom";
+        if (form.elements[name].value !== FRAGMENT_PRESETS[preset][name.slice(7)]) {
+          form.elements["phase2_fragment"].value = "Custom";
         }
       });
     });
-    document.getElementById("scan-form").elements["phase2_configs"].addEventListener("input", (e) => {
+    form.elements["phase2_configs"].addEventListener("input", (e) => {
       const on = (e.target.value.trim() !== "");
-      p2Fields.forEach(n => document.getElementById("scan-form").elements[n].disabled = !on);
+      p2Fields.forEach(n => form.elements[n].disabled = !on);
     });
 
-    document.getElementById("scan-form").elements["mode"].addEventListener("change", (e) => {
+    // mode segmented control: CDN / WARP
+    const warpProbesLabel = document.getElementById("warp-probes-label");
+    const warpEndpointsRow = document.getElementById("warp-endpoints-row");
+    const includeV6Label = document.getElementById("include-v6-label");
+    const presetRow = document.getElementById("preset-row");
+
+    function onModeChange(e) {
       const warpMode = e.target.value === "Warp";
-      const form = document.getElementById("scan-form");
-      document.getElementById("warp-probes-label").hidden = !warpMode;
-      document.getElementById("warp-endpoints-row").hidden = !warpMode;
-      document.getElementById("include-v6-label").hidden = warpMode;
+      warpProbesLabel.hidden = !warpMode;
+      warpEndpointsRow.hidden = !warpMode;
+      includeV6Label.hidden = warpMode;
       form.elements["phase2_configs"].disabled = warpMode;
       p2Fields.forEach(n => form.elements[n].disabled = warpMode);
-      document.getElementById("preset-row").querySelectorAll("input,select")
-        .forEach(f => f.disabled = warpMode);
+      presetRow.querySelectorAll("input,select").forEach(f => f.disabled = warpMode);
       if (warpMode) {
         form.elements["target-radio"].value = "count";
         form.elements["count"].disabled = false;
@@ -623,15 +1167,16 @@
         }
       }
       syncWarpVerify();
-    });
+    }
+    form.querySelectorAll('input[name="mode"]').forEach(r => r.addEventListener("change", onModeChange));
 
-    const verifyBox = document.getElementById("scan-form").elements["warp_verify"];
-    const wgconfField = document.getElementById("scan-form").elements["warp_wgconf"];
+    const verifyBox = form.elements["warp_verify"];
+    const wgconfField = form.elements["warp_wgconf"];
     const wgconfFileBtn = document.getElementById("wgconf-file-btn");
     const wgconfFile = document.getElementById("wgconf-file");
 
     function syncWarpVerify() {
-      const warpMode = document.getElementById("scan-form").elements["mode"].value === "Warp";
+      const warpMode = form.elements["mode"].value === "Warp";
       wgconfField.disabled = !warpMode || !verifyBox.checked;
       verifyBox.disabled = !warpMode || !wgconfField.value.trim();
       wgconfFileBtn.disabled = !warpMode;
@@ -733,7 +1278,6 @@
     }
 
     function applyConfig(cfg) {
-      const form = document.getElementById("scan-form");
       form.elements["mode"].value = cfg.mode === "Warp" ? "Warp" : "Cdn";
       form.elements["ports"].value = Array.isArray(cfg.ports) ? cfg.ports.join(",") : "443";
       form.elements["concurrency"].value = cfg.concurrency ?? 200;
@@ -769,7 +1313,7 @@
       // Re-run the enable/disable handlers so the form reflects the loaded config.
       form.elements["target-radio"].dispatchEvent(new Event("change"));
       form.elements["phase2_configs"].dispatchEvent(new Event("input"));
-      form.elements["mode"].dispatchEvent(new Event("change"));
+      form.querySelector('input[name="mode"]:checked').dispatchEvent(new Event("change"));
       form.elements["phase2_fragment"].dispatchEvent(new Event("change"));
       syncWarpVerify();
     }
@@ -797,6 +1341,7 @@
       }
     });
 
+    render();
     refreshProfiles();
   </script>
 </body>
