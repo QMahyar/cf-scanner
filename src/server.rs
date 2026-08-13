@@ -4,7 +4,9 @@
 //! serialized.
 
 use std::convert::Infallible;
-use std::sync::Arc;
+use std::fs;
+use std::sync::{Arc, RwLock};
+use std::time::Duration;
 
 use axum::extract::State;
 use axum::http::StatusCode;
@@ -20,15 +22,116 @@ use tower_http::services::ServeDir;
 
 use crate::api::types::{ScanConfig, ScanEvent, ScanSummary, Verdict};
 use crate::engine::ScanController;
+use crate::paths;
+use crate::ranges::{self, CidrPool, HttpGet};
 
 const EMBEDDED_INDEX: &str = include_str!("../embed/index.html");
+const DEFAULT_RANGES_REFRESH_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
 
 struct AppState {
     controller: Arc<ScanController>,
+    ranges: Arc<RangesState>,
+}
+
+/// What /api/ranges serves: the current pool plus when it was last refreshed.
+struct RangesInner {
+    pool: CidrPool,
+    last_updated: Option<String>,
+}
+
+type Persist = Box<dyn Fn(&CidrPool, &str) -> anyhow::Result<()> + Send + Sync>;
+
+struct RangesState {
+    inner: RwLock<RangesInner>,
+    persist: Persist,
+}
+
+impl RangesState {
+    /// Production state: the refreshed data-dir file when present, else the
+    /// bundled list; the embedded-list load time stands in for last_updated
+    /// until the first successful refresh.
+    fn load() -> Arc<Self> {
+        let text = paths::refreshed_ranges_path()
+            .ok()
+            .and_then(|p| fs::read_to_string(p).ok());
+        let now = ranges::rfc3339_utc(ranges::unix_now());
+        let (pool, last_updated) = match text {
+            Some(text) => (
+                CidrPool::parse(&text).unwrap_or_else(|_| CidrPool::bundled()),
+                ranges::last_updated_of(&text).or(Some(now)),
+            ),
+            None => (CidrPool::bundled(), Some(now)),
+        };
+        Arc::new(Self {
+            inner: RwLock::new(RangesInner { pool, last_updated }),
+            persist: Box::new(ranges::write_pool),
+        })
+    }
+
+    /// Test constructor: persistence is a no-op so background-refresh tests
+    /// never touch the data dir.
+    #[cfg(test)]
+    fn load_text(text: &str, last_updated: Option<&str>) -> Arc<Self> {
+        let pool = CidrPool::parse(text).unwrap_or_else(|_| CidrPool::bundled());
+        Arc::new(Self {
+            inner: RwLock::new(RangesInner {
+                pool,
+                last_updated: last_updated.map(str::to_owned),
+            }),
+            persist: Box::new(|_, _| Ok(())),
+        })
+    }
+
+    /// One refresh cycle: fetch + validate, persist (best-effort, logged),
+    /// then swap the in-memory snapshot. Errors leave the last good data.
+    async fn refresh(&self, http: &impl HttpGet) -> anyhow::Result<()> {
+        let pool = ranges::fetch_official(http).await?;
+        let last_updated = ranges::rfc3339_utc(ranges::unix_now());
+        if let Err(err) = (self.persist)(&pool, &last_updated) {
+            tracing::warn!("ranges refresh: could not persist to disk: {err:#}");
+        }
+        let mut inner = self.inner.write().expect("ranges state lock");
+        inner.pool = pool;
+        inner.last_updated = Some(last_updated);
+        Ok(())
+    }
+
+    /// Spawns the refresh loop; `interval` overrides the 24h default (tests
+    /// use a short one). Never ends; a failed cycle is logged and the last
+    /// good data stays in place. The first tick fires immediately.
+    fn spawn_refresh<H>(self: &Arc<Self>, interval: Option<Duration>, http: Arc<H>)
+    where
+        H: HttpGet + Send + Sync + 'static,
+    {
+        let interval = interval.unwrap_or(DEFAULT_RANGES_REFRESH_INTERVAL);
+        let this = Arc::clone(self);
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(interval);
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                ticker.tick().await;
+                if let Err(err) = this.refresh(http.as_ref()).await {
+                    tracing::warn!(
+                        "ranges background refresh failed (keeping last good data): {err:#}"
+                    );
+                }
+            }
+        });
+    }
 }
 
 pub fn router(controller: Arc<ScanController>) -> Router {
-    let state = Arc::new(AppState { controller });
+    let ranges = RangesState::load();
+    ranges.spawn_refresh(None, Arc::new(ranges::RealHttp));
+    router_with(controller, ranges)
+}
+
+/// Router with an injected ranges state (tests).
+fn router_with(controller: Arc<ScanController>, ranges_state: Arc<RangesState>) -> Router {
+    let state = Arc::new(AppState {
+        controller,
+        ranges: ranges_state,
+    });
     Router::new()
         .route("/", get(index))
         .route("/api/scan", post(start_scan))
@@ -105,13 +208,17 @@ async fn reset(State(state): State<Arc<AppState>>) -> StatusCode {
 struct RangesPayload {
     bundled: Vec<String>,
     host_count: u64,
+    /// RFC3339 UTC of the last successful refresh (or the embedded-list load
+    /// time); None before anything has been loaded.
+    last_updated: Option<String>,
 }
 
-async fn ranges() -> Json<RangesPayload> {
-    let pool = crate::ranges::CidrPool::bundled();
+async fn ranges(State(state): State<Arc<AppState>>) -> Json<RangesPayload> {
+    let inner = state.ranges.inner.read().expect("ranges state lock");
     Json(RangesPayload {
-        bundled: pool.ranges().iter().map(|c| format!("{}", c)).collect(),
-        host_count: pool.host_count(),
+        bundled: inner.pool.ranges().iter().map(|c| format!("{c}")).collect(),
+        host_count: inner.pool.host_count(),
+        last_updated: inner.last_updated.clone(),
     })
 }
 
@@ -154,6 +261,26 @@ mod tests {
 
     use crate::api::types::{Mode, ScanTarget, StopCondition};
     use crate::probe::FakeTransport;
+    use crate::ranges::BUNDLED_RANGES;
+
+    const OFFICIAL_FIXTURE: &str =
+        r#"{"success":true,"result":{"ipv4_cidrs":["10.1.0.0/16"]},"errors":[]}"#;
+
+    struct FakeHttp(&'static str);
+
+    impl HttpGet for FakeHttp {
+        fn get<'a>(&'a self, _url: &'a str) -> ranges::HttpFuture<'a> {
+            Box::pin(async move { Ok(self.0.to_owned()) })
+        }
+    }
+
+    struct FailingHttp;
+
+    impl HttpGet for FailingHttp {
+        fn get<'a>(&'a self, _url: &'a str) -> ranges::HttpFuture<'a> {
+            Box::pin(async { Err(anyhow::anyhow!("network down")) })
+        }
+    }
 
     fn cfg(count: u32, found: u32) -> ScanConfig {
         ScanConfig {
@@ -169,15 +296,21 @@ mod tests {
     }
 
     /// Spawns the router on an ephemeral port with a scripted transport and
-    /// returns its address.
+    /// returns its address. Ranges are the bundled list with no timestamp.
     async fn serve(t: FakeTransport) -> SocketAddr {
+        serve_with_ranges(t, RangesState::load_text(BUNDLED_RANGES, None)).await
+    }
+
+    async fn serve_with_ranges(t: FakeTransport, ranges: Arc<RangesState>) -> SocketAddr {
         let controller = Arc::new(ScanController::new(Arc::new(t)));
         let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
             .await
             .unwrap();
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move {
-            axum::serve(listener, router(controller)).await.unwrap();
+            axum::serve(listener, router_with(controller, ranges))
+                .await
+                .unwrap();
         });
         addr
     }
@@ -336,18 +469,79 @@ mod tests {
         assert_eq!(status, 204);
     }
 
-    #[tokio::test]
-    async fn ranges_endpoint_reports_bundled_pool() {
-        let addr = serve(FakeTransport::new()).await;
-        let (status, text) = request(
+    async fn get_ranges(addr: SocketAddr) -> (u16, String) {
+        request(
             addr,
             "GET /api/ranges HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n",
             None,
         )
-        .await;
+        .await
+    }
+
+    /// The JSON body after the HTTP header block.
+    fn json_body(text: &str) -> &str {
+        text.split_once("\r\n\r\n").map(|(_, b)| b).unwrap_or(text)
+    }
+
+    #[tokio::test]
+    async fn ranges_endpoint_reports_bundled_pool() {
+        let addr = serve(FakeTransport::new()).await;
+        let (status, text) = get_ranges(addr).await;
         assert_eq!(status, 200);
         assert!(text.contains("\"bundled\":["), "{text}");
         assert!(text.contains("\"host_count\":"));
+        assert!(text.contains("\"last_updated\":null"), "{text}");
         assert!(text.contains("173.245.48.0/20"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn ranges_endpoint_reports_last_updated() {
+        let ranges = RangesState::load_text(BUNDLED_RANGES, Some("2026-08-13T12:34:56Z"));
+        let addr = serve_with_ranges(FakeTransport::new(), ranges).await;
+        let (status, text) = get_ranges(addr).await;
+        assert_eq!(status, 200);
+        assert!(
+            text.contains("\"last_updated\":\"2026-08-13T12:34:56Z\""),
+            "{text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn background_refresh_populates_last_updated() {
+        let ranges = RangesState::load_text("10.0.0.0/8", None);
+        ranges.spawn_refresh(
+            Some(Duration::from_millis(20)),
+            Arc::new(FakeHttp(OFFICIAL_FIXTURE)),
+        );
+        let addr = serve_with_ranges(FakeTransport::new(), ranges).await;
+        for _ in 0..50 {
+            let (status, text) = get_ranges(addr).await;
+            if status == 200 && text.contains("10.1.0.0/16") {
+                let payload: serde_json::Value =
+                    serde_json::from_str(json_body(&text)).expect("ranges payload JSON");
+                let ts = payload["last_updated"].as_str().expect("last_updated set");
+                assert!(ts.ends_with('Z'), "{ts}");
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("background refresh did not update the ranges payload");
+    }
+
+    #[tokio::test]
+    async fn background_refresh_failure_keeps_last_good_data() {
+        let ranges = RangesState::load_text("10.0.0.0/8", Some("2026-01-01T00:00:00Z"));
+        ranges.spawn_refresh(Some(Duration::from_millis(20)), Arc::new(FailingHttp));
+        let addr = serve_with_ranges(FakeTransport::new(), ranges).await;
+        // Let several failed cycles elapse; the state must not move.
+        tokio::time::sleep(Duration::from_millis(120)).await;
+        let (status, text) = get_ranges(addr).await;
+        assert_eq!(status, 200);
+        assert!(text.contains("10.0.0.0/8"), "{text}");
+        assert!(!text.contains("10.1.0.0/16"), "{text}");
+        assert!(
+            text.contains("\"last_updated\":\"2026-01-01T00:00:00Z\""),
+            "{text}"
+        );
     }
 }

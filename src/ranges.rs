@@ -442,19 +442,25 @@ pub fn parse_official(body: &str) -> Result<Vec<Cidr>> {
         .collect()
 }
 
-#[allow(async_fn_in_trait)] // internal seam; send bounds are irrelevant here
+/// One HTTPS GET, boxed so the seam is dyn-compatible and Send (the server
+/// spawns refreshes as a background task).
+pub type HttpFuture<'a> =
+    std::pin::Pin<Box<dyn std::future::Future<Output = Result<String>> + Send + 'a>>;
+
 pub trait HttpGet {
-    async fn get(&self, url: &str) -> Result<String>;
+    fn get<'a>(&'a self, url: &'a str) -> HttpFuture<'a>;
 }
 
 /// Minimal HTTPS GET (HTTP/1.1, rustls roots); enough for one JSON endpoint.
 pub struct RealHttp;
 
 impl HttpGet for RealHttp {
-    async fn get(&self, url: &str) -> Result<String> {
-        tokio::time::timeout(FETCH_TIMEOUT, fetch_tls(url))
-            .await
-            .context("fetch timed out")?
+    fn get<'a>(&'a self, url: &'a str) -> HttpFuture<'a> {
+        Box::pin(async move {
+            tokio::time::timeout(FETCH_TIMEOUT, fetch_tls(url))
+                .await
+                .context("fetch timed out")?
+        })
     }
 }
 
@@ -948,8 +954,8 @@ mod tests {
     struct FakeHttp(&'static str);
 
     impl HttpGet for FakeHttp {
-        async fn get(&self, _url: &str) -> Result<String> {
-            Ok(self.0.to_owned())
+        fn get<'a>(&'a self, _url: &'a str) -> HttpFuture<'a> {
+            Box::pin(async move { Ok(self.0.to_owned()) })
         }
     }
 
