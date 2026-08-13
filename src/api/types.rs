@@ -2,7 +2,7 @@
 //! agents). The engine returns domain types; the server maps them into these
 //! wire types. Never serialize engine types directly.
 
-use std::net::Ipv4Addr;
+use std::net::{IpAddr, Ipv4Addr};
 
 use serde::{Deserialize, Serialize};
 
@@ -136,6 +136,10 @@ pub struct ScanConfig {
     pub exclude: Vec<String>,
     /// CIDRs to scan INSTEAD of the bundled ranges; empty = bundled ranges.
     pub custom_cidrs: Vec<String>,
+    /// Include the bundled Cloudflare IPv6 ranges in the CDN phase-1 pool.
+    /// Off by default so existing scans stay IPv4-only unless requested.
+    #[serde(default)]
+    pub include_v6: bool,
     /// Parallel probes (1..=1000).
     pub concurrency: u16,
     /// Per-probe timeout in ms (100..=30_000).
@@ -156,6 +160,7 @@ impl Default for ScanConfig {
             stop: StopCondition::unlimited(20),
             exclude: Vec::new(),
             custom_cidrs: Vec::new(),
+            include_v6: false,
             concurrency: DEFAULT_CONCURRENCY,
             timeout_ms: DEFAULT_TIMEOUT_MS,
             include_v6: false,
@@ -167,7 +172,7 @@ impl Default for ScanConfig {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Verdict {
-    pub ip: Ipv4Addr,
+    pub ip: IpAddr,
     pub port: u16,
     pub latency_ms: Option<u32>,
     /// WARP and phase-2 only.
@@ -330,22 +335,22 @@ fn validate_phase2(p2: &Phase2Config) -> Result<(), ConfigError> {
     Ok(())
 }
 
-/// Validates `a.b.c.d/prefix` (IPv4 only by design).
+/// Validates `ip/prefix` for both address families.
 fn validate_cidr(s: &str) -> Result<(), ConfigError> {
     let (ip, prefix) = s
         .split_once('/')
         .ok_or_else(|| ConfigError::InvalidCidr(s.to_owned(), "missing /prefix".to_owned()))?;
-    let ip: Ipv4Addr = ip
+    let ip: IpAddr = ip
         .parse()
-        .map_err(|_| ConfigError::InvalidCidr(s.to_owned(), "not an IPv4 address".to_owned()))?;
-    let _ = ip;
+        .map_err(|_| ConfigError::InvalidCidr(s.to_owned(), "not an IP address".to_owned()))?;
+    let max_prefix = if ip.is_ipv4() { 32 } else { 128 };
     let prefix: u8 = prefix
         .parse()
         .map_err(|_| ConfigError::InvalidCidr(s.to_owned(), "prefix is not a number".to_owned()))?;
-    if prefix > 32 {
+    if prefix > max_prefix {
         return Err(ConfigError::InvalidCidr(
             s.to_owned(),
-            "prefix out of range 0-32".to_owned(),
+            format!("prefix out of range 0-{max_prefix}"),
         ));
     }
     Ok(())
@@ -468,7 +473,14 @@ mod tests {
 
     #[test]
     fn rejects_malformed_cidrs() {
-        for bad in ["garbage", "1.2.3.4", "1.2.3.4/33", "1.2.3.4/abc", "::1/64"] {
+        for bad in [
+            "garbage",
+            "1.2.3.4",
+            "1.2.3.4/33",
+            "1.2.3.4/abc",
+            "2606:4700::/129",
+            "2001:db8::g/64",
+        ] {
             let mut c = valid_config();
             c.exclude = vec![bad.to_owned()];
             assert!(c.validate().is_err(), "expected {bad} to be rejected");
@@ -477,11 +489,48 @@ mod tests {
 
     #[test]
     fn accepts_valid_cidrs() {
-        for good in ["1.2.3.0/24", "104.16.0.0/13", "172.64.0.0/13", "0.0.0.0/0"] {
+        for good in [
+            "1.2.3.0/24",
+            "104.16.0.0/13",
+            "172.64.0.0/13",
+            "0.0.0.0/0",
+            "2606:4700::/32",
+            "2400:cb00::/32",
+            "::1/128",
+        ] {
             let mut c = valid_config();
             c.exclude = vec![good.to_owned()];
             assert_eq!(c.validate(), Ok(()), "expected {good} to be accepted");
         }
+    }
+
+    #[test]
+    fn include_v6_defaults_to_false() {
+        assert!(!ScanConfig::default().include_v6);
+        let json = r#"{
+            "mode": "Cdn",
+            "target": {"Count": 10},
+            "ports": [443],
+            "stop": {"found": 1, "cap": null},
+            "exclude": [],
+            "custom_cidrs": [],
+            "concurrency": 10,
+            "timeout_ms": 3000,
+            "phase2": null,
+            "warp": null
+        }"#;
+        let cfg: ScanConfig = serde_json::from_str(json).unwrap();
+        assert!(!cfg.include_v6, "omitted field must deserialize as false");
+    }
+
+    #[test]
+    fn include_v6_round_trips_through_serde() {
+        let mut c = valid_config();
+        c.include_v6 = true;
+        let json = serde_json::to_string(&c).unwrap();
+        assert!(json.contains("\"include_v6\":true"), "{json}");
+        let back: ScanConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(c, back);
     }
 
     #[test]
