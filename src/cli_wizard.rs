@@ -10,7 +10,8 @@ use crate::api::types::{
 };
 use crate::engine::ScanController;
 use crate::warp;
-use anyhow::{Result, anyhow};
+use crate::warpgen;
+use anyhow::{Context as _, Result, anyhow};
 use dialoguer::{Confirm, Input, Select};
 
 /// WARP prompts: candidate count / full pools, ports, probes per endpoint,
@@ -105,6 +106,7 @@ pub async fn run(controller: Arc<ScanController>) -> Result<()> {
         println!("aborted");
         return Ok(());
     }
+    let is_warp = cfg.mode == Mode::Warp;
     let summary = controller
         .run_streaming(cfg, |e| match e {
             ScanEvent::Progress(p) => {
@@ -132,6 +134,57 @@ pub async fn run(controller: Arc<ScanController>) -> Result<()> {
     eprintln!(
         "done — scanned {}, found {} working in {} ms",
         summary.scanned, summary.found, summary.duration_ms
+    );
+    if is_warp {
+        prompt_registration(&controller).await?;
+    }
+    Ok(())
+}
+
+/// Task 14 opt-in: after a WARP scan, offer to register an identity with
+/// Cloudflare's client API and export a ready-to-use wgconf. The exported
+/// endpoint bakes in the best endpoint the scan just found.
+async fn prompt_registration(controller: &ScanController) -> Result<()> {
+    if !Confirm::new()
+        .with_prompt(
+            "Generate a WARP config (opt-in v0a884 registration via api.cloudflareclient.com)?",
+        )
+        .default(false)
+        .interact()?
+    {
+        return Ok(());
+    }
+    let best = controller
+        .results()
+        .into_iter()
+        .min_by_key(|v| v.latency_ms.unwrap_or(u32::MAX))
+        .map(|v| format!("{}:{}", v.ip, v.port));
+    if let Some(endpoint) = &best {
+        println!("best scan result: {endpoint} — will be the WireGuard endpoint");
+    }
+    let license: String = Input::new()
+        .with_prompt("WARP+ license key (empty = free account)")
+        .allow_empty(true)
+        .interact()?;
+    let out: String = Input::new()
+        .with_prompt("Output path (empty = print to stdout)")
+        .allow_empty(true)
+        .interact()?;
+    let out = if out.trim().is_empty() {
+        None
+    } else {
+        Some(std::path::PathBuf::from(out.trim()))
+    };
+    let license = (!license.trim().is_empty()).then_some(license.trim().to_owned());
+    warpgen::generate(out.as_deref(), license.as_deref(), best.as_deref())
+        .await
+        .context("registration failed")?;
+    match out {
+        Some(path) => eprintln!("wgconf written to {}", path.display()),
+        None => eprintln!("wgconf printed above"),
+    }
+    println!(
+        "tip: verify it with `cf-scanner scan --mode warp --warp-verify --warp-wgconf-file <saved>`"
     );
     Ok(())
 }

@@ -34,13 +34,18 @@ and browser form)
 ## Phase 4: WARP
 - [x] Task 12: WARP probe (pools, ports, boringtun, loss)
 - [x] Task 13: wgconf parse + real-config verification
-- [ ] Task 14: WARP registration (v0a884, wgconf builder, WARP+, export)
+- [x] Task 14: WARP registration (v0a884, wgconf builder, WARP+, export)
 
 **Checkpoint E:** WARP end-to-end
 (verified live 2026-08-13: probe against real endpoints → 162.159.192.5:2408
 open; 183/204 open in a 300-candidate run; found stopped at ~2×concurrency
 waves — soft-stop overshoot, known behavior; verify path proven by a real
 boringtun loopback handshake with a local keypair, `wg_verify_transport_completes_a_real_handshake_with_a_peer`)
+(updated 2026-08-13: registration proven live — real identity via v0a884 with
+wgcf-matching payload (full `tos` timestamp, `type` field, okhttp UA, retry on
+blackholed DNS IPs), real wgconf generated + exported, and the scan engine
+completed a real WireGuard handshake against 162.159.192.5:2408 with the
+registered keypair)
 
 ## Phase 5: Geo + integration
 - [ ] Task 15: Geo (mmdb embed, country, colo trace)

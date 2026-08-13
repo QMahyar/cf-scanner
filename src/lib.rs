@@ -12,5 +12,6 @@ pub mod ranges;
 pub mod server;
 pub mod verify;
 pub mod warp;
+pub mod warpgen;
 pub mod wgconf;
 pub mod xray;

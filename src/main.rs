@@ -1,10 +1,11 @@
+use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
 
 use anyhow::{Result, anyhow};
 use cf_scanner::api;
 use cf_scanner::api::types::{CdnPreset, Mode, ScanConfig, ScanEvent, ScanTarget, StopCondition};
-use cf_scanner::{cli_wizard, engine, paths, probe, ranges, server};
+use cf_scanner::{cli_wizard, engine, paths, probe, ranges, server, warpgen};
 use clap::{Parser, Subcommand, ValueEnum};
 use tracing_subscriber::EnvFilter;
 
@@ -39,12 +40,43 @@ enum Command {
         #[command(subcommand)]
         action: RangesAction,
     },
+    /// WARP identity: register with Cloudflare, generate/export a wgconf
+    WarpConfig {
+        #[command(subcommand)]
+        action: WarpConfigAction,
+    },
 }
 
 #[derive(Subcommand)]
 enum RangesAction {
     /// Re-fetch official Cloudflare IPv4 ranges from cloudflare.com
     Refresh,
+}
+
+#[derive(Subcommand)]
+enum WarpConfigAction {
+    /// Keygen + v0a884 registration; persist identity; write wgconf
+    Generate {
+        /// Output .conf path (default: print to stdout)
+        #[arg(long)]
+        out: Option<String>,
+        /// Optional WARP+ license key to bind
+        #[arg(long)]
+        license: Option<String>,
+        /// WireGuard endpoint `host:port` baked into the config (default:
+        /// engage.cloudflareclient.com:2408)
+        #[arg(long)]
+        endpoint: Option<String>,
+    },
+    /// Reuse the persisted identity: refresh the config and write it out
+    Export {
+        /// Output .conf path (default: print to stdout)
+        #[arg(long)]
+        out: Option<String>,
+        /// WireGuard endpoint `host:port` baked into the config
+        #[arg(long)]
+        endpoint: Option<String>,
+    },
 }
 
 #[derive(clap::Args, Clone)]
@@ -323,6 +355,32 @@ async fn run(cli: Cli) -> Result<()> {
                     "refreshed {n} IPv4 ranges -> {}",
                     paths::refreshed_ranges_path()?.display()
                 );
+                Ok(())
+            }
+        },
+        Command::WarpConfig { action } => match action {
+            WarpConfigAction::Generate {
+                out,
+                license,
+                endpoint,
+            } => {
+                let out = out.as_deref().map(PathBuf::from);
+                warpgen::generate(out.as_deref(), license.as_deref(), endpoint.as_deref()).await?;
+                match out {
+                    Some(path) => {
+                        println!("identity registered; wgconf written to {}", path.display())
+                    }
+                    None => eprintln!("identity registered; wgconf printed above"),
+                }
+                Ok(())
+            }
+            WarpConfigAction::Export { out, endpoint } => {
+                let out = out.as_deref().map(PathBuf::from);
+                warpgen::export(out.as_deref(), endpoint.as_deref()).await?;
+                match out {
+                    Some(path) => println!("wgconf written to {}", path.display()),
+                    None => eprintln!("wgconf printed above"),
+                }
                 Ok(())
             }
         },
