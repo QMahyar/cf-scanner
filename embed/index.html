@@ -114,6 +114,8 @@
             <label>Verify with your own wgconf (real keypair handshake)
               <textarea name="warp_wgconf" rows="3" placeholder="[Interface]&#10;PrivateKey = ..." disabled></textarea>
             </label>
+            <button id="wgconf-file-btn" type="button" class="outline" disabled>Load wgconf from file</button>
+            <input id="wgconf-file" type="file" accept=".conf,.txt,text/plain" hidden>
             <label><input type="checkbox" name="warp_verify" disabled>
               Verify discovered endpoints with the config above</label>
           </div>
@@ -576,18 +578,39 @@
           form.elements["ports"].value = "443";
         }
       }
+      syncWarpVerify();
     });
 
     const verifyBox = document.getElementById("scan-form").elements["warp_verify"];
     const wgconfField = document.getElementById("scan-form").elements["warp_wgconf"];
-    verifyBox.addEventListener("change", () => wgconfField.disabled = !verifyBox.checked);
+    const wgconfFileBtn = document.getElementById("wgconf-file-btn");
+    const wgconfFile = document.getElementById("wgconf-file");
+
+    function syncWarpVerify() {
+      const warpMode = document.getElementById("scan-form").elements["mode"].value === "Warp";
+      wgconfField.disabled = !warpMode || !verifyBox.checked;
+      verifyBox.disabled = !warpMode || !wgconfField.value.trim();
+      wgconfFileBtn.disabled = !warpMode;
+    }
+    syncWarpVerify();
+    verifyBox.addEventListener("change", syncWarpVerify);
     wgconfField.addEventListener("input", () => {
       if (!wgconfField.value.trim()) verifyBox.checked = false;
+      syncWarpVerify();
     });
-    document.getElementById("mode").addEventListener("change", e => {
-      const warpMode = e.target.value === "Warp";
-      verifyBox.disabled = !warpMode || !wgconfField.value.trim();
-      wgconfField.disabled = !warpMode || !verifyBox.checked;
+    wgconfFileBtn.addEventListener("click", () => wgconfFile.click());
+    wgconfFile.addEventListener("change", () => {
+      const file = wgconfFile.files && wgconfFile.files[0];
+      if (!file) return;
+      const reader = new FileReader();
+      reader.onload = () => {
+        wgconfField.value = String(reader.result || "");
+        if (wgconfField.value.trim()) verifyBox.checked = true;
+        syncWarpVerify();
+      };
+      reader.onerror = () => showStatus("Could not read the wgconf file.");
+      reader.readAsText(file);
+      wgconfFile.value = "";
     });
   </script>
 </body>
