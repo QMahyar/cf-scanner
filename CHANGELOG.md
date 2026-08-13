@@ -3,6 +3,41 @@
 All notable changes to CF-Scanner are documented here, grouped by
 Added / Changed / Fixed / Deprecated / Removed / Security, newest on top.
 
+## [Unreleased]
+
+Review-driven hardening from the
+[finished-product review (2026-08-13)](docs/review/product-review-2026-08-13.md).
+Changes merged by the `review/*` branches land here.
+
+### Security
+- Host-header allowlist + Origin/Sec-Fetch-Site checks close the
+  DNS-rebinding/CSRF/SSRF surface of the unauthenticated localhost API.
+- Phase-2 configs over the HTTP API accept URLs/URIs only; local file paths
+  stay CLI-only.
+- Profile responses mask WireGuard key material.
+- Trial xray configs written 0600; stale `trial-*` dirs swept on startup.
+- List fields (ports, SNIs, exclusions, CIDRs) capped and deduped.
+
+### Performance
+- Bounded probe fan-out: a worker pool drains the plan instead of spawning a
+  task per (host, port); `Preset::Full` can no longer OOM the process.
+
+### Reliability
+- xray lifecycle: graceful shutdown reaps children, fast corrupt-binary
+  detection, stderr surfaced (redacted), single pre-flight download.
+- Zero-candidate scans no longer destroy results; run failures surface
+  instead of hanging the UI.
+
+### UI
+- Scan-state machine rework: real "Cancelled" state, start/reset guards,
+  live-region + progressbar accessibility fixes, light-theme contrast pass,
+  SSE reconnect/recovery.
+
+### Docs
+- spec.md flipped to APPROVED; stack/structure/testing corrections.
+- README customer quickstart; docs index + QA runbook; task-tracker
+  reconciliation.
+
 ## [0.3.0] - 2026-08-13
 
 ### Added
@@ -124,3 +159,8 @@ Added / Changed / Fixed / Deprecated / Removed / Security, newest on top.
   previously such configs were rejected as invalid.
 - `custom_cidrs` now REPLACE the bundled ranges (was: merged in addition);
   exclusions still apply to custom ranges.
+
+[Unreleased]: https://github.com/QMahyar/cf-scanner/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/QMahyar/cf-scanner/releases/tag/v0.3.0
+[0.2.0]: https://github.com/QMahyar/cf-scanner/releases/tag/v0.2.0
+[0.1.0]: https://github.com/QMahyar/cf-scanner/releases/tag/v0.1.0

@@ -18,24 +18,60 @@ telemetry, nothing leaves your machine.
 
 ## Quick Start
 
+### Download
+
+Get the latest release from
+[GitHub Releases](https://github.com/QMahyar/cf-scanner/releases):
+
+- **Windows** — the MSI installer (easiest; upgrades in place) or the
+  portable zip
+- **Linux (x86_64 / aarch64)** — one-line shell installer:
+
+  ```sh
+  curl -LsSf https://github.com/QMahyar/cf-scanner/releases/latest/download/cf-scanner-installer.sh | sh
+  ```
+
+- **Any platform** — the portable zip/tarball: extract anywhere and run
+  `cf-scanner` directly (no install step)
+
+### Run
+
+```sh
+cf-scanner serve     # API + UI on http://127.0.0.1:8765
 ```
+
+Then open <http://127.0.0.1:8765> in your browser. Prefer a different port?
+`cf-scanner serve --port 9000`.
+
+### Build from Source
+
+```sh
 cargo build --release
-cargo run -- serve            # API + UI on http://127.0.0.1:8765
+cargo run -- serve    # API + UI on http://127.0.0.1:8765
 ```
+
+Rust 2024 toolchain required; see `docs/development.md` for the full local
+flow.
 
 ## Commands
 
+Installed binary: use `cf-scanner`. Running from source: replace `cf-scanner`
+with `cargo run --`.
+
 | Command | Description |
 |---------|-------------|
-| `cargo run -- serve` | Start API + embedded UI on 127.0.0.1:8765 |
-| `cargo run -- scan --mode cdn --preset quick --target 20` | One-shot CDN scan (JSON lines on stdout) |
-| `cargo run -- scan --mode warp --ports 2408,500` | One-shot WARP scan |
-| `cargo run -- ranges refresh` | Refresh bundled Cloudflare ranges (verified HTTPS fetch) |
+| `cf-scanner serve` | Start API + embedded UI on 127.0.0.1:8765 |
+| `cf-scanner scan --mode cdn --preset quick --target 20` | One-shot CDN scan (JSON lines on stdout) |
+| `cf-scanner scan --mode warp --ports 2408,500` | One-shot WARP scan |
+| `cf-scanner wizard` | Interactive wizard over the same engine |
+| `cf-scanner warp-config generate` | Opt-in WARP registration (v0a884 API) + wgconf build |
+| `cf-scanner warp-config export` | Export the registered WARP config as text/.conf |
+| `cf-scanner ranges refresh` | Refresh bundled Cloudflare ranges (verified HTTPS fetch) |
 | `cargo test` | Unit + integration tests |
 | `cargo clippy --all-targets -- -D warnings` | Lint |
 | `cargo fmt --check` | Format check |
 | `dist plan` | Release dry-run (cargo-dist 0.32) |
-| `dist build --artifacts=all --tag=v0.1.0` | Build release artifacts (normally via CI) |
+| `dist build --artifacts=all --tag=v0.3.0` | Build release artifacts (normally via CI) |
 
 ## Architecture
 
@@ -54,8 +90,8 @@ cargo run -- serve            # API + UI on http://127.0.0.1:8765
 - **GeoIP.** db-ip.com Lite country MMDB embedded at build time
   (`include_bytes!` + maxminddb). Country is resolved offline per verdict.
   Data is CC BY 4.0 — attribution link in the UI footer.
-- **Frontend.** One embedded HTML file (htmx + SSE, zero build step), served
-  by the same binary.
+- **Frontend.** One embedded HTML file (vanilla JS + native EventSource, zero
+  build step), served by the same binary.
 
 Design rationale lives in [docs/decisions/](docs/decisions/).
 
@@ -74,14 +110,37 @@ Design rationale lives in [docs/decisions/](docs/decisions/).
 
 ## Security
 
-- Binds to 127.0.0.1 only, unless an explicit bind flag is given.
+- Binds to 127.0.0.1 only; the port is configurable with `--port`.
 - Imported configs and keys are never logged or transmitted.
 - Downloaded binaries are checksum-verified against pinned versions
   (`data/xray-version.txt`, `data/geoip-version.txt`).
 - No history, no telemetry: results live in memory only; `reset` clears them.
 
+## Troubleshooting
+
+| Problem | Fix |
+|---------|-----|
+| `serve` exits: port 8765 in use | Pick another port: `cf-scanner serve --port 9000` |
+| Windows SmartScreen warning | Click "More info" → "Run anyway". Binaries are unsigned (accepted trade-off; see ADR-001). |
+| Termux: phase-2 xray fails to start | Termux builds static musl; xray linux-arm64 is glibc — install Termux's glibc package. |
+| Scan finds no results | Check network reachability, run `cf-scanner ranges refresh`, or try WARP mode / other ports. |
+
+## Support & Contributing
+
+Issues and feature requests:
+<https://github.com/QMahyar/cf-scanner/issues>. Contributions are welcome:
+open a PR from a fork, keeping `cargo test`, clippy `-D warnings`, and
+`fmt --check` green (`docs/development.md`). Architecture decisions live in
+`docs/decisions/`; the finished-product review (2026-08-13) is in
+[docs/review/](docs/review/product-review-2026-08-13.md).
+
+## License
+
+MIT.
+
 ## Documentation
 
+- `docs/README.md` — documentation index
 - `docs/intent/cf-scanner.md` — confirmed user intent + verified research
 - `docs/spec.md` — the approved spec
 - `docs/development.md` — local build + test flow

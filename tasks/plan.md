@@ -1,5 +1,10 @@
 # Implementation Plan: CF-Scanner
 
+> Superseded as the living ledger by `tasks/todo.md` and the
+> [finished-product review (2026-08-13)](../docs/review/product-review-2026-08-13.md).
+> The boxes below are historical: Tasks 1-14 are verified implemented
+> (CHANGELOG 0.1.0-0.3.0); open work lives in the review report.
+
 ## Overview
 
 One Rust binary: localhost HTTP API + embedded browser UI + CLI (flags, wizard,
@@ -40,9 +45,9 @@ Source of truth: `docs/spec.md` (approved 2026-08-12) and
 
 ### Phase 0: Foundation
 
-- [ ] Task 1: Project skeleton — workspace, Cargo.toml (pinned deps), layout,
+- [x] Task 1: Project skeleton — workspace, Cargo.toml (pinned deps), layout,
       .gitignore, data/ placeholders, PR CI workflow (test/clippy/fmt).
-- [ ] Task 2: API contract types (`src/api/types.rs`) + validation.
+- [x] Task 2: API contract types (`src/api/types.rs`) + validation.
 
 ### Checkpoint A: Foundation
 - [ ] `cargo build` clean, `cargo test` green, CI workflow file valid
@@ -50,13 +55,13 @@ Source of truth: `docs/spec.md` (approved 2026-08-12) and
 
 ### Phase 1: Engine core (CDN phase 1)
 
-- [ ] Task 3: Ranges — bundled cf-ranges.txt, CIDR expansion + sampling
+- [x] Task 3: Ranges — bundled cf-ranges.txt, CIDR expansion + sampling
       (presets, custom count), exclusion lists, custom CIDR input.
-- [ ] Task 4: TLS probe — tokio TCP connect + TLS handshake, timeout, latency,
+- [x] Task 4: TLS probe — tokio TCP connect + TLS handshake, timeout, latency,
       SNI, injectable transport.
-- [ ] Task 5: ScanController — stop conditions (N found / cap / run-until),
+- [x] Task 5: ScanController — stop conditions (N found / cap / run-until),
       worker pool, progress events, results store (last-scan + reset).
-- [ ] Task 6: Server API — axum routes (start scan, SSE events, results,
+- [x] Task 6: Server API — axum routes (start scan, SSE events, results,
       reset, health), static embed serving.
 
 ### Checkpoint B: Phase-1 engine works end-to-end via API + curl
@@ -65,10 +70,11 @@ Source of truth: `docs/spec.md` (approved 2026-08-12) and
 
 ### Phase 2: Frontend + CLI
 
-- [ ] Task 7: Frontend `embed/index.html` — Pico.css + htmx + SSE; config form
+- [x] Task 7: Frontend `embed/index.html` — single-file HTML, vanilla JS +
+      native EventSource, custom design system; config form
       (mode/preset/ports/stop), live sortable results table, copy/save/reset,
       db-ip attribution.
-- [ ] Task 8: CLI — `serve` / `scan` / `ranges` subcommands; JSON-lines
+- [x] Task 8: CLI — `serve` / `scan` / `ranges` subcommands; JSON-lines
       output; interactive wizard (mode, phase, count, stop, config import).
 
 ### Checkpoint C: Full UX loop works in browser and CLI
@@ -77,12 +83,12 @@ Source of truth: `docs/spec.md` (approved 2026-08-12) and
 
 ### Phase 3: CDN phase 2 (xray)
 
-- [ ] Task 9: Config parsers — vless/trojan/vmess/ss URIs, subscription URLs,
+- [x] Task 9: Config parsers — vless/trojan/vmess/ss URIs, subscription URLs,
       Xray JSON → OutboundSpec (normalized).
-- [ ] Task 10: Xray manager — bundled binary discovery, checksum-verified
+- [x] Task 10: Xray manager — bundled binary discovery, checksum-verified
       download fallback, spawn/cleanup, socks inbound configs, fragment preset
       builder (light/medium/heavy/custom → freedom + dialerProxy).
-- [ ] Task 11: Phase-2 verifier — swap IP, run xray, tiny HTTP GET through
+- [x] Task 11: Phase-2 verifier — swap IP, run xray, tiny HTTP GET through
       tunnel (configurable target), latency, verdict with fragment/SNI combo,
       bounded concurrency.
 
@@ -91,12 +97,12 @@ Source of truth: `docs/spec.md` (approved 2026-08-12) and
 
 ### Phase 4: WARP
 
-- [ ] Task 12: WARP probe — bundled pools, ports (2408 default), boringtun
+- [x] Task 12: WARP probe — bundled pools, ports (2408 default), boringtun
       Init, UDP send/recv, Response/Cookie classify, latency + loss, custom
       endpoint list.
-- [ ] Task 13: wgconf parse + real-config verification (WireGuard/AmneziaWG),
+- [x] Task 13: wgconf parse + real-config verification (WireGuard/AmneziaWG),
       endpoint swap, handshake with user keypair.
-- [ ] Task 14: WARP registration — v0a884 client (register/enable/fetch),
+- [x] Task 14: WARP registration — v0a884 client (register/enable/fetch),
       keygen, wgconf builder, WARP+ license binding, export text/.conf,
       identity persistence.
 
@@ -135,7 +141,7 @@ first. Sized S/M; pick up from the top.
 - [x] Task 21: Packaging - drop the foreign 0-byte placeholder from release
       archives (build.rs removes the other platform's placeholder after
       bundling); docs updated.
-- [x] Task 22: UI polish (htmx) - dark mode, result density toggle, latency
+- [x] Task 22: UI polish - dark mode, result density toggle, latency
       histogram in the summary bar.
 - [x] Task 23: Fragment preset editor in the UI (custom preset fields for
       light/medium/heavy), round-trip through the existing API config.

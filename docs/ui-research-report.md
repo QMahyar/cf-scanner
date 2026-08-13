@@ -1,5 +1,9 @@
 # CF-Scanner Frontend Research Report — 10 Agent Findings
 
+> **Annotation:** Research snapshot (pre-0.2.0). Implemented items are tracked
+> in CHANGELOG 0.2.0/0.3.0; superseded by the 0.3.0 custom design system. Do
+> not treat "Needs change" statuses as open work.
+
 Date: 2026-08-13
 Status: Research pass — recommendations with trust scores
 

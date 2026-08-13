@@ -3,6 +3,12 @@
 Date: 2026-08-12
 Status: Confirmed by user (interview-me skill)
 
+> **Note:** this is the ORIGINAL intent record. Shipped reality is tracked in
+> `docs/spec.md`, `CHANGELOG.md`, and the
+> [finished-product review (2026-08-13)](../review/product-review-2026-08-13.md);
+> later discrepancies here are intent-vs-shipped history, not open change
+> requests.
+
 ## Summary
 
 One cross-platform Rust binary that finds working Cloudflare IPs/endpoints for
@@ -12,8 +18,9 @@ browser frontend, and an agent-friendly CLI — all driving the same engine.
 ## The Five Lines
 
 - **Outcome:** A single binary that scans Cloudflare IPv4s (phase 1: TCP/TLS
-  handshake; phase 2: real-config verification via embedded xray-core) and WARP
-  UDP endpoints, reporting country/datacenter/latency/packet-loss per result.
+  handshake; phase 2: real-config verification via xray subprocess — crates.io
+  xray-core is NOT an embedder, see correction #1) and WARP UDP endpoints,
+  reporting country/datacenter/latency/packet-loss per result.
 - **User:** Two audiences — CLI agents (JSON API + flags/wizard) and normal
   users (browser frontend with a clean, fast, sortable results list).
 - **Why now:** The user's ISP blocks/throttles Cloudflare IPs selectively;
@@ -21,8 +28,9 @@ browser frontend, and an agent-friendly CLI — all driving the same engine.
 - **Success:** User picks mode/phase, IP count, stop condition via wizard, flags,
   or browser; results appear live; copy/save/reset supported; agents can script
   the entire flow over the local API.
-- **Constraint:** Single binary, IPv4 only, localhost only, no history (last
-  scan + reset), configs never leave the machine, no telemetry, no speed tests.
+- **Constraint:** Single binary, IPv4 by default (opt-in IPv6 since v0.2.0),
+  localhost only, no history (last scan + reset), configs never leave the
+  machine, no telemetry, no speed tests.
 
 ## Detailed Intent (verbatim decisions)
 
@@ -36,7 +44,8 @@ browser frontend, and an agent-friendly CLI — all driving the same engine.
 
 ### CDN/proxy mode
 - Phase 1: TCP+TLS handshake scan over bundled official Cloudflare ranges
-  (14 IPv4 subnets, ~1.5M IPs). `refresh` command re-fetches from Cloudflare.
+  (15 IPv4 subnets, ~1.5M IPs — 131.0.72.0/22 added upstream). `refresh`
+  command re-fetches from Cloudflare.
   Custom CIDR input. Per-scan dirty-range exclusion list.
   Presets: Quick (1 IP per /24) / Normal (~12K) / Full (~1.5M) + custom count.
   Ports configurable, default 443. Fast concurrency defaults, configurable.
@@ -79,8 +88,10 @@ browser frontend, and an agent-friendly CLI — all driving the same engine.
 ### Stack (confirmed)
 - Rust 2024, tokio, clap, serde, axum, tokio-rustls, reqwest,
   x25519-dalek + chacha20poly1305 + blake2 (WireGuard handshake),
-  maxminddb (IP2Location LITE mmdb), tracing, xray-core crate (embedded Xray).
-- Frontend: vanilla HTML + htmx + SSE + Pico.css, embedded, zero build step.
+  maxminddb (IP2Location LITE mmdb), tracing, xray as a spawned subprocess
+  (see correction #1).
+- Frontend: one embedded HTML file, vanilla JS + native EventSource + custom
+  design system (v0.3.0), zero build step.
 
 ### Release pipeline (confirmed)
 - Public GitHub repo, MIT license. Name: CF-Scanner / cf-scanner.
@@ -166,3 +177,5 @@ decision required where marked **[DECISION]**.
    zero deps, vendorable. `/cdn-cgi/trace` is unofficial but live-verified:
    plain `key=value` lines with `colo` (3-letter datacenter code).
    Sources: https://htmx.org/extensions/sse/, https://picocss.com
+   (Superseded by implementation: the shipped UI is vanilla JS + native
+   EventSource + custom design system (0.3.0) — see CHANGELOG.)
