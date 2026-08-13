@@ -336,15 +336,76 @@ pub fn effective_pool(custom_cidrs: &[String], exclude: &[String]) -> Result<Cid
     effective_pool_from(custom_cidrs, exclude, runtime.as_deref())
 }
 
-/// Fetches the official list over HTTPS and writes it to the data dir.
-pub async fn refresh_to_disk(http: &impl HttpGet) -> Result<usize> {
+pub const LAST_UPDATED_PREFIX: &str = "# last-updated: ";
+
+/// Fetches the official list, validates it, and returns the parsed pool.
+pub async fn fetch_official(http: &impl HttpGet) -> Result<CidrPool> {
     let body = http.get(OFFICIAL_IPS_URL).await?;
     let cidrs = parse_official(&body)?;
+    Ok(CidrPool { ranges: cidrs })
+}
+
+/// Fetches the official list over HTTPS and writes it to the data dir with a
+/// fresh last-updated header. Returns the number of ranges.
+pub async fn refresh_to_disk(http: &impl HttpGet) -> Result<usize> {
+    let pool = fetch_official(http).await?;
+    write_pool(&pool, &rfc3339_utc(unix_now()))?;
+    Ok(pool.ranges().len())
+}
+
+/// Atomically replaces the data-dir ranges file with `pool` (temp file +
+/// rename), tagged with the `last_updated` header that CLI refreshes and the
+/// server's background refresh share as one timestamp source.
+pub fn write_pool(pool: &CidrPool, last_updated: &str) -> Result<()> {
     let dir = paths::data_dir()?;
     fs::create_dir_all(&dir).context("create data dir")?;
-    fs::write(paths::refreshed_ranges_path()?, render_lines(&cidrs))
-        .context("write refreshed ranges")?;
-    Ok(cidrs.len())
+    let path = paths::refreshed_ranges_path()?;
+    let mut text = format!("{LAST_UPDATED_PREFIX}{last_updated}\n");
+    text.push_str(&render_lines(pool.ranges()));
+    let tmp = path.with_extension("txt.tmp");
+    // Scans read this file at start; a torn write would fail the scan. Rename
+    // is atomic on the same volume, so readers see old or new, never partial.
+    fs::write(&tmp, text).context("write refreshed ranges")?;
+    fs::rename(&tmp, &path).context("replace refreshed ranges")?;
+    Ok(())
+}
+
+/// The header's value if `text` is a refreshed ranges file we wrote.
+pub fn last_updated_of(text: &str) -> Option<String> {
+    text.lines().find_map(|l| {
+        l.trim()
+            .strip_prefix(LAST_UPDATED_PREFIX)
+            .map(str::to_owned)
+    })
+}
+
+pub fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// RFC3339 UTC timestamp for `unix_secs` (second precision). Civil date via
+/// Howard Hinnant's epoch-days algorithm; no chrono dependency (same
+/// approach as the WARP registration `tos` timestamp in warpgen).
+pub fn rfc3339_utc(unix_secs: u64) -> String {
+    let days = unix_secs / 86_400;
+    let z = days as i64 + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
+    let y = yoe + era * 400 + (m <= 2) as i64;
+    let (h, mi, s) = (
+        (unix_secs % 86_400) / 3600,
+        (unix_secs % 3600) / 60,
+        unix_secs % 60,
+    );
+    format!("{y:04}-{m:02}-{d:02}T{h:02}:{mi:02}:{s:02}Z")
 }
 
 #[derive(Deserialize)]
@@ -898,8 +959,31 @@ mod tests {
         let http = FakeHttp(body);
         assert_eq!(refresh_to_disk(&http).await.unwrap(), 1);
         let written = fs::read_to_string(paths::refreshed_ranges_path().unwrap()).unwrap();
-        assert_eq!(written, "10.0.0.0/8\n");
+        assert!(written.starts_with("# last-updated: "), "{written}");
+        assert!(written.ends_with("10.0.0.0/8\n"), "{written}");
+        assert!(last_updated_of(&written).is_some());
+        assert_eq!(CidrPool::parse(&written).unwrap().host_count(), 1 << 24);
         fs::remove_file(paths::refreshed_ranges_path().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn rfc3339_utc_formats_known_instants() {
+        assert_eq!(rfc3339_utc(0), "1970-01-01T00:00:00Z");
+        assert_eq!(rfc3339_utc(1_735_689_600), "2025-01-01T00:00:00Z");
+        assert_eq!(rfc3339_utc(1_735_734_896), "2025-01-01T12:34:56Z");
+        assert_eq!(rfc3339_utc(1_709_164_800), "2024-02-29T00:00:00Z");
+        assert_eq!(rfc3339_utc(1_784_160_000), "2026-07-16T00:00:00Z");
+    }
+
+    #[test]
+    fn last_updated_header_is_skipped_by_pool_and_read_back() {
+        let text = "# last-updated: 2025-01-01T12:34:56Z\n10.0.0.0/8\n";
+        assert_eq!(
+            last_updated_of(text).as_deref(),
+            Some("2025-01-01T12:34:56Z")
+        );
+        assert_eq!(last_updated_of("10.0.0.0/8\n"), None);
+        assert_eq!(CidrPool::parse(text).unwrap().host_count(), 1 << 24);
     }
 
     /// Plays a minimal no-auth socks server that answers CONNECT and serves
