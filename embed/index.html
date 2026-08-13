@@ -222,7 +222,7 @@
     <footer class="spacer muted">
       IP geolocation data &copy; <a href="https://db-ip.com" target="_blank" rel="noopener">db-ip.com</a>
       (db-ip Lite, <a href="https://creativecommons.org/licenses/by/4.0/" target="_blank" rel="noopener">CC BY 4.0</a>)
-      &mdash; CF-Scanner v0.1.0
+      &mdash; CF-Scanner v0.2.0
     </footer>
   </main>
 
@@ -473,12 +473,18 @@
     });
 
     copyBtn.addEventListener("click", async () => {
-      const text = results.map(v => `${v.ip}:${v.port}`).join("\n");
+      const text = results.map(v => {
+        const ip = v.ip.includes(":") ? `[${v.ip}]` : v.ip;
+        return `${ip}:${v.port}`;
+      }).join("\n");
       try { await navigator.clipboard.writeText(text); } catch { /* clipboard denied */ }
     });
 
     saveBtn.addEventListener("click", () => {
-      const lines = results.map(v => `${v.ip}:${v.port} ${v.latency_ms ?? "?"}ms`).join("\n");
+      const lines = results.map(v => {
+        const ip = v.ip.includes(":") ? `[${v.ip}]` : v.ip;
+        return `${ip}:${v.port} ${v.latency_ms ?? "?"}ms`;
+      }).join("\n");
       const blob = new Blob([lines + "\n"], { type: "text/plain" });
       const a = document.createElement("a");
       a.href = URL.createObjectURL(blob);
@@ -489,7 +495,9 @@
 
     function csvField(v) {
       if (v == null) return "";
-      const s = String(v);
+      let s = String(v);
+      // Neutralize spreadsheet formula injection (= + - @ lead-ins).
+      if (/^[=+\-@]/.test(s)) s = "'" + s;
       return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
     }
 

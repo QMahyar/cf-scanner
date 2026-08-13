@@ -11,6 +11,7 @@ pub const DEFAULT_WARP_PORTS: &[u16] = &[2408, 500, 854, 880, 1701, 3138, 4500];
 pub const DEFAULT_CONCURRENCY: u16 = 200;
 pub const DEFAULT_TIMEOUT_MS: u64 = 3_000;
 pub const DEFAULT_PROBE_URL: &str = "https://cp.cloudflare.com/";
+pub const MAX_SCAN_COUNT: u32 = 100_000;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Mode {
@@ -218,7 +219,7 @@ pub enum ScanEvent {
 pub enum ConfigError {
     #[error("port {0} out of range 1-65535")]
     InvalidPort(u16),
-    #[error("target count must be >= 1, got {0}")]
+    #[error("target count must be 1..=100000, got {0}")]
     InvalidCount(u32),
     #[error("stop.found must be >= 1, got {0}")]
     InvalidFound(u32),
@@ -251,8 +252,16 @@ pub enum ConfigError {
 impl ScanConfig {
     pub fn validate(&self) -> Result<(), ConfigError> {
         validate_ports(&self.ports)?;
-        if let ScanTarget::Count(0) = self.target {
-            return Err(ConfigError::InvalidCount(0));
+        if let ScanTarget::Count(n) = self.target {
+            if n == 0 {
+                return Err(ConfigError::InvalidCount(0));
+            }
+            // The engine spawns one probe task per sampled host and the plan
+            // pre-allocates a set of 2n entries: cap the count so an
+            // unauthenticated API call cannot abort the process (OOM).
+            if n > MAX_SCAN_COUNT {
+                return Err(ConfigError::InvalidCount(n));
+            }
         }
         if self.stop.found == 0 {
             return Err(ConfigError::InvalidFound(0));
@@ -349,6 +358,14 @@ fn validate_cidr(s: &str) -> Result<(), ConfigError> {
             format!("prefix out of range 0-{max_prefix}"),
         ));
     }
+    // A v6 /0 covers 2^128 addresses: `Cidr::host_count` saturates at
+    // u128::MAX, so exclusion/planning math on it would be off by one.
+    if ip.is_ipv6() && prefix == 0 {
+        return Err(ConfigError::InvalidCidr(
+            s.to_owned(),
+            "IPv6 /0 is not supported (host count exceeds u128)".to_owned(),
+        ));
+    }
     Ok(())
 }
 
@@ -420,6 +437,37 @@ mod tests {
         let mut c = valid_config();
         c.target = ScanTarget::Count(0);
         assert_eq!(c.validate(), Err(ConfigError::InvalidCount(0)));
+    }
+
+    #[test]
+    fn rejects_count_above_cap() {
+        let mut c = valid_config();
+        c.target = ScanTarget::Count(MAX_SCAN_COUNT + 1);
+        assert_eq!(
+            c.validate(),
+            Err(ConfigError::InvalidCount(MAX_SCAN_COUNT + 1))
+        );
+    }
+
+    #[test]
+    fn accepts_count_at_cap() {
+        let mut c = valid_config();
+        c.target = ScanTarget::Count(MAX_SCAN_COUNT);
+        assert_eq!(c.validate(), Ok(()));
+    }
+
+    #[test]
+    fn rejects_v6_slash_zero() {
+        let mut c = valid_config();
+        c.custom_cidrs = vec!["::/0".to_owned()];
+        assert!(matches!(c.validate(), Err(ConfigError::InvalidCidr(_, _))));
+    }
+
+    #[test]
+    fn accepts_v6_slash_one() {
+        let mut c = valid_config();
+        c.custom_cidrs = vec!["2001:db8::/1".to_owned()];
+        assert_eq!(c.validate(), Ok(()));
     }
 
     #[test]
