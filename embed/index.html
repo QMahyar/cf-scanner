@@ -132,9 +132,6 @@
                   <option value="Custom">Custom</option>
                 </select>
               </label>
-              <label>Custom fragment &ldquo;length,interval&rdquo;
-                <input name="phase2_custom" type="text" placeholder="100-200,10-20" disabled>
-              </label>
               <label>SNI variants (comma-separated; empty = each config&rsquo;s own)
                 <input name="phase2_snis" type="text" placeholder="www.cloudflare.com" disabled>
               </label>
@@ -143,6 +140,17 @@
               </label>
               <label>Parallel instances (1&ndash;8)
                 <input name="phase2_concurrency" type="number" min="1" max="8" value="3" disabled>
+              </label>
+            </div>
+            <div class="grid">
+              <label>Packets (custom preset)
+                <input name="phase2_packets" type="text" value="tlshello" disabled>
+              </label>
+              <label>Length in bytes (custom preset, &ldquo;min-max&rdquo;)
+                <input name="phase2_length" type="text" placeholder="100-200" disabled>
+              </label>
+              <label>Interval in ms (custom preset, &ldquo;min-max&rdquo;)
+                <input name="phase2_interval" type="text" placeholder="10-20" disabled>
               </label>
             </div>
           </details>
@@ -285,12 +293,13 @@
         const fragment = form.elements["phase2_fragment"].value;
         let custom_fragment = null;
         if (fragment === "Custom") {
-          const values = form.elements["phase2_custom"].value.trim();
-          const parts = values.split(",");
-          if (parts.length !== 2 || !parts[0].trim() || !parts[1].trim()) {
-            throw new Error('custom fragment needs "length,interval"');
+          const packets = form.elements["phase2_packets"].value.trim();
+          const length = form.elements["phase2_length"].value.trim();
+          const interval = form.elements["phase2_interval"].value.trim();
+          if (!packets || !length || !interval) {
+            throw new Error('custom fragment needs packets, length, and interval');
           }
-          custom_fragment = { packets: "tlshello", length: parts[0].trim(), interval: parts[1].trim() };
+          custom_fragment = { packets, length, interval };
         }
         phase2 = {
           configs: p2configs,
@@ -479,7 +488,36 @@
         document.getElementById("scan-form").elements["count"].disabled = r.value !== "count";
       }));
 
-    const p2Fields = ["phase2_fragment", "phase2_custom", "phase2_snis", "phase2_probe_url", "phase2_concurrency"];
+    const p2Fields = ["phase2_fragment", "phase2_packets", "phase2_length", "phase2_interval", "phase2_snis", "phase2_probe_url", "phase2_concurrency"];
+
+    const FRAGMENT_PRESETS = {
+      Light: { packets: "tlshello", length: "100-200", interval: "10-20" },
+      Medium: { packets: "tlshello", length: "50-200", interval: "10-40" },
+      Heavy: { packets: "tlshello", length: "10-300", interval: "5-50" }
+    };
+    const fragmentForm = document.getElementById("scan-form");
+
+    function fillFragmentFields(values) {
+      fragmentForm.elements["phase2_packets"].value = values.packets;
+      fragmentForm.elements["phase2_length"].value = values.length;
+      fragmentForm.elements["phase2_interval"].value = values.interval;
+    }
+
+    function syncFragmentFields() {
+      const preset = fragmentForm.elements["phase2_fragment"].value;
+      if (preset === "Off") fillFragmentFields({ packets: "tlshello", length: "", interval: "" });
+      else if (FRAGMENT_PRESETS[preset]) fillFragmentFields(FRAGMENT_PRESETS[preset]);
+    }
+    fragmentForm.elements["phase2_fragment"].addEventListener("change", syncFragmentFields);
+    ["phase2_packets", "phase2_length", "phase2_interval"].forEach(name => {
+      fragmentForm.elements[name].addEventListener("input", () => {
+        const preset = fragmentForm.elements["phase2_fragment"].value;
+        if (!FRAGMENT_PRESETS[preset]) return;
+        if (fragmentForm.elements[name].value !== FRAGMENT_PRESETS[preset][name.slice(7)]) {
+          fragmentForm.elements["phase2_fragment"].value = "Custom";
+        }
+      });
+    });
     document.getElementById("scan-form").elements["phase2_configs"].addEventListener("input", (e) => {
       const on = (e.target.value.trim() !== "");
       p2Fields.forEach(n => document.getElementById("scan-form").elements[n].disabled = !on);
