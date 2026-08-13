@@ -232,11 +232,16 @@ fn exe_name() -> &'static str {
     if cfg!(windows) { "xray.exe" } else { "xray" }
 }
 
-/// Bundled xray next to the running binary (release archives carry it).
+/// Bundled xray next to the running binary (release archives carry it; a
+/// directory include lands it under `bundled/` inside the archive).
 pub fn find_bundled() -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
-    let path = exe.parent()?.join(exe_name());
-    path.is_file().then_some(path)
+    let parent = exe.parent()?;
+    let candidates = [parent.to_path_buf(), parent.join("bundled")];
+    candidates
+        .into_iter()
+        .map(|dir| dir.join(exe_name()))
+        .find(|path| path.is_file())
 }
 
 /// Checked-out xray in the data dir (dev/fallback installs).

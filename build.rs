@@ -131,6 +131,14 @@ fn bundle_xray_if_requested() {
         eprintln!("error: moving {}: {err}", tmp.display());
         std::process::exit(1)
     });
+    // Archives must carry only this target's binary: drop the foreign
+    // 0-byte placeholder so dist's include glob picks up a single xray.
+    let foreign = if exe == "xray.exe" {
+        "xray"
+    } else {
+        "xray.exe"
+    };
+    let _ = std::fs::remove_file(PathBuf::from("data/bundled").join(foreign));
     println!("bundled {asset} -> {}", dest.display());
 }
 

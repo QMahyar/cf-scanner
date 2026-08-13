@@ -57,9 +57,12 @@ the real binary. Never commit the real binary (see ADR-001).
   installed. This is expected: GitHub's windows runners ship WiX, so CI
   produces the `.msi` even when your dev box can't. The zip archive is the
   artifact to inspect locally.
-- **Archives carry a 0-byte foreign placeholder** (e.g. `xray.exe` inside the
-  linux archive). Inert and harmless; a consequence of bundling the
-  per-platform binary over a shared tracked placeholder (ADR-001).
+- **Sequential multi-target dist builds locally need placeholder restores.**
+  Each dist build deletes the foreign platform's placeholder
+  (`data/bundled/xray.exe` on linux builds and vice versa), so a second
+  dist build for the other target fails with "placeholder missing" until you
+  `git restore data/bundled/xray data/bundled/xray.exe` between runs. CI is
+  unaffected (each job has its own checkout).
 - **SmartScreen warning** on unsigned Windows binaries — accepted, documented.
 - **Termux**: static musl build; xray linux-arm64 is glibc (needs the Termux
   glibc package). Document, don't fix.
@@ -76,6 +79,7 @@ in sync with XTLS release naming (arm64 = `-v8a` suffix, macOS = `macos`).
 | Symptom | Cause / fix |
 |---|---|
 | `error: could not download .../Xray-*.zip` at build | Asset name mapping stale in `build.rs::xray_asset`; verify names via `gh api repos/XTLS/Xray-core/releases/tags/<v>/assets` |
+| `error: ... placeholder missing; refusing to write xray` | Foreign-target placeholder deleted by a previous dist build; `git restore data/bundled/xray data/bundled/xray.exe` |
 | `xray checksum mismatch` | Pinned tag in `data/xray-version.txt` re-released; re-verify `.dgst` and pin the new tag |
 | `dist: command not found` | `~/.cargo/bin` not on PATH; call `dist.exe` by full path |
 | MSI step error (`candle`) | Local-only; WiX missing — see limitations above |

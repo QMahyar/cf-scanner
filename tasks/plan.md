@@ -121,8 +121,34 @@ Source of truth: `docs/spec.md` (approved 2026-08-12) and
       security pass; fix findings.
 
 ### Checkpoint G: v0.1.0 release ready
-- [ ] `dist plan --artifacts=all --tag=v0.1.0` green
+- [x] `dist plan --artifacts=all --tag=v0.1.0` green
 - [x] All tests/clippy/fmt green; review findings closed (optionals deferred)
+
+## Phase 7: v0.2 backlog (post-release)
+
+Candidate tasks only — nothing here is approved spec yet. Each item needs a
+spec pass before implementation; API contract changes (per AGENTS.md) ask
+first. Sized S/M; pick up from the top.
+
+- [x] Task 20: CI hardening - checkout@v6 (Node 20 deprecation), `cargo audit`
+      as a Checks job (security gate moves from local-only to enforced).
+- [x] Task 21: Packaging - drop the foreign 0-byte placeholder from release
+      archives (build.rs removes the other platform's placeholder after
+      bundling); docs updated.
+- [ ] Task 22: UI polish (htmx) - dark mode, result density toggle, latency
+      histogram in the summary bar.
+- [ ] Task 23: Fragment preset editor in the UI (custom preset fields for
+      light/medium/heavy), round-trip through the existing API config.
+- [ ] Task 24: Scan profiles - save/load named scan configs (config lives in
+      memory per session only; no persistence without spec sign-off).
+- [ ] Task 25: Results export - client-side CSV/JSON export of the last scan
+      (explicit user action; does not violate the no-history promise).
+- [ ] Task 26: WARP wgconf import UX - drag-and-drop / paste box matching the
+      phase-2 config import pattern.
+- [ ] Task 27: IPv6 candidate ranges in phase 1 (official CF v6 lists) with a
+      dedicated toggle.
+- [ ] Task 28: `ranges refresh` periodic background refresh + last-updated
+      timestamp in the UI.
 
 ## Risks and Mitigations
 

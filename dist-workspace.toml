@@ -14,11 +14,13 @@ targets = ["aarch64-apple-darwin", "aarch64-unknown-linux-gnu", "x86_64-apple-da
 
 # Archives carry the per-platform xray binary next to cf-scanner itself:
 # build.rs overwrites the committed placeholder with the checksum-verified
-# download whenever the `dist-bundle-xray` feature is on (dist builds only),
-# so the same include list works on every target.
-# NOTE: dist-workspace.toml is parsed as the flat v0 schema — no nested
+# download whenever the `dist-bundle-xray` feature is on (dist builds only)
+# and deletes the other platform's placeholder, so the directory include
+# ships exactly one xray binary per target. The directory lands as
+# `bundled/<exe>` inside the archive; find_bundled() covers that layout.
+# NOTE: dist-workspace.toml is parsed as the flat v0 schema - no nested
 # [dist.artifacts.archives] / [dist.builds.cargo] tables (they're ignored).
-include = ["data/bundled/xray", "data/bundled/xray.exe"]
+include = ["data/bundled"]
 
 # Enable the release-bundling feature only for dist builds; dev builds stay
 # untouched (runtime fallback download covers them, per spec).

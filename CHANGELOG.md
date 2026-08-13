@@ -9,6 +9,13 @@ Added / Changed / Fixed / Deprecated / Removed / Security, newest on top.
 - Development + release process docs (`docs/development.md`,
   `docs/release-process.md`, ADR-007) so future developers and agents follow
   one local build/test flow, versioning contract, and publishing pipeline.
+- Post-v0.1.0 roadmap in `tasks/plan.md` (Phase 7 candidate tasks).
+- `cargo audit` dependency scan as a mandatory CI check (was local-only).
+
+### Changed
+- Release archives now carry only the target platform's xray binary; the
+  foreign 0-byte placeholder is dropped at build time.
+- CI checks updated to `actions/checkout@v6` (Node 20 deprecation).
 
 ## [0.1.0] - 2026-08-13
 
