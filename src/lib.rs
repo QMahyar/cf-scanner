@@ -6,6 +6,7 @@ pub mod api;
 pub mod cli_wizard;
 pub mod configs;
 pub mod engine;
+pub mod geo;
 pub mod paths;
 pub mod probe;
 pub mod ranges;
