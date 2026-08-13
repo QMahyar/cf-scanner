@@ -115,7 +115,7 @@ Source of truth: `docs/spec.md` (approved 2026-08-12) and
 
 - [x] Task 17: dist config — 5 targets, installers (msi/shell/powershell),
       ExtraArtifacts (mmdb, xray), release.yml, plan verification.
-- [ ] Task 18: README + ADRs (xray bundling, boringtun, db-ip, fragment chain,
+- [x] Task 18: README + ADRs (xray bundling, boringtun, db-ip, fragment chain,
       single-binary UI, no-history), Termux/SmartScreen caveats.
 - [ ] Task 19: Final review — code-review-and-quality + code-simplification +
       security pass; fix findings.

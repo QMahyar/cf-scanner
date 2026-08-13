@@ -20,6 +20,22 @@ Added / Changed / Fixed / Deprecated / Removed / Security, newest on top.
   semantics. Phase-2/WARP modes explicitly rejected until Tasks 11/12.
 - Local HTTP server (axum) on 127.0.0.1: scan start, SSE event stream,
   results+summary, cancel, reset, ranges, embedded placeholder UI.
+- Phase-2 config parsers: `vless://`/`trojan://`/`vmess://`/`ss://` URIs,
+  subscription URLs, and Xray JSON → normalized outbound spec.
+- Phase-2 verification engine: spawns the official xray binary
+  (`xray run -c config.json`, local socks inbound), DPI-bypass fragmentation
+  (light/medium/heavy/custom presets via freedom outbound +
+  `sockopt.dialerProxy`), per-IP verdicts with SNI/fragment details.
+- WARP mode engine: UDP endpoint discovery with real WireGuard handshake
+  probes (boringtun), optional wgconf verification, opt-in client registration
+  via Cloudflare's API + wgconf export.
+- GeoIP: db-ip.com Lite country MMDB embedded at build time; country and
+  datacenter (colo) shown in results and sortable in the UI (CC BY 4.0).
+- Release pipeline: cargo-dist with msi/shell/powershell installers, 5-target
+  matrix, and the xray binary bundled into every archive (checksum-verified at
+  build time).
+- README, docs/decisions ADRs (xray bundling, boringtun, db-ip, fragment
+  chain, single-binary contract, no-history/no-telemetry).
 
 ### Changed
 - `stop.cap` may now be smaller than `stop.found` (the cap wins first);

@@ -55,7 +55,7 @@ registered keypair)
 
 ## Phase 6: Release + docs
 - [x] Task 17: dist config + release pipeline
-- [ ] Task 18: README + ADRs + caveats
+- [x] Task 18: README + ADRs + caveats
 - [ ] Task 19: Final review (review/simplify/security pass)
 
 **Checkpoint G:** v0.1.0 release ready
