@@ -11,6 +11,9 @@ browser UI + CLI, all over one in-process engine.
 
 - `docs/intent/cf-scanner.md` — confirmed user intent + verified research corrections
 - `docs/spec.md` — approved spec (commands, structure, style, boundaries, decisions)
+- `docs/development.md` — local build + test flow (incl. dist smoke test + placeholder restore)
+- `docs/release-process.md` — versioning control + publishing pipeline (release/tag/fix flows)
+- `docs/decisions/` — ADRs (ADR-007 = versioning + publishing decision)
 - `tasks/plan.md`, `tasks/todo.md` — implementation plan and task list (Task N references in commits)
 
 ## Skills
@@ -27,8 +30,14 @@ cargo run -- serve        # dev: API + UI on 127.0.0.1:8765
 cargo test                # unit + integration tests
 cargo clippy --all-targets -- -D warnings
 cargo fmt --check
+cargo audit               # dependency vulnerability scan (cargo install cargo-audit)
 dist plan --artifacts=all --tag=v0.1.0   # release dry-run (dist, formerly cargo-dist)
+# local packaging smoke test, then restore the tracked 0-byte placeholders:
+dist build --artifacts=local --target=<host-target>
+git restore data/bundled/xray data/bundled/xray.exe
 ```
+
+Release flow (tag → CI → GitHub Release) is in `docs/release-process.md` — never publish artifacts manually.
 
 ## Architecture
 

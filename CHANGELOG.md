@@ -3,6 +3,13 @@
 All notable changes to CF-Scanner are documented here, grouped by
 Added / Changed / Fixed / Deprecated / Removed / Security, newest on top.
 
+## [Unreleased]
+
+### Added
+- Development + release process docs (`docs/development.md`,
+  `docs/release-process.md`, ADR-007) so future developers and agents follow
+  one local build/test flow, versioning contract, and publishing pipeline.
+
 ## [0.1.0] - 2026-08-13
 
 ### Added

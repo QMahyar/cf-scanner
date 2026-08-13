@@ -84,5 +84,7 @@ Design rationale lives in [docs/decisions/](docs/decisions/).
 
 - `docs/intent/cf-scanner.md` — confirmed user intent + verified research
 - `docs/spec.md` — the approved spec
+- `docs/development.md` — local build + test flow
+- `docs/release-process.md` — versioning control + publishing pipeline
 - `docs/decisions/` — architecture decision records
 - `tasks/plan.md`, `tasks/todo.md` — implementation plan and task list
