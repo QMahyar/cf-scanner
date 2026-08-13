@@ -167,6 +167,8 @@
       Idle. Configure and start a scan.
     </section>
 
+    <section id="ranges-info" class="muted" aria-live="polite"></section>
+
     <section class="spacer" id="results-section">
       <hgroup>
         <h2>Results <span id="result-count" class="muted"></span></h2>
@@ -497,6 +499,22 @@
       a.click();
       URL.revokeObjectURL(a.href);
     });
+
+    fetch("/api/ranges")
+      .then(r => (r.ok ? r.json() : null))
+      .then(data => {
+        if (!data) return; // endpoint absent in this build; keep the section empty
+        const el = document.getElementById("ranges-info");
+        let text = "Bundled ranges: "
+          + (data.host_count != null ? data.host_count.toLocaleString() : "\u2014")
+          + " hosts";
+        if (data.last_updated) {
+          const when = new Date(data.last_updated);
+          if (!isNaN(when)) text += ` \u2014 updated ${when.toLocaleString()}`;
+        }
+        el.textContent = text;
+      })
+      .catch(() => { /* ranges endpoint unavailable; nothing to show */ });
 
     const es = new EventSource("/api/events");
     es.addEventListener("progress", (e) => {
