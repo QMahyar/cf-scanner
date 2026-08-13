@@ -203,6 +203,20 @@
       </table>
     </section>
 
+    <section class="spacer">
+      <hgroup>
+        <h2>Profiles</h2>
+        <p class="muted">Named scan configs, held in memory by the server for this session only.</p>
+      </hgroup>
+      <div class="grid">
+        <label>Profile name
+          <input id="profile-name" type="text" placeholder="home-vless" autocomplete="off">
+        </label>
+        <button id="profile-save-btn" type="button" class="secondary">Save current form</button>
+      </div>
+      <ul id="profile-list"></ul>
+    </section>
+
     <footer class="spacer muted">
       IP geolocation data &copy; <a href="https://db-ip.com" target="_blank" rel="noopener">db-ip.com</a>
       (db-ip Lite, <a href="https://creativecommons.org/licenses/by/4.0/" target="_blank" rel="noopener">CC BY 4.0</a>)
@@ -630,6 +644,147 @@
       reader.readAsText(file);
       wgconfFile.value = "";
     });
+
+    const profileList = document.getElementById("profile-list");
+    const profileName = document.getElementById("profile-name");
+
+    function profileRow(text) {
+      const li = document.createElement("li");
+      li.className = "profile-row";
+      const span = document.createElement("span");
+      span.textContent = text;
+      li.appendChild(span);
+      return li;
+    }
+
+    async function refreshProfiles() {
+      profileList.replaceChildren();
+      let profiles;
+      try {
+        const resp = await fetch("/api/profiles");
+        if (!resp.ok) {
+          profileList.appendChild(profileRow("Profiles unavailable (server build without profile support)."));
+          return;
+        }
+        const data = await resp.json();
+        profiles = Array.isArray(data) ? data
+          : (data && Array.isArray(data.profiles) ? data.profiles : []);
+      } catch {
+        profileList.appendChild(profileRow("Profiles unavailable (server build without profile support)."));
+        return;
+      }
+      if (profiles.length === 0) {
+        profileList.appendChild(profileRow("No profiles saved yet."));
+        return;
+      }
+      for (const p of profiles) {
+        if (!p || typeof p.name !== "string" || !p.name) continue;
+        const load = document.createElement("button");
+        load.type = "button";
+        load.className = "outline";
+        load.textContent = "Load";
+        load.addEventListener("click", () => loadProfile(p.name));
+        const del = document.createElement("button");
+        del.type = "button";
+        del.className = "secondary";
+        del.textContent = "Delete";
+        del.addEventListener("click", () => deleteProfile(p.name));
+        const li = profileRow(p.name);
+        li.appendChild(load);
+        li.appendChild(del);
+        profileList.appendChild(li);
+      }
+    }
+
+    async function loadProfile(name) {
+      try {
+        const resp = await fetch(`/api/profiles/${encodeURIComponent(name)}`);
+        if (!resp.ok) { showStatus(`Profile load failed: ${resp.status}`); return; }
+        const p = await resp.json();
+        if (!p || !p.config) { showStatus(`Profile "${name}" has no config.`); return; }
+        applyConfig(p.config);
+        showStatus(`Loaded profile "${name}".`);
+      } catch (err) {
+        showStatus(`Profile load failed: ${err}`);
+      }
+    }
+
+    async function deleteProfile(name) {
+      try {
+        const resp = await fetch(`/api/profiles/${encodeURIComponent(name)}`, { method: "DELETE" });
+        if (!resp.ok && resp.status !== 404) { showStatus(`Profile delete failed: ${resp.status}`); return; }
+        showStatus(`Profile "${name}" deleted.`);
+        refreshProfiles();
+      } catch (err) {
+        showStatus(`Profile delete failed: ${err}`);
+      }
+    }
+
+    function applyConfig(cfg) {
+      const form = document.getElementById("scan-form");
+      form.elements["mode"].value = cfg.mode === "Warp" ? "Warp" : "Cdn";
+      form.elements["ports"].value = Array.isArray(cfg.ports) ? cfg.ports.join(",") : "443";
+      form.elements["concurrency"].value = cfg.concurrency ?? 200;
+      form.elements["timeout_ms"].value = cfg.timeout_ms ?? 3000;
+      form.elements["found"].value = (cfg.stop && cfg.stop.found) || 20;
+      form.elements["cap"].value = cfg.stop && cfg.stop.cap != null ? cfg.stop.cap : "";
+      form.elements["exclude"].value = (cfg.exclude || []).join("\n");
+      form.elements["custom_cidrs"].value = (cfg.custom_cidrs || []).join("\n");
+
+      const isPreset = cfg.target && cfg.target.Preset != null;
+      form.elements["target-radio"].value = isPreset ? "preset" : "count";
+      if (isPreset) form.elements["preset"].value = cfg.target.Preset;
+      if (!isPreset) form.elements["count"].value = (cfg.target && cfg.target.Count) || 1;
+
+      const w = cfg.warp || null;
+      form.elements["warp_probes"].value = w ? w.probes_per_endpoint : 3;
+      form.elements["warp_endpoints"].value = w ? (w.custom_endpoints || []).join("\n") : "";
+      form.elements["warp_wgconf"].value = w && w.wgconf ? w.wgconf : "";
+      form.elements["warp_verify"].checked = !!(w && w.verify_with_wgconf);
+
+      const p2 = cfg.phase2 || null;
+      form.elements["phase2_configs"].value = p2 ? p2.configs.join("\n") : "";
+      form.elements["phase2_fragment"].value = p2 ? p2.fragment : "Off";
+      const cf = p2 && p2.custom_fragment ? p2.custom_fragment : null;
+      form.elements["phase2_packets"].value = cf ? cf.packets : "tlshello";
+      form.elements["phase2_length"].value = cf ? cf.length : "";
+      form.elements["phase2_interval"].value = cf ? cf.interval : "";
+      form.elements["phase2_snis"].value = p2 ? (p2.snis || []).join(",") : "";
+      form.elements["phase2_probe_url"].value = p2 ? p2.probe_url : "https://cp.cloudflare.com/";
+      form.elements["phase2_concurrency"].value = p2 ? p2.concurrency : 3;
+
+      // Re-run the enable/disable handlers so the form reflects the loaded config.
+      form.elements["target-radio"].dispatchEvent(new Event("change"));
+      form.elements["phase2_configs"].dispatchEvent(new Event("input"));
+      form.elements["mode"].dispatchEvent(new Event("change"));
+      form.elements["phase2_fragment"].dispatchEvent(new Event("change"));
+      syncWarpVerify();
+    }
+
+    document.getElementById("profile-save-btn").addEventListener("click", async () => {
+      const name = profileName.value.trim();
+      if (!name) { showStatus("Profile name required."); return; }
+      let cfg;
+      try { cfg = buildConfig(); } catch (err) { showStatus(`Cannot save profile: ${err}`); return; }
+      try {
+        const resp = await fetch(`/api/profiles/${encodeURIComponent(name)}`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ name, config: cfg })
+        });
+        if (!resp.ok) {
+          const detail = await resp.text();
+          showStatus(`Profile save failed: ${detail || resp.status}`);
+          return;
+        }
+        showStatus(`Profile "${name}" saved.`);
+        refreshProfiles();
+      } catch (err) {
+        showStatus(`Profile save failed: ${err}`);
+      }
+    });
+
+    refreshProfiles();
   </script>
 </body>
 </html>
