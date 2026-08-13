@@ -162,7 +162,10 @@ async fn prompt_registration(controller: &ScanController) -> Result<()> {
         .results()
         .into_iter()
         .min_by_key(|v| v.latency_ms.unwrap_or(u32::MAX))
-        .map(|v| format!("{}:{}", v.ip, v.port));
+        .map(|v| match v.ip {
+            std::net::IpAddr::V6(_) => format!("[{}]:{}", v.ip, v.port),
+            _ => format!("{}:{}", v.ip, v.port),
+        });
     if let Some(endpoint) = &best {
         println!("best scan result: {endpoint} — will be the WireGuard endpoint");
     }

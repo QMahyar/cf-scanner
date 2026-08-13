@@ -3,7 +3,7 @@
 //! /cdn-cgi/trace bodies parsed defensively (phase 2 only). An absent or
 //! unreadable embedded db degrades to `None` everywhere.
 
-use std::net::Ipv4Addr;
+use std::net::IpAddr;
 
 use maxminddb::geoip2::Country;
 
@@ -27,10 +27,11 @@ impl Geo {
         Self { country }
     }
 
-    /// ISO-3166 alpha-2 country code for an IP, when the embedded db has it.
-    pub fn country(&self, ip: Ipv4Addr) -> Option<String> {
+    /// ISO-3166 alpha-2 country code for an IP (v4 or v6), when the embedded
+    /// db has it.
+    pub fn country(&self, ip: IpAddr) -> Option<String> {
         let reader = self.country.as_ref()?;
-        let record = reader.lookup(ip.into()).ok()?;
+        let record = reader.lookup(ip).ok()?;
         let country = record.decode::<Country>().ok()??;
         country.country.iso_code.map(str::to_owned)
     }
@@ -70,7 +71,7 @@ mod tests {
     fn embedded_geo_constructs_without_the_db() {
         // Must not panic on machines where the build-time download failed.
         let geo = Geo::embedded();
-        let _ = geo.country(Ipv4Addr::LOCALHOST);
+        let _ = geo.country("127.0.0.1".parse().unwrap());
     }
 
     #[test]
@@ -81,7 +82,18 @@ mod tests {
         if geo.country.is_none() {
             return;
         }
-        let google_dns: Ipv4Addr = "8.8.8.8".parse().unwrap();
+        let google_dns: IpAddr = "8.8.8.8".parse().unwrap();
         assert_eq!(geo.country(google_dns).as_deref(), Some("US"));
+    }
+
+    #[test]
+    fn embedded_db_looks_up_v6_addresses_when_present() {
+        let geo = Geo::embedded();
+        if geo.country.is_none() {
+            return;
+        }
+        // Google GGC v6 allocation the db-ip Lite build resolves to US.
+        let google: IpAddr = "2607:f8b0:4001::1".parse().unwrap();
+        assert_eq!(geo.country(google).as_deref(), Some("US"));
     }
 }
