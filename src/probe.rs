@@ -9,7 +9,7 @@
 //! transport items are the lib's API, so no dead-code flag is needed.
 
 use std::future::Future;
-use std::net::Ipv4Addr;
+use std::net::IpAddr;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -40,11 +40,12 @@ pub enum ProbeError {
 
 /// `Ok(latency_ms)` when the endpoint completed TCP+TLS within the budget.
 /// Core type is an explicit future so `Arc<dyn Transport>` stays object-safe
-/// for the server.
+/// for the server. `ip` may be v4 or v6; the connect goes to `[ip]:port`
+/// either way.
 pub trait Transport: Send + Sync {
     fn probe(
         &self,
-        ip: Ipv4Addr,
+        ip: IpAddr,
         port: u16,
         timeout_ms: u64,
     ) -> Pin<Box<dyn Future<Output = Result<u32, ProbeError>> + Send + '_>>;
@@ -81,7 +82,7 @@ impl Default for TlsTransport {
 impl Transport for TlsTransport {
     fn probe(
         &self,
-        ip: Ipv4Addr,
+        ip: IpAddr,
         port: u16,
         timeout_ms: u64,
     ) -> Pin<Box<dyn Future<Output = Result<u32, ProbeError>> + Send + '_>> {
@@ -165,7 +166,7 @@ struct Scripted {
 /// outcome. Latencies are returned verbatim so stop-condition math is
 /// observable.
 pub struct FakeTransport {
-    script: std::sync::Mutex<std::collections::HashMap<(u32, u16), Scripted>>,
+    script: std::sync::Mutex<std::collections::HashMap<(IpAddr, u16), Scripted>>,
 }
 
 impl Default for FakeTransport {
@@ -182,28 +183,28 @@ impl FakeTransport {
     }
 
     /// Chainable builder entry.
-    pub fn ok(self, ip: Ipv4Addr, port: u16, latency_ms: u32) -> Self {
+    pub fn ok(self, ip: IpAddr, port: u16, latency_ms: u32) -> Self {
         self.insert(ip, port, Ok(latency_ms));
         self
     }
 
     /// Chainable builder entry for an Ok outcome that only resolves after
     /// `delay_ms` of real time.
-    pub fn ok_slow(self, ip: Ipv4Addr, port: u16, latency_ms: u32, delay_ms: u64) -> Self {
+    pub fn ok_slow(self, ip: IpAddr, port: u16, latency_ms: u32, delay_ms: u64) -> Self {
         self.insert(ip, port, Ok(latency_ms));
         self.script
             .lock()
             .unwrap()
-            .get_mut(&(u32::from(ip), port))
+            .get_mut(&(ip, port))
             .unwrap()
             .delay_ms = delay_ms;
         self
     }
 
     /// Mutable insert for tests that script transports incrementally.
-    pub fn insert(&self, ip: Ipv4Addr, port: u16, outcome: Result<u32, ProbeError>) {
+    pub fn insert(&self, ip: IpAddr, port: u16, outcome: Result<u32, ProbeError>) {
         self.script.lock().unwrap().insert(
-            (u32::from(ip), port),
+            (ip, port),
             Scripted {
                 outcome,
                 delay_ms: 0,
@@ -214,9 +215,9 @@ impl FakeTransport {
 
     /// Chainable builder for per-call outcomes (WARP loss tests): each call
     /// pops the next entry; the entry inserted first is used first.
-    pub fn seq(self, ip: Ipv4Addr, port: u16, outcomes: Vec<Result<u32, ProbeError>>) -> Self {
+    pub fn seq(self, ip: IpAddr, port: u16, outcomes: Vec<Result<u32, ProbeError>>) -> Self {
         self.script.lock().unwrap().insert(
-            (u32::from(ip), port),
+            (ip, port),
             Scripted {
                 outcome: outcomes
                     .last()
@@ -234,7 +235,7 @@ impl FakeTransport {
     }
 
     #[cfg(test)]
-    pub fn fail(self, ip: Ipv4Addr, port: u16, err: ProbeError) -> Self {
+    pub fn fail(self, ip: IpAddr, port: u16, err: ProbeError) -> Self {
         self.insert(ip, port, Err(err));
         self
     }
@@ -243,12 +244,11 @@ impl FakeTransport {
 impl Transport for FakeTransport {
     fn probe(
         &self,
-        ip: Ipv4Addr,
+        ip: IpAddr,
         port: u16,
         _timeout_ms: u64,
     ) -> Pin<Box<dyn Future<Output = Result<u32, ProbeError>> + Send + '_>> {
-        let (ip_int, _) = (u32::from(ip), port);
-        let mut scripted = match self.script.lock().unwrap().get(&(ip_int, port)) {
+        let mut scripted = match self.script.lock().unwrap().get(&(ip, port)) {
             Some(s) => s.clone(),
             None => Scripted {
                 outcome: Err(ProbeError::Refused("not scripted".to_owned())),
@@ -260,7 +260,7 @@ impl Transport for FakeTransport {
             self.script
                 .lock()
                 .unwrap()
-                .get_mut(&(ip_int, port))
+                .get_mut(&(ip, port))
                 .expect("scripted entry must still exist")
                 .sequence = scripted.sequence;
             scripted.outcome = next;
@@ -300,6 +300,18 @@ mod tests {
             t.probe("9.9.9.9".parse().unwrap(), 443, 3000).await,
             Err(ProbeError::Timeout { timeout_ms: 3000 })
         );
+    }
+
+    #[tokio::test]
+    async fn fake_keys_v6_addresses_by_family() {
+        let t = FakeTransport::new()
+            .ok("2606:4700::1".parse().unwrap(), 443, 7)
+            .ok("1.2.3.4".parse().unwrap(), 443, 9);
+        assert_eq!(
+            t.probe("2606:4700::1".parse().unwrap(), 443, 1000).await,
+            Ok(7)
+        );
+        assert_eq!(t.probe("1.2.3.4".parse().unwrap(), 443, 1000).await, Ok(9));
     }
 
     #[tokio::test]
