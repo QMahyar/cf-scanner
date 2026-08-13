@@ -287,13 +287,17 @@ fn load_identity() -> Result<Identity> {
 /// address/DNS/peer from the registration response, and `endpoint_override`
 /// (a working `host:port` from the scan) when given — defaulting to the
 /// engage endpoint.
-fn build_wgconf(secret: &StaticSecret, dev: &Device, endpoint_override: Option<&str>) -> WgConfig {
+fn build_wgconf(
+    secret: &StaticSecret,
+    dev: &Device,
+    endpoint_override: Option<&str>,
+) -> Result<WgConfig> {
     let private_key = base64::engine::general_purpose::STANDARD.encode(secret.to_bytes());
     let peer = dev
         .config
         .peers
         .first()
-        .expect("registration always yields a peer");
+        .ok_or_else(|| anyhow!("registration response carried no peer"))?;
     let addresses = &dev.config.interface.addresses;
     let address = [addresses.v4.as_str(), addresses.v6.as_str()]
         .into_iter()
@@ -305,7 +309,7 @@ fn build_wgconf(secret: &StaticSecret, dev: &Device, endpoint_override: Option<&
     } else {
         peer.allowed_ips.clone()
     };
-    WgConfig {
+    Ok(WgConfig {
         private_key,
         address,
         dns: Some(DNS.to_owned()),
@@ -322,7 +326,7 @@ fn build_wgconf(secret: &StaticSecret, dev: &Device, endpoint_override: Option<&
             persistent_keepalive: None,
             preshared_key: None,
         },
-    }
+    })
 }
 
 fn peer_endpoint(endpoint: &PeerEndpoint) -> String {
@@ -361,7 +365,7 @@ pub async fn generate(
         client.bind_license(&reg.id, &token, license).await?;
     }
     let reg = client.fetch(&reg.id, &token).await?;
-    let wgconf = build_wgconf(&secret, &reg, endpoint_override);
+    let wgconf = build_wgconf(&secret, &reg, endpoint_override)?;
     let text = render_wgconf(&wgconf);
     // The identity (keys included) is persisted so `export` works offline of
     // the keygen step; it is never printed or logged.
@@ -386,7 +390,7 @@ pub async fn export(out: Option<&Path>, endpoint_override: Option<&str>) -> Resu
     let client = WarpClient::new(DEFAULT_API_BASE.into(), DEFAULT_TIMEOUT);
     let reg = client.fetch(&identity.id, &identity.token).await?;
     let secret = StaticSecret::from(crate::wgconf::decode_key(&identity.private_key)?);
-    let text = render_wgconf(&build_wgconf(&secret, &reg, endpoint_override));
+    let text = render_wgconf(&build_wgconf(&secret, &reg, endpoint_override)?);
     write_out(out, &text)?;
     Ok(text)
 }
@@ -584,7 +588,7 @@ mod tests {
                 }],
             },
         };
-        let wg = build_wgconf(&secret, &dev, None);
+        let wg = build_wgconf(&secret, &dev, None).unwrap();
         assert_eq!(wg.peer.public_key, "AAAA");
         assert_eq!(
             wg.peer.endpoint.as_deref(),
@@ -602,7 +606,7 @@ mod tests {
         );
         assert_eq!(wg.peer.allowed_ips, vec!["0.0.0.0/0", "::/0"]);
         assert!(wg.address.contains("172.16.0.2/32"));
-        let over = build_wgconf(&secret, &dev, Some("1.2.3.4:2408"));
+        let over = build_wgconf(&secret, &dev, Some("1.2.3.4:2408")).unwrap();
         assert_eq!(over.peer.endpoint.as_deref(), Some("1.2.3.4:2408"));
         let text = render_wgconf(&wg);
         assert!(text.contains("PrivateKey"));

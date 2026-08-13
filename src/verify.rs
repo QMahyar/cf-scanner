@@ -77,44 +77,58 @@ impl TunnelProbe for XrayTunnelProbe {
             ..
         } = req;
         Box::pin(async move {
-            let xray_bin = xray::find_binary().ok_or_else(|| {
-                anyhow!("xray binary not found; bundle or download it into the data dir first")
-            })?;
             let work_dir = paths::data_dir().context("no data directory for trial configs")?;
             std::fs::create_dir_all(&work_dir)?;
-            let socks_port = pick_ephemeral_port().context("no free port for xray inbound")?;
-            let cfg = xray::build_config(
-                &spec,
-                dial_ip,
-                &preset,
-                custom.as_ref(),
-                sni.as_deref(),
-                socks_port,
-            )?;
             let trial_dir = fresh_trial_dir(&work_dir);
-            let mut proc = xray::spawn(&trial_dir, &xray_bin, &cfg).await?;
 
-            let started = Instant::now();
-            let outcome = ranges::get_via_socks(&probe_url, proc.socks_addr, timeout_ms).await;
-            let latency_ms = started.elapsed().as_millis() as u32;
-            proc.stop().await;
-            let _ = std::fs::remove_dir_all(&trial_dir);
+            // Trial dirs hold configs embedding the user's id/password;
+            // remove them even when the attempt dies mid-flight.
+            let outcome = async {
+                let xray_bin = match xray::find_binary() {
+                    Some(bin) => bin,
+                    None => {
+                        let fetch = xray::RealFetch;
+                        xray::download_binary(&fetch).await.with_context(
+                            || "xray binary missing; the checksum-verified download also failed",
+                        )?
+                    }
+                };
+                let socks_port = pick_ephemeral_port().context("no free port for xray inbound")?;
+                let cfg = xray::build_config(
+                    &spec,
+                    dial_ip,
+                    &preset,
+                    custom.as_ref(),
+                    sni.as_deref(),
+                    socks_port,
+                )?;
+                let mut proc = xray::spawn(&trial_dir, &xray_bin, &cfg).await?;
 
-            match outcome {
-                Ok(body) => Ok(TunnelResult {
-                    passed: true,
-                    latency_ms: Some(latency_ms),
-                    colo: crate::geo::parse_colo(&body),
-                }),
-                Err(err) => {
-                    tracing::debug!(%err, ip = %dial_ip, "phase-2 probe did not deliver 200");
-                    Ok(TunnelResult {
-                        passed: false,
-                        latency_ms: None,
-                        colo: None,
-                    })
+                let started = Instant::now();
+                let outcome = ranges::get_via_socks(&probe_url, proc.socks_addr, timeout_ms).await;
+                let latency_ms = started.elapsed().as_millis() as u32;
+                proc.stop().await;
+
+                match outcome {
+                    Ok(body) => Ok(TunnelResult {
+                        passed: true,
+                        latency_ms: Some(latency_ms),
+                        colo: crate::geo::parse_colo(&body),
+                    }),
+                    Err(err) => {
+                        tracing::debug!(%err, ip = %dial_ip, "phase-2 probe did not deliver 200");
+                        Ok(TunnelResult {
+                            passed: false,
+                            latency_ms: None,
+                            colo: None,
+                        })
+                    }
                 }
             }
+            .await;
+
+            let _ = std::fs::remove_dir_all(&trial_dir);
+            outcome
         })
     }
 }
@@ -141,10 +155,11 @@ fn pick_ephemeral_port() -> Result<u16> {
 }
 
 /// Discovers the xray binary and fails with a hint if it is absent. Exposed
-/// for the CLI/server to pre-flight before a phase-2 scan starts.
+/// for the CLI/server to pre-flight before a phase-2 scan starts (the real
+/// probe auto-downloads a checksum-verified binary when missing).
 pub fn require_xray_binary() -> Result<PathBuf> {
     xray::find_binary()
-        .ok_or_else(|| anyhow!("xray binary not found; run the checksum-verified download first"))
+        .ok_or_else(|| anyhow!("xray binary not found; it will be downloaded at phase 2"))
 }
 
 #[cfg(test)]

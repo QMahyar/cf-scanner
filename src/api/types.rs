@@ -204,6 +204,9 @@ pub enum ScanEvent {
     Progress(ScanProgress),
     Result(Box<Verdict>),
     Finished(ScanSummary),
+    /// The run aborted before finishing (e.g. phase-2 setup failed); the
+    /// message is redacted and safe for the UI/stderr. No `Finished` follows.
+    Failed(String),
 }
 
 #[derive(Debug, PartialEq, Eq, thiserror::Error)]

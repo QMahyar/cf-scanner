@@ -421,6 +421,32 @@ async fn fetch_tls(url: &str) -> Result<String> {
 }
 
 async fn fetch_tls_inner(url: &str, extra_headers: &str) -> Result<Vec<u8>> {
+    // GitHub release URLs and subscription links 30x to CDNs; follow up to
+    // 5 redirects so downloads survive the common 302 hop.
+    let mut current = url.to_owned();
+    for _ in 0..5 {
+        let (_fetched_url, status, headers, body) = fetch_one(&current, extra_headers).await?;
+        if matches!(status, 301 | 302 | 303 | 307 | 308) {
+            let location = headers
+                .iter()
+                .find(|h| h.to_ascii_lowercase().starts_with("location:"))
+                .map(|h| h.trim().strip_prefix("location:").unwrap_or("").trim())
+                .filter(|l| !l.is_empty())
+                .ok_or_else(|| anyhow!("redirect without Location from {current}"))?;
+            current = url::Url::parse(&current)?.join(location)?.to_string();
+            if !current.starts_with("https://") {
+                bail!("refusing non-https redirect to {current}");
+            }
+            continue;
+        }
+        return Ok(body);
+    }
+    bail!("too many redirects fetching {url}")
+}
+
+/// One HTTPS GET: returns (requested_url, status, headers, body). Bodies are
+/// capped (64 MiB) and chunked responses are decoded.
+async fn fetch_one(url: &str, extra_headers: &str) -> Result<(String, u16, Vec<String>, Vec<u8>)> {
     let rest = url
         .strip_prefix("https://")
         .ok_or_else(|| anyhow!("only https:// URLs supported"))?;
@@ -438,37 +464,86 @@ async fn fetch_tls_inner(url: &str, extra_headers: &str) -> Result<Vec<u8>> {
     let server_name =
         rustls::pki_types::ServerName::try_from(host.to_owned()).context("invalid hostname")?;
     let tls = tls_connector().connect(server_name, stream).await?;
-    send_http(tls, &request).await
+    let (status, headers, body) = send_http(tls, &request).await?;
+    Ok((url.to_owned(), status, headers, body))
 }
 
 fn http_request(host: &str, path: &str, extra_headers: &str) -> String {
     format!("GET {path} HTTP/1.1\r\nHost: {host}\r\n{extra_headers}\r\nConnection: close\r\n\r\n")
 }
 
-/// Sends `request` over the stream and returns the body of an `HTTP/1.1 200`
-/// reply (any other status is an error).
-async fn send_http<S>(stream: S, request: &str) -> Result<Vec<u8>>
+/// Sends `request` over the stream and parses the reply: status line,
+/// headers, and body (chunked transfer decoding applied). The body is capped
+/// at [`MAX_BODY_BYTES`] so untrusted responses can't exhaust memory.
+const MAX_BODY_BYTES: usize = 64 * 1024 * 1024;
+
+async fn send_http<S>(stream: S, request: &str) -> Result<(u16, Vec<String>, Vec<u8>)>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
-    let (mut rd, mut wr) = tokio::io::split(stream);
+    let (rd, mut wr) = tokio::io::split(stream);
     wr.write_all(request.as_bytes()).await?;
 
     let bytes: Vec<u8> = {
         let mut buf = Vec::new();
-        rd.read_to_end(&mut buf).await?;
+        rd.take(MAX_BODY_BYTES as u64 + 64 * 1024)
+            .read_to_end(&mut buf)
+            .await?;
         buf
     };
     let split = bytes
         .windows(4)
         .position(|w| w == b"\r\n\r\n")
         .context("malformed HTTP response")?;
-    let (headers, body) = bytes.split_at(split);
-    let headers = String::from_utf8_lossy(headers);
-    if !headers.starts_with("HTTP/1.1 200") {
-        bail!("HTTP error: {headers}");
+    let (head, body) = bytes.split_at(split);
+    let head = String::from_utf8_lossy(head);
+    let mut lines = head.lines();
+    let status_line = lines.next().context("empty HTTP response")?;
+    let status = status_line
+        .split_whitespace()
+        .nth(1)
+        .and_then(|s| s.parse().ok())
+        .context("malformed status line")?;
+    let headers: Vec<String> = lines.map(str::to_owned).collect();
+    let body = body[4..].to_vec();
+    let body = if headers.iter().any(|h| {
+        h.to_ascii_lowercase()
+            .starts_with("transfer-encoding: chunked")
+    }) {
+        decode_chunked(&body)?
+    } else {
+        body
+    };
+    Ok((status, headers, body))
+}
+
+/// Minimal HTTP/1.1 chunked decoder: `size\r\n data \r\n ... 0\r\n\r\n`.
+fn decode_chunked(mut input: &[u8]) -> Result<Vec<u8>> {
+    let mut out = Vec::new();
+    loop {
+        let line_end = input
+            .windows(2)
+            .position(|w| w == b"\r\n")
+            .context("truncated chunk size line")?;
+        let size_str = std::str::from_utf8(&input[..line_end])
+            .context("chunk size line not utf-8")?
+            .split(';')
+            .next()
+            .unwrap_or("");
+        let size = usize::from_str_radix(size_str.trim(), 16).context("malformed chunk size")?;
+        input = &input[line_end + 2..];
+        if size == 0 {
+            return Ok(out);
+        }
+        if size > MAX_BODY_BYTES - out.len() {
+            bail!("chunked body exceeds the {} cap", MAX_BODY_BYTES);
+        }
+        if input.len() < size + 2 {
+            bail!("truncated chunk data");
+        }
+        out.extend_from_slice(&input[..size]);
+        input = &input[size + 2..];
     }
-    Ok(body[4..].to_vec())
 }
 
 fn tls_connector() -> tokio_rustls::TlsConnector {
@@ -509,14 +584,18 @@ async fn get_via_socks_inner(url: &str, socks: SocketAddr) -> Result<Vec<u8>> {
     let mut stream = TcpStream::connect(socks).await?;
     socks5_connect(&mut stream, &host, port).await?;
     let request = http_request(&host, &path, "Accept: */*");
-    if use_tls {
+    let (status, _, body) = if use_tls {
         let server_name =
             rustls::pki_types::ServerName::try_from(host).context("invalid hostname")?;
         let tls = tls_connector().connect(server_name, stream).await?;
-        send_http(tls, &request).await
+        send_http(tls, &request).await?
     } else {
-        send_http(stream, &request).await
+        send_http(stream, &request).await?
+    };
+    if status != 200 {
+        bail!("tunnel probe got HTTP {status}");
     }
+    Ok(body)
 }
 
 /// RFC 1928 no-auth handshake with a domain-based CONNECT.

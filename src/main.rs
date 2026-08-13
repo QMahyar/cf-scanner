@@ -394,18 +394,23 @@ async fn run_scan(args: ScanArgs) -> Result<()> {
     let controller = Arc::new(engine::ScanController::new(Arc::new(
         probe::TlsTransport::new(),
     )));
-    let summary = controller
-        .run_streaming(cfg, |e| match e {
-            ScanEvent::Result(v) => {
-                println!("{}", serde_json::to_string(&v).unwrap());
-            }
-            ScanEvent::Finished(s) => {
-                println!("{}", serde_json::to_string(&s).unwrap());
-            }
-            ScanEvent::Progress(_) => {}
-        })
-        .await
-        .map_err(|e| anyhow!("scan failed: {e:#}"))?;
+    let streaming = |e: ScanEvent| match e {
+        ScanEvent::Result(v) => {
+            println!("{}", serde_json::to_string(&v).unwrap());
+        }
+        ScanEvent::Finished(s) => {
+            println!("{}", serde_json::to_string(&s).unwrap());
+        }
+        ScanEvent::Failed(msg) => {
+            eprintln!("scan failed: {msg}");
+        }
+        ScanEvent::Progress(_) => {}
+    };
+    let summary = match args.seed {
+        Some(seed) => controller.run_streaming_seeded(cfg, seed, streaming).await,
+        None => controller.run_streaming(cfg, streaming).await,
+    }
+    .map_err(|e| anyhow!("scan failed: {e:#}"))?;
     eprintln!(
         "scanned {} hosts, found {} working in {} ms",
         summary.scanned, summary.found, summary.duration_ms

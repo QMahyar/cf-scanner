@@ -43,12 +43,16 @@ pub fn router(controller: Arc<ScanController>) -> Router {
         .with_state(state)
 }
 
-/// 202 with no body; the run's progress is observable on /api/events.
+/// 202 with no body; the run's progress is observable on /api/events. 409
+/// when another scan is already running (the engine rejects double-runs).
 async fn start_scan(
     State(state): State<Arc<AppState>>,
     Json(cfg): Json<ScanConfig>,
 ) -> Result<StatusCode, ApiError> {
     cfg.validate().map_err(ApiError::bad_request)?;
+    if state.controller.is_running() {
+        return Err(ApiError::conflict("a scan is already running"));
+    }
     let controller = state.controller.clone();
     tokio::spawn(async move {
         if let Err(err) = controller.run(cfg).await {
@@ -66,6 +70,7 @@ async fn events(
             Ok(ScanEvent::Progress(p)) => Event::default().event("progress").json_data(p).ok(),
             Ok(ScanEvent::Result(v)) => Event::default().event("result").json_data(*v).ok(),
             Ok(ScanEvent::Finished(s)) => Event::default().event("finished").json_data(s).ok(),
+            Ok(ScanEvent::Failed(msg)) => Event::default().event("failed").json_data(msg).ok(),
             Err(_lagged) => None,
         }
         .map(Ok)
@@ -124,6 +129,13 @@ impl ApiError {
         Self {
             status: StatusCode::BAD_REQUEST,
             message: err.to_string(),
+        }
+    }
+
+    fn conflict(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
+            message: message.into(),
         }
     }
 }
@@ -292,6 +304,27 @@ mod tests {
         assert!(text.contains("event: progress"), "{text}");
         assert!(text.contains("event: result"), "{text}");
         assert!(text.contains("event: finished"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn second_scan_while_running_is_conflict() {
+        // All /29 hosts probe slowly so the count-sampled plan keeps the run
+        // alive while the second POST arrives.
+        let mut t = FakeTransport::new();
+        for i in 0..8u8 {
+            t = t.ok_slow(format!("10.0.0.{i}").parse().unwrap(), 443, 25, 500);
+        }
+        let addr = serve(t).await;
+        let body = cfg(1, 1);
+        assert_eq!(
+            post_scan(addr, &serde_json::to_string(&body).unwrap()).await,
+            202
+        );
+        // Give the spawned run task time to reach the running guard.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let body = cfg(1, 1);
+        let status = post_scan(addr, &serde_json::to_string(&body).unwrap()).await;
+        assert_eq!(status, 409);
     }
 
     #[tokio::test]

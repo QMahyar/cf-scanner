@@ -39,6 +39,7 @@ pub struct ScanController {
     store: Store,
     summary: Mutex<Option<ScanSummary>>,
     cancel_tx: Mutex<Option<watch::Sender<bool>>>,
+    running: Mutex<bool>,
 }
 
 impl ScanController {
@@ -63,6 +64,7 @@ impl ScanController {
             store: Arc::new(Mutex::new(Vec::new())),
             summary: Mutex::new(None),
             cancel_tx: Mutex::new(None),
+            running: Mutex::new(false),
         }
     }
 
@@ -93,7 +95,23 @@ impl ScanController {
         self.store.lock().unwrap().clone()
     }
 
+    /// True while a run is active; the server rejects new scans then.
+    pub fn is_running(&self) -> bool {
+        *self.running.lock().unwrap()
+    }
+
+    /// Clears the last scan's results. No-op while a run is active so an
+    /// in-flight run can never repopulate a store the user just cleared.
     pub fn reset(&self) {
+        if self.is_running() {
+            return;
+        }
+        self.clear_store();
+    }
+
+    /// Internal reset for run start; bypasses the running guard (the run
+    /// itself is the one clearing, not a concurrent caller).
+    fn clear_store(&self) {
         self.store.lock().unwrap().clear();
         self.summary.lock().unwrap().take();
     }
@@ -105,24 +123,31 @@ impl ScanController {
     }
 
     pub async fn run(&self, cfg: ScanConfig) -> Result<ScanSummary> {
-        let seed = SystemTime::now()
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .map(|d| d.as_nanos() as u64)
-            .unwrap_or(0);
-        self.run_seeded(cfg, seed).await
+        self.run_seeded(cfg, time_seed()).await
     }
 
     /// Runs `cfg` while invoking `on_event` as each event is emitted (the
     /// subscriber attaches before the run starts, so no event is missed).
-    /// Errors abort before `Finished` is sent; callers still get them here.
+    /// Errors abort before `Finished` is sent (a `Failed` event is emitted
+    /// instead); callers still get them here.
     pub async fn run_streaming(
         self: &Arc<Self>,
         cfg: ScanConfig,
+        on_event: impl FnMut(ScanEvent),
+    ) -> Result<ScanSummary> {
+        self.run_streaming_seeded(cfg, time_seed(), on_event).await
+    }
+
+    /// `run_streaming` with an explicit sampling seed (repro runs).
+    pub async fn run_streaming_seeded(
+        self: &Arc<Self>,
+        cfg: ScanConfig,
+        seed: u64,
         mut on_event: impl FnMut(ScanEvent),
     ) -> Result<ScanSummary> {
         let mut rx = self.subscribe();
         let controller = self.clone();
-        let mut handle = tokio::spawn(async move { controller.run(cfg).await });
+        let mut handle = tokio::spawn(async move { controller.run_seeded(cfg, seed).await });
         loop {
             tokio::select! {
                 done = &mut handle => {
@@ -145,7 +170,29 @@ impl ScanController {
         }
     }
 
+    /// At most one run per controller: a second concurrent run is rejected
+    /// (surfacing as a `Failed` event) so two runs can never race the shared
+    /// store or the cancel slot.
     pub async fn run_seeded(&self, cfg: ScanConfig, seed: u64) -> Result<ScanSummary> {
+        {
+            let mut running = self.running.lock().unwrap();
+            if *running {
+                let err = anyhow!("a scan is already running");
+                self.emit(ScanEvent::Failed(format!("{err:#}")));
+                return Err(err);
+            }
+            *running = true;
+        }
+        let result = self.run_seeded_unguarded(cfg, seed).await;
+        self.cancel_tx.lock().unwrap().take();
+        *self.running.lock().unwrap() = false;
+        if let Err(err) = &result {
+            self.emit(ScanEvent::Failed(format!("{err:#}")));
+        }
+        result
+    }
+
+    async fn run_seeded_unguarded(&self, cfg: ScanConfig, seed: u64) -> Result<ScanSummary> {
         let pool = ranges::effective_pool(&cfg.custom_cidrs, &cfg.exclude)?;
         self.run_seeded_with_pool(cfg, seed, pool).await
     }
@@ -165,7 +212,7 @@ impl ScanController {
         let phase2 = cfg.phase2.take();
 
         let started = Instant::now();
-        self.reset();
+        self.clear_store();
         let plan = ranges::plan(&pool, &cfg.target, &mut SplitMix64::new(seed));
         let total = plan_probe_count(&plan, &cfg.ports);
         self.emit(ScanEvent::Progress(ScanProgress {
@@ -287,7 +334,7 @@ impl ScanController {
         };
 
         let started = Instant::now();
-        self.reset();
+        self.clear_store();
         let groups = self.warp_groups(&cfg, &warp, seed)?;
         let total = groups.len() as u64;
         self.emit(ScanEvent::Progress(ScanProgress {
@@ -545,10 +592,10 @@ impl ScanController {
                     .sub_fetch
                     .fetch(entry)
                     .await
-                    .with_context(|| format!("subscription {entry} failed"))?;
+                    .with_context(|| format!("subscription {} failed", redact_entry(entry)))?;
                 let parsed = parse_subscription(&body);
                 tracing::debug!(
-                    url = %entry,
+                    url = %redact_entry(entry),
                     ok = parsed.specs.len(),
                     ignored = parsed.ignored,
                     "subscription fetched"
@@ -556,7 +603,9 @@ impl ScanController {
                 specs.extend(parsed.specs);
             } else if entry.contains("://") {
                 specs.push(
-                    parse_uri(entry).with_context(|| format!("config {entry} failed to parse"))?,
+                    parse_uri(entry).with_context(|| {
+                        format!("config {} failed to parse", redact_entry(entry))
+                    })?,
                 );
             } else {
                 let text = std::fs::read_to_string(entry)
@@ -585,6 +634,43 @@ impl ScanController {
     fn emit(&self, event: ScanEvent) {
         let _ = self.events.send(event);
     }
+}
+
+/// Sampling seed for interactive runs (per-run entropy; explicit seeds win).
+fn time_seed() -> u64 {
+    SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0)
+}
+
+/// Renders a config entry safe for logs/errors: userinfo and query/fragment
+/// are stripped, and hosts that look like opaque payloads (ss:// base64,
+/// VMess UUIDs) are masked. Local file paths keep only the file name.
+fn redact_entry(entry: &str) -> String {
+    // Windows drive-letter paths ("C:\...") must not be mistaken for URLs.
+    let looks_like_path = entry.len() > 2
+        && entry.as_bytes()[0].is_ascii_alphabetic()
+        && entry.as_bytes()[1] == b':'
+        && matches!(entry.as_bytes().get(2), Some(b'\\') | Some(b'/'));
+    let Ok(mut url) = url::Url::parse(entry) else {
+        return entry.rsplit(['/', '\\']).next().unwrap_or(entry).to_owned();
+    };
+    if looks_like_path {
+        return entry.rsplit(['/', '\\']).next().unwrap_or(entry).to_owned();
+    }
+    if !url.username().is_empty() || url.password().is_some() {
+        let _ = url.set_username("***");
+        let _ = url.set_password(Some("***"));
+    }
+    if let Some(host) = url.host_str() {
+        if host.len() > 24 && !host.contains('.') {
+            let _ = url.set_host(Some("redacted"));
+        }
+    }
+    url.set_query(None);
+    url.set_fragment(None);
+    url.to_string()
 }
 
 /// Concrete host addresses a plan item yields. `Sample` rolls fresh random
@@ -980,7 +1066,10 @@ mod tests {
         let mut events = vec![];
         let err = c.run_streaming(cfg, |e| events.push(e)).await.unwrap_err();
         assert!(err.to_string().contains("out of range"));
-        assert!(events.is_empty());
+        // The run surfaced as a Failed event instead of Finished.
+        assert!(!events.is_empty(), "the failure must reach clients");
+        assert!(!events.iter().any(|e| matches!(e, ScanEvent::Finished(_))));
+        assert!(events.iter().any(|e| matches!(e, ScanEvent::Failed(_))));
     }
 
     // --- WARP ----------------------------------------------------------------
@@ -1265,5 +1354,97 @@ mod tests {
         cfg.phase2 = Some(p2_cfg(&[VLESS], &[]));
         let err = run_local(&c, cfg, 1).await.unwrap_err();
         assert!(err.to_string().contains("every attempt failed"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn concurrent_runs_are_rejected_and_failed_event_is_emitted() {
+        // Every /29 host probes slowly so the run is provably alive when the
+        // second run is attempted (the count-sampled plan may draw any host).
+        let mut t = FakeTransport::new();
+        for i in 0..8u8 {
+            t = t.ok_slow(format!("10.0.0.{i}").parse().unwrap(), 443, 25, 150);
+        }
+        let c = Arc::new(ScanController::new(Arc::new(t)));
+        let mut events = c.subscribe();
+        let mut cfg = ok_cfg(8, None);
+        cfg.custom_cidrs = vec!["10.0.0.0/29".to_owned()];
+        let first = tokio::spawn({
+            let c = c.clone();
+            let cfg = cfg.clone();
+            async move { c.run(cfg).await.unwrap() }
+        });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(c.is_running());
+
+        let err = c.run(cfg.clone()).await.unwrap_err();
+        assert!(err.to_string().contains("already running"), "{err}");
+
+        // The rejected run still surfaces to UI/CLI clients as a Failed event
+        // (drain past the first run's Progress events).
+        let event = loop {
+            let event = tokio::time::timeout(Duration::from_secs(1), events.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            if matches!(event, ScanEvent::Failed(_)) {
+                break event;
+            }
+        };
+        let ScanEvent::Failed(msg) = event else {
+            unreachable!("loop only breaks on Failed")
+        };
+        assert!(msg.contains("already running"), "{msg}");
+
+        let summary = first.await.unwrap();
+        assert_eq!(summary.found, 8);
+        assert!(!c.is_running());
+
+        // After the first run finishes, a new run is accepted again.
+        let again = c.run(cfg).await.unwrap();
+        assert_eq!(again.found, 8);
+    }
+
+    #[tokio::test]
+    async fn reset_while_running_is_a_noop() {
+        let mut t = FakeTransport::new();
+        for i in 0..8u8 {
+            t = t.ok_slow(format!("10.0.0.{i}").parse().unwrap(), 443, 25, 150);
+        }
+        let c = Arc::new(ScanController::new(Arc::new(t)));
+        let mut cfg = ok_cfg(8, None);
+        cfg.custom_cidrs = vec!["10.0.0.0/29".to_owned()];
+        let first = tokio::spawn({
+            let c = c.clone();
+            let cfg = cfg.clone();
+            async move { c.run(cfg).await.unwrap() }
+        });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        c.reset();
+        let summary = first.await.unwrap();
+        assert_eq!(summary.found, 8);
+        assert_eq!(c.results().len(), 8, "reset must not clear an active run");
+    }
+
+    #[test]
+    fn redact_entry_strips_secrets_from_uris() {
+        assert_eq!(
+            redact_entry("vless://deadbeef-0000-0000-0000-000000000000@1.2.3.4:443?type=tcp"),
+            "vless://***:***@1.2.3.4:443"
+        );
+        assert_eq!(
+            redact_entry("https://sub.example.com/sub?token=abc123"),
+            "https://sub.example.com/sub"
+        );
+        assert_eq!(
+            redact_entry("ss://YWVzLTI1Ni1nY206cGFzc3dvcmQxMjM0NTY3ODkw@1.2.3.4:8388"),
+            "ss://***:***@1.2.3.4:8388"
+        );
+        // Opaque hosts (no userinfo, no dots) get masked outright.
+        assert_eq!(
+            redact_entry("vmess://Zm9vYmFyYmF6cXV4MTIzNDU2Nzg5MDEyMzQ1Njc4OTAxMjM0NTY3OA"),
+            "vmess://redacted"
+        );
+        // Non-URLs (local file paths) degrade to the file name only.
+        assert_eq!(redact_entry("C:\\users\\me\\config.json"), "config.json");
     }
 }

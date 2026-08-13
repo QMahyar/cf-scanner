@@ -257,16 +257,28 @@
       status.textContent = text;
     }
 
+    function cell(value, cls) {
+      const td = document.createElement("td");
+      if (cls) td.className = cls;
+      if (value == null) {
+        td.textContent = "\u2014";
+        td.className = (td.className ? td.className + " " : "") + "muted";
+      } else {
+        td.textContent = String(value);
+      }
+      return td;
+    }
+
     function lossCell(v) {
-      if (v.loss_pct == null) return '<td class="muted">&mdash;</td>';
-      return `<td>${v.loss_pct.toFixed(1)}%</td>`;
+      if (v.loss_pct == null) return cell(null, "muted");
+      return cell(`${v.loss_pct.toFixed(1)}%`);
     }
 
     function phase2Cell(v) {
       const p2 = v.phase2;
-      if (!p2) return '<td class="muted">&mdash;</td>';
-      if (p2.passed) return `<td class="v-ok">&#10003; ${p2.fragment} ${p2.sni}</td>`;
-      return '<td class="v-bad">&#10007;</td>';
+      if (!p2) return cell(null, "muted");
+      if (p2.passed) return cell(`\u2713 ${p2.fragment} ${p2.sni}`, "v-ok");
+      return cell("\u2717", "v-bad");
     }
 
     function render() {
@@ -280,12 +292,19 @@
       if (rows.length === 0) {
         const tr = document.createElement("tr");
         tr.id = "empty-row";
-        tr.innerHTML = '<td colspan="7" class="muted">No results yet.</td>';
+        tr.appendChild(cell("No results yet.", "muted"));
+        tr.firstChild.colSpan = 7;
         body.appendChild(tr);
       } else {
         for (const v of rows) {
           const tr = document.createElement("tr");
-          tr.innerHTML = `<td>${v.ip}</td><td>${v.port}</td><td>${v.latency_ms ?? "&mdash;"}</td><td>${lossCell(v)}</td><td>${v.country ?? "&mdash;"}</td><td>${v.colo ?? "&mdash;"}</td><td>${phase2Cell(v)}</td>`;
+          tr.appendChild(cell(v.ip));
+          tr.appendChild(cell(v.port));
+          tr.appendChild(cell(v.latency_ms));
+          tr.appendChild(lossCell(v));
+          tr.appendChild(cell(v.country));
+          tr.appendChild(cell(v.colo));
+          tr.appendChild(phase2Cell(v));
           body.appendChild(tr);
         }
       }
@@ -368,6 +387,10 @@
       const s = JSON.parse(e.data);
       cancelBtn.disabled = true;
       showStatus(`Done: ${s.scanned} scanned, ${s.found} found in ${(s.duration_ms / 1000).toFixed(1)}s`);
+    });
+    es.addEventListener("failed", (e) => {
+      cancelBtn.disabled = true;
+      showStatus(`Scan failed: ${JSON.parse(e.data)}`);
     });
 
     // htmx handles the mode/preset radio toggle for the count input.

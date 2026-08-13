@@ -128,6 +128,10 @@ pub async fn run(controller: Arc<ScanController>) -> Result<()> {
                 );
             }
             ScanEvent::Finished(_) => print!("\r\x1b[K"),
+            ScanEvent::Failed(msg) => {
+                print!("\r\x1b[K");
+                eprintln!("scan failed: {msg}");
+            }
         })
         .await
         .map_err(|e| anyhow!("scan failed: {e:#}"))?;
@@ -280,7 +284,7 @@ fn prompt_config() -> Result<ScanConfig> {
     };
     if phase2.is_some() && crate::verify::require_xray_binary().is_err() {
         println!(
-            "note: xray binary not found yet — the scan will fail at phase 2 with a download hint"
+            "note: xray binary not found yet - it will be downloaded (checksum-verified) when phase 2 starts"
         );
     }
 
