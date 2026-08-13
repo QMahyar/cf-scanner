@@ -141,16 +141,35 @@ fn read_all<R: Read>(entry: &mut R) -> Vec<u8> {
 }
 
 fn xray_asset(target: &str) -> Option<String> {
+    // XTLS asset naming (v26.x): macos uses "macos" (not darwin), and arm64
+    // carries a "-v8a" suffix across all platforms.
     let (os, arch) = if target.contains("windows") {
-        ("windows", "64")
-    } else if target.contains("apple") && target.contains("aarch64") {
-        ("darwin", "arm64")
+        (
+            "windows",
+            if target.contains("aarch64") {
+                "arm64-v8a"
+            } else {
+                "64"
+            },
+        )
     } else if target.contains("apple") {
-        ("darwin", "64")
-    } else if target.contains("aarch64") {
-        ("linux", "arm64")
+        (
+            "macos",
+            if target.contains("aarch64") {
+                "arm64-v8a"
+            } else {
+                "64"
+            },
+        )
     } else if target.contains("linux") {
-        ("linux", "64")
+        (
+            "linux",
+            if target.contains("aarch64") {
+                "arm64-v8a"
+            } else {
+                "64"
+            },
+        )
     } else {
         return None;
     };
