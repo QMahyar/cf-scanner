@@ -1,19 +1,12 @@
 use std::process::ExitCode;
 use std::sync::Arc;
 
-mod api;
-mod cli_wizard;
-mod engine;
-mod paths;
-mod probe;
-mod ranges;
-mod server;
-
 use anyhow::{Result, anyhow};
+use cf_scanner::api;
+use cf_scanner::api::types::{CdnPreset, Mode, ScanConfig, ScanEvent, ScanTarget, StopCondition};
+use cf_scanner::{cli_wizard, engine, paths, probe, ranges, server};
 use clap::{Parser, Subcommand, ValueEnum};
 use tracing_subscriber::EnvFilter;
-
-use api::types::{CdnPreset, Mode, ScanConfig, ScanEvent, ScanTarget, StopCondition};
 
 #[derive(Parser)]
 #[command(
@@ -266,13 +259,7 @@ mod tests {
         let cfg = build_scan_config(&args()).unwrap();
         assert_eq!(cfg.target, ScanTarget::Preset(CdnPreset::Quick));
         assert_eq!(cfg.ports, vec![DEFAULT_PORT]);
-        assert_eq!(
-            cfg.stop,
-            StopCondition {
-                found: 20,
-                cap: None
-            }
-        );
+        assert_eq!(cfg.stop, StopCondition { found: 20, cap: None });
     }
 
     #[test]
@@ -311,22 +298,9 @@ mod tests {
     #[test]
     fn parses_comma_delimited_flags() {
         let argv = [
-            "cf-scanner",
-            "scan",
-            "--mode",
-            "warp",
-            "--ports",
-            "2408,500",
-            "--exclude",
-            "1.2.3.0/24,2.3.4.0/24",
-            "--custom-cidrs",
-            "10.0.0.0/24",
-            "--target",
-            "5",
-            "--cap",
-            "100",
-            "--seed",
-            "42",
+            "cf-scanner", "scan", "--mode", "warp", "--ports", "2408,500",
+            "--exclude", "1.2.3.0/24,2.3.4.0/24", "--custom-cidrs", "10.0.0.0/24",
+            "--target", "5", "--cap", "100", "--seed", "42",
         ];
         let scan_args = match Cli::try_parse_from(argv).unwrap().command {
             Command::Scan(a) => a,
@@ -336,18 +310,9 @@ mod tests {
         assert_eq!(scan_args.ports, Some(vec![2408, 500]));
         assert_eq!(scan_args.seed, Some(42));
         let cfg = build_scan_config(&scan_args).unwrap();
-        assert_eq!(
-            cfg.exclude,
-            vec!["1.2.3.0/24".to_owned(), "2.3.4.0/24".to_owned()]
-        );
+        assert_eq!(cfg.exclude, vec!["1.2.3.0/24".to_owned(), "2.3.4.0/24".to_owned()]);
         assert_eq!(cfg.custom_cidrs, vec!["10.0.0.0/24".to_owned()]);
-        assert_eq!(
-            cfg.stop,
-            StopCondition {
-                found: 5,
-                cap: Some(100)
-            }
-        );
+        assert_eq!(cfg.stop, StopCondition { found: 5, cap: Some(100) });
     }
 
     #[test]

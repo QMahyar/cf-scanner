@@ -5,9 +5,8 @@
 //! certificates (anycast SNI fronting rarely matches the IP SAN), so the
 //! verifier is bypassed on purpose; real configuration validation is what
 //! phase-2 (Task 11) exists for.
-//! FakeTransport is only reachable from engine tests (cfg(test)), so the
-//! module keeps a self-revoking dead-code flag until it is used in builds.
-#![expect(dead_code)]
+//! FakeTransport is only reachable from engine tests (cfg(test)); the public
+//! transport items are the lib's API, so no dead-code flag is needed.
 
 use std::future::Future;
 use std::net::Ipv4Addr;
@@ -165,6 +164,12 @@ struct Scripted {
 /// observable.
 pub struct FakeTransport {
     script: std::sync::Mutex<std::collections::HashMap<(u32, u16), Scripted>>,
+}
+
+impl Default for FakeTransport {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl FakeTransport {

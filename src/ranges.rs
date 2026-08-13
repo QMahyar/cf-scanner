@@ -381,6 +381,7 @@ pub fn parse_official(body: &str) -> Result<Vec<Cidr>> {
         .collect()
 }
 
+#[allow(async_fn_in_trait)] // internal seam; send bounds are irrelevant here
 pub trait HttpGet {
     async fn get(&self, url: &str) -> Result<String>;
 }
@@ -396,7 +397,19 @@ impl HttpGet for RealHttp {
     }
 }
 
+/// HTTPS GET with extra request headers (e.g. `User-Agent`), used by the
+/// phase-2 subscription fetcher which must not send the bare default UA.
+pub async fn fetch_tls_with_headers(url: &str, extra_headers: &str) -> Result<String> {
+    tokio::time::timeout(FETCH_TIMEOUT, fetch_tls_inner(url, extra_headers))
+        .await
+        .context("fetch timed out")?
+}
+
 async fn fetch_tls(url: &str) -> Result<String> {
+    fetch_tls_inner(url, "Accept: application/json").await
+}
+
+async fn fetch_tls_inner(url: &str, extra_headers: &str) -> Result<String> {
     let rest = url
         .strip_prefix("https://")
         .ok_or_else(|| anyhow!("only https:// URLs supported"))?;
@@ -423,7 +436,7 @@ async fn fetch_tls(url: &str) -> Result<String> {
     let (mut rd, mut wr) = tokio::io::split(tls);
 
     let req = format!(
-        "GET {path} HTTP/1.1\r\nHost: {host}\r\nAccept: application/json\r\nConnection: close\r\n\r\n"
+        "GET {path} HTTP/1.1\r\nHost: {host}\r\n{extra_headers}\r\nConnection: close\r\n\r\n"
     );
     wr.write_all(req.as_bytes()).await?;
 

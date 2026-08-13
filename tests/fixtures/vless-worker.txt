@@ -1,0 +1,1 @@
+vless://6086b6d5-6874-4299-8ef9-33b01a2125aa@104.17.160.217:2096?encryption=none&security=tls&sni=edgetunnel-8.edgetunnel-92fc86.workers.dev&fp=chrome&type=ws&host=edgetunnel-8.edgetunnel-92fc86.workers.dev&path=/&packetEncoding=xudp#CF%E5%AE%98%E6%96%B9%E4%BC%98%E9%80%895
