@@ -4,7 +4,7 @@
 //! tests never touch the wire.
 
 use std::fs;
-use std::net::{Ipv4Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -17,12 +17,14 @@ use crate::api::types::{CdnPreset, ScanTarget};
 use crate::paths;
 
 pub const BUNDLED_RANGES: &str = include_str!("../data/cf-ranges.txt");
+pub const BUNDLED_RANGES_V6: &str = include_str!("../data/cf-ranges-v6.txt");
 pub const OFFICIAL_IPS_URL: &str = "https://api.cloudflare.com/client/v4/ips";
+pub const OFFICIAL_IPS_V6_URL: &str = "https://www.cloudflare.com/ips-v6/";
 const FETCH_TIMEOUT: Duration = Duration::from_secs(20);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Cidr {
-    pub addr: Ipv4Addr,
+    pub addr: IpAddr,
     pub prefix: u8,
 }
 
@@ -33,12 +35,35 @@ impl std::fmt::Display for Cidr {
 }
 
 impl Cidr {
-    pub fn host_count(self) -> u64 {
-        1u64 << (32 - self.prefix as u64)
+    fn bits(self) -> u32 {
+        match self.addr {
+            IpAddr::V4(_) => 32,
+            IpAddr::V6(_) => 128,
+        }
     }
 
-    /// /24 sub-blocks this range covers; prefix >= 24 clamps to 1.
+    fn base(self) -> u128 {
+        match self.addr {
+            IpAddr::V4(a) => u32::from(a) as u128,
+            IpAddr::V6(a) => u128::from(a),
+        }
+    }
+
+    /// Number of addresses in the block. The v6 space can exceed u128
+    /// (`/0`); those blocks saturate at [`u128::MAX`].
+    pub fn host_count(self) -> u128 {
+        let shift = self.bits() - self.prefix as u32;
+        if shift >= 128 {
+            u128::MAX
+        } else {
+            1u128 << shift
+        }
+    }
+
+    /// /24 sub-blocks this v4 range covers; prefix >= 24 clamps to 1.
+    /// v6 ranges are never decomposed this way (see `plan_preset`).
     fn sub24_count(self) -> u64 {
+        debug_assert!(self.addr.is_ipv4());
         if self.prefix >= 24 {
             1
         } else {
@@ -46,38 +71,73 @@ impl Cidr {
         }
     }
 
-    /// Absolute IP for a host index within this range (index wraps).
-    pub fn host(self, index: u64) -> Ipv4Addr {
-        let base = u32::from(self.addr);
-        Ipv4Addr::from(base.wrapping_add((index % self.host_count()) as u32))
+    /// Absolute address for a host index within this range (index wraps).
+    pub fn host(self, index: u128) -> IpAddr {
+        let offset = index % self.host_count();
+        match self.addr {
+            IpAddr::V4(a) => IpAddr::V4(Ipv4Addr::from(u32::from(a).wrapping_add(offset as u32))),
+            IpAddr::V6(a) => IpAddr::V6(Ipv6Addr::from(u128::from(a).wrapping_add(offset))),
+        }
     }
 
+    /// True when `other` is a same-family sub-block of `self`.
     fn contains(self, other: Cidr) -> bool {
-        let a = u32::from(self.addr) as u64;
-        let b = u32::from(other.addr) as u64;
-        other.prefix >= self.prefix && b >= a && b + other.host_count() <= a + self.host_count()
+        if self.addr.is_ipv4() != other.addr.is_ipv4() {
+            return false;
+        }
+        let a = self.base();
+        let b = other.base();
+        other.prefix >= self.prefix
+            && b >= a
+            && b.saturating_add(other.host_count()) <= a.saturating_add(self.host_count())
     }
 }
 
-/// Validates and normalizes `a.b.c.d/prefix`; host bits are masked off.
+/// Validates and normalizes `ip/prefix`; host bits are masked off. Both v4
+/// and v6 are accepted.
 pub fn parse_cidr(s: &str) -> Result<Cidr> {
     let (ip, prefix) = s
         .split_once('/')
         .ok_or_else(|| anyhow!("missing /prefix in {s:?}"))?;
-    let addr: Ipv4Addr = ip.trim().parse().context("invalid IPv4 address")?;
+    let addr: IpAddr = ip.trim().parse().context("invalid IP address")?;
     let prefix: u8 = prefix.trim().parse().context("prefix is not a number")?;
-    if prefix > 32 {
-        bail!("prefix out of range 0-32");
+    let bits = match addr {
+        IpAddr::V4(_) => 32,
+        IpAddr::V6(_) => 128,
+    };
+    if prefix > bits {
+        bail!("prefix out of range 0-{bits}");
     }
-    let masked = if prefix == 0 {
-        0
-    } else {
-        u32::from(addr) & (u32::MAX << (32 - prefix))
+    let masked = match addr {
+        IpAddr::V4(a) => {
+            let mask = if prefix == 0 {
+                0
+            } else {
+                u32::MAX << (32 - prefix)
+            };
+            IpAddr::V4(Ipv4Addr::from(u32::from(a) & mask))
+        }
+        IpAddr::V6(a) => {
+            let mask = if prefix == 0 {
+                0
+            } else {
+                u128::MAX << (128 - prefix)
+            };
+            IpAddr::V6(Ipv6Addr::from(u128::from(a) & mask))
+        }
     };
     Ok(Cidr {
-        addr: Ipv4Addr::from(masked),
+        addr: masked,
         prefix,
     })
+}
+
+/// Unwraps the v4 address of a range the caller has already checked is v4.
+fn ipv4(addr: IpAddr) -> Ipv4Addr {
+    match addr {
+        IpAddr::V4(a) => a,
+        IpAddr::V6(_) => unreachable!("v6 ranges are handled separately"),
+    }
 }
 
 fn parse_lines(text: &str) -> Result<Vec<Cidr>> {
@@ -106,6 +166,11 @@ impl CidrPool {
         Self::parse(BUNDLED_RANGES).expect("bundled ranges must parse")
     }
 
+    /// The official Cloudflare IPv6 ranges; opt-in via `ScanConfig::include_v6`.
+    pub fn bundled_v6() -> Self {
+        Self::parse(BUNDLED_RANGES_V6).expect("bundled v6 ranges must parse")
+    }
+
     pub fn parse(text: &str) -> Result<Self> {
         Ok(Self {
             ranges: parse_lines(text)?,
@@ -116,8 +181,11 @@ impl CidrPool {
         &self.ranges
     }
 
-    pub fn host_count(&self) -> u64 {
-        self.ranges.iter().map(|c| c.host_count()).sum()
+    pub fn host_count(&self) -> u128 {
+        self.ranges
+            .iter()
+            .map(|c| c.host_count())
+            .fold(0u128, u128::saturating_add)
     }
 
     pub fn extend(&mut self, more: Vec<Cidr>) {
@@ -148,16 +216,21 @@ enum Subtract {
     Split(Vec<Cidr>),
 }
 
-/// Splits `outer` around `inner` when inner is a proper sub-block.
+/// Splits `outer` around `inner` when inner is a proper sub-block of the
+/// same family; different families never intersect, so they always Keep.
 fn subtract(outer: Cidr, inner: Cidr) -> Subtract {
+    if outer.addr.is_ipv4() != inner.addr.is_ipv4() {
+        return Subtract::Keep;
+    }
     if inner == outer || inner.contains(outer) {
         return Subtract::None;
     }
     if !outer.contains(inner) {
         return Subtract::Keep;
     }
-    let a = u32::from(outer.addr) as u64;
-    let b = u32::from(inner.addr) as u64;
+    let bits = outer.bits();
+    let a = outer.base();
+    let b = inner.base();
     let before = b - a;
     let after_start = b + inner.host_count() - a;
     let after = outer.host_count() - after_start;
@@ -165,20 +238,30 @@ fn subtract(outer: Cidr, inner: Cidr) -> Subtract {
     // Greedy high-bit blocks capped by the current address alignment; both
     // lengths are multiples of inner's stride, so this always lands on
     // valid CIDR boundaries.
-    decompose(a, before, &mut parts);
-    decompose(a + after_start, after, &mut parts);
+    decompose(a, before, bits, &mut parts);
+    decompose(a + after_start, after, bits, &mut parts);
     Subtract::Split(parts)
 }
 
-fn decompose(mut base: u64, mut len: u64, out: &mut Vec<Cidr>) {
+/// Splits [base, base+len) into aligned same-family CIDR blocks.
+fn decompose(mut base: u128, mut len: u128, bits: u32, out: &mut Vec<Cidr>) {
     while len > 0 {
-        let max_k = 63 - len.leading_zeros();
-        let align_k = if base == 0 { 32 } else { base.trailing_zeros() };
-        let k = max_k.min(align_k) as u8;
-        let block = 1u64 << k;
+        let max_k = 127 - len.leading_zeros();
+        let align_k = if base == 0 {
+            bits
+        } else {
+            base.trailing_zeros().min(bits)
+        };
+        let k = max_k.min(align_k);
+        let block = 1u128 << k;
+        let addr = if bits == 128 {
+            IpAddr::V6(Ipv6Addr::from(base))
+        } else {
+            IpAddr::V4(Ipv4Addr::from(base as u32))
+        };
         out.push(Cidr {
-            addr: Ipv4Addr::from(base as u32),
-            prefix: 32 - k,
+            addr,
+            prefix: (bits - k) as u8,
         });
         base += block;
         len -= block;
@@ -186,12 +269,12 @@ fn decompose(mut base: u64, mut len: u64, out: &mut Vec<Cidr>) {
 }
 
 /// How the engine walks a pool: every host, a random subset per CIDR block,
-/// or pre-rolled concrete host offsets.
+/// or pre-rolled concrete host offsets (v6 host spaces need u128 offsets).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PlanItem {
     Every { cidr: Cidr },
     Sample { cidr: Cidr, count: u64 },
-    Hosts { cidr: Cidr, offsets: Vec<u64> },
+    Hosts { cidr: Cidr, offsets: Vec<u128> },
 }
 
 /// Deterministic (seeded) splitmix64; good enough for sampling.
@@ -214,6 +297,14 @@ impl SplitMix64 {
     pub fn below(&mut self, bound: u64) -> u64 {
         self.next_u64() % bound
     }
+
+    /// Uniform in [0, bound) for u128 bounds (v6 host spaces). Two 64-bit
+    /// draws; modulo bias (< 2^-64) is negligible.
+    pub fn below_u128(&mut self, bound: u128) -> u128 {
+        let lo = self.next_u64() as u128;
+        let hi = self.next_u64() as u128;
+        ((hi << 64) | lo) % bound
+    }
 }
 
 /// Builds the walk plan for a target. Apply exclusions before planning.
@@ -221,32 +312,49 @@ pub fn plan(pool: &CidrPool, target: &ScanTarget, rng: &mut SplitMix64) -> Vec<P
     match target {
         ScanTarget::Count(n) => plan_count(pool, *n as u64, rng),
         ScanTarget::Preset(p) => match p {
-            CdnPreset::Quick => plan_per24(pool, 1, rng),
-            CdnPreset::Normal => plan_per24(pool, 3, rng),
+            CdnPreset::Quick => plan_preset(pool, 1, rng),
+            CdnPreset::Normal => plan_preset(pool, 3, rng),
             CdnPreset::Full => pool
                 .ranges
                 .iter()
-                .map(|c| PlanItem::Every { cidr: *c })
+                .map(|c| {
+                    if c.addr.is_ipv6() {
+                        // Enumerating the v6 space is infeasible (2^96+ hosts
+                        // per bundled range); Full samples one per range.
+                        PlanItem::Sample { cidr: *c, count: 1 }
+                    } else {
+                        PlanItem::Every { cidr: *c }
+                    }
+                })
                 .collect(),
         },
     }
 }
 
 /// 1 (Quick) or 3 (Normal) random hosts per /24, network/broadcast excluded.
-fn plan_per24(pool: &CidrPool, per: u64, _rng: &mut SplitMix64) -> Vec<PlanItem> {
+/// v6 ranges have no /24 notion; they yield `per` random hosts from the
+/// whole block.
+fn plan_preset(pool: &CidrPool, per: u64, _rng: &mut SplitMix64) -> Vec<PlanItem> {
     let mut items = Vec::new();
     for &cidr in &pool.ranges {
-        if cidr.prefix >= 24 {
+        if cidr.addr.is_ipv6() {
             items.push(PlanItem::Sample {
                 cidr,
-                count: per.min(cidr.host_count()),
+                count: per.min(cidr.host_count().min(u64::MAX as u128) as u64),
             });
             continue;
         }
-        let base = u32::from(cidr.addr) as u64;
+        if cidr.prefix >= 24 {
+            items.push(PlanItem::Sample {
+                cidr,
+                count: per.min(cidr.host_count().min(u64::MAX as u128) as u64),
+            });
+            continue;
+        }
+        let base = u32::from(ipv4(cidr.addr)) as u64;
         for i in 0..cidr.sub24_count() {
             let sub = Cidr {
-                addr: Ipv4Addr::from((base + (i << 8)) as u32),
+                addr: IpAddr::V4(Ipv4Addr::from((base + (i << 8)) as u32)),
                 prefix: 24,
             };
             items.push(PlanItem::Sample {
@@ -260,26 +368,26 @@ fn plan_per24(pool: &CidrPool, per: u64, _rng: &mut SplitMix64) -> Vec<PlanItem>
 
 /// `n` distinct random offsets spread across the whole pool.
 fn plan_count(pool: &CidrPool, n: u64, rng: &mut SplitMix64) -> Vec<PlanItem> {
-    if n >= pool.host_count() {
+    let total = pool.host_count();
+    if n as u128 >= total {
         return pool
             .ranges
             .iter()
             .map(|c| PlanItem::Every { cidr: *c })
             .collect();
     }
-    let total = pool.host_count();
     let mut seen = std::collections::HashSet::with_capacity(n as usize * 2);
     while seen.len() < n as usize {
-        seen.insert(rng.below(total));
+        seen.insert(rng.below_u128(total));
     }
-    let mut pick: Vec<u64> = seen.into_iter().collect();
+    let mut pick: Vec<u128> = seen.into_iter().collect();
     pick.sort_unstable();
     let mut items = Vec::new();
-    let mut offset = 0u64;
+    let mut offset = 0u128;
     let mut i = 0usize;
     for &cidr in &pool.ranges {
         let end = offset + cidr.host_count();
-        let mut in_range: Vec<u64> = Vec::new();
+        let mut in_range: Vec<u128> = Vec::new();
         while i < pick.len() && pick[i] < end {
             in_range.push(pick[i] - offset);
             i += 1;
@@ -296,7 +404,7 @@ fn plan_count(pool: &CidrPool, n: u64, rng: &mut SplitMix64) -> Vec<PlanItem> {
 }
 
 /// Bundled ranges, overridden by a refreshed copy in the data dir when
-/// present, plus custom CIDRs, minus exclusions. What the engine scans.
+/// present. What the engine scans (IPv4 half of the pool).
 pub fn base_pool(runtime_refreshed: Option<&str>) -> Result<CidrPool> {
     match runtime_refreshed {
         Some(text) => CidrPool::parse(text),
@@ -304,18 +412,33 @@ pub fn base_pool(runtime_refreshed: Option<&str>) -> Result<CidrPool> {
     }
 }
 
+/// The IPv6 half, added to the pool only when the scan opts in via
+/// `include_v6`. Refreshed copy from the data dir wins when present.
+pub fn base_pool_v6(runtime_refreshed: Option<&str>) -> Result<CidrPool> {
+    match runtime_refreshed {
+        Some(text) => CidrPool::parse(text),
+        None => Ok(CidrPool::bundled_v6()),
+    }
+}
+
 pub fn effective_pool_from(
     custom_cidrs: &[String],
     exclude: &[String],
-    runtime_refreshed: Option<&str>,
+    include_v6: bool,
+    refreshed_v4: Option<&str>,
+    refreshed_v6: Option<&str>,
 ) -> Result<CidrPool> {
     // Custom CIDRs REPLACE the official pool: pasting your own ranges means
-    // "scan these, not the internet". Exclusions still apply to them.
+    // "scan these, not the internet" (explicit v6 input is always honored,
+    // the flag only gates the bundled v6 list). Exclusions still apply.
     let mut pool = if custom_cidrs.is_empty() {
-        base_pool(runtime_refreshed)?
+        base_pool(refreshed_v4)?
     } else {
         CidrPool { ranges: Vec::new() }
     };
+    if include_v6 && custom_cidrs.is_empty() {
+        pool.extend(base_pool_v6(refreshed_v6)?.ranges);
+    }
     let customs: Vec<Cidr> = custom_cidrs
         .iter()
         .map(|s| parse_cidr(s))
@@ -328,12 +451,30 @@ pub fn effective_pool_from(
     Ok(pool.excluding(&excluded))
 }
 
-pub fn effective_pool(custom_cidrs: &[String], exclude: &[String]) -> Result<CidrPool> {
-    let runtime = match paths::refreshed_ranges_path() {
+pub fn effective_pool(
+    custom_cidrs: &[String],
+    exclude: &[String],
+    include_v6: bool,
+) -> Result<CidrPool> {
+    let runtime_v4 = match paths::refreshed_ranges_path() {
         Ok(p) => fs::read_to_string(p).ok(),
         Err(_) => None,
     };
-    effective_pool_from(custom_cidrs, exclude, runtime.as_deref())
+    let runtime_v6 = if include_v6 {
+        match paths::refreshed_ranges_v6_path() {
+            Ok(p) => fs::read_to_string(p).ok(),
+            Err(_) => None,
+        }
+    } else {
+        None
+    };
+    effective_pool_from(
+        custom_cidrs,
+        exclude,
+        include_v6,
+        runtime_v4.as_deref(),
+        runtime_v6.as_deref(),
+    )
 }
 
 /// Fetches the official list over HTTPS and writes it to the data dir.
@@ -344,6 +485,22 @@ pub async fn refresh_to_disk(http: &impl HttpGet) -> Result<usize> {
     fs::create_dir_all(&dir).context("create data dir")?;
     fs::write(paths::refreshed_ranges_path()?, render_lines(&cidrs))
         .context("write refreshed ranges")?;
+    Ok(cidrs.len())
+}
+
+/// Fetches the official IPv6 list (`ranges refresh --ipv6`) and writes it to
+/// the data dir. The endpoint serves plain one-CIDR-per-line text, so every
+/// parsed entry must come back v6.
+pub async fn refresh_v6_to_disk(http: &impl HttpGet) -> Result<usize> {
+    let body = http.get(OFFICIAL_IPS_V6_URL).await?;
+    let cidrs = parse_lines(&body)?;
+    if let Some(bad) = cidrs.iter().find(|c| !c.addr.is_ipv6()) {
+        bail!("{OFFICIAL_IPS_V6_URL} returned a non-IPv6 CIDR: {bad}");
+    }
+    let dir = paths::data_dir()?;
+    fs::create_dir_all(&dir).context("create data dir")?;
+    fs::write(paths::refreshed_ranges_v6_path()?, render_lines(&cidrs))
+        .context("write refreshed v6 ranges")?;
     Ok(cidrs.len())
 }
 
@@ -360,7 +517,8 @@ struct OfficialResult {
     ipv4_cidrs: Vec<String>,
 }
 
-/// IPv6 entries are skipped: CF-Scanner is IPv4-only by design.
+/// IPv6 entries are skipped: this JSON endpoint feeds the v4 refresh only;
+/// the v6 list has its own source (`cf-ranges-v6.txt`, `ips-v6` endpoint).
 pub fn parse_official(body: &str) -> Result<Vec<Cidr>> {
     let resp: OfficialResponse =
         serde_json::from_str(body).context("parse cloudflare API response")?;
@@ -659,8 +817,51 @@ mod tests {
     }
 
     #[test]
+    fn parses_and_masks_v6_cidrs() {
+        assert_eq!(
+            parse_cidr("2606:4700::/32").unwrap(),
+            Cidr {
+                addr: "2606:4700::".parse().unwrap(),
+                prefix: 32
+            }
+        );
+        let c = parse_cidr("2606:4700::1234:5678/32").unwrap();
+        assert_eq!(
+            c,
+            Cidr {
+                addr: "2606:4700::".parse().unwrap(),
+                prefix: 32
+            }
+        );
+        let c = parse_cidr("2001:db8:1::ff/64").unwrap();
+        assert_eq!(
+            c,
+            Cidr {
+                addr: "2001:db8:1::".parse().unwrap(),
+                prefix: 64
+            }
+        );
+        assert_eq!(
+            parse_cidr("::/0").unwrap(),
+            Cidr {
+                addr: "::".parse().unwrap(),
+                prefix: 0
+            }
+        );
+    }
+
+    #[test]
     fn rejects_malformed_cidrs() {
-        for bad in ["garbage", "1.2.3.4", "1.2.3.4/33", "1.2.3.4/abc", "::1/64"] {
+        for bad in [
+            "garbage",
+            "1.2.3.4",
+            "1.2.3.4/33",
+            "1.2.3.4/abc",
+            "2606:4700::/129",
+            "2001:db8::g/64",
+            "2606:4700::",
+            "1.2.3.4/-1",
+        ] {
             assert!(parse_cidr(bad).is_err(), "expected {bad} to fail");
         }
     }
@@ -670,6 +871,17 @@ mod tests {
         let pool = CidrPool::bundled();
         assert!(pool.host_count() > 1_000_000);
         assert!(pool.ranges().len() >= 15);
+    }
+
+    #[test]
+    fn bundled_v6_file_parses() {
+        let pool = CidrPool::bundled_v6();
+        assert!(pool.ranges().len() >= 5, "official v6 list shrank");
+        assert!(pool.ranges().iter().all(|c| c.addr.is_ipv6()));
+        assert!(
+            pool.ranges().iter().all(|c| c.host_count() >= 1u128 << 96),
+            "every bundled v6 range must be huge"
+        );
     }
 
     #[test]
@@ -685,6 +897,78 @@ mod tests {
     }
 
     #[test]
+    fn v6_host_indexing_stays_inside_the_block() {
+        let c = Cidr {
+            addr: "2001:db8::".parse().unwrap(),
+            prefix: 120,
+        };
+        assert_eq!(c.host_count(), 256);
+        assert_eq!(c.host(0), "2001:db8::".parse::<Ipv6Addr>().unwrap());
+        assert_eq!(c.host(255), "2001:db8::ff".parse::<Ipv6Addr>().unwrap());
+        assert_eq!(c.host(256), "2001:db8::".parse::<Ipv6Addr>().unwrap());
+        // A /32 sample lands inside 2606:4700::/32.
+        let big = Cidr {
+            addr: "2606:4700::".parse().unwrap(),
+            prefix: 32,
+        };
+        let host = big.host(7);
+        assert!(big.contains(Cidr {
+            addr: host,
+            prefix: 128
+        }));
+        assert!(host.is_ipv6());
+    }
+
+    #[test]
+    fn v6_exclusion_splits_around_subnet() {
+        let pool = CidrPool {
+            ranges: vec![parse_cidr("2606:4700::/32").unwrap()],
+        };
+        let ex = parse_cidr("2606:4700:1:2::/64").unwrap();
+        let out = pool.excluding(&[ex]);
+        let remaining: u128 = out.ranges.iter().map(|c| c.host_count()).sum();
+        assert_eq!(remaining, (1u128 << 96) - (1u128 << 64), "missing portion");
+        for c in &out.ranges {
+            assert!(c.addr.is_ipv6(), "v4 range leaked into v6 split: {c:?}");
+            assert!(!c.contains(ex), "excluded range leaked: {c:?}");
+        }
+        let mut sorted = out.ranges.clone();
+        sorted.sort_by_key(|c| c.base());
+        for w in sorted.windows(2) {
+            assert!(
+                w[0].base() + w[0].host_count() <= w[1].base(),
+                "overlapping split: {:?} + {:?}",
+                w[0],
+                w[1]
+            );
+        }
+    }
+
+    #[test]
+    fn cross_family_exclusions_never_intersect() {
+        let v4 = CidrPool {
+            ranges: vec![parse_cidr("10.0.0.0/8").unwrap()],
+        };
+        let v6_ex = parse_cidr("2606:4700::/32").unwrap();
+        assert_eq!(v4.excluding(&[v6_ex]), v4, "v6 exclude must not touch v4");
+
+        let v6 = CidrPool {
+            ranges: vec![parse_cidr("2606:4700::/32").unwrap()],
+        };
+        let v4_ex = parse_cidr("10.0.0.0/8").unwrap();
+        assert_eq!(v6.excluding(&[v4_ex]), v6, "v4 exclude must not touch v6");
+    }
+
+    #[test]
+    fn exclusion_removes_contained_ranges() {
+        let pool = CidrPool {
+            ranges: vec![parse_cidr("10.0.0.0/8").unwrap()],
+        };
+        let ex = parse_cidr("0.0.0.0/0").unwrap();
+        assert_eq!(pool.excluding(&[ex]).host_count(), 0);
+    }
+
+    #[test]
     fn exclusion_splits_around_subnet() {
         let pool = CidrPool {
             ranges: vec![Cidr {
@@ -694,21 +978,21 @@ mod tests {
         };
         let ex = parse_cidr("10.1.2.0/24").unwrap();
         let out = pool.excluding(&[ex]);
-        let remaining: u64 = out.ranges.iter().map(|c| c.host_count()).sum();
+        let remaining: u128 = out.ranges.iter().map(|c| c.host_count()).sum();
         assert_eq!(remaining, (1 << 24) - 256, "missing portion: {out:?}");
         for c in &out.ranges {
             assert!(!c.contains(ex), "excluded range leaked: {c:?}");
-            let end = u32::from(c.addr) as u64 + c.host_count();
+            let end = c.base() + c.host_count();
             assert!(
-                end <= 0x0A00_0000u64 + (1 << 24),
+                end <= 0x0A00_0000u128 + (1 << 24),
                 "{c:?} spills out of 10/8"
             );
         }
         let mut sorted = out.ranges.clone();
-        sorted.sort_by_key(|c| u32::from(c.addr));
+        sorted.sort_by_key(|c| c.base());
         for w in sorted.windows(2) {
             assert!(
-                u32::from(w[0].addr) as u64 + w[0].host_count() <= u32::from(w[1].addr) as u64,
+                w[0].base() + w[0].host_count() <= w[1].base(),
                 "overlapping split: {:?} + {:?}",
                 w[0],
                 w[1]
@@ -723,15 +1007,6 @@ mod tests {
         };
         let ex = parse_cidr("192.168.0.0/16").unwrap();
         assert_eq!(pool.excluding(&[ex]), pool);
-    }
-
-    #[test]
-    fn exclusion_removes_contained_ranges() {
-        let pool = CidrPool {
-            ranges: vec![parse_cidr("10.0.0.0/8").unwrap()],
-        };
-        let ex = parse_cidr("0.0.0.0/0").unwrap();
-        assert_eq!(pool.excluding(&[ex]).host_count(), 0);
     }
 
     #[test]
@@ -798,11 +1073,14 @@ mod tests {
         };
         let mut rng = SplitMix64::new(7);
         let plan = plan(&pool, &ScanTarget::Count(200), &mut rng);
-        let mut ips: Vec<Ipv4Addr> = Vec::new();
+        let mut ips: Vec<IpAddr> = Vec::new();
         for item in &plan {
             match item {
                 PlanItem::Hosts { cidr, offsets } => {
-                    assert!(offsets.len() as u64 <= cidr.host_count(), "run-away sample");
+                    assert!(
+                        offsets.len() as u128 <= cidr.host_count(),
+                        "run-away sample"
+                    );
                     for &o in offsets {
                         assert!(o < cidr.host_count(), "offset outside range");
                         ips.push(cidr.host(o));
@@ -815,7 +1093,7 @@ mod tests {
         ips.sort();
         ips.dedup();
         assert_eq!(ips.len(), 200, "samples must stay distinct");
-        let pool_ips: Vec<Ipv4Addr> = (0..(128 + 256))
+        let pool_ips: Vec<IpAddr> = (0..(128 + 256))
             .map(|i| {
                 if i < 128 {
                     Cidr {
@@ -838,6 +1116,95 @@ mod tests {
     }
 
     #[test]
+    fn count_plan_visits_v6_hosts_across_a_mixed_pool() {
+        let pool = CidrPool {
+            ranges: vec![
+                parse_cidr("10.0.0.0/24").unwrap(),
+                parse_cidr("2606:4700::/120").unwrap(),
+            ],
+        };
+        let mut rng = SplitMix64::new(11);
+        let plan = plan(&pool, &ScanTarget::Count(100), &mut rng);
+        let mut ips: Vec<IpAddr> = Vec::new();
+        for item in &plan {
+            match item {
+                PlanItem::Hosts { cidr, offsets } => {
+                    for &o in offsets {
+                        assert!(o < cidr.host_count(), "offset outside range");
+                        ips.push(cidr.host(o));
+                    }
+                }
+                _ => panic!("count plan must be concrete hosts"),
+            }
+        }
+        assert_eq!(ips.len(), 100);
+        ips.sort();
+        ips.dedup();
+        assert_eq!(ips.len(), 100, "samples must stay distinct");
+        assert!(
+            ips.iter().any(|ip| ip.is_ipv6()),
+            "v6 range must be sampled: {ips:?}"
+        );
+        for ip in &ips {
+            let family_ok = ip.is_ipv6() || ip.is_ipv4();
+            assert!(family_ok, "{ip} is neither family");
+        }
+    }
+
+    #[test]
+    fn preset_samples_cover_v6_ranges() {
+        let pool = CidrPool {
+            ranges: vec![
+                parse_cidr("10.0.0.0/24").unwrap(),
+                parse_cidr("2606:4700::/32").unwrap(),
+            ],
+        };
+        for (preset, per) in [(&CdnPreset::Quick, 1), (&CdnPreset::Normal, 3)] {
+            let plan = plan(
+                &pool,
+                &ScanTarget::Preset((*preset).clone()),
+                &mut SplitMix64::new(3),
+            );
+            let v6_samples: Vec<&PlanItem> = plan
+                .iter()
+                .filter(|i| matches!(i, PlanItem::Sample { cidr, .. } if cidr.addr.is_ipv6()))
+                .collect();
+            assert_eq!(v6_samples.len(), 1, "{preset:?} must sample the v6 range");
+            match v6_samples[0] {
+                PlanItem::Sample { count, .. } => assert_eq!(*count, per),
+                _ => unreachable!(),
+            }
+        }
+    }
+
+    #[test]
+    fn full_preset_samples_v6_ranges_instead_of_enumerating() {
+        let pool = CidrPool {
+            ranges: vec![
+                parse_cidr("10.0.0.0/30").unwrap(),
+                parse_cidr("2606:4700::/32").unwrap(),
+            ],
+        };
+        let plan = plan(
+            &pool,
+            &ScanTarget::Preset(CdnPreset::Full),
+            &mut SplitMix64::new(1),
+        );
+        assert_eq!(
+            plan,
+            vec![
+                PlanItem::Every {
+                    cidr: parse_cidr("10.0.0.0/30").unwrap()
+                },
+                PlanItem::Sample {
+                    cidr: parse_cidr("2606:4700::/32").unwrap(),
+                    count: 1
+                },
+            ]
+        );
+    }
+
+    #[test]
     fn count_over_total_degrades_to_every() {
         let pool = CidrPool {
             ranges: vec![parse_cidr("10.0.0.0/30").unwrap()],
@@ -852,10 +1219,45 @@ mod tests {
         let pool = effective_pool_from(
             &["10.0.0.0/24".to_owned()],
             &["10.0.0.0/25".to_owned()],
+            false,
             Some(""),
+            None,
         )
         .unwrap();
         assert_eq!(pool.host_count(), 128);
+    }
+
+    #[test]
+    fn effective_pool_includes_v6_only_when_requested() {
+        let v4 = effective_pool_from(&[], &[], false, None, None).unwrap();
+        assert!(
+            v4.ranges().iter().all(|c| c.addr.is_ipv4()),
+            "default pool must stay IPv4-only"
+        );
+        let v6 = effective_pool_from(&[], &[], true, None, None).unwrap();
+        assert!(v6.ranges().iter().any(|c| c.addr.is_ipv6()));
+        assert!(
+            v6.ranges().iter().any(|c| c.addr.is_ipv4()),
+            "v4 half must remain"
+        );
+    }
+
+    #[test]
+    fn custom_v6_cidrs_are_honored_without_the_flag() {
+        let pool =
+            effective_pool_from(&["2606:4700::/32".to_owned()], &[], false, None, None).unwrap();
+        assert!(pool.ranges().iter().all(|c| c.addr.is_ipv6()));
+    }
+
+    #[test]
+    fn effective_pool_prefers_refreshed_v6_when_included() {
+        let pool = effective_pool_from(&[], &[], true, None, Some("2606:4700::/32\n")).unwrap();
+        assert_eq!(pool.ranges().iter().filter(|c| c.addr.is_ipv6()).count(), 1);
+        let pool = effective_pool_from(&[], &[], false, None, Some("2606:4700::/32\n")).unwrap();
+        assert!(
+            pool.ranges().iter().all(|c| c.addr.is_ipv4()),
+            "refreshed v6 must be ignored when include_v6 is off"
+        );
     }
 
     #[test]
@@ -863,10 +1265,14 @@ mod tests {
         let live = base_pool(Some("10.0.0.0/24\n")).unwrap();
         assert_eq!(live.host_count(), 256);
         assert!(base_pool(None).unwrap().host_count() > 1_000_000);
+        let live6 = base_pool_v6(Some("2606:4700::/32\n")).unwrap();
+        assert_eq!(live6.ranges().len(), 1);
+        assert!(base_pool_v6(None).unwrap().ranges().len() >= 5);
     }
 
     #[test]
-    fn parses_official_fixture_skipping_ipv6() {
+    fn parses_official_fixture_keeping_v6() {
+        // v6 entries in the response are no longer discarded.
         let body = r#"{
             "success": true,
             "result": {
@@ -875,7 +1281,13 @@ mod tests {
             "errors": []
         }"#;
         let cidrs = parse_official(body).unwrap();
-        assert_eq!(cidrs, vec![parse_cidr("104.16.0.0/13").unwrap()]);
+        assert_eq!(
+            cidrs,
+            vec![
+                parse_cidr("104.16.0.0/13").unwrap(),
+                parse_cidr("2001:4860::/32").unwrap()
+            ]
+        );
     }
 
     #[test]
@@ -900,6 +1312,21 @@ mod tests {
         let written = fs::read_to_string(paths::refreshed_ranges_path().unwrap()).unwrap();
         assert_eq!(written, "10.0.0.0/8\n");
         fs::remove_file(paths::refreshed_ranges_path().unwrap()).unwrap();
+    }
+
+    #[tokio::test]
+    async fn refresh_v6_to_disk_round_trips() {
+        let http = FakeHttp("2606:4700::/32\n2400:cb00::/32\n");
+        assert_eq!(refresh_v6_to_disk(&http).await.unwrap(), 2);
+        let written = fs::read_to_string(paths::refreshed_ranges_v6_path().unwrap()).unwrap();
+        assert_eq!(written, "2606:4700::/32\n2400:cb00::/32\n");
+        fs::remove_file(paths::refreshed_ranges_v6_path().unwrap()).unwrap();
+    }
+
+    #[tokio::test]
+    async fn refresh_v6_rejects_non_v6_entries() {
+        let http = FakeHttp("2606:4700::/32\n1.2.3.4/24\n");
+        assert!(refresh_v6_to_disk(&http).await.is_err());
     }
 
     /// Plays a minimal no-auth socks server that answers CONNECT and serves

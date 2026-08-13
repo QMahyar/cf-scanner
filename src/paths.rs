@@ -14,6 +14,11 @@ pub fn refreshed_ranges_path() -> Result<PathBuf> {
     Ok(data_dir()?.join("cf-ranges.txt"))
 }
 
+/// Data-dir copy of the refreshed IPv6 list (`ranges refresh --ipv6`).
+pub fn refreshed_ranges_v6_path() -> Result<PathBuf> {
+    Ok(data_dir()?.join("cf-ranges-v6.txt"))
+}
+
 /// Data-dir location of the xray binary (dev/downloaded fallback; release
 /// archives bundle the binary next to the executable instead).
 pub fn xray_binary_path() -> Result<PathBuf> {
