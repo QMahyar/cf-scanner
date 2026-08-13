@@ -18,24 +18,29 @@ Status legend: [ ] todo · [~] in progress · [x] done
 working CF IPs via curl, latency-sorted, with summary)
 
 ## Phase 2: Frontend + CLI
-- [ ] Task 7: Frontend embed (htmx + SSE + Pico, sortable table)
-- [ ] Task 8: CLI (serve/scan/ranges, JSON lines, wizard)
+- [x] Task 7: Frontend embed (htmx + SSE + Pico, sortable table)
+- [x] Task 8: CLI (serve/scan/ranges, JSON lines, wizard)
 
-**Checkpoint C:** full UX loop in browser + CLI
+**Checkpoint C:** full UX loop in browser + CLI (phase-2 fields in CLI, wizard,
+and browser form)
 
 ## Phase 3: CDN phase 2
-- [ ] Task 9: Config parsers (URIs, subscriptions, Xray JSON)
-- [ ] Task 10: Xray manager (bundle, checksum, spawn, fragment builder)
-- [ ] Task 11: Phase-2 verifier (tunnel HTTP check, verdict)
+- [x] Task 9: Config parsers (URIs, subscriptions, Xray JSON)
+- [x] Task 10: Xray manager (bundle, checksum, spawn, fragment builder)
+- [x] Task 11: Phase-2 verifier (tunnel HTTP check, verdict)
 
 **Checkpoint D:** phase-2 verdicts with real xray
 
 ## Phase 4: WARP
-- [ ] Task 12: WARP probe (pools, ports, boringtun, loss)
-- [ ] Task 13: wgconf parse + real-config verification
+- [x] Task 12: WARP probe (pools, ports, boringtun, loss)
+- [x] Task 13: wgconf parse + real-config verification
 - [ ] Task 14: WARP registration (v0a884, wgconf builder, WARP+, export)
 
 **Checkpoint E:** WARP end-to-end
+(verified live 2026-08-13: probe against real endpoints → 162.159.192.5:2408
+open; 183/204 open in a 300-candidate run; found stopped at ~2×concurrency
+waves — soft-stop overshoot, known behavior; verify path proven by a real
+boringtun loopback handshake with a local keypair, `wg_verify_transport_completes_a_real_handshake_with_a_peer`)
 
 ## Phase 5: Geo + integration
 - [ ] Task 15: Geo (mmdb embed, country, colo trace)

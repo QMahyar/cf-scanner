@@ -2,17 +2,27 @@
 //! fan-out, stop conditions, event stream and the last-scan results store.
 //! Used by the HTTP server (Task 6) and CLI (Task 8).
 
+use std::collections::HashSet;
+use std::net::Ipv4Addr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Instant, SystemTime};
 
-use anyhow::{Result, anyhow};
+use anyhow::{Context as _, Result, anyhow, bail};
 use tokio::sync::{Semaphore, broadcast, watch};
 use tokio::task::JoinSet;
 
-use crate::api::types::{Mode, ScanConfig, ScanEvent, ScanProgress, ScanSummary, Verdict};
+use crate::api::types::{
+    FragmentPreset, Mode, Phase2Config, Phase2Verdict, ScanConfig, ScanEvent, ScanProgress,
+    ScanSummary, ScanTarget, Verdict, WarpConfig,
+};
+use crate::configs::{
+    OutboundSpec, RealSubFetch, SubFetch, parse_subscription, parse_uri, parse_xray_json,
+};
 use crate::probe::{ProbeError, Transport};
 use crate::ranges::{self, PlanItem, SplitMix64};
+use crate::verify::{ProbeRequest, TunnelProbe, XrayTunnelProbe};
+use crate::warp;
 
 const PROGRESS_EVERY: u64 = 50;
 
@@ -20,6 +30,9 @@ type Store = Arc<Mutex<Vec<Verdict>>>;
 
 pub struct ScanController {
     transport: Arc<dyn Transport>,
+    warp_transport: Arc<dyn Transport>,
+    sub_fetch: Arc<dyn SubFetch>,
+    tunnel_probe: Arc<dyn TunnelProbe>,
     events: broadcast::Sender<ScanEvent>,
     store: Store,
     summary: Mutex<Option<ScanSummary>>,
@@ -28,14 +41,39 @@ pub struct ScanController {
 
 impl ScanController {
     pub fn new(transport: Arc<dyn Transport>) -> Self {
+        Self::with_transports(transport, Arc::new(warp::WarpTransport))
+    }
+
+    /// One controller serving both modes (the server's case): CDN probes go
+    /// through `transport`, WARP through `warp_transport`.
+    pub fn with_transports(
+        transport: Arc<dyn Transport>,
+        warp_transport: Arc<dyn Transport>,
+    ) -> Self {
         let (events, _) = broadcast::channel(1024);
         Self {
             transport,
+            warp_transport,
+            sub_fetch: Arc::new(RealSubFetch),
+            tunnel_probe: Arc::new(XrayTunnelProbe),
             events,
             store: Arc::new(Mutex::new(Vec::new())),
             summary: Mutex::new(None),
             cancel_tx: Mutex::new(None),
         }
+    }
+
+    /// Test seam: injects the subscription fetcher and tunnel probe so
+    /// phase-2 runs never touch the network or spawn xray.
+    pub fn with_probes(
+        transport: Arc<dyn Transport>,
+        sub_fetch: Arc<dyn SubFetch>,
+        tunnel_probe: Arc<dyn TunnelProbe>,
+    ) -> Self {
+        let mut controller = Self::with_transports(transport.clone(), transport);
+        controller.sub_fetch = sub_fetch;
+        controller.tunnel_probe = tunnel_probe;
+        controller
     }
 
     pub fn subscribe(&self) -> broadcast::Receiver<ScanEvent> {
@@ -113,17 +151,15 @@ impl ScanController {
     /// and the real Cloudflare ranges.
     async fn run_seeded_with_pool(
         &self,
-        cfg: ScanConfig,
+        mut cfg: ScanConfig,
         seed: u64,
         pool: ranges::CidrPool,
     ) -> Result<ScanSummary> {
         cfg.validate()?;
         if cfg.mode == Mode::Warp {
-            return Err(anyhow!("WARP mode lands in Task 12"));
+            return self.run_warp(cfg, seed).await;
         }
-        if cfg.phase2.is_some() {
-            return Err(anyhow!("phase-2 verification lands in Task 11"));
-        }
+        let phase2 = cfg.phase2.take();
 
         let started = Instant::now();
         self.reset();
@@ -210,11 +246,320 @@ impl ScanController {
             res.map_err(|e| anyhow!("probe task panicked: {e}"))??;
         }
 
+        if let Some(p2) = phase2 {
+            self.verify_phase(&cfg, &p2).await?;
+        }
+
         Ok(self.finish(
             started,
             scanned.load(Ordering::Relaxed),
             found.load(Ordering::Relaxed),
         ))
+    }
+
+    // --- WARP: UDP endpoint discovery ----------------------------------------
+
+    /// WARP run: every (endpoint, port) group gets `probes_per_endpoint`
+    /// handshake probes; open (Response/Cookie) groups emit a verdict with
+    /// min latency and loss %. `scanned` counts completed groups, so totals
+    /// stay readable in the UI.
+    async fn run_warp(&self, cfg: ScanConfig, seed: u64) -> Result<ScanSummary> {
+        cfg.validate()?;
+        let warp = cfg.warp.clone().unwrap_or_default();
+        let probes_per_endpoint = warp.probes_per_endpoint.max(1) as u64;
+        // Verification (Task 13): probe under the user's keypair from their
+        // wgconf instead of the dummy key. Parsing fails fast here, before
+        // any probe is sent.
+        let transport: Arc<dyn Transport> = if warp.verify_with_wgconf {
+            let text = warp
+                .wgconf
+                .as_deref()
+                .ok_or_else(|| anyhow!("verify_with_wgconf requires a wgconf"))?;
+            let wg = crate::wgconf::parse_wg_entry(text)
+                .map_err(|e| anyhow!("invalid wgconf: {e:#}"))?;
+            Arc::new(warp::WgVerifyTransport::from_config(&wg)?)
+        } else {
+            self.warp_transport.clone()
+        };
+
+        let started = Instant::now();
+        self.reset();
+        let groups = self.warp_groups(&cfg, &warp, seed)?;
+        let total = groups.len() as u64;
+        self.emit(ScanEvent::Progress(ScanProgress {
+            scanned: 0,
+            found: 0,
+            total: Some(total),
+        }));
+
+        if total == 0 {
+            return Ok(self.finish(started, 0, 0));
+        }
+
+        let (cancel_tx, cancel_rx) = watch::channel(false);
+        *self.cancel_tx.lock().unwrap() = Some(cancel_tx);
+        let scanned = Arc::new(AtomicU64::new(0));
+        let found = Arc::new(AtomicU64::new(0));
+        let semaphore = Arc::new(Semaphore::new(cfg.concurrency as usize));
+
+        let mut tasks = JoinSet::new();
+        for (ip, ports) in &groups {
+            let ip = *ip;
+            for &port in ports {
+                let transport = transport.clone();
+                let store = self.store.clone();
+                let events = self.events.clone();
+                let semaphore = semaphore.clone();
+                let scanned = scanned.clone();
+                let found = found.clone();
+                let stop = cfg.stop.clone();
+                let cancel = cancel_rx.clone();
+                tasks.spawn(async move {
+                    let _permit = semaphore
+                        .acquire_owned()
+                        .await
+                        .map_err(|_| anyhow!("semaphore closed"))?;
+                    if *cancel.borrow()
+                        || found.load(Ordering::Relaxed) >= u64::from(stop.found)
+                        || stop
+                            .cap
+                            .is_some_and(|cap| scanned.load(Ordering::Relaxed) >= u64::from(cap))
+                    {
+                        return Ok(());
+                    }
+                    let mut latency_ms: Option<u32> = None;
+                    let mut failed = 0u64;
+                    for _ in 0..probes_per_endpoint {
+                        if *cancel.borrow() {
+                            return Ok(());
+                        }
+                        match transport.probe(ip, port, cfg.timeout_ms).await {
+                            Ok(latency) => {
+                                latency_ms = Some(latency_ms.map_or(latency, |m| m.min(latency)));
+                            }
+                            Err(_) => failed += 1,
+                        }
+                    }
+                    scanned.fetch_add(1, Ordering::Relaxed);
+                    if let Some(latency) = latency_ms {
+                        found.fetch_add(1, Ordering::Relaxed);
+                        let verdict = Verdict {
+                            ip,
+                            port,
+                            latency_ms: Some(latency),
+                            loss_pct: Some(failed as f32 / probes_per_endpoint as f32 * 100.0),
+                            country: None,
+                            colo: None,
+                            phase2: None,
+                        };
+                        insert_sorted(&store, verdict.clone());
+                        let _ = events.send(ScanEvent::Result(Box::new(verdict)));
+                    }
+                    if scanned.load(Ordering::Relaxed) % PROGRESS_EVERY == 0 {
+                        let _ = events.send(ScanEvent::Progress(ScanProgress {
+                            scanned: scanned.load(Ordering::Relaxed),
+                            found: found.load(Ordering::Relaxed),
+                            total: Some(total),
+                        }));
+                    }
+                    Ok::<(), anyhow::Error>(())
+                });
+            }
+        }
+        while let Some(res) = tasks.join_next().await {
+            res.map_err(|e| anyhow!("WARP probe task panicked: {e}"))??;
+        }
+
+        Ok(self.finish(
+            started,
+            scanned.load(Ordering::Relaxed),
+            found.load(Ordering::Relaxed),
+        ))
+    }
+
+    /// (endpoint, ports) groups: custom endpoints (with optional per-endpoint
+    /// ports) when given, else the bundled pools sampled per `cfg.target`.
+    fn warp_groups(
+        &self,
+        cfg: &ScanConfig,
+        warp: &WarpConfig,
+        seed: u64,
+    ) -> Result<Vec<(std::net::Ipv4Addr, Vec<u16>)>> {
+        let ports = cfg.ports.clone();
+        let mut groups = Vec::new();
+        if warp.custom_endpoints.is_empty() {
+            let excluded = cfg
+                .exclude
+                .iter()
+                .filter_map(|c| ranges::parse_cidr(c).ok())
+                .collect::<Vec<_>>();
+            let pool = warp::bundled_pool().excluding(&excluded);
+            let plan = ranges::plan(&pool, &cfg.target, &mut SplitMix64::new(seed));
+            for item in &plan {
+                for host in plan_hosts(item, &mut SplitMix64::new(seed)) {
+                    groups.push((host, ports.clone()));
+                }
+            }
+        } else {
+            for ep in &warp.custom_endpoints {
+                let (ip, port) = parse_endpoint(ep)?;
+                groups.push((ip, port.map_or_else(|| ports.clone(), |p| vec![p])));
+            }
+            if let ScanTarget::Count(n) = cfg.target {
+                let mut rng = SplitMix64::new(seed ^ 0x5EED);
+                while groups.len() > n as usize {
+                    let idx = rng.below(groups.len() as u64) as usize;
+                    groups.swap_remove(idx);
+                }
+            }
+        }
+        Ok(groups)
+    }
+
+    // --- phase 2: real-config verification through xray --------------------
+
+    /// Verifies every phase-1 candidate through the user's configs, trying
+    /// (config, SNI) combos until one passes per candidate. Updates verdicts
+    /// in place and re-emits them so clients see the fragment/SNI detail.
+    async fn verify_phase(&self, cfg: &ScanConfig, p2: &Phase2Config) -> Result<()> {
+        let specs = self.parse_phase2_configs(p2).await?;
+        if specs.is_empty() {
+            bail!("phase 2: no usable configs (every entry failed to parse)");
+        }
+        let snis: Vec<Option<String>> = if p2.snis.is_empty() {
+            vec![None]
+        } else {
+            p2.snis.iter().map(|s| Some(s.clone())).collect()
+        };
+        let candidates = self.store.lock().unwrap().clone();
+        if candidates.is_empty() {
+            return Ok(());
+        }
+
+        let (cancel_tx, cancel_rx) = watch::channel(false);
+        *self.cancel_tx.lock().unwrap() = Some(cancel_tx);
+        let semaphore = Arc::new(Semaphore::new(p2.concurrency as usize));
+        let passed_ips: Arc<Mutex<HashSet<std::net::Ipv4Addr>>> =
+            Arc::new(Mutex::new(HashSet::new()));
+        let attempts = Arc::new(AtomicU64::new(0));
+        let spawned = Arc::new(AtomicU64::new(0));
+        let first_error: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+
+        let mut tasks = JoinSet::new();
+        for v in &candidates {
+            for spec in &specs {
+                for sni in &snis {
+                    let probe = self.tunnel_probe.clone();
+                    let store = self.store.clone();
+                    let events = self.events.clone();
+                    let semaphore = semaphore.clone();
+                    let cancel = cancel_rx.clone();
+                    let passed_ips = passed_ips.clone();
+                    let attempts = attempts.clone();
+                    let spawned = spawned.clone();
+                    let first_error = first_error.clone();
+                    let ip = v.ip;
+                    let spec = spec.clone();
+                    let sni = sni.clone();
+                    let p2 = p2.clone();
+                    let timeout_ms = cfg.timeout_ms;
+                    tasks.spawn(async move {
+                        let _permit = semaphore
+                            .acquire_owned()
+                            .await
+                            .map_err(|_| anyhow!("semaphore closed"))?;
+                        if *cancel.borrow() || passed_ips.lock().unwrap().contains(&ip) {
+                            return Ok(());
+                        }
+                        attempts.fetch_add(1, Ordering::Relaxed);
+                        match probe
+                            .probe(ProbeRequest {
+                                spec: &spec,
+                                dial_ip: ip,
+                                preset: &p2.fragment,
+                                custom: p2.custom_fragment.as_ref(),
+                                sni: sni.as_deref(),
+                                probe_url: &p2.probe_url,
+                                timeout_ms,
+                            })
+                            .await
+                        {
+                            Ok(result) => {
+                                spawned.fetch_add(1, Ordering::Relaxed);
+                                let verdict = Phase2Verdict {
+                                    passed: result.passed,
+                                    fragment: fragment_label(&p2.fragment),
+                                    sni: sni.unwrap_or_default(),
+                                    latency_ms: result.latency_ms,
+                                };
+                                if result.passed {
+                                    passed_ips.lock().unwrap().insert(ip);
+                                }
+                                if let Some(updated) = update_verdict_phase2(&store, ip, verdict) {
+                                    let _ = events.send(ScanEvent::Result(Box::new(updated)));
+                                }
+                            }
+                            Err(err) => {
+                                let mut slot = first_error.lock().unwrap();
+                                if slot.is_none() {
+                                    *slot = Some(err.to_string());
+                                }
+                            }
+                        }
+                        Ok::<(), anyhow::Error>(())
+                    });
+                }
+            }
+        }
+        while let Some(res) = tasks.join_next().await {
+            res.map_err(|e| anyhow!("phase-2 task panicked: {e}"))??;
+        }
+
+        if attempts.load(Ordering::Relaxed) > 0 && spawned.load(Ordering::Relaxed) == 0 {
+            let reason = first_error.lock().unwrap().clone().unwrap_or_default();
+            bail!("phase 2: every attempt failed before a probe ran: {reason}");
+        }
+        Ok(())
+    }
+
+    /// Configs entries are vless/trojan/vmess/ss URIs, http(s) subscription
+    /// URLs, or local xray JSON file paths. Keeps every parse result so one
+    /// bad entry never sinks a good batch.
+    async fn parse_phase2_configs(&self, p2: &Phase2Config) -> Result<Vec<OutboundSpec>> {
+        let mut specs = Vec::new();
+        for entry in &p2.configs {
+            let entry = entry.trim();
+            if entry.is_empty() {
+                continue;
+            }
+            if entry.starts_with("http://") || entry.starts_with("https://") {
+                let body = self
+                    .sub_fetch
+                    .fetch(entry)
+                    .await
+                    .with_context(|| format!("subscription {entry} failed"))?;
+                let parsed = parse_subscription(&body);
+                tracing::debug!(
+                    url = %entry,
+                    ok = parsed.specs.len(),
+                    ignored = parsed.ignored,
+                    "subscription fetched"
+                );
+                specs.extend(parsed.specs);
+            } else if entry.contains("://") {
+                specs.push(
+                    parse_uri(entry).with_context(|| format!("config {entry} failed to parse"))?,
+                );
+            } else {
+                let text = std::fs::read_to_string(entry)
+                    .with_context(|| format!("config file {entry} unreadable"))?;
+                specs.push(
+                    parse_xray_json(&text)
+                        .with_context(|| format!("config file {entry} has no usable outbound"))?,
+                );
+            }
+        }
+        Ok(specs)
     }
 
     fn finish(&self, started: Instant, scanned: u64, found: u64) -> ScanSummary {
@@ -279,14 +624,60 @@ fn insert_sorted(store: &Store, verdict: Verdict) {
     results.insert(pos, verdict);
 }
 
+/// `ip` or `ip:port`; the API validator already ran, so this only returns
+/// errors for impossible input.
+fn parse_endpoint(s: &str) -> Result<(std::net::Ipv4Addr, Option<u16>)> {
+    let (ip, port) = match s.rsplit_once(':') {
+        Some((ip, port)) => (ip, Some(port)),
+        None => (s, None),
+    };
+    let ip: Ipv4Addr = ip
+        .trim()
+        .parse()
+        .map_err(|_| anyhow!("invalid endpoint {s:?}"))?;
+    let port = match port {
+        Some(p) => Some(
+            p.trim()
+                .parse()
+                .map_err(|_| anyhow!("invalid endpoint port in {s:?}"))?,
+        ),
+        None => None,
+    };
+    Ok((ip, port))
+}
+
+/// Stable fragment label for verdicts: `off`/`light`/`medium`/`heavy`/`custom`.
+fn fragment_label(preset: &FragmentPreset) -> String {
+    match preset {
+        FragmentPreset::Off => "off",
+        FragmentPreset::Light => "light",
+        FragmentPreset::Medium => "medium",
+        FragmentPreset::Heavy => "heavy",
+        FragmentPreset::Custom => "custom",
+    }
+    .to_owned()
+}
+
+/// Attaches a phase-2 verdict to the stored row and returns the updated
+/// verdict for re-emission. `None` when the row vanished (reset mid-phase).
+fn update_verdict_phase2(store: &Store, ip: Ipv4Addr, p2v: Phase2Verdict) -> Option<Verdict> {
+    let mut results = store.lock().unwrap();
+    let pos = results.iter().position(|v| v.ip == ip)?;
+    results[pos].phase2 = Some(p2v);
+    Some(results[pos].clone())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::net::Ipv4Addr;
+    use std::future::Future;
+    use std::pin::Pin;
+    use std::sync::atomic::AtomicBool;
     use std::time::Duration;
 
-    use crate::api::types::{ScanConfig, ScanTarget, StopCondition};
+    use crate::api::types::{Phase2Config, ScanConfig, ScanTarget, StopCondition};
     use crate::probe::FakeTransport;
+    use crate::verify::{TunnelProbe, TunnelResult};
 
     fn ok_cfg(found: u32, cap: Option<u32>) -> ScanConfig {
         // Serial probing keeps stop/cap semantics exact in tests.
@@ -297,6 +688,77 @@ mod tests {
             ports: vec![443],
             concurrency: 1,
             ..ScanConfig::default()
+        }
+    }
+
+    fn p2_cfg(configs: &[&str], snis: &[&str]) -> Phase2Config {
+        Phase2Config {
+            configs: configs.iter().map(|s| (*s).to_owned()).collect(),
+            snis: snis.iter().map(|s| (*s).to_owned()).collect(),
+            concurrency: 2,
+            ..Default::default()
+        }
+    }
+
+    struct FakeSub(&'static str);
+
+    impl SubFetch for FakeSub {
+        fn fetch(&self, _url: &str) -> Pin<Box<dyn Future<Output = Result<String>> + Send + '_>> {
+            Box::pin(async move { Ok(self.0.to_owned()) })
+        }
+    }
+
+    #[derive(Clone)]
+    struct FakeTunnelProbe {
+        passed: std::sync::Arc<std::sync::Mutex<HashSet<Ipv4Addr>>>,
+        attempts: std::sync::Arc<AtomicU64>,
+        sni_pass: Option<&'static str>,
+        always_err: std::sync::Arc<AtomicBool>,
+    }
+
+    impl FakeTunnelProbe {
+        fn new() -> Self {
+            Self {
+                passed: std::sync::Arc::new(std::sync::Mutex::new(HashSet::new())),
+                attempts: std::sync::Arc::new(AtomicU64::new(0)),
+                sni_pass: None,
+                always_err: std::sync::Arc::new(AtomicBool::new(false)),
+            }
+        }
+
+        fn pass(self, ip: Ipv4Addr) -> Self {
+            self.passed.lock().unwrap().insert(ip);
+            self
+        }
+    }
+
+    impl TunnelProbe for FakeTunnelProbe {
+        fn probe(
+            &self,
+            req: ProbeRequest<'_>,
+        ) -> Pin<Box<dyn Future<Output = Result<TunnelResult>> + Send + '_>> {
+            let this = self.clone();
+            let sni = req.sni.map(str::to_owned);
+            let dial_ip = req.dial_ip;
+            Box::pin(async move {
+                this.attempts.fetch_add(1, Ordering::Relaxed);
+                if this.always_err.load(Ordering::Relaxed) {
+                    return Err(anyhow!("simulated spawn failure"));
+                }
+                if let Some(want) = this.sni_pass {
+                    if sni.as_deref() != Some(want) {
+                        return Ok(TunnelResult {
+                            passed: false,
+                            latency_ms: None,
+                        });
+                    }
+                }
+                let passed = this.passed.lock().unwrap().contains(&dial_ip);
+                Ok(TunnelResult {
+                    passed,
+                    latency_ms: passed.then_some(7),
+                })
+            })
         }
     }
 
@@ -418,9 +880,6 @@ mod tests {
     async fn rejects_unsupported_modes() {
         let (c, _) = controller(Arc::new(FakeTransport::new()));
         let mut cfg = ok_cfg(1, None);
-        cfg.mode = Mode::Warp;
-        assert!(run_local(&c, cfg, 1).await.is_err());
-        let mut cfg = ok_cfg(1, None);
         cfg.phase2 = Some(crate::api::types::Phase2Config::default());
         assert!(run_local(&c, cfg, 1).await.is_err());
     }
@@ -498,10 +957,294 @@ mod tests {
     async fn run_streaming_reports_errors_without_finished() {
         let c = Arc::new(ScanController::new(Arc::new(FakeTransport::new())));
         let mut cfg = ok_cfg(1, None);
-        cfg.mode = Mode::Warp; // unsupported until Task 12; run aborts before Finished
+        cfg.ports = vec![0]; // validation rejects the run before any event
         let mut events = vec![];
         let err = c.run_streaming(cfg, |e| events.push(e)).await.unwrap_err();
-        assert!(err.to_string().contains("WARP"));
+        assert!(err.to_string().contains("out of range"));
         assert!(events.is_empty());
+    }
+
+    // --- WARP ----------------------------------------------------------------
+
+    fn warp_cfg(probes: u8, endpoints: &[&str]) -> ScanConfig {
+        ScanConfig {
+            mode: Mode::Warp,
+            target: ScanTarget::Count(10),
+            stop: StopCondition {
+                found: 5,
+                cap: None,
+            },
+            ports: vec![2408],
+            concurrency: 1,
+            warp: Some(WarpConfig {
+                probes_per_endpoint: probes,
+                custom_endpoints: endpoints.iter().map(|s| (*s).to_owned()).collect(),
+                ..Default::default()
+            }),
+            ..ScanConfig::default()
+        }
+    }
+
+    /// WARP tests script the fake into the warp transport slot.
+    fn warp_controller(
+        t: FakeTransport,
+    ) -> (
+        Arc<ScanController>,
+        tokio::sync::broadcast::Receiver<ScanEvent>,
+    ) {
+        let t = Arc::new(t);
+        let controller = Arc::new(ScanController::with_transports(t.clone(), t.clone()));
+        let rx = controller.subscribe();
+        (controller, rx)
+    }
+
+    #[tokio::test]
+    async fn warp_measures_loss_and_min_latency() {
+        let t = FakeTransport::new()
+            .seq("10.0.0.1".parse().unwrap(), 2408, vec![Ok(5), Ok(7), Ok(6)])
+            .seq(
+                "10.0.0.2".parse().unwrap(),
+                2408,
+                vec![
+                    Ok(9),
+                    Err(ProbeError::Timeout { timeout_ms: 3000 }),
+                    Err(ProbeError::Timeout { timeout_ms: 3000 }),
+                ],
+            );
+        let (c, _) = warp_controller(t);
+        let summary = run_local(&c, warp_cfg(3, &["10.0.0.1", "10.0.0.2"]), 1)
+            .await
+            .unwrap();
+        assert_eq!(summary.found, 2);
+        assert_eq!(summary.scanned, 2);
+        let results = c.results();
+        assert_eq!(results[0].latency_ms, Some(5));
+        assert_eq!(results[0].loss_pct, Some(0.0));
+        assert_eq!(results[1].latency_ms, Some(9));
+        let loss = results[1].loss_pct.unwrap();
+        assert!((loss - 66.67).abs() < 0.1, "loss={loss}");
+    }
+
+    #[tokio::test]
+    async fn warp_custom_endpoint_port_overrides_cfg_ports() {
+        let t = FakeTransport::new().ok("10.0.0.9".parse().unwrap(), 1234, 12);
+        let (c, _) = warp_controller(t);
+        let mut cfg = warp_cfg(1, &["10.0.0.9:1234"]);
+        cfg.ports = vec![2408];
+        let summary = run_local(&c, cfg, 1).await.unwrap();
+        assert_eq!(summary.found, 1);
+        assert_eq!(c.results()[0].port, 1234);
+    }
+
+    #[tokio::test]
+    async fn warp_closed_endpoints_produce_no_verdicts() {
+        let (c, _) = warp_controller(FakeTransport::new());
+        let summary = run_local(&c, warp_cfg(2, &["10.0.0.5"]), 1).await.unwrap();
+        assert_eq!(summary.scanned, 1);
+        assert_eq!(summary.found, 0);
+        assert!(c.results().is_empty());
+    }
+
+    #[tokio::test]
+    async fn warp_stop_condition_stops_early() {
+        let t = FakeTransport::new()
+            .ok("10.0.0.1".parse().unwrap(), 2408, 5)
+            .ok("10.0.0.2".parse().unwrap(), 2408, 5)
+            .ok("10.0.0.3".parse().unwrap(), 2408, 5);
+        let (c, _) = warp_controller(t);
+        let mut cfg = warp_cfg(1, &["10.0.0.1", "10.0.0.2", "10.0.0.3"]);
+        cfg.stop = StopCondition {
+            found: 1,
+            cap: None,
+        };
+        let summary = run_local(&c, cfg, 1).await.unwrap();
+        assert_eq!(summary.found, 1);
+        assert_eq!(summary.scanned, 1, "later groups must not start");
+    }
+
+    #[tokio::test]
+    async fn warp_full_pool_scan_visits_every_endpoint() {
+        let (c, _) = warp_controller(FakeTransport::new());
+        let mut cfg = warp_cfg(1, &[]);
+        cfg.target = ScanTarget::Count(1_000_000);
+        let summary = run_local(&c, cfg, 1).await.unwrap();
+        assert_eq!(summary.scanned, 8 * 256, "all bundled pool hosts");
+        assert_eq!(summary.found, 0);
+    }
+
+    #[tokio::test]
+    async fn warp_count_caps_custom_endpoints_by_sampling() {
+        let t = FakeTransport::new()
+            .ok("10.0.0.1".parse().unwrap(), 2408, 5)
+            .ok("10.0.0.2".parse().unwrap(), 2408, 5)
+            .ok("10.0.0.3".parse().unwrap(), 2408, 5)
+            .ok("10.0.0.4".parse().unwrap(), 2408, 5);
+        let (c, _) = warp_controller(t);
+        let mut cfg = warp_cfg(1, &["10.0.0.1", "10.0.0.2", "10.0.0.3", "10.0.0.4"]);
+        cfg.target = ScanTarget::Count(2);
+        let summary = run_local(&c, cfg, 1).await.unwrap();
+        assert_eq!(
+            summary.scanned, 2,
+            "Count caps the explicit list by sampling"
+        );
+        assert_eq!(summary.found, 2);
+    }
+
+    #[tokio::test]
+    async fn warp_verify_fails_fast_without_a_wgconf() {
+        let (c, _) = warp_controller(FakeTransport::new());
+        let mut cfg = warp_cfg(1, &["10.0.0.1"]);
+        cfg.warp = Some(WarpConfig {
+            verify_with_wgconf: true,
+            ..Default::default()
+        });
+        let err = run_local(&c, cfg, 1).await.unwrap_err();
+        assert!(err.to_string().contains("requires wgconf"), "{err:#}");
+    }
+
+    #[tokio::test]
+    async fn warp_verify_rejects_an_invalid_wgconf_before_probing() {
+        let (c, _) = warp_controller(FakeTransport::new());
+        let mut cfg = warp_cfg(1, &["10.0.0.1"]);
+        cfg.warp = Some(WarpConfig {
+            verify_with_wgconf: true,
+            wgconf: Some("not a wgconf at all".to_owned()),
+            ..Default::default()
+        });
+        let err = run_local(&c, cfg, 1).await.unwrap_err();
+        assert!(err.to_string().contains("invalid wgconf"), "{err:#}");
+        assert!(c.results().is_empty());
+    }
+
+    // --- phase 2 ------------------------------------------------------------
+
+    fn p2_controller(
+        transport: FakeTransport,
+        sub: FakeSub,
+        probe: FakeTunnelProbe,
+    ) -> Arc<ScanController> {
+        Arc::new(ScanController::with_probes(
+            Arc::new(transport),
+            Arc::new(sub),
+            Arc::new(probe),
+        ))
+    }
+
+    const VLESS: &str = "vless://aaaaaaaa-bbbb-cccc-dddd-eeeeffff0000@1.2.3.4:443";
+
+    #[tokio::test]
+    async fn phase2_attaches_verdicts_and_reemits_results() {
+        let t = FakeTransport::new()
+            .ok("10.0.0.1".parse().unwrap(), 443, 50)
+            .ok("10.0.0.2".parse().unwrap(), 443, 10);
+        let probe = FakeTunnelProbe::new()
+            .pass("10.0.0.1".parse().unwrap())
+            .pass("10.0.0.2".parse().unwrap());
+        let c = p2_controller(t, FakeSub(""), probe.clone());
+        let mut rx = c.subscribe();
+        let mut cfg = ok_cfg(2, None);
+        cfg.phase2 = Some(p2_cfg(&[VLESS], &[]));
+        run_local(&c, cfg, 1).await.unwrap();
+
+        let results = c.results();
+        assert_eq!(results.len(), 2);
+        for v in &results {
+            let p2 = v.phase2.as_ref().expect("phase-2 verdict attached");
+            assert!(p2.passed, "{v:?}");
+            assert_eq!(p2.fragment, "off");
+            assert_eq!(p2.sni, "");
+            assert_eq!(p2.latency_ms, Some(7));
+        }
+        assert_eq!(probe.attempts.load(Ordering::Relaxed), 2);
+
+        let mut phase2_events = 0;
+        while let Ok(e) = rx.try_recv() {
+            if let ScanEvent::Result(v) = e {
+                if v.phase2.is_some() {
+                    phase2_events += 1;
+                }
+            }
+        }
+        assert_eq!(phase2_events, 2, "updated verdicts must be re-emitted");
+    }
+
+    #[tokio::test]
+    async fn phase2_marks_failed_attempts_without_aborting() {
+        let t = FakeTransport::new().ok("10.0.0.1".parse().unwrap(), 443, 50);
+        let probe = FakeTunnelProbe::new(); // nothing passes
+        let c = p2_controller(t, FakeSub(""), probe.clone());
+        let mut cfg = ok_cfg(1, None);
+        cfg.phase2 = Some(p2_cfg(&[VLESS], &[]));
+        run_local(&c, cfg, 1).await.unwrap();
+        let results = c.results();
+        let p2 = results[0].phase2.as_ref().unwrap();
+        assert!(!p2.passed);
+        assert_eq!(p2.fragment, "off");
+        assert_eq!(p2.latency_ms, None);
+    }
+
+    #[tokio::test]
+    async fn phase2_tries_sni_combos_until_one_passes() {
+        let t = FakeTransport::new().ok("10.0.0.1".parse().unwrap(), 443, 50);
+        let mut probe = FakeTunnelProbe::new().pass("10.0.0.1".parse().unwrap());
+        probe.sni_pass = Some("b.me");
+        let c = p2_controller(t, FakeSub(""), probe.clone());
+        let mut cfg = ok_cfg(1, None);
+        cfg.phase2 = Some(p2_cfg(&[VLESS], &["a.me", "b.me"]));
+        run_local(&c, cfg, 1).await.unwrap();
+        let results = c.results();
+        let p2 = results[0].phase2.as_ref().unwrap();
+        assert!(p2.passed);
+        assert_eq!(p2.sni, "b.me");
+        // One failed combo + one pass per candidate.
+        assert_eq!(probe.attempts.load(Ordering::Relaxed), 2);
+    }
+
+    #[tokio::test]
+    async fn phase2_fetches_subscriptions_through_the_seam() {
+        let t = FakeTransport::new().ok("10.0.0.1".parse().unwrap(), 443, 50);
+        let probe = FakeTunnelProbe::new().pass("10.0.0.1".parse().unwrap());
+        let sub = FakeSub("vless://aaaaaaaa-bbbb-cccc-dddd-eeeeffff0000@1.2.3.4:443\nnot-a-uri\n");
+        let c = p2_controller(t, sub, probe);
+        let mut cfg = ok_cfg(1, None);
+        cfg.phase2 = Some(p2_cfg(&["https://sub.example.com/x"], &[]));
+        run_local(&c, cfg, 1).await.unwrap();
+        assert!(c.results()[0].phase2.as_ref().unwrap().passed);
+    }
+
+    #[tokio::test]
+    async fn phase2_without_candidates_is_a_noop() {
+        let probe = FakeTunnelProbe::new();
+        let c = p2_controller(FakeTransport::new(), FakeSub(""), probe.clone());
+        let mut cfg = ok_cfg(5, None);
+        cfg.phase2 = Some(p2_cfg(&[VLESS], &[]));
+        run_local(&c, cfg, 1).await.unwrap();
+        assert_eq!(probe.attempts.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn phase2_bad_config_aborts_the_run() {
+        let t = FakeTransport::new().ok("10.0.0.1".parse().unwrap(), 443, 50);
+        let c = p2_controller(t, FakeSub(""), FakeTunnelProbe::new());
+        let mut cfg = ok_cfg(1, None);
+        cfg.phase2 = Some(p2_cfg(&["ftp://nope"], &[]));
+        let err = run_local(&c, cfg, 1).await.unwrap_err();
+        assert!(err.to_string().contains("failed to parse"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn phase2_local_failures_abort_with_a_reason() {
+        let t = FakeTransport::new()
+            .ok("10.0.0.1".parse().unwrap(), 443, 50)
+            .ok("10.0.0.2".parse().unwrap(), 443, 50);
+        let probe = FakeTunnelProbe::new();
+        probe
+            .always_err
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        let c = p2_controller(t, FakeSub(""), probe);
+        let mut cfg = ok_cfg(2, None);
+        cfg.phase2 = Some(p2_cfg(&[VLESS], &[]));
+        let err = run_local(&c, cfg, 1).await.unwrap_err();
+        assert!(err.to_string().contains("every attempt failed"), "{err}");
     }
 }

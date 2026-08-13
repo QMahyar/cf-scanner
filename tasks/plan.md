@@ -30,7 +30,8 @@ Source of truth: `docs/spec.md` (approved 2026-08-12) and
 - **Fragment via XTLS documented pattern:** fragment block on a Freedom
   outbound + `sockopt.dialerProxy` on the proxied outbound.
 - **WARP probe via boringtun** (valid MAC1 required; MAC2 zeros OK). Response
-  (92B, type 2) or Cookie (64B, type 3) with matching receiver index = open.
+  (92B, type 2) or Cookie (64B, type 3), structurally valid = open
+  (verified live: WARP replies under its own session index, no match).
 - **Last-scan-only state.** Results kept in memory; reset clears. No history.
 - **JSON-lines CLI.** `scan` prints one JSON object per result + final summary;
   wizard is interactive.

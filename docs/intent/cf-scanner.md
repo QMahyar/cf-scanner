@@ -138,8 +138,12 @@ decision required where marked **[DECISION]**.
    wgcf-ecosystem norm). Use the **boringtun** crate (Cloudflare, maintained)
    to build Init with valid MAC1 and parse replies — no hand-rolled crypto.
    WARP server public key: bundle the known constant, refresh from the
-   registration API when available. Open = Response (type 2, len 92, receiver
-   index match) or Cookie (type 3, len 64).
+   registration API when available. Open = Response (type 2, len 92) or
+   Cookie (type 3, len 64), structurally valid — CORRECTION (verified live
+   2026-08-13 against real WARP): the receiver index in replies does NOT
+   match the Init's sender index for dummy-key probes (Cloudflare answers
+   under its own session index; wgcf-ecosystem scanners classify on packet
+   shape alone). Index matching would mark every real endpoint closed.
    Sources: https://www.wireguard.com/protocol/, https://docs.rs/boringtun/
 
 5. **GeoIP: switch to db-ip.com Lite MMDB.** IP2Location LITE ships CSV/BIN

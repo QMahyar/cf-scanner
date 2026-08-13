@@ -9,6 +9,8 @@
   <script src="https://cdn.jsdelivr.net/npm/htmx-ext-sse@2.2.4/sse.js" defer></script>
   <style>
     .muted { color: var(--pico-muted-color); }
+    .v-ok { color: var(--pico-primary); }
+    .v-bad { color: var(--pico-del-color); }
     .spacer { margin-top: 1rem; }
     table { table-layout: fixed; }
     th.sortable { cursor: pointer; user-select: none; }
@@ -35,11 +37,14 @@
             <label>Mode
               <select name="mode">
                 <option value="Cdn" selected>CDN / proxy</option>
-                <option value="Warp">WARP (arrives in a later build)</option>
+                <option value="Warp">WARP &mdash; UDP endpoint discovery</option>
               </select>
             </label>
             <label>Ports (comma-separated)
               <input name="ports" type="text" value="443" required>
+            </label>
+            <label id="warp-probes-label" hidden>Probes per endpoint (1&ndash;10, drives loss %)
+              <input name="warp_probes" type="number" min="1" max="10" value="3">
             </label>
             <label>Concurrency (1&ndash;1000)
               <input name="concurrency" type="number" min="1" max="1000" value="200" required>
@@ -81,6 +86,45 @@
               <textarea name="exclude" rows="3" placeholder="141.101.64.0/18"></textarea>
             </label>
           </div>
+          <div class="grid" id="warp-endpoints-row" hidden>
+            <label>WARP custom endpoints (ip or ip:port, one per line; empty = bundled pools)
+              <textarea name="warp_endpoints" rows="3" placeholder="162.159.192.5&#10;188.114.99.7:2408"></textarea>
+            </label>
+            <label>Verify with your own wgconf (real keypair handshake)
+              <textarea name="warp_wgconf" rows="3" placeholder="[Interface]&#10;PrivateKey = ..." disabled></textarea>
+            </label>
+            <label><input type="checkbox" name="warp_verify" disabled>
+              Verify discovered endpoints with the config above</label>
+          </div>
+          <details id="phase2-details">
+            <summary>Phase 2 &mdash; verify candidates through xray</summary>
+            <div class="grid">
+              <label>Configs (URIs, subscription URLs, or xray JSON paths; one per line)
+                <textarea name="phase2_configs" rows="3" placeholder="vless://uuid@host:443?encryption=none"></textarea>
+              </label>
+              <label>Fragment preset
+                <select name="phase2_fragment" disabled>
+                  <option value="Off" selected>Off</option>
+                  <option value="Light">Light (100-200 bytes / 10-20 ms)</option>
+                  <option value="Medium">Medium (50-200 bytes / 10-40 ms)</option>
+                  <option value="Heavy">Heavy (10-300 bytes / 5-50 ms)</option>
+                  <option value="Custom">Custom</option>
+                </select>
+              </label>
+              <label>Custom fragment &ldquo;length,interval&rdquo;
+                <input name="phase2_custom" type="text" placeholder="100-200,10-20" disabled>
+              </label>
+              <label>SNI variants (comma-separated; empty = each config&rsquo;s own)
+                <input name="phase2_snis" type="text" placeholder="www.cloudflare.com" disabled>
+              </label>
+              <label>Probe URL
+                <input name="phase2_probe_url" type="url" value="https://cp.cloudflare.com/" disabled>
+              </label>
+              <label>Parallel instances (1&ndash;8)
+                <input name="phase2_concurrency" type="number" min="1" max="8" value="3" disabled>
+              </label>
+            </div>
+          </details>
           <button id="start-btn" type="submit">Start scan</button>
           <button id="cancel-btn" type="button" class="secondary" disabled>Cancel</button>
           <button id="reset-btn" type="button" class="outline">Reset results</button>
@@ -107,10 +151,12 @@
             <th class="sortable" data-key="ip">IP <span class="caret"></span></th>
             <th class="sortable" data-key="port">Port <span class="caret"></span></th>
             <th class="sortable" data-key="latency_ms">Latency (ms) <span class="caret"></span></th>
+            <th class="sortable" data-key="loss_pct">Loss % <span class="caret"></span></th>
+            <th>Phase 2</th>
           </tr>
         </thead>
         <tbody id="results-body">
-          <tr id="empty-row"><td colspan="3" class="muted">No results yet.</td></tr>
+          <tr id="empty-row"><td colspan="5" class="muted">No results yet.</td></tr>
         </tbody>
       </table>
     </section>
@@ -153,25 +199,72 @@
       const capRaw = form.elements["cap"].value;
       if (capRaw.trim() !== "") stop.cap = Number(capRaw);
 
+      const p2configs = parseLines(form.elements["phase2_configs"].value);
+      let phase2 = null;
+      if (p2configs.length > 0) {
+        const fragment = form.elements["phase2_fragment"].value;
+        let custom_fragment = null;
+        if (fragment === "Custom") {
+          const values = form.elements["phase2_custom"].value.trim();
+          const parts = values.split(",");
+          if (parts.length !== 2 || !parts[0].trim() || !parts[1].trim()) {
+            throw new Error('custom fragment needs "length,interval"');
+          }
+          custom_fragment = { packets: "tlshello", length: parts[0].trim(), interval: parts[1].trim() };
+        }
+        phase2 = {
+          configs: p2configs,
+          fragment,
+          custom_fragment,
+          snis: form.elements["phase2_snis"].value.split(",").map(s => s.trim()).filter(Boolean),
+          probe_url: form.elements["phase2_probe_url"].value.trim(),
+          concurrency: Number(form.elements["phase2_concurrency"].value)
+        };
+      }
+
+      const mode = form.elements["mode"].value;
+      const warp = mode === "Warp" ? {
+        custom_endpoints: parseLines(form.elements["warp_endpoints"].value),
+        probes_per_endpoint: Number(form.elements["warp_probes"].value),
+        wgconf: form.elements["warp_verify"].checked
+          ? form.elements["warp_wgconf"].value
+          : null,
+        verify_with_wgconf: form.elements["warp_verify"].checked,
+        generate_config: false,
+        warp_plus_license: null
+      } : null;
+
       return {
-        mode: form.elements["mode"].value,
-        target: radio === "preset"
+        mode,
+        target: radio === "preset" && mode === "Cdn"
           ? { Preset: form.elements["preset"].value }
-          : { Count: Number(form.elements["count"].value) },
+          : { Count: Number(form.elements["count"].value) || 1 },
         ports,
         stop,
         exclude: parseLines(form.elements["exclude"].value),
         custom_cidrs: parseLines(form.elements["custom_cidrs"].value),
         concurrency: Number(form.elements["concurrency"].value),
         timeout_ms: Number(form.elements["timeout_ms"].value),
-        phase2: null,
-        warp: null
+        phase2: mode === "Cdn" ? phase2 : null,
+        warp
       };
     }
 
     function showStatus(text, state) {
       status.dataset.state = state || "";
       status.textContent = text;
+    }
+
+    function lossCell(v) {
+      if (v.loss_pct == null) return '<td class="muted">&mdash;</td>';
+      return `<td>${v.loss_pct.toFixed(1)}%</td>`;
+    }
+
+    function phase2Cell(v) {
+      const p2 = v.phase2;
+      if (!p2) return '<td class="muted">&mdash;</td>';
+      if (p2.passed) return `<td class="v-ok">&#10003; ${p2.fragment} ${p2.sni}</td>`;
+      return '<td class="v-bad">&#10007;</td>';
     }
 
     function render() {
@@ -185,12 +278,12 @@
       if (rows.length === 0) {
         const tr = document.createElement("tr");
         tr.id = "empty-row";
-        tr.innerHTML = '<td colspan="3" class="muted">No results yet.</td>';
+        tr.innerHTML = '<td colspan="5" class="muted">No results yet.</td>';
         body.appendChild(tr);
       } else {
         for (const v of rows) {
           const tr = document.createElement("tr");
-          tr.innerHTML = `<td>${v.ip}</td><td>${v.port}</td><td>${v.latency_ms ?? "&mdash;"}</td>`;
+          tr.innerHTML = `<td>${v.ip}</td><td>${v.port}</td><td>${v.latency_ms ?? "&mdash;"}</td><td>${lossCell(v)}</td><td>${phase2Cell(v)}</td>`;
           body.appendChild(tr);
         }
       }
@@ -281,6 +374,44 @@
         document.getElementById("preset-row").querySelectorAll("input,select").forEach(f => f.disabled = r.value !== "preset");
         document.getElementById("scan-form").elements["count"].disabled = r.value !== "count";
       }));
+
+    const p2Fields = ["phase2_fragment", "phase2_custom", "phase2_snis", "phase2_probe_url", "phase2_concurrency"];
+    document.getElementById("scan-form").elements["phase2_configs"].addEventListener("input", (e) => {
+      const on = (e.target.value.trim() !== "");
+      p2Fields.forEach(n => document.getElementById("scan-form").elements[n].disabled = !on);
+    });
+
+    document.getElementById("scan-form").elements["mode"].addEventListener("change", (e) => {
+      const warpMode = e.target.value === "Warp";
+      const form = document.getElementById("scan-form");
+      document.getElementById("warp-probes-label").hidden = !warpMode;
+      document.getElementById("warp-endpoints-row").hidden = !warpMode;
+      form.elements["phase2_configs"].disabled = warpMode;
+      p2Fields.forEach(n => form.elements[n].disabled = warpMode);
+      document.getElementById("preset-row").querySelectorAll("input,select")
+        .forEach(f => f.disabled = warpMode);
+      if (warpMode) {
+        form.elements["target-radio"].value = "count";
+        form.elements["count"].disabled = false;
+        if (form.elements["ports"].value === "443") form.elements["ports"].value = "2408";
+      } else {
+        if (form.elements["ports"].value === "2408" && !form.elements["ports"].value.includes(",")) {
+          form.elements["ports"].value = "443";
+        }
+      }
+    });
+
+    const verifyBox = document.getElementById("scan-form").elements["warp_verify"];
+    const wgconfField = document.getElementById("scan-form").elements["warp_wgconf"];
+    verifyBox.addEventListener("change", () => wgconfField.disabled = !verifyBox.checked);
+    wgconfField.addEventListener("input", () => {
+      if (!wgconfField.value.trim()) verifyBox.checked = false;
+    });
+    document.getElementById("mode").addEventListener("change", e => {
+      const warpMode = e.target.value === "Warp";
+      verifyBox.disabled = !warpMode || !wgconfField.value.trim();
+      wgconfField.disabled = !warpMode || !verifyBox.checked;
+    });
   </script>
 </body>
 </html>

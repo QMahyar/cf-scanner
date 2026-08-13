@@ -155,8 +155,10 @@ impl ServerCertVerifier for NoVerify {
 /// exercise cancellation while a probe is in flight.
 #[derive(Clone)]
 struct Scripted {
+    /// Falls back to the last sequence entry once the queue is drained.
     outcome: Result<u32, ProbeError>,
     delay_ms: u64,
+    sequence: std::collections::VecDeque<Result<u32, ProbeError>>,
 }
 
 /// Scripted transport for engine tests: each (ip, port) maps to a scripted
@@ -205,8 +207,26 @@ impl FakeTransport {
             Scripted {
                 outcome,
                 delay_ms: 0,
+                sequence: std::collections::VecDeque::new(),
             },
         );
+    }
+
+    /// Chainable builder for per-call outcomes (WARP loss tests): each call
+    /// pops the next entry; the entry inserted first is used first.
+    pub fn seq(self, ip: Ipv4Addr, port: u16, outcomes: Vec<Result<u32, ProbeError>>) -> Self {
+        self.script.lock().unwrap().insert(
+            (u32::from(ip), port),
+            Scripted {
+                outcome: outcomes
+                    .last()
+                    .cloned()
+                    .unwrap_or_else(|| Err(ProbeError::Refused("empty sequence".to_owned()))),
+                delay_ms: 0,
+                sequence: outcomes.into(),
+            },
+        );
+        self
     }
 
     pub fn clear(&self) {
@@ -227,13 +247,24 @@ impl Transport for FakeTransport {
         port: u16,
         _timeout_ms: u64,
     ) -> Pin<Box<dyn Future<Output = Result<u32, ProbeError>> + Send + '_>> {
-        let scripted = match self.script.lock().unwrap().get(&(u32::from(ip), port)) {
+        let (ip_int, _) = (u32::from(ip), port);
+        let mut scripted = match self.script.lock().unwrap().get(&(ip_int, port)) {
             Some(s) => s.clone(),
             None => Scripted {
                 outcome: Err(ProbeError::Refused("not scripted".to_owned())),
                 delay_ms: 0,
+                sequence: std::collections::VecDeque::new(),
             },
         };
+        if let Some(next) = scripted.sequence.pop_front() {
+            self.script
+                .lock()
+                .unwrap()
+                .get_mut(&(ip_int, port))
+                .expect("scripted entry must still exist")
+                .sequence = scripted.sequence;
+            scripted.outcome = next;
+        }
         Box::pin(async move {
             if scripted.delay_ms > 0 {
                 tokio::time::sleep(Duration::from_millis(scripted.delay_ms)).await;
@@ -268,6 +299,24 @@ mod tests {
         assert_eq!(
             t.probe("9.9.9.9".parse().unwrap(), 443, 3000).await,
             Err(ProbeError::Timeout { timeout_ms: 3000 })
+        );
+    }
+
+    #[tokio::test]
+    async fn fake_sequence_is_consumed_then_repeats_last() {
+        let t = FakeTransport::new().seq(
+            "1.2.3.4".parse().unwrap(),
+            443,
+            vec![Ok(5), Err(ProbeError::Timeout { timeout_ms: 1 })],
+        );
+        assert_eq!(t.probe("1.2.3.4".parse().unwrap(), 443, 1).await, Ok(5));
+        assert_eq!(
+            t.probe("1.2.3.4".parse().unwrap(), 443, 1).await,
+            Err(ProbeError::Timeout { timeout_ms: 1 })
+        );
+        assert_eq!(
+            t.probe("1.2.3.4".parse().unwrap(), 443, 1).await,
+            Err(ProbeError::Timeout { timeout_ms: 1 })
         );
     }
 }

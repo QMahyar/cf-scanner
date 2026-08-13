@@ -13,3 +13,10 @@ pub fn data_dir() -> Result<PathBuf> {
 pub fn refreshed_ranges_path() -> Result<PathBuf> {
     Ok(data_dir()?.join("cf-ranges.txt"))
 }
+
+/// Data-dir location of the xray binary (dev/downloaded fallback; release
+/// archives bundle the binary next to the executable instead).
+pub fn xray_binary_path() -> Result<PathBuf> {
+    let name = if cfg!(windows) { "xray.exe" } else { "xray" };
+    Ok(data_dir()?.join(name))
+}

@@ -1,20 +1,100 @@
 //! Interactive wizard: friendly prompts that drive the same engine and API
 //! contract the browser UI and CLI use. Non-json output lives on stderr so
-//! stdout stays machine-readable. Phase-2 config import lands with Task 9;
-//! WARP with Task 12.
+//! stdout stays machine-readable.
 
 use std::sync::Arc;
 
+use crate::api::types::{
+    CdnPreset, FragmentPreset, Mode, Phase2Config, ScanConfig, ScanEvent, ScanTarget,
+    StopCondition, WarpConfig,
+};
+use crate::engine::ScanController;
+use crate::warp;
 use anyhow::{Result, anyhow};
 use dialoguer::{Confirm, Input, Select};
 
-use crate::api::types::{CdnPreset, Mode, ScanConfig, ScanEvent, ScanTarget, StopCondition};
-use crate::engine::ScanController;
+/// WARP prompts: candidate count / full pools, ports, probes per endpoint,
+/// custom endpoints, optional wgconf verification. Registration lands with
+/// Task 14.
+fn prompt_warp() -> Result<ScanConfig> {
+    let all_pools = warp::bundled_pool().host_count();
+    let count: u32 = Input::new()
+        .with_prompt(format!(
+            "Candidate endpoints (1-{all_pools}; {} = all pools)",
+            all_pools
+        ))
+        .validate_with(|n: &u32| (*n >= 1).then_some(()).ok_or("must be >= 1"))
+        .default(all_pools as u32)
+        .interact()?;
+    let ports = parse_ports(
+        &Input::new()
+            .with_prompt("UDP ports (comma-separated)")
+            .default("2408".to_owned())
+            .validate_with(|s: &String| parse_ports(s).map(|_| ()).map_err(|e| e.to_string()))
+            .interact()?,
+    )?;
+    let found: u32 = Input::new()
+        .with_prompt("Stop after N working endpoints")
+        .validate_with(|n: &u32| (*n >= 1).then_some(()).ok_or("must be >= 1"))
+        .default(20)
+        .interact()?;
+    let probes: u8 = Input::new()
+        .with_prompt("Handshake probes per endpoint (1-10, drives loss %)")
+        .validate_with(|n: &u8| (1..=10).contains(n).then_some(()).ok_or("must be 1-10"))
+        .default(3)
+        .interact()?;
+    let custom =
+        parse_list("Custom endpoints ip or ip:port (comma-separated; empty = bundled pools)")?;
+    let verify = Confirm::new()
+        .with_prompt("Verify with your own wgconf (real keypair handshake)?")
+        .default(false)
+        .interact()?;
+    let wgconf = if verify {
+        let path: String = Input::new()
+            .with_prompt("Path to a wg-quick / AmneziaWG config file")
+            .interact()?;
+        Some(std::fs::read_to_string(&path).map_err(|e| anyhow!("could not read wgconf: {e}"))?)
+    } else {
+        None
+    };
+    let concurrency: u16 = Input::new()
+        .with_prompt("Parallel probes (1-1000)")
+        .validate_with(|n: &u16| (1..=1000).contains(n).then_some(()).ok_or("must be 1-1000"))
+        .default(200)
+        .interact()?;
+    let timeout_ms: u64 = Input::new()
+        .with_prompt("Probe timeout in ms (100-30000)")
+        .validate_with(|n: &u64| {
+            (100..=30_000)
+                .contains(n)
+                .then_some(())
+                .ok_or("must be 100-30000")
+        })
+        .default(3000)
+        .interact()?;
 
-const WARP_NOT_YET: &str = "WARP mode arrives in a later build; using CDN mode.";
+    let cfg = ScanConfig {
+        mode: Mode::Warp,
+        target: ScanTarget::Count(count),
+        ports,
+        stop: StopCondition { found, cap: None },
+        warp: Some(WarpConfig {
+            custom_endpoints: custom,
+            probes_per_endpoint: probes,
+            wgconf,
+            verify_with_wgconf: verify,
+            ..Default::default()
+        }),
+        concurrency,
+        timeout_ms,
+        ..ScanConfig::default()
+    };
+    cfg.validate().map_err(|e| anyhow!("invalid input: {e}"))?;
+    Ok(cfg)
+}
 
 pub async fn run(controller: Arc<ScanController>) -> Result<()> {
-    println!("CF-Scanner wizard — CDN/proxy phase-1 scan (config import arrives in a later build)");
+    println!("CF-Scanner wizard — CDN/proxy scan with optional xray phase-2 verification");
     let cfg = prompt_config()?;
     println!();
     if !Confirm::new()
@@ -33,7 +113,17 @@ pub async fn run(controller: Arc<ScanController>) -> Result<()> {
                 eprint!("\r\x1b[Kchecked {scanned}{total} — {found} working");
             }
             ScanEvent::Result(v) => {
-                println!("\r\x1b[K{}\t{}ms", v.ip, v.latency_ms.unwrap_or(0));
+                let phase2 = match &v.phase2 {
+                    Some(p) if p.passed => format!("\t[phase2 ✓ {} {}]", p.fragment, p.sni),
+                    Some(_) => "\t[phase2 ✗]".to_owned(),
+                    None => String::new(),
+                };
+                println!(
+                    "\r\x1b[K{}\t{}ms{}",
+                    v.ip,
+                    v.latency_ms.unwrap_or(0),
+                    phase2
+                );
             }
             ScanEvent::Finished(_) => print!("\r\x1b[K"),
         })
@@ -55,7 +145,7 @@ fn prompt_config() -> Result<ScanConfig> {
         .interact()?
         == 1
     {
-        println!("{WARP_NOT_YET}");
+        return prompt_warp();
     }
 
     let preset = Select::new()
@@ -126,6 +216,21 @@ fn prompt_config() -> Result<ScanConfig> {
     )?;
     let exclude = parse_cidr_list("Excluded CIDRs (comma-separated; empty = none)")?;
 
+    let phase2 = if Confirm::new()
+        .with_prompt("Verify candidates through xray (phase 2)?")
+        .default(false)
+        .interact()?
+    {
+        Some(prompt_phase2()?)
+    } else {
+        None
+    };
+    if phase2.is_some() && crate::verify::require_xray_binary().is_err() {
+        println!(
+            "note: xray binary not found yet — the scan will fail at phase 2 with a download hint"
+        );
+    }
+
     let cfg = ScanConfig {
         mode: Mode::Cdn,
         target,
@@ -135,10 +240,90 @@ fn prompt_config() -> Result<ScanConfig> {
         custom_cidrs,
         concurrency,
         timeout_ms,
+        phase2,
         ..ScanConfig::default()
     };
     cfg.validate().map_err(|e| anyhow!("invalid input: {e}"))?;
     Ok(cfg)
+}
+
+/// Phase-2 prompts: configs, fragment preset, SNIs, probe target.
+fn prompt_phase2() -> Result<Phase2Config> {
+    let configs = parse_list(
+        "Configs (vless/trojan/vmess/ss URIs, subscription URLs, or xray JSON paths; comma-separated)",
+    )?;
+    if configs.is_empty() {
+        return Err(anyhow!("at least one config required for phase 2"));
+    }
+
+    let fragment = match Select::new()
+        .with_prompt("Fragment preset")
+        .item("Off")
+        .item("Light (100-200 bytes / 10-20 ms)")
+        .item("Medium (50-200 bytes / 10-40 ms)")
+        .item("Heavy (10-300 bytes / 5-50 ms)")
+        .item("Custom")
+        .default(0)
+        .interact()?
+    {
+        1 => FragmentPreset::Light,
+        2 => FragmentPreset::Medium,
+        3 => FragmentPreset::Heavy,
+        4 => FragmentPreset::Custom,
+        _ => FragmentPreset::Off,
+    };
+    let custom_fragment = if fragment == FragmentPreset::Custom {
+        let values: String = Input::new()
+            .with_prompt("Custom fragment \"length,interval\" (e.g. 100-200,10-20)")
+            .validate_with(|s: &String| {
+                s.split_once(',')
+                    .map(|_| ())
+                    .ok_or("must be \"length,interval\"")
+            })
+            .interact()?;
+        let (length, interval) = values.split_once(',').unwrap();
+        Some(crate::api::types::CustomFragment {
+            packets: "tlshello".to_owned(),
+            length: length.trim().to_owned(),
+            interval: interval.trim().to_owned(),
+        })
+    } else {
+        None
+    };
+
+    let snis =
+        parse_list("SNI fronting variants (comma-separated; empty = each config's own SNI)")?;
+    let probe_url: String = Input::new()
+        .with_prompt("Probe URL fetched through the tunnel")
+        .default(crate::api::types::DEFAULT_PROBE_URL.to_owned())
+        .interact()?;
+    let concurrency: u8 = Input::new()
+        .with_prompt("Parallel xray instances (1-8)")
+        .validate_with(|n: &u8| (1..=8).contains(n).then_some(()).ok_or("must be 1-8"))
+        .default(3)
+        .interact()?;
+
+    Ok(Phase2Config {
+        configs,
+        fragment,
+        custom_fragment,
+        snis,
+        probe_url,
+        concurrency,
+    })
+}
+
+fn parse_list(prompt: &str) -> Result<Vec<String>> {
+    let raw: String = dialoguer::Input::new()
+        .with_prompt(prompt)
+        .allow_empty(true)
+        .interact()?;
+    Ok(raw
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
+        .collect())
 }
 
 fn parse_ports(s: &str) -> Result<Vec<u16>> {

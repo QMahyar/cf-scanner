@@ -4,13 +4,13 @@
 //! tests never touch the wire.
 
 use std::fs;
-use std::net::Ipv4Addr;
+use std::net::{Ipv4Addr, SocketAddr};
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
 use rustls::RootCertStore;
 use serde::Deserialize;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
 
 use crate::api::types::{CdnPreset, ScanTarget};
@@ -400,16 +400,27 @@ impl HttpGet for RealHttp {
 /// HTTPS GET with extra request headers (e.g. `User-Agent`), used by the
 /// phase-2 subscription fetcher which must not send the bare default UA.
 pub async fn fetch_tls_with_headers(url: &str, extra_headers: &str) -> Result<String> {
+    let body = fetch_tls_parts(url, extra_headers).await?;
+    Ok(String::from_utf8_lossy(&body).into_owned())
+}
+
+/// HTTPS GET returning raw bytes (binary downloads like the xray zip).
+pub async fn fetch_bytes(url: &str) -> Result<Vec<u8>> {
+    fetch_tls_parts(url, "Accept: */*").await
+}
+
+async fn fetch_tls_parts(url: &str, extra_headers: &str) -> Result<Vec<u8>> {
     tokio::time::timeout(FETCH_TIMEOUT, fetch_tls_inner(url, extra_headers))
         .await
         .context("fetch timed out")?
 }
 
 async fn fetch_tls(url: &str) -> Result<String> {
-    fetch_tls_inner(url, "Accept: application/json").await
+    let body = fetch_tls_parts(url, "Accept: application/json").await?;
+    Ok(String::from_utf8_lossy(&body).into_owned())
 }
 
-async fn fetch_tls_inner(url: &str, extra_headers: &str) -> Result<String> {
+async fn fetch_tls_inner(url: &str, extra_headers: &str) -> Result<Vec<u8>> {
     let rest = url
         .strip_prefix("https://")
         .ok_or_else(|| anyhow!("only https:// URLs supported"))?;
@@ -422,34 +433,127 @@ async fn fetch_tls_inner(url: &str, extra_headers: &str) -> Result<String> {
         None => (host_port, 443),
     };
 
+    let stream = TcpStream::connect((host, port)).await?;
+    let request = http_request(host, &path, extra_headers);
+    let server_name =
+        rustls::pki_types::ServerName::try_from(host.to_owned()).context("invalid hostname")?;
+    let tls = tls_connector().connect(server_name, stream).await?;
+    send_http(tls, &request).await
+}
+
+fn http_request(host: &str, path: &str, extra_headers: &str) -> String {
+    format!("GET {path} HTTP/1.1\r\nHost: {host}\r\n{extra_headers}\r\nConnection: close\r\n\r\n")
+}
+
+/// Sends `request` over the stream and returns the body of an `HTTP/1.1 200`
+/// reply (any other status is an error).
+async fn send_http<S>(stream: S, request: &str) -> Result<Vec<u8>>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let (mut rd, mut wr) = tokio::io::split(stream);
+    wr.write_all(request.as_bytes()).await?;
+
+    let bytes: Vec<u8> = {
+        let mut buf = Vec::new();
+        rd.read_to_end(&mut buf).await?;
+        buf
+    };
+    let split = bytes
+        .windows(4)
+        .position(|w| w == b"\r\n\r\n")
+        .context("malformed HTTP response")?;
+    let (headers, body) = bytes.split_at(split);
+    let headers = String::from_utf8_lossy(headers);
+    if !headers.starts_with("HTTP/1.1 200") {
+        bail!("HTTP error: {headers}");
+    }
+    Ok(body[4..].to_vec())
+}
+
+fn tls_connector() -> tokio_rustls::TlsConnector {
     let mut roots = RootCertStore::empty();
     roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
     let config = rustls::ClientConfig::builder()
         .with_root_certificates(roots)
         .with_no_client_auth();
-    let connector = tokio_rustls::TlsConnector::from(std::sync::Arc::new(config));
+    tokio_rustls::TlsConnector::from(std::sync::Arc::new(config))
+}
 
-    let stream = TcpStream::connect((host, port)).await?;
-    let server_name =
-        rustls::pki_types::ServerName::try_from(host.to_owned()).context("invalid hostname")?;
-    let tls = connector.connect(server_name, stream).await?;
-    let (mut rd, mut wr) = tokio::io::split(tls);
+/// Phase-2 tunnel probe: SOCKS5 (no-auth) CONNECT to `url`'s host through the
+/// socks inbound, then the same TLS+HTTP GET leg as a direct fetch. `Err`
+/// means the tunnel did not deliver a 200.
+pub async fn get_via_socks(url: &str, socks: SocketAddr, timeout_ms: u64) -> Result<Vec<u8>> {
+    tokio::time::timeout(
+        Duration::from_millis(timeout_ms),
+        get_via_socks_inner(url, socks),
+    )
+    .await
+    .context("tunnel probe timed out")?
+}
 
-    let req = format!(
-        "GET {path} HTTP/1.1\r\nHost: {host}\r\n{extra_headers}\r\nConnection: close\r\n\r\n"
-    );
-    wr.write_all(req.as_bytes()).await?;
+async fn get_via_socks_inner(url: &str, socks: SocketAddr) -> Result<Vec<u8>> {
+    let parsed = url::Url::parse(url).context("bad probe URL")?;
+    let use_tls = parsed.scheme() == "https";
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| anyhow!("probe URL has no host"))?
+        .to_owned();
+    let port = parsed.port_or_known_default().unwrap_or(80);
+    let path = if parsed.path().is_empty() {
+        "/".to_owned()
+    } else {
+        parsed.path().to_owned()
+    };
 
-    let mut buf = Vec::new();
-    rd.read_to_end(&mut buf).await?;
-    let text = String::from_utf8_lossy(&buf);
-    let (headers, body) = text
-        .split_once("\r\n\r\n")
-        .context("malformed HTTP response")?;
-    if !headers.starts_with("HTTP/1.1 200") {
-        bail!("HTTP error: {headers}");
+    let mut stream = TcpStream::connect(socks).await?;
+    socks5_connect(&mut stream, &host, port).await?;
+    let request = http_request(&host, &path, "Accept: */*");
+    if use_tls {
+        let server_name =
+            rustls::pki_types::ServerName::try_from(host).context("invalid hostname")?;
+        let tls = tls_connector().connect(server_name, stream).await?;
+        send_http(tls, &request).await
+    } else {
+        send_http(stream, &request).await
     }
-    Ok(body.to_owned())
+}
+
+/// RFC 1928 no-auth handshake with a domain-based CONNECT.
+async fn socks5_connect(stream: &mut TcpStream, host: &str, port: u16) -> Result<()> {
+    stream.write_all(&[0x05, 0x01, 0x00]).await?;
+    let mut method = [0u8; 2];
+    stream.read_exact(&mut method).await?;
+    if method != [0x05, 0x00] {
+        bail!("socks server refused no-auth: {method:02x?}");
+    }
+    let host = host.as_bytes();
+    if host.len() > 255 {
+        bail!("socks host too long");
+    }
+    let mut req = vec![0x05, 0x01, 0x00, 0x03, host.len() as u8];
+    req.extend_from_slice(host);
+    req.extend_from_slice(&port.to_be_bytes());
+    stream.write_all(&req).await?;
+
+    let mut head = [0u8; 4];
+    stream.read_exact(&mut head).await?;
+    if head[0] != 0x05 || head[1] != 0x00 {
+        bail!("socks CONNECT failed: {head:02x?}");
+    }
+    let addr_len = match head[3] {
+        0x01 => 4 + 2,
+        0x03 => {
+            let mut len = [0u8; 1];
+            stream.read_exact(&mut len).await?;
+            len[0] as usize + 2
+        }
+        0x04 => 16 + 2,
+        other => bail!("socks reply has unknown addr type {other}"),
+    };
+    let mut rest = vec![0u8; addr_len];
+    stream.read_exact(&mut rest).await?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -717,5 +821,68 @@ mod tests {
         let written = fs::read_to_string(paths::refreshed_ranges_path().unwrap()).unwrap();
         assert_eq!(written, "10.0.0.0/8\n");
         fs::remove_file(paths::refreshed_ranges_path().unwrap()).unwrap();
+    }
+
+    /// Plays a minimal no-auth socks server that answers CONNECT and serves
+    /// one `200 OK` body — enough to prove the client's wire format.
+    async fn fake_socks_server() -> SocketAddr {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut greeting = [0u8; 3];
+            sock.read_exact(&mut greeting).await.unwrap();
+            sock.write_all(&[0x05, 0x00]).await.unwrap();
+            let mut req = Vec::new();
+            loop {
+                let mut byte = [0u8; 1];
+                sock.read_exact(&mut byte).await.unwrap();
+                req.push(byte[0]);
+                if req.len() >= 5 && req[3] == 0x03 && req.len() >= 5 + req[4] as usize + 2 {
+                    break;
+                }
+            }
+            // VER REP RSV ATYP BND.ADDR BND.PORT (127.0.0.1:0)
+            sock.write_all(&[0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0])
+                .await
+                .unwrap();
+            let mut http = Vec::new();
+            while !http.ends_with(b"\r\n\r\n") {
+                let mut byte = [0u8; 1];
+                sock.read_exact(&mut byte).await.unwrap();
+                http.push(byte[0]);
+            }
+            sock.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
+                .await
+                .unwrap();
+        });
+        addr
+    }
+
+    #[tokio::test]
+    async fn tunnel_probe_gets_http_through_fake_socks() {
+        let socks = fake_socks_server().await;
+        let body = get_via_socks("http://example.test/check", socks, 5_000)
+            .await
+            .unwrap();
+        assert_eq!(body, b"ok");
+    }
+
+    #[tokio::test]
+    async fn tunnel_probe_times_out_when_socks_never_answers() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let socks = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            // Accept the greeting and then stay silent: the client must give up.
+            if let Ok((mut sock, _)) = listener.accept().await {
+                let mut buf = [0u8; 3];
+                let _ = sock.read_exact(&mut buf).await;
+                let _ = tokio::time::sleep(Duration::from_secs(5)).await;
+            }
+        });
+        let err = get_via_socks("http://example.test/", socks, 50)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("timed out"), "{err}");
     }
 }

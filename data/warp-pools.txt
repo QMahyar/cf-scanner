@@ -1,3 +1,4 @@
+# Cloudflare WARP endpoint pools (IPv4)
 8.47.69.0/24
 162.159.192.0/24
 162.159.193.0/24

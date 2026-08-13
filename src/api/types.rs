@@ -236,6 +236,8 @@ pub enum ConfigError {
     InvalidProbes(u8),
     #[error("phase2 concurrency {0} out of range 1-8")]
     InvalidPhase2Concurrency(u8),
+    #[error("verify_with_wgconf requires wgconf text")]
+    VerifyNeedsWgconf,
 }
 
 impl ScanConfig {
@@ -282,6 +284,9 @@ impl WarpConfig {
     pub fn validate(&self) -> Result<(), ConfigError> {
         if !(1..=10).contains(&self.probes_per_endpoint) {
             return Err(ConfigError::InvalidProbes(self.probes_per_endpoint));
+        }
+        if self.verify_with_wgconf && self.wgconf.is_none() {
+            return Err(ConfigError::VerifyNeedsWgconf);
         }
         for ep in &self.custom_endpoints {
             validate_endpoint(ep)?;
@@ -566,6 +571,21 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(w.validate(), Err(ConfigError::InvalidProbes(11)));
+    }
+
+    #[test]
+    fn verify_without_wgconf_is_rejected() {
+        let w = WarpConfig {
+            verify_with_wgconf: true,
+            ..Default::default()
+        };
+        assert_eq!(w.validate(), Err(ConfigError::VerifyNeedsWgconf));
+        let w = WarpConfig {
+            verify_with_wgconf: true,
+            wgconf: Some("anything".to_owned()),
+            ..Default::default()
+        };
+        assert_eq!(w.validate(), Ok(()));
     }
 
     #[test]

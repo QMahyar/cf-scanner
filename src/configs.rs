@@ -4,6 +4,8 @@
 //! the network unless explicitly fetching a sub URL.
 
 use std::collections::BTreeMap;
+use std::future::Future;
+use std::pin::Pin;
 
 use anyhow::{Result, anyhow, bail};
 use base64::Engine as _;
@@ -71,17 +73,21 @@ pub struct SubscriptionParse {
     pub ignored: usize,
 }
 
-/// Full HTTPS GET with a subscription-friendly User-Agent.
-#[allow(async_fn_in_trait)] // internal seam; send bounds are irrelevant here
-pub trait SubFetch {
-    async fn fetch(&self, url: &str) -> Result<String>;
+/// Full HTTPS GET with a subscription-friendly User-Agent. BoxFuture style
+/// so it is dyn-compatible for `Arc<dyn SubFetch>` in the engine.
+pub trait SubFetch: Send + Sync {
+    fn fetch(&self, url: &str) -> Pin<Box<dyn Future<Output = Result<String>> + Send + '_>>;
 }
 
 pub struct RealSubFetch;
 
 impl SubFetch for RealSubFetch {
-    async fn fetch(&self, url: &str) -> Result<String> {
-        ranges::fetch_tls_with_headers(url, &format!("User-Agent: {SUB_UA}\r\nAccept: */*")).await
+    fn fetch(&self, url: &str) -> Pin<Box<dyn Future<Output = Result<String>> + Send + '_>> {
+        let url = url.to_owned();
+        Box::pin(async move {
+            ranges::fetch_tls_with_headers(&url, &format!("User-Agent: {SUB_UA}\r\nAccept: */*"))
+                .await
+        })
     }
 }
 
@@ -483,8 +489,8 @@ mod tests {
     struct FakeSub(String);
 
     impl SubFetch for FakeSub {
-        async fn fetch(&self, _url: &str) -> Result<String> {
-            Ok(self.0.clone())
+        fn fetch(&self, _url: &str) -> Pin<Box<dyn Future<Output = Result<String>> + Send + '_>> {
+            Box::pin(async move { Ok(self.0.clone()) })
         }
     }
 

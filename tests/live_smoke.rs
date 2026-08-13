@@ -2,8 +2,8 @@
 //! They hit real endpoints; credentials come from the environment (never
 //! committed).
 
-use cf_scanner::configs::{RealSubFetch, fetch_subscription, parse_uri};
 use cf_scanner::configs::Protocol;
+use cf_scanner::configs::{RealSubFetch, fetch_subscription, parse_uri};
 
 /// Mirrors the provider install `main()` performs; the test binary has no
 /// main of its own.
