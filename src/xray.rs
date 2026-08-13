@@ -220,9 +220,10 @@ fn asset_name() -> Result<&'static str> {
     Ok(match (std::env::consts::OS, std::env::consts::ARCH) {
         ("windows", "x86_64") => "Xray-windows-64.zip",
         ("linux", "x86_64") => "Xray-linux-64.zip",
-        ("linux", "aarch64") => "Xray-linux-arm64.zip",
+        // XTLS v26+: arm64 assets carry a -v8a suffix (see ADR-007 gotchas).
+        ("linux", "aarch64") => "Xray-linux-arm64-v8a.zip",
         ("macos", "x86_64") => "Xray-macos-64.zip",
-        ("macos", "aarch64") => "Xray-macos-arm64.zip",
+        ("macos", "aarch64") => "Xray-macos-arm64-v8a.zip",
         (os, arch) => bail!("no xray asset for {os}/{arch}"),
     })
 }
@@ -542,7 +543,7 @@ mod tests {
         let mut buf = std::io::Cursor::new(Vec::new());
         {
             let mut w = zip::ZipWriter::new(&mut buf);
-            w.start_file("xray.exe", zip::write::SimpleFileOptions::default())
+            w.start_file(exe_name(), zip::write::SimpleFileOptions::default())
                 .unwrap();
             std::io::Write::write_all(&mut w, b"fake xray payload").unwrap();
             w.finish().unwrap();
