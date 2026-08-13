@@ -104,16 +104,16 @@ Source of truth: `docs/spec.md` (approved 2026-08-12) and
 
 ### Phase 5: Geo + integration
 
-- [ ] Task 15: Geo — embedded db-ip Lite mmdb (country), maxminddb lookup,
+- [x] Task 15: Geo — embedded db-ip Lite mmdb (country), maxminddb lookup,
       /cdn-cgi/trace colo parse with fallback.
-- [ ] Task 16: Engine integration — colo/loss/sort keys wired into verdicts
+- [x] Task 16: Engine integration — colo/loss/sort keys wired into verdicts
       and results; sortable columns complete.
 
 ### Checkpoint F: Results complete (country/colo/latency/loss, sorting)
 
 ### Phase 6: Release + docs
 
-- [ ] Task 17: dist config — 5 targets, installers (msi/shell/powershell),
+- [x] Task 17: dist config — 5 targets, installers (msi/shell/powershell),
       ExtraArtifacts (mmdb, xray), release.yml, plan verification.
 - [ ] Task 18: README + ADRs (xray bundling, boringtun, db-ip, fragment chain,
       single-binary UI, no-history), Termux/SmartScreen caveats.

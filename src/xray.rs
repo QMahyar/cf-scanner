@@ -288,13 +288,14 @@ fn hex_lower(bytes: &[u8]) -> String {
     s
 }
 
-/// Parses XTLS `.dgst` text (`SHA256 (file.zip) = <hex>`); scoped to the
-/// first 64-char hex run so format variations are tolerated.
+/// Parses XTLS `.dgst` text (the current format has no filename, just
+/// `SHA2-256= <hex>` lines); scoped to the first 64-char hex run on the
+/// SHA-256 line so format variations are tolerated.
 fn parse_dgst(text: &str, asset: &str) -> Result<String> {
     let line = text
         .lines()
-        .find(|l| l.contains(asset))
-        .ok_or_else(|| anyhow!(".dgst has no line for {asset}"))?;
+        .find(|l| l.trim_start().starts_with("SHA2-256"))
+        .ok_or_else(|| anyhow!(".dgst has no SHA2-256 line for {asset}"))?;
     let hex64: Vec<&str> = line
         .split(|c: char| !c.is_ascii_hexdigit())
         .filter(|s| s.len() == 64)
@@ -508,15 +509,18 @@ mod tests {
 
     #[test]
     fn parses_realistic_dgst_text() {
+        // The format XTLS actually ships: labeled digests, no filename.
         let dgst = format!(
-            "# SHA256 digest\nSHA256 (Xray-windows-64.zip) = {}",
-            "a".repeat(64)
+            "MD5= {}\nSHA1= {}\nSHA2-256= {}\nSHA2-512= {}",
+            "b".repeat(32),
+            "c".repeat(40),
+            "a".repeat(64),
+            "d".repeat(128)
         );
         assert_eq!(
             parse_dgst(&dgst, "Xray-windows-64.zip").unwrap(),
             "a".repeat(64)
         );
-        assert!(parse_dgst(&dgst, "Xray-linux-64.zip").is_err());
         assert!(parse_dgst("garbage", "Xray-windows-64.zip").is_err());
     }
 
@@ -544,10 +548,7 @@ mod tests {
             w.finish().unwrap();
         }
         let zip_bytes = buf.into_inner();
-        let dgst = format!(
-            "# SHA256 digest\nSHA256 (Xray-windows-64.zip) = {}",
-            hex_lower(&Sha256::digest(&zip_bytes))
-        );
+        let dgst = format!("SHA2-256= {}", hex_lower(&Sha256::digest(&zip_bytes)));
 
         struct FakeFetch(Vec<u8>, String);
         impl BinaryFetch for FakeFetch {
@@ -575,10 +576,7 @@ mod tests {
     #[tokio::test]
     async fn checksum_mismatch_is_rejected() {
         let bad_zip = b"not the right data".to_vec();
-        let dgst = format!(
-            "# SHA256 digest\nSHA256 (Xray-windows-64.zip) = {}",
-            "0".repeat(64)
-        );
+        let dgst = format!("SHA2-256= {}", "0".repeat(64));
         struct FakeFetch(Vec<u8>, String);
         impl BinaryFetch for FakeFetch {
             async fn bytes(&self, url: &str) -> Result<Vec<u8>> {

@@ -4,8 +4,15 @@ version = "0.1.0"
 edition = "2024"
 description = "Find working Cloudflare IPs/endpoints on ISP-restricted networks"
 license = "MIT"
+authors = ["qmahyar"]
 repository = "https://github.com/qmahyar/cf-scanner"
 rust-version = "1.85"
+
+[package.metadata.wix]
+upgrade-guid = "B4B16BC8-2905-4E0E-A024-47552733A782"
+path-guid = "77D27897-3FD7-4F5E-8E8D-752186082D10"
+license = false
+eula = false
 
 [dependencies]
 anyhow = "1.0.104"
@@ -35,5 +42,17 @@ url = "2.5.8"
 webpki-roots = "0.26"
 zip = { version = "7.2.0", default-features = false, features = ["deflate"] }
 
+[features]
+# dist-only: build.rs bundles the checksum-verified xray binary into release
+# archives (see dist-workspace.toml). Dev builds never enable this.
+dist-bundle-xray = []
+
 [build-dependencies]
 flate2 = "1"
+sha2 = "0.11.0"
+zip = { version = "7.2.0", default-features = false, features = ["deflate"] }
+
+# The profile that 'dist' will build with
+[profile.dist]
+inherits = "release"
+lto = "thin"

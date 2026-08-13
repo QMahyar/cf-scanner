@@ -48,13 +48,13 @@ completed a real WireGuard handshake against 162.159.192.5:2408 with the
 registered keypair)
 
 ## Phase 5: Geo + integration
-- [ ] Task 15: Geo (mmdb embed, country, colo trace)
-- [ ] Task 16: Engine integration (colo/loss/sort keys)
+- [x] Task 15: Geo (mmdb embed, country, colo trace)
+- [x] Task 16: Engine integration (colo/loss/sort keys)
 
 **Checkpoint F:** complete result columns + sorting
 
 ## Phase 6: Release + docs
-- [ ] Task 17: dist config + release pipeline
+- [x] Task 17: dist config + release pipeline
 - [ ] Task 18: README + ADRs + caveats
 - [ ] Task 19: Final review (review/simplify/security pass)
 
