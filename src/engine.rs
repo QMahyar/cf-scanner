@@ -3,7 +3,7 @@
 //! Used by the HTTP server (Task 6) and CLI (Task 8).
 
 use std::collections::HashSet;
-use std::net::Ipv4Addr;
+use std::net::{IpAddr, Ipv4Addr};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Instant, SystemTime};
@@ -193,7 +193,7 @@ impl ScanController {
     }
 
     async fn run_seeded_unguarded(&self, cfg: ScanConfig, seed: u64) -> Result<ScanSummary> {
-        let pool = ranges::effective_pool(&cfg.custom_cidrs, &cfg.exclude)?;
+        let pool = ranges::effective_pool(&cfg.custom_cidrs, &cfg.exclude, cfg.include_v6)?;
         self.run_seeded_with_pool(cfg, seed, pool).await
     }
 
@@ -355,7 +355,7 @@ impl ScanController {
 
         let mut tasks = JoinSet::new();
         for (ip, ports) in &groups {
-            let ip = *ip;
+            let ip = IpAddr::from(*ip);
             for &port in ports {
                 let transport = transport.clone();
                 let store = self.store.clone();
@@ -449,7 +449,10 @@ impl ScanController {
             let plan = ranges::plan(&pool, &cfg.target, &mut SplitMix64::new(seed));
             for item in &plan {
                 for host in plan_hosts(item, &mut SplitMix64::new(seed)) {
-                    groups.push((host, ports.clone()));
+                    match host {
+                        IpAddr::V4(ip) => groups.push((ip, ports.clone())),
+                        IpAddr::V6(_) => bail!("WARP pools must stay IPv4"),
+                    }
                 }
             }
         } else {
@@ -499,6 +502,9 @@ impl ScanController {
 
         let mut tasks = JoinSet::new();
         for v in &candidates {
+            // Phase 2 dials the candidate through xray, which takes a raw
+            // IPv4 address; v6 phase-1 finds stay phase-1-only for now.
+            let IpAddr::V4(ip) = v.ip else { continue };
             for spec in &specs {
                 for sni in &snis {
                     let probe = self.tunnel_probe.clone();
@@ -510,7 +516,6 @@ impl ScanController {
                     let attempts = attempts.clone();
                     let spawned = spawned.clone();
                     let first_error = first_error.clone();
-                    let ip = v.ip;
                     let spec = spec.clone();
                     let sni = sni.clone();
                     let p2 = p2.clone();
@@ -675,20 +680,21 @@ fn redact_entry(entry: &str) -> String {
 
 /// Concrete host addresses a plan item yields. `Sample` rolls fresh random
 /// hosts with a per-port seed so multi-port scans don't repeat the same host.
-fn plan_hosts(item: &PlanItem, rng: &mut SplitMix64) -> Vec<std::net::Ipv4Addr> {
+/// v6 host spaces need u128 sampling (see `SplitMix64::below_u128`).
+fn plan_hosts(item: &PlanItem, rng: &mut SplitMix64) -> Vec<IpAddr> {
     match item {
         PlanItem::Every { cidr } => (0..cidr.host_count())
             .map(|i| cidr.host(i))
             .collect::<Vec<_>>(),
         PlanItem::Sample { cidr, count } => {
-            let count = (*count).min(cidr.host_count());
+            let count = (*count).min(cidr.host_count().min(u64::MAX as u128) as u64);
             let mut hosts = Vec::with_capacity(count as usize);
             for _ in 0..count {
-                let idx = if cidr.prefix == 24 {
+                let idx = if cidr.addr.is_ipv4() && cidr.prefix == 24 {
                     // Skip network and broadcast addresses on full /24 blocks.
-                    rng.below(254) + 1
+                    (rng.below(254) + 1) as u128
                 } else {
-                    rng.below(cidr.host_count())
+                    rng.below_u128(cidr.host_count())
                 };
                 hosts.push(cidr.host(idx));
             }
@@ -699,15 +705,16 @@ fn plan_hosts(item: &PlanItem, rng: &mut SplitMix64) -> Vec<std::net::Ipv4Addr> 
 }
 
 fn plan_probe_count(plan: &[PlanItem], ports: &[u16]) -> u64 {
-    let hosts: u64 = plan
+    let hosts: u128 = plan
         .iter()
         .map(|i| match i {
             PlanItem::Every { cidr } => cidr.host_count(),
-            PlanItem::Sample { cidr, count } => (*count).min(cidr.host_count()),
-            PlanItem::Hosts { offsets, .. } => offsets.len() as u64,
+            PlanItem::Sample { cidr, count } => (*count as u128).min(cidr.host_count()),
+            PlanItem::Hosts { offsets, .. } => offsets.len() as u128,
         })
         .sum();
-    hosts.saturating_mul(ports.len() as u64)
+    let probes = hosts.saturating_mul(ports.len() as u128);
+    probes.min(u64::MAX as u128) as u64
 }
 
 fn insert_sorted(store: &Store, verdict: Verdict) {
@@ -927,6 +934,28 @@ mod tests {
         let summary = run_local(&c, ok_cfg(10, None), 1).await.unwrap();
         assert_eq!(summary.found, 1);
         assert_eq!(summary.scanned, 8, "all 8 hosts must be probed");
+    }
+
+    #[tokio::test]
+    async fn scans_v6_hosts_from_an_explicit_pool() {
+        // Count(8) >= the /126 pool's 3 usable hosts, so the plan enumerates
+        // every host; script the v6 addresses deterministically. (::0 is the
+        // network address and comes back unanswered.)
+        let t = FakeTransport::new()
+            .ok("2606:4700::1".parse().unwrap(), 443, 20)
+            .ok("2606:4700::2".parse().unwrap(), 443, 30)
+            .ok("2606:4700::3".parse().unwrap(), 443, 10);
+        let (c, _) = controller(Arc::new(t));
+        let pool = ranges::CidrPool::parse("2606:4700::/126").unwrap();
+        let summary = c
+            .run_seeded_with_pool(ok_cfg(100, None), 1, pool)
+            .await
+            .unwrap();
+        assert_eq!(summary.scanned, 4);
+        assert_eq!(summary.found, 3);
+        let results = c.results();
+        assert!(results.iter().all(|v| v.ip.is_ipv6()));
+        assert_eq!(results[0].ip, "2606:4700::3".parse::<IpAddr>().unwrap());
     }
 
     #[tokio::test]
@@ -1239,6 +1268,33 @@ mod tests {
     }
 
     const VLESS: &str = "vless://aaaaaaaa-bbbb-cccc-dddd-eeeeffff0000@1.2.3.4:443";
+
+    #[tokio::test]
+    async fn phase2_skips_v6_candidates() {
+        // v6 phase-1 finds stay phase-1-only: xray dials a raw v4 address.
+        let t = FakeTransport::new()
+            .ok("2606:4700::1".parse().unwrap(), 443, 20)
+            .ok("2606:4700::2".parse().unwrap(), 443, 30)
+            .ok("10.0.0.1".parse().unwrap(), 443, 40);
+        let probe = FakeTunnelProbe::new().pass("10.0.0.1".parse().unwrap());
+        let c = p2_controller(t, FakeSub(""), probe.clone());
+        let mut cfg = ok_cfg(100, None);
+        cfg.phase2 = Some(p2_cfg(&[VLESS], &[]));
+        let pool = ranges::CidrPool::parse("2606:4700::/126\n10.0.0.0/30").unwrap();
+        c.run_seeded_with_pool(cfg, 1, pool).await.unwrap();
+        // Only the v4 candidate went through the tunnel probe.
+        assert_eq!(probe.attempts.load(Ordering::Relaxed), 1);
+        let results = c.results();
+        let v4 = results.iter().find(|v| !v.ip.is_ipv6()).unwrap();
+        assert!(v4.phase2.as_ref().unwrap().passed);
+        assert_eq!(results.iter().filter(|v| v.ip.is_ipv6()).count(), 2);
+        assert!(
+            results
+                .iter()
+                .filter(|v| v.ip.is_ipv6())
+                .all(|v| v.phase2.is_none())
+        );
+    }
 
     #[tokio::test]
     async fn phase2_attaches_verdicts_and_reemits_results() {

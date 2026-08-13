@@ -50,7 +50,11 @@ enum Command {
 #[derive(Subcommand)]
 enum RangesAction {
     /// Re-fetch official Cloudflare IPv4 ranges from cloudflare.com
-    Refresh,
+    Refresh {
+        /// Also fetch the official IPv6 list into data/cf-ranges-v6.txt
+        #[arg(long)]
+        ipv6: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -120,6 +124,10 @@ struct ScanArgs {
     /// Scan these CIDRs INSTEAD of the bundled ranges, comma-separated
     #[arg(long, value_delimiter = ',')]
     custom_cidrs: Vec<String>,
+
+    /// Include the bundled Cloudflare IPv6 ranges in the CDN candidate pool
+    #[arg(long)]
+    ipv6: bool,
 
     /// Enable phase-2 verification: vless/trojan/vmess/ss URIs, subscription
     /// URLs, or local xray JSON paths, comma-separated
@@ -235,6 +243,9 @@ fn build_scan_config(args: &ScanArgs) -> Result<ScanConfig> {
     if mode == Mode::Cdn && args.warp_wgconf_file.is_some() {
         return Err(anyhow!("--warp-wgconf-file requires --mode warp"));
     }
+    if mode == Mode::Warp && args.ipv6 {
+        return Err(anyhow!("--ipv6 is CDN-only; WARP pools are IPv4"));
+    }
     let target = match (args.preset, args.count) {
         (Some(preset), None) => ScanTarget::Preset(CdnPreset::from(preset)),
         (None, Some(count)) => ScanTarget::Count(count),
@@ -271,6 +282,7 @@ fn build_scan_config(args: &ScanArgs) -> Result<ScanConfig> {
         },
         exclude: args.exclude.clone(),
         custom_cidrs: args.custom_cidrs.clone(),
+        include_v6: args.ipv6,
         concurrency: args.concurrency,
         timeout_ms: args.timeout_ms,
         phase2,
@@ -349,11 +361,18 @@ async fn run(cli: Cli) -> Result<()> {
             cli_wizard::run(controller).await
         }
         Command::Ranges { action } => match action {
-            RangesAction::Refresh => {
-                let n = ranges::refresh_to_disk(&ranges::RealHttp).await?;
+            RangesAction::Refresh { ipv6 } => {
+                let (n, v6_path) = if ipv6 {
+                    let n = ranges::refresh_v6_to_disk(&ranges::RealHttp).await?;
+                    (n, Some(paths::refreshed_ranges_v6_path()?))
+                } else {
+                    let n = ranges::refresh_to_disk(&ranges::RealHttp).await?;
+                    (n, None)
+                };
+                let family = if ipv6 { "IPv6" } else { "IPv4" };
                 println!(
-                    "refreshed {n} IPv4 ranges -> {}",
-                    paths::refreshed_ranges_path()?.display()
+                    "refreshed {n} {family} ranges -> {}",
+                    v6_path.unwrap_or(paths::refreshed_ranges_path()?).display()
                 );
                 Ok(())
             }
@@ -446,6 +465,7 @@ mod tests {
             timeout_ms: 3000,
             exclude: vec![],
             custom_cidrs: vec![],
+            ipv6: false,
             phase2_configs: vec![],
             phase2_fragment: None,
             phase2_custom: None,
@@ -593,6 +613,47 @@ mod tests {
         a.warp_verify = true;
         a.warp_wgconf_file = Some("tests/fixtures/warp-wgconf.txt".to_owned());
         assert!(build_scan_config(&a).is_err(), "cdn must reject warp flags");
+    }
+
+    #[test]
+    fn ipv6_flag_enables_v6_ranges() {
+        let argv = ["cf-scanner", "scan", "--ipv6"];
+        let scan_args = match Cli::try_parse_from(argv).unwrap().command {
+            Command::Scan { args } => *args,
+            _ => unreachable!(),
+        };
+        assert!(scan_args.ipv6);
+        let cfg = build_scan_config(&scan_args).unwrap();
+        assert!(cfg.include_v6);
+        // Default stays off.
+        assert!(!build_scan_config(&args()).unwrap().include_v6);
+    }
+
+    #[test]
+    fn warp_mode_rejects_ipv6_flag() {
+        let mut a = args();
+        a.mode = ModeArg::Warp;
+        a.ipv6 = true;
+        let err = build_scan_config(&a).unwrap_err();
+        assert!(err.to_string().contains("CDN-only"), "{err:#}");
+    }
+
+    #[test]
+    fn ranges_refresh_ipv6_flag_parses() {
+        let argv = ["cf-scanner", "ranges", "refresh", "--ipv6"];
+        match Cli::try_parse_from(argv).unwrap().command {
+            Command::Ranges {
+                action: RangesAction::Refresh { ipv6: true },
+            } => {}
+            _ => panic!("expected refresh --ipv6"),
+        }
+        let argv = ["cf-scanner", "ranges", "refresh"];
+        match Cli::try_parse_from(argv).unwrap().command {
+            Command::Ranges {
+                action: RangesAction::Refresh { ipv6: false },
+            } => {}
+            _ => panic!("expected plain refresh"),
+        }
     }
 
     #[test]

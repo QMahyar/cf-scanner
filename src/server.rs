@@ -129,7 +129,7 @@ async fn ranges() -> Json<RangesPayload> {
     let pool = crate::ranges::CidrPool::bundled();
     Json(RangesPayload {
         bundled: pool.ranges().iter().map(|c| format!("{}", c)).collect(),
-        host_count: pool.host_count(),
+        host_count: pool.host_count().min(u64::MAX as u128) as u64,
     })
 }
 
@@ -369,6 +369,29 @@ mod tests {
         let body = r#"{"mode":"Cdn","target":{"Preset":"Quick"},"ports":[0],"stop":{"found":1,"cap":null},"exclude":[],"custom_cidrs":[],"concurrency":1,"timeout_ms":3000,"phase2":null,"warp":null}"#;
         let status = post_scan(addr, body).await;
         assert_eq!(status, 400);
+    }
+
+    #[tokio::test]
+    async fn accepts_include_v6_scan_config() {
+        let addr = serve(FakeTransport::new()).await;
+        let mut c = cfg(1, 1);
+        c.include_v6 = true;
+        assert_eq!(
+            post_scan(addr, &serde_json::to_string(&c).unwrap()).await,
+            202
+        );
+    }
+
+    #[tokio::test]
+    async fn scan_config_without_include_v6_field_still_posts() {
+        // The field is serde-defaulted so older clients keep working.
+        let addr = serve(FakeTransport::new()).await;
+        let c = cfg(1, 1);
+        let mut json = serde_json::to_string(&c).unwrap();
+        assert!(json.contains("\"include_v6\":false"), "{json}");
+        json = json.replacen("\"include_v6\":false,", "", 1);
+        assert!(!json.contains("include_v6"), "{json}");
+        assert_eq!(post_scan(addr, &json).await, 202);
     }
 
     #[tokio::test]
