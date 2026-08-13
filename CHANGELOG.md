@@ -6,6 +6,17 @@ Added / Changed / Fixed / Deprecated / Removed / Security, newest on top.
 ## [Unreleased]
 
 ### Added
+- IPv6 candidate ranges in phase 1: official Cloudflare v6 list bundled
+  (`data/cf-ranges-v6.txt`), `--ipv6` CLI flags, `ScanConfig.include_v6`
+  toggle, IPv6 verdicts (wire-compatible `IpAddr`), v6 exclusions/sampling.
+- Background ranges refresh (24h, non-blocking, failure keeps last-good data)
+  and `last_updated` (RFC3339 UTC) on `GET /api/ranges`.
+- In-memory scan profiles API (`GET/PUT/DELETE /api/profiles[/{name}]`,
+  session-lifetime, validated configs, no persistence).
+- UI: dark mode (system + manual toggle), results density toggle, latency
+  histogram, fragment preset editor (custom fields), client-side CSV/JSON
+  results export, WARP wgconf import (paste + file picker), profiles panel,
+  ranges last-updated display, IPv6 checkbox.
 - Development + release process docs (`docs/development.md`,
   `docs/release-process.md`, ADR-007) so future developers and agents follow
   one local build/test flow, versioning contract, and publishing pipeline.
