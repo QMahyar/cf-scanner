@@ -117,12 +117,12 @@ Source of truth: `docs/spec.md` (approved 2026-08-12) and
       ExtraArtifacts (mmdb, xray), release.yml, plan verification.
 - [x] Task 18: README + ADRs (xray bundling, boringtun, db-ip, fragment chain,
       single-binary UI, no-history), Termux/SmartScreen caveats.
-- [ ] Task 19: Final review — code-review-and-quality + code-simplification +
+- [x] Task 19: Final review — code-review-and-quality + code-simplification +
       security pass; fix findings.
 
 ### Checkpoint G: v0.1.0 release ready
 - [ ] `dist plan --artifacts=all --tag=v0.1.0` green
-- [ ] All tests/clippy/fmt green; review findings closed
+- [x] All tests/clippy/fmt green; review findings closed (optionals deferred)
 
 ## Risks and Mitigations
 
