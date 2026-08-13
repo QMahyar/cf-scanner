@@ -775,7 +775,7 @@
         const resp = await fetch(`/api/profiles/${encodeURIComponent(name)}`, {
           method: "PUT",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ name, config: cfg })
+          body: JSON.stringify(cfg)
         });
         if (!resp.ok) {
           const detail = await resp.text();

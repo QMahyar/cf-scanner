@@ -285,7 +285,6 @@ fn build_scan_config(args: &ScanArgs) -> Result<ScanConfig> {
         include_v6: args.ipv6,
         concurrency: args.concurrency,
         timeout_ms: args.timeout_ms,
-        include_v6: false,
         phase2,
         warp,
     };
