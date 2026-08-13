@@ -150,9 +150,11 @@
           <tr>
             <th class="sortable" data-key="ip">IP <span class="caret"></span></th>
             <th class="sortable" data-key="port">Port <span class="caret"></span></th>
-            <th class="sortable" data-key="latency_ms">Latency (ms) <span class="caret"></span></th>
-            <th class="sortable" data-key="loss_pct">Loss % <span class="caret"></span></th>
-            <th>Phase 2</th>
+<th class="sortable" data-key="latency_ms">Latency (ms) <span class="caret"></span></th>
+<th class="sortable" data-key="loss_pct">Loss % <span class="caret"></span></th>
+<th class="sortable" data-key="country">Country <span class="caret"></span></th>
+<th class="sortable" data-key="colo">Colo <span class="caret"></span></th>
+<th>Phase 2</th>
           </tr>
         </thead>
         <tbody id="results-body">
@@ -278,12 +280,12 @@
       if (rows.length === 0) {
         const tr = document.createElement("tr");
         tr.id = "empty-row";
-        tr.innerHTML = '<td colspan="5" class="muted">No results yet.</td>';
+        tr.innerHTML = '<td colspan="7" class="muted">No results yet.</td>';
         body.appendChild(tr);
       } else {
         for (const v of rows) {
           const tr = document.createElement("tr");
-          tr.innerHTML = `<td>${v.ip}</td><td>${v.port}</td><td>${v.latency_ms ?? "&mdash;"}</td><td>${lossCell(v)}</td><td>${phase2Cell(v)}</td>`;
+          tr.innerHTML = `<td>${v.ip}</td><td>${v.port}</td><td>${v.latency_ms ?? "&mdash;"}</td><td>${lossCell(v)}</td><td>${v.country ?? "&mdash;"}</td><td>${v.colo ?? "&mdash;"}</td><td>${phase2Cell(v)}</td>`;
           body.appendChild(tr);
         }
       }

@@ -19,6 +19,7 @@ use crate::api::types::{
 use crate::configs::{
     OutboundSpec, RealSubFetch, SubFetch, parse_subscription, parse_uri, parse_xray_json,
 };
+use crate::geo::Geo;
 use crate::probe::{ProbeError, Transport};
 use crate::ranges::{self, PlanItem, SplitMix64};
 use crate::verify::{ProbeRequest, TunnelProbe, XrayTunnelProbe};
@@ -33,6 +34,7 @@ pub struct ScanController {
     warp_transport: Arc<dyn Transport>,
     sub_fetch: Arc<dyn SubFetch>,
     tunnel_probe: Arc<dyn TunnelProbe>,
+    geo: Arc<Geo>,
     events: broadcast::Sender<ScanEvent>,
     store: Store,
     summary: Mutex<Option<ScanSummary>>,
@@ -56,6 +58,7 @@ impl ScanController {
             warp_transport,
             sub_fetch: Arc::new(RealSubFetch),
             tunnel_probe: Arc::new(XrayTunnelProbe),
+            geo: Arc::new(Geo::embedded()),
             events,
             store: Arc::new(Mutex::new(Vec::new())),
             summary: Mutex::new(None),
@@ -194,6 +197,7 @@ impl ScanController {
                     let found = found.clone();
                     let stop = cfg.stop.clone();
                     let cancel = cancel_rx.clone();
+                    let geo = self.geo.clone();
                     tasks.spawn(async move {
                         let _permit = semaphore
                             .acquire_owned()
@@ -218,7 +222,7 @@ impl ScanController {
                                     port,
                                     latency_ms: Some(latency_ms),
                                     loss_pct: None,
-                                    country: None,
+                                    country: geo.country(ip),
                                     colo: None,
                                     phase2: None,
                                 };
@@ -314,6 +318,7 @@ impl ScanController {
                 let found = found.clone();
                 let stop = cfg.stop.clone();
                 let cancel = cancel_rx.clone();
+                let geo = self.geo.clone();
                 tasks.spawn(async move {
                     let _permit = semaphore
                         .acquire_owned()
@@ -348,7 +353,7 @@ impl ScanController {
                             port,
                             latency_ms: Some(latency),
                             loss_pct: Some(failed as f32 / probes_per_endpoint as f32 * 100.0),
-                            country: None,
+                            country: geo.country(ip),
                             colo: None,
                             phase2: None,
                         };
@@ -486,6 +491,7 @@ impl ScanController {
                         {
                             Ok(result) => {
                                 spawned.fetch_add(1, Ordering::Relaxed);
+                                let colo = result.colo.clone();
                                 let verdict = Phase2Verdict {
                                     passed: result.passed,
                                     fragment: fragment_label(&p2.fragment),
@@ -495,7 +501,9 @@ impl ScanController {
                                 if result.passed {
                                     passed_ips.lock().unwrap().insert(ip);
                                 }
-                                if let Some(updated) = update_verdict_phase2(&store, ip, verdict) {
+                                if let Some(updated) =
+                                    update_verdict_phase2(&store, ip, verdict, colo)
+                                {
                                     let _ = events.send(ScanEvent::Result(Box::new(updated)));
                                 }
                             }
@@ -658,12 +666,21 @@ fn fragment_label(preset: &FragmentPreset) -> String {
     .to_owned()
 }
 
-/// Attaches a phase-2 verdict to the stored row and returns the updated
-/// verdict for re-emission. `None` when the row vanished (reset mid-phase).
-fn update_verdict_phase2(store: &Store, ip: Ipv4Addr, p2v: Phase2Verdict) -> Option<Verdict> {
+/// Attaches a phase-2 verdict (and the colo observed during verification) to
+/// the stored row and returns the updated verdict for re-emission. `None`
+/// when the row vanished (reset mid-phase).
+fn update_verdict_phase2(
+    store: &Store,
+    ip: Ipv4Addr,
+    p2v: Phase2Verdict,
+    colo: Option<String>,
+) -> Option<Verdict> {
     let mut results = store.lock().unwrap();
     let pos = results.iter().position(|v| v.ip == ip)?;
     results[pos].phase2 = Some(p2v);
+    if colo.is_some() {
+        results[pos].colo = colo;
+    }
     Some(results[pos].clone())
 }
 
@@ -750,6 +767,7 @@ mod tests {
                         return Ok(TunnelResult {
                             passed: false,
                             latency_ms: None,
+                            colo: None,
                         });
                     }
                 }
@@ -757,6 +775,7 @@ mod tests {
                 Ok(TunnelResult {
                     passed,
                     latency_ms: passed.then_some(7),
+                    colo: None,
                 })
             })
         }

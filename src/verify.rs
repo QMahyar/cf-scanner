@@ -27,6 +27,8 @@ pub struct TunnelResult {
     pub passed: bool,
     /// Round-trip of the probe GET through the tunnel.
     pub latency_ms: Option<u32>,
+    /// Cloudflare colo code from the trace body, when present.
+    pub colo: Option<String>,
 }
 
 /// Everything one tunnel attempt needs (kept as a single argument so the
@@ -99,15 +101,17 @@ impl TunnelProbe for XrayTunnelProbe {
             let _ = std::fs::remove_dir_all(&trial_dir);
 
             match outcome {
-                Ok(_) => Ok(TunnelResult {
+                Ok(body) => Ok(TunnelResult {
                     passed: true,
                     latency_ms: Some(latency_ms),
+                    colo: crate::geo::parse_colo(&body),
                 }),
                 Err(err) => {
                     tracing::debug!(%err, ip = %dial_ip, "phase-2 probe did not deliver 200");
                     Ok(TunnelResult {
                         passed: false,
                         latency_ms: None,
+                        colo: None,
                     })
                 }
             }
