@@ -94,6 +94,13 @@ fn prompt_warp() -> Result<ScanConfig> {
 }
 
 pub async fn run(controller: Arc<ScanController>) -> Result<()> {
+    match run_wizard(controller).await {
+        Err(err) if is_interrupt(&err) => Err(anyhow!("interrupted")),
+        other => other,
+    }
+}
+
+async fn run_wizard(controller: Arc<ScanController>) -> Result<()> {
     println!("CF-Scanner wizard — CDN/proxy scan with optional xray phase-2 verification");
     let cfg = prompt_config()?;
     println!();
@@ -106,6 +113,14 @@ pub async fn run(controller: Arc<ScanController>) -> Result<()> {
         return Ok(());
     }
     let is_warp = cfg.mode == Mode::Warp;
+    let cancel_on_ctrl_c = {
+        let controller = controller.clone();
+        tokio::spawn(async move {
+            if tokio::signal::ctrl_c().await.is_ok() {
+                controller.cancel();
+            }
+        })
+    };
     let summary = controller
         .run_streaming(cfg, |e| match e {
             ScanEvent::Progress(p) => {
@@ -133,11 +148,17 @@ pub async fn run(controller: Arc<ScanController>) -> Result<()> {
             }
         })
         .await
-        .map_err(|e| anyhow!("scan failed: {e:#}"))?;
+        .map_err(|e| anyhow!("scan failed: {e:#}"));
+    cancel_on_ctrl_c.abort();
+    let summary = summary?;
     eprintln!(
         "done — scanned {}, found {} working in {} ms",
         summary.scanned, summary.found, summary.duration_ms
     );
+    if summary.cancelled {
+        eprintln!("cancelled — {} working endpoints retained", summary.found);
+        return Ok(());
+    }
     if is_warp {
         prompt_registration(&controller).await?;
     }
@@ -193,6 +214,17 @@ async fn prompt_registration(controller: &ScanController) -> Result<()> {
         "tip: verify it with `cf-scanner scan --mode warp --warp-verify --warp-wgconf-file <saved>`"
     );
     Ok(())
+}
+
+/// A Ctrl+C during a prompt surfaces as `dialoguer::Error::IO(Interrupted)`
+/// in the error chain; report it as a plain "interrupted" instead of a raw
+/// IO error.
+fn is_interrupt(err: &anyhow::Error) -> bool {
+    err.chain().any(|cause| {
+        cause.downcast_ref::<dialoguer::Error>().is_some_and(|e| {
+            matches!(e, dialoguer::Error::IO(io) if io.kind() == std::io::ErrorKind::Interrupted)
+        })
+    })
 }
 
 fn prompt_config() -> Result<ScanConfig> {
@@ -340,12 +372,7 @@ fn prompt_phase2() -> Result<Phase2Config> {
                     .ok_or("must be \"length,interval\"")
             })
             .interact()?;
-        let (length, interval) = values.split_once(',').unwrap();
-        Some(crate::api::types::CustomFragment {
-            packets: "tlshello".to_owned(),
-            length: length.trim().to_owned(),
-            interval: interval.trim().to_owned(),
-        })
+        Some(parse_custom_fragment(&values)?)
     } else {
         None
     };
@@ -369,6 +396,21 @@ fn prompt_phase2() -> Result<Phase2Config> {
         snis,
         probe_url,
         concurrency,
+    })
+}
+
+/// Parse `"length,interval"` into a custom fragment; the prompt validator
+/// already guarantees the comma, but user input must never unwrap.
+fn parse_custom_fragment(values: &str) -> Result<crate::api::types::CustomFragment> {
+    let Some((length, interval)) = values.split_once(',') else {
+        return Err(anyhow!(
+            "custom fragment must be \"length,interval\", got: '{values}'"
+        ));
+    };
+    Ok(crate::api::types::CustomFragment {
+        packets: "tlshello".to_owned(),
+        length: length.trim().to_owned(),
+        interval: interval.trim().to_owned(),
     })
 }
 
@@ -428,5 +470,29 @@ mod tests {
         assert!(parse_ports("").is_err());
         assert!(parse_ports("0,443").is_err());
         assert!(parse_ports("abc").is_err());
+    }
+
+    #[test]
+    fn custom_fragment_parses_or_errors() {
+        let f = parse_custom_fragment("100-200, 10-20").unwrap();
+        assert_eq!(f.length, "100-200");
+        assert_eq!(f.interval, "10-20");
+        assert!(parse_custom_fragment("100-200").is_err());
+        assert!(parse_custom_fragment("").is_err());
+    }
+
+    #[test]
+    fn only_interrupted_prompt_errors_are_interrupts() {
+        let err = anyhow::Error::new(dialoguer::Error::IO(std::io::Error::new(
+            std::io::ErrorKind::Interrupted,
+            "ctrl+c",
+        )));
+        assert!(is_interrupt(&err));
+        let err = anyhow::Error::new(dialoguer::Error::IO(std::io::Error::new(
+            std::io::ErrorKind::NotConnected,
+            "not a terminal",
+        )));
+        assert!(!is_interrupt(&err));
+        assert!(!is_interrupt(&anyhow!("boom")));
     }
 }

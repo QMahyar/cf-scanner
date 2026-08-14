@@ -8,6 +8,7 @@ use cf_scanner::api::types::{CdnPreset, Mode, ScanConfig, ScanEvent, ScanTarget,
 use cf_scanner::{cli_wizard, engine, paths, probe, ranges, server, warpgen};
 use clap::{Parser, Subcommand, ValueEnum};
 use tracing_subscriber::EnvFilter;
+use tracing_subscriber::filter::LevelFilter;
 
 #[derive(Parser)]
 #[command(
@@ -16,6 +17,10 @@ use tracing_subscriber::EnvFilter;
     about = "Find working Cloudflare IPs/endpoints on ISP-restricted networks"
 )]
 struct Cli {
+    /// Info-level logs (RUST_LOG, when set, still wins)
+    #[arg(long, global = true)]
+    verbose: bool,
+
     #[command(subcommand)]
     command: Command,
 }
@@ -154,9 +159,9 @@ struct ScanArgs {
     #[arg(long, requires = "phase2_configs")]
     phase2_concurrency: Option<u8>,
 
-    /// WARP: handshake probes per endpoint (1-10); drives loss %
-    #[arg(long, default_value_t = 3)]
-    warp_probes: u8,
+    /// WARP: handshake probes per endpoint (1-10, default 3); drives loss %
+    #[arg(long)]
+    warp_probes: Option<u8>,
 
     /// WARP: explicit endpoints `ip` or `ip:port`, comma-separated (empty =
     /// bundled pools)
@@ -243,6 +248,9 @@ fn build_scan_config(args: &ScanArgs) -> Result<ScanConfig> {
     if mode == Mode::Cdn && args.warp_wgconf_file.is_some() {
         return Err(anyhow!("--warp-wgconf-file requires --mode warp"));
     }
+    if mode == Mode::Cdn && args.warp_probes.is_some() {
+        return Err(anyhow!("--warp-probes requires --mode warp"));
+    }
     if mode == Mode::Warp && args.ipv6 {
         return Err(anyhow!("--ipv6 is CDN-only; WARP pools are IPv4"));
     }
@@ -263,7 +271,7 @@ fn build_scan_config(args: &ScanArgs) -> Result<ScanConfig> {
         .map_err(|e| anyhow!("could not read --warp-wgconf-file: {e}"))?;
     let warp = (mode == Mode::Warp).then(|| api::types::WarpConfig {
         custom_endpoints: args.warp_endpoints.clone(),
-        probes_per_endpoint: args.warp_probes,
+        probes_per_endpoint: args.warp_probes.unwrap_or(3),
         wgconf,
         verify_with_wgconf: args.warp_verify,
     });
@@ -335,11 +343,14 @@ fn build_phase2(args: &ScanArgs) -> Result<Option<api::types::Phase2Config>> {
 #[tokio::main]
 async fn main() -> ExitCode {
     let _ = rustls::crypto::ring::default_provider().install_default();
+    let cli = Cli::parse();
     tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::from_default_env())
+        .with_env_filter(env_filter(
+            cli.verbose,
+            std::env::var("RUST_LOG").ok().as_deref(),
+        ))
         .init();
 
-    let cli = Cli::parse();
     match run(cli).await {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
@@ -347,6 +358,20 @@ async fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// Tracing filter: `RUST_LOG` wins when set (lossy, same as the old
+/// `from_default_env`); otherwise `--verbose` lifts the error-only default to
+/// `info`.
+fn env_filter(verbose: bool, rust_log: Option<&str>) -> EnvFilter {
+    let directive = match rust_log.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(dirs) => dirs.to_owned(),
+        None if verbose => "info".to_owned(),
+        None => "error".to_owned(),
+    };
+    EnvFilter::builder()
+        .with_default_directive(LevelFilter::ERROR.into())
+        .parse_lossy(directive)
 }
 
 async fn run(cli: Cli) -> Result<()> {
@@ -406,45 +431,113 @@ async fn run(cli: Cli) -> Result<()> {
 }
 
 /// One-shot scan: results and the final summary as newline-delimited JSON on
-/// stdout (the `ScanEvent` contract), human summary on stderr.
+/// stdout (the `ScanEvent` contract), human summary on stderr. Ctrl+C cancels
+/// the running scan so it drains and exits cleanly instead of dying mid-probe.
 async fn run_scan(args: ScanArgs) -> Result<()> {
     let cfg = build_scan_config(&args)?;
     let controller = Arc::new(engine::ScanController::new(Arc::new(
         probe::TlsTransport::new(),
     )));
+    let cancel_on_ctrl_c = {
+        let controller = controller.clone();
+        tokio::spawn(async move {
+            if tokio::signal::ctrl_c().await.is_ok() {
+                controller.cancel();
+            }
+        })
+    };
     let streaming = |e: ScanEvent| match e {
         ScanEvent::Result(v) => {
-            println!("{}", serde_json::to_string(&v).unwrap());
+            if let Some(line) = serialize_event(&v) {
+                println!("{line}");
+            }
         }
         ScanEvent::Finished(s) => {
-            println!("{}", serde_json::to_string(&s).unwrap());
+            if let Some(line) = serialize_event(&s) {
+                println!("{line}");
+            }
         }
         ScanEvent::Failed(msg) => {
             eprintln!("scan failed: {msg}");
         }
         ScanEvent::Progress(_) => {}
     };
-    let summary = match args.seed {
+    let result = match args.seed {
         Some(seed) => controller.run_streaming_seeded(cfg, seed, streaming).await,
         None => controller.run_streaming(cfg, streaming).await,
     }
-    .map_err(|e| anyhow!("scan failed: {e:#}"))?;
+    .map_err(|e| anyhow!("scan failed: {e:#}"));
+    cancel_on_ctrl_c.abort();
+    let summary = result?;
     eprintln!(
         "scanned {} hosts, found {} working in {} ms",
         summary.scanned, summary.found, summary.duration_ms
     );
+    if summary.cancelled {
+        eprintln!(
+            "scan cancelled — {} working endpoints retained",
+            summary.found
+        );
+    }
     Ok(())
+}
+
+/// Serialize a scan event to an NDJSON line without panicking: a serialization
+/// failure (unreachable for the fixed API types, but possible) is logged to
+/// stderr and the line is skipped.
+fn serialize_event<T: serde::Serialize>(value: &T) -> Option<String> {
+    match serde_json::to_string(value) {
+        Ok(line) => Some(line),
+        Err(err) => {
+            eprintln!("could not serialize scan event: {err}");
+            None
+        }
+    }
 }
 
 async fn serve(port: u16) -> Result<()> {
     let controller = Arc::new(engine::ScanController::new(Arc::new(
         probe::TlsTransport::new(),
     )));
-    let listener = tokio::net::TcpListener::bind(("127.0.0.1", port)).await?;
-    let url = format!("http://127.0.0.1:{port}");
+    let listener = match tokio::net::TcpListener::bind(("127.0.0.1", port)).await {
+        Ok(listener) => listener,
+        Err(err) => return Err(anyhow!("{}", bind_error(port, &err))),
+    };
+    let url = serve_url(listener.local_addr()?);
     tracing::info!("CF-Scanner running at {url}");
-    axum::serve(listener, server::router(controller)).await?;
+    axum::serve(listener, server::router(controller.clone()))
+        .with_graceful_shutdown(shutdown_signal(controller))
+        .await?;
     Ok(())
+}
+
+/// Bind failure message: a busy port gets a hint, anything else stays
+/// human-readable with the attempted address.
+fn bind_error(port: u16, err: &std::io::Error) -> String {
+    if err.kind() == std::io::ErrorKind::AddrInUse {
+        format!("port {port} in use — try: cf-scanner serve --port <other>")
+    } else {
+        format!("could not bind 127.0.0.1:{port}: {err}")
+    }
+}
+
+/// The URL of the bound listener; `--port 0` picks an ephemeral port, so the
+/// printed URL must come from `local_addr`, not the requested port.
+fn serve_url(addr: std::net::SocketAddr) -> String {
+    format!("http://{addr}")
+}
+
+/// Ctrl+C: cancel any in-flight scan (probes drain on the next stop check),
+/// then let axum finish in-flight requests. The runtime drop after `serve`
+/// returns reaps xray children via their Drop::start_kill.
+async fn shutdown_signal(controller: Arc<engine::ScanController>) {
+    if let Err(err) = tokio::signal::ctrl_c().await {
+        // A broken Ctrl+C hook must not take the server down; keep serving.
+        tracing::error!("could not listen for Ctrl+C: {err}");
+        std::future::pending::<()>().await;
+    }
+    tracing::info!("shutting down; cancelling any active scan");
+    controller.cancel();
 }
 
 #[cfg(test)]
@@ -471,7 +564,7 @@ mod tests {
             phase2_snis: vec![],
             phase2_probe_url: None,
             phase2_concurrency: None,
-            warp_probes: 3,
+            warp_probes: None,
             warp_endpoints: vec![],
             warp_verify: false,
             warp_wgconf_file: None,
@@ -764,5 +857,123 @@ mod tests {
         let c = p2.custom_fragment.unwrap();
         assert_eq!(c.length, "100-200");
         assert_eq!(c.interval, "10-20");
+    }
+
+    #[test]
+    fn cdn_mode_rejects_explicit_warp_probes() {
+        let mut a = args();
+        a.warp_probes = Some(5);
+        let err = build_scan_config(&a).unwrap_err();
+        assert!(err.to_string().contains("--warp-probes"), "{err:#}");
+        let mut a = args();
+        a.warp_probes = Some(3);
+        let err = build_scan_config(&a).unwrap_err();
+        assert!(
+            err.to_string().contains("--warp-probes"),
+            "even the default value must not silently no-op: {err:#}"
+        );
+        let mut a = args();
+        a.mode = ModeArg::Warp;
+        a.warp_probes = Some(5);
+        let cfg = build_scan_config(&a).unwrap();
+        assert_eq!(cfg.warp.unwrap().probes_per_endpoint, 5);
+        let mut a = args();
+        a.mode = ModeArg::Warp;
+        let cfg = build_scan_config(&a).unwrap();
+        assert_eq!(cfg.warp.unwrap().probes_per_endpoint, 3);
+    }
+
+    #[test]
+    fn cdn_mode_rejects_warp_probes_at_cli_parse_level() {
+        let argv = ["cf-scanner", "scan", "--warp-probes", "5"];
+        let a = match Cli::try_parse_from(argv).unwrap().command {
+            Command::Scan { args } => *args,
+            _ => unreachable!(),
+        };
+        let err = build_scan_config(&a).unwrap_err();
+        assert!(err.to_string().contains("--warp-probes"), "{err:#}");
+    }
+
+    #[test]
+    fn verbose_flag_parses_before_and_after_subcommand() {
+        let cli =
+            Cli::try_parse_from(["cf-scanner", "--verbose", "scan", "--count", "10"]).unwrap();
+        assert!(cli.verbose);
+        match cli.command {
+            Command::Scan { args } => assert_eq!(args.count, Some(10)),
+            _ => panic!("expected scan"),
+        }
+        let cli =
+            Cli::try_parse_from(["cf-scanner", "scan", "--count", "10", "--verbose"]).unwrap();
+        assert!(cli.verbose);
+        assert!(
+            !Cli::try_parse_from(["cf-scanner", "serve"])
+                .unwrap()
+                .verbose
+        );
+    }
+
+    #[test]
+    fn verbose_defaults_log_filter_to_info() {
+        assert_eq!(env_filter(true, None).to_string(), "info");
+        assert_eq!(env_filter(false, None).to_string(), "error");
+    }
+
+    #[test]
+    fn rust_log_wins_over_verbose() {
+        assert_eq!(env_filter(true, Some("warn")).to_string(), "warn");
+        assert_eq!(
+            env_filter(false, Some("cf_scanner=debug")).to_string(),
+            "cf_scanner=debug"
+        );
+        assert_eq!(env_filter(true, Some("")).to_string(), "info");
+        assert_eq!(env_filter(false, Some("")).to_string(), "error");
+        assert_eq!(env_filter(true, Some("  ")).to_string(), "info");
+    }
+
+    #[test]
+    fn bind_error_hints_when_port_is_taken() {
+        let taken = std::io::Error::new(std::io::ErrorKind::AddrInUse, "in use");
+        assert_eq!(
+            bind_error(8765, &taken),
+            "port 8765 in use — try: cf-scanner serve --port <other>"
+        );
+        let denied = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "denied");
+        let msg = bind_error(8765, &denied);
+        assert!(
+            msg.contains("127.0.0.1:8765") && msg.contains("denied"),
+            "{msg}"
+        );
+        assert!(!msg.contains("in use — try"), "{msg}");
+    }
+
+    #[test]
+    fn serve_url_uses_the_bound_addr() {
+        let v4 = "127.0.0.1:8765".parse::<std::net::SocketAddr>().unwrap();
+        assert_eq!(serve_url(v4), "http://127.0.0.1:8765");
+        let v6 = "[::1]:9000".parse::<std::net::SocketAddr>().unwrap();
+        assert_eq!(serve_url(v6), "http://[::1]:9000");
+    }
+
+    #[test]
+    fn serialize_event_never_panics() {
+        struct Fails;
+        impl serde::Serialize for Fails {
+            fn serialize<S: serde::Serializer>(&self, _serializer: S) -> Result<S::Ok, S::Error> {
+                Err(serde::ser::Error::custom("boom"))
+            }
+        }
+        let verdict = api::types::Verdict {
+            ip: "1.2.3.4".parse().unwrap(),
+            port: 443,
+            latency_ms: Some(12),
+            loss_pct: None,
+            country: None,
+            colo: None,
+            phase2: None,
+        };
+        let line = serialize_event(&verdict).unwrap();
+        assert!(line.contains("\"ip\":\"1.2.3.4\""), "{line}");
+        assert!(serialize_event(&Fails).is_none());
     }
 }
