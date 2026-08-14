@@ -108,6 +108,13 @@ pub fn parse_cidr(s: &str) -> Result<Cidr> {
     if prefix > bits {
         bail!("prefix out of range 0-{bits}");
     }
+    // A v6 /0 covers 2^128 addresses: `host_count` saturates at u128::MAX,
+    // so exclusion and planning math on it would be off by one. The API
+    // validator has always rejected it; keep the rejection in the parser so
+    // `validate_cidr` can delegate without a second rule.
+    if addr.is_ipv6() && prefix == 0 {
+        bail!("IPv6 /0 is not supported (host count exceeds u128)");
+    }
     let masked = match addr {
         IpAddr::V4(a) => {
             let mask = if prefix == 0 {
@@ -404,19 +411,35 @@ fn plan_count(pool: &CidrPool, n: u64, rng: &mut SplitMix64) -> Vec<PlanItem> {
 }
 
 /// Bundled ranges, overridden by a refreshed copy in the data dir when
-/// present. What the engine scans (IPv4 half of the pool).
+/// present. What the engine scans (IPv4 half of the pool). A refreshed copy
+/// that fails to parse falls back to the bundled list, matching
+/// `RangesState::load`: a corrupted or hand-edited file must degrade the
+/// scan, never brick it.
 pub fn base_pool(runtime_refreshed: Option<&str>) -> Result<CidrPool> {
     match runtime_refreshed {
-        Some(text) => CidrPool::parse(text),
+        Some(text) => match CidrPool::parse(text) {
+            Ok(pool) => Ok(pool),
+            Err(_) => {
+                tracing::warn!("refreshed IPv4 ranges failed to parse; using the bundled list");
+                Ok(CidrPool::bundled())
+            }
+        },
         None => Ok(CidrPool::bundled()),
     }
 }
 
 /// The IPv6 half, added to the pool only when the scan opts in via
-/// `include_v6`. Refreshed copy from the data dir wins when present.
+/// `include_v6`. Refreshed copy from the data dir wins when present; a copy
+/// that fails to parse falls back to the bundled list like the v4 half.
 pub fn base_pool_v6(runtime_refreshed: Option<&str>) -> Result<CidrPool> {
     match runtime_refreshed {
-        Some(text) => CidrPool::parse(text),
+        Some(text) => match CidrPool::parse(text) {
+            Ok(pool) => Ok(pool),
+            Err(_) => {
+                tracing::warn!("refreshed IPv6 ranges failed to parse; using the bundled list");
+                Ok(CidrPool::bundled_v6())
+            }
+        },
         None => Ok(CidrPool::bundled_v6()),
     }
 }
@@ -880,6 +903,7 @@ async fn socks5_connect(stream: &mut TcpStream, host: &str, port: u16) -> Result
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::paths::test_env::{DATA_DIR_LOCK, IsolatedDataDir};
 
     #[test]
     fn parses_and_masks_cidrs() {
@@ -925,13 +949,20 @@ mod tests {
                 prefix: 64
             }
         );
+    }
+
+    #[test]
+    fn parses_v4_zero_prefix_but_rejects_v6_zero_prefix() {
         assert_eq!(
-            parse_cidr("::/0").unwrap(),
+            parse_cidr("0.0.0.0/0").unwrap(),
             Cidr {
-                addr: "::".parse().unwrap(),
+                addr: "0.0.0.0".parse().unwrap(),
                 prefix: 0
             }
         );
+        // v6 /0 saturates `host_count` at u128::MAX; the API validator has
+        // always rejected it, and so must the shared parser.
+        assert!(parse_cidr("::/0").is_err());
     }
 
     #[test]
@@ -945,6 +976,7 @@ mod tests {
             "2001:db8::g/64",
             "2606:4700::",
             "1.2.3.4/-1",
+            "::/0",
         ] {
             assert!(parse_cidr(bad).is_err(), "expected {bad} to fail");
         }
@@ -1298,6 +1330,263 @@ mod tests {
         assert!(matches!(plan[0], PlanItem::Every { .. }));
     }
 
+    // --- Property tests (seeded, no external RNG) -----------------------------
+
+    /// Random v4 address aligned to `prefix`.
+    fn random_v4_base(rng: &mut SplitMix64, prefix: u8) -> Ipv4Addr {
+        let raw = rng.next_u64() as u32;
+        let mask = if prefix == 0 {
+            0
+        } else {
+            u32::MAX << (32 - prefix)
+        };
+        Ipv4Addr::from(raw & mask)
+    }
+
+    /// Random v6 address aligned to `prefix`.
+    fn random_v6_base(rng: &mut SplitMix64, prefix: u8) -> Ipv6Addr {
+        let lo = rng.next_u64() as u128;
+        let hi = rng.next_u64() as u128;
+        let raw = (hi << 64) | lo;
+        let mask = if prefix == 0 {
+            0
+        } else {
+            u128::MAX << (128 - prefix)
+        };
+        Ipv6Addr::from(raw & mask)
+    }
+
+    /// Half-open [start, end) span of a range.
+    fn span(c: Cidr) -> (u128, u128) {
+        (c.base(), c.base() + c.host_count())
+    }
+
+    /// Sorted list of every address in `pool` for containment checks.
+    fn pool_hosts(pool: &CidrPool) -> Vec<IpAddr> {
+        let mut hosts = Vec::new();
+        for c in pool.ranges() {
+            for i in 0..c.host_count() {
+                hosts.push(c.host(i));
+            }
+        }
+        hosts.sort();
+        hosts
+    }
+
+    /// Collects the concrete hosts a count plan yields, panicking on non-host
+    /// items.
+    fn plan_hosts(plan: &[PlanItem]) -> Vec<IpAddr> {
+        let mut hosts = Vec::new();
+        for item in plan {
+            match item {
+                PlanItem::Hosts { cidr, offsets } => {
+                    assert!(
+                        offsets.len() as u128 <= cidr.host_count(),
+                        "run-away sample"
+                    );
+                    for &o in offsets {
+                        assert!(o < cidr.host_count(), "offset outside range");
+                        hosts.push(cidr.host(o));
+                    }
+                }
+                _ => panic!("count plan must be concrete hosts"),
+            }
+        }
+        hosts
+    }
+
+    /// Brute-force exclusion invariant over random v4 (outer, inner) pairs:
+    /// every host of `outer` must land in exactly one of {inner, output},
+    /// the output must cover `outer` minus the overlap, and no output range
+    /// may overlap `inner` or escape `outer`. Aligned CIDRs never partially
+    /// overlap, so the span-intersection arithmetic is exact.
+    #[test]
+    fn exclusion_split_matches_brute_force_for_random_cidrs() {
+        let mut rng = SplitMix64::new(0xC1D5_5EED);
+        for _ in 0..400 {
+            let outer_prefix = 18 + rng.below(11) as u8; // 18..=28: <= 16384 hosts
+            let outer = Cidr {
+                addr: IpAddr::V4(random_v4_base(&mut rng, outer_prefix)),
+                prefix: outer_prefix,
+            };
+            let inner_prefix = rng.below(33) as u8;
+            let inner = Cidr {
+                addr: IpAddr::V4(random_v4_base(&mut rng, inner_prefix)),
+                prefix: inner_prefix,
+            };
+            let out = CidrPool {
+                ranges: vec![outer],
+            }
+            .excluding(&[inner]);
+            let (os, oe) = span(outer);
+            let (is, ie) = span(inner);
+            let overlap = oe.min(ie).saturating_sub(os.max(is));
+            let removed = if inner.contains(outer) {
+                outer.host_count()
+            } else {
+                overlap
+            };
+            assert_eq!(
+                out.ranges.iter().map(|c| c.host_count()).sum::<u128>(),
+                outer.host_count() - removed,
+                "host count mismatch for outer={outer} inner={inner} out={out:?}"
+            );
+            for idx in 0..outer.host_count() {
+                let host = Cidr {
+                    addr: outer.host(idx),
+                    prefix: 32,
+                };
+                let in_inner = inner.contains(host);
+                let in_out = out.ranges.iter().any(|c| c.contains(host));
+                assert!(
+                    in_inner != in_out,
+                    "host {host} must be in exactly one of inner/output \
+                     (outer={outer} inner={inner} out={out:?})"
+                );
+            }
+            for c in &out.ranges {
+                assert!(outer.contains(*c), "{c} escaped {outer}");
+                assert!(!c.contains(inner), "{c} overlaps the exclusion {inner}");
+            }
+            let mut sorted = out.ranges.clone();
+            sorted.sort_by_key(|c| c.base());
+            for w in sorted.windows(2) {
+                assert!(
+                    w[0].base() + w[0].host_count() <= w[1].base(),
+                    "overlapping parts: {:?} + {:?}",
+                    w[0],
+                    w[1]
+                );
+            }
+        }
+    }
+
+    /// Same invariant for small v6 ranges (prefix 120..=126 keeps the brute
+    /// force tractable), inner drawn aligned inside `outer` or equal to it.
+    #[test]
+    fn v6_exclusion_split_matches_brute_force_for_random_cidrs() {
+        let mut rng = SplitMix64::new(0x6E5_5EED);
+        for _ in 0..200 {
+            let outer_prefix = 120 + rng.below(7) as u8; // 120..=126: <= 256 hosts
+            let outer = Cidr {
+                addr: IpAddr::V6(random_v6_base(&mut rng, outer_prefix)),
+                prefix: outer_prefix,
+            };
+            let inner_prefix = outer_prefix + rng.below((128 - outer_prefix) as u64 + 1) as u8;
+            let stride = 1u128 << (128 - inner_prefix);
+            let inner = Cidr {
+                addr: IpAddr::V6(Ipv6Addr::from(
+                    outer.base() + rng.below_u128(outer.host_count() / stride) * stride,
+                )),
+                prefix: inner_prefix,
+            };
+            let out = CidrPool {
+                ranges: vec![outer],
+            }
+            .excluding(&[inner]);
+            let removed = if inner_prefix == outer_prefix {
+                outer.host_count()
+            } else {
+                inner.host_count()
+            };
+            assert_eq!(
+                out.ranges.iter().map(|c| c.host_count()).sum::<u128>(),
+                outer.host_count() - removed,
+                "host count mismatch for outer={outer} inner={inner} out={out:?}"
+            );
+            for idx in 0..outer.host_count() {
+                let host = Cidr {
+                    addr: outer.host(idx),
+                    prefix: 128,
+                };
+                let in_inner = inner.contains(host);
+                let in_out = out.ranges.iter().any(|c| c.contains(host));
+                assert!(
+                    in_inner != in_out,
+                    "host {host} must be in exactly one of inner/output \
+                     (outer={outer} inner={inner} out={out:?})"
+                );
+            }
+        }
+    }
+
+    /// Count sampling must stay distinct and in-pool across many seeds and
+    /// counts, including counts near the pool boundary (offset rounding).
+    #[test]
+    fn count_sampling_is_distinct_across_seeds_and_counts() {
+        let pool = CidrPool {
+            ranges: vec![
+                parse_cidr("10.0.0.0/22").unwrap(),
+                parse_cidr("10.0.4.0/24").unwrap(),
+            ],
+        };
+        let hosts = pool_hosts(&pool);
+        assert_eq!(hosts.len(), 1024 + 256);
+        for seed in 0..25 {
+            for &n in &[1u32, 2, 5, 64, 128, 256, 1024, 1279] {
+                let plan = plan(&pool, &ScanTarget::Count(n), &mut SplitMix64::new(seed));
+                let picked = plan_hosts(&plan);
+                assert_eq!(picked.len() as u32, n, "seed {seed} count {n}");
+                let mut sorted = picked.clone();
+                sorted.sort();
+                sorted.dedup();
+                assert_eq!(
+                    sorted.len() as u32,
+                    n,
+                    "seed {seed} count {n}: samples not distinct"
+                );
+                for ip in &picked {
+                    assert!(
+                        hosts.binary_search(ip).is_ok(),
+                        "seed {seed} count {n}: {ip} outside the pool"
+                    );
+                }
+            }
+        }
+    }
+
+    /// The same distinctness/containment properties on a mixed v4+v6 pool.
+    #[test]
+    fn count_sampling_stays_distinct_on_mixed_family_pools() {
+        let pool = CidrPool {
+            ranges: vec![
+                parse_cidr("10.0.0.0/24").unwrap(),
+                parse_cidr("2606:4700::/120").unwrap(),
+            ],
+        };
+        let hosts = pool_hosts(&pool);
+        assert_eq!(hosts.len(), 512);
+        for seed in 0..8 {
+            for &n in &[3u32, 100, 400] {
+                let plan = plan(&pool, &ScanTarget::Count(n), &mut SplitMix64::new(seed));
+                let picked = plan_hosts(&plan);
+                assert_eq!(picked.len() as u32, n, "seed {seed} count {n}");
+                let mut sorted = picked.clone();
+                sorted.sort();
+                sorted.dedup();
+                assert_eq!(
+                    sorted.len() as u32,
+                    n,
+                    "seed {seed} count {n}: samples not distinct"
+                );
+                for ip in &picked {
+                    assert!(
+                        hosts.binary_search(ip).is_ok(),
+                        "seed {seed} count {n}: {ip} outside the pool"
+                    );
+                }
+                // Small counts may legitimately land entirely in the v4 half
+                // (512 hosts, 256 v4); only a near-total sample must reach v6.
+                if n >= 400 {
+                    assert!(
+                        picked.iter().any(|ip| ip.is_ipv6()),
+                        "seed {seed} count {n}: v6 half never sampled"
+                    );
+                }
+            }
+        }
+    }
+
     #[test]
     fn effective_pool_applies_custom_and_exclude() {
         let pool = effective_pool_from(
@@ -1355,6 +1644,45 @@ mod tests {
     }
 
     #[test]
+    fn base_pool_falls_back_to_bundled_when_refresh_is_corrupt() {
+        let pool = base_pool(Some("not a cidr\n10.0.0.0/8\n")).unwrap();
+        assert_eq!(pool, CidrPool::bundled());
+        let pool6 = base_pool_v6(Some("2606:4700::/32\nbroken")).unwrap();
+        assert_eq!(pool6, CidrPool::bundled_v6());
+    }
+
+    #[test]
+    fn effective_pool_survives_a_corrupt_refreshed_file() {
+        let pool = effective_pool_from(&[], &[], false, Some("garbage\n"), None).unwrap();
+        assert_eq!(pool, CidrPool::bundled());
+        let pool =
+            effective_pool_from(&[], &[], true, Some("garbage\n"), Some("garbage\n")).unwrap();
+        assert!(
+            pool.ranges().iter().any(|c| c.addr.is_ipv4()),
+            "v4 half must survive a corrupt refresh"
+        );
+        assert!(
+            pool.ranges().iter().any(|c| c.addr.is_ipv6()),
+            "v6 half must survive a corrupt refresh"
+        );
+    }
+
+    #[test]
+    fn effective_pool_still_rejects_bad_custom_cidrs() {
+        assert!(
+            effective_pool_from(
+                &["not-a-cidr".to_owned()],
+                &[],
+                false,
+                Some("garbage"),
+                None
+            )
+            .is_err(),
+            "user-supplied CIDRs must fail loudly, only the refreshed file degrades"
+        );
+    }
+
+    #[test]
     fn parses_official_fixture_skipping_v6() {
         // v6 entries in the response are discarded: the v4 refresh must
         // never seed v6 hosts into a v4-only scan.
@@ -1385,6 +1713,11 @@ mod tests {
 
     #[tokio::test]
     async fn refresh_to_disk_round_trips() {
+        // Refresh writes the data-dir file for real; redirect the data dir to
+        // a throwaway temp dir (warpgen pattern) so a developer's refreshed
+        // ranges are never read, replaced, or deleted by a test run.
+        let _guard = DATA_DIR_LOCK.lock().await;
+        let _isolated = IsolatedDataDir::new();
         let body = r#"{"success":true,"result":{"ipv4_cidrs":["10.0.0.0/8"]},"errors":[]}"#;
         let http = FakeHttp(body);
         assert_eq!(refresh_to_disk(&http).await.unwrap(), 1);
@@ -1393,7 +1726,6 @@ mod tests {
         assert!(written.ends_with("10.0.0.0/8\n"), "{written}");
         assert!(last_updated_of(&written).is_some());
         assert_eq!(CidrPool::parse(&written).unwrap().host_count(), 1 << 24);
-        fs::remove_file(paths::refreshed_ranges_path().unwrap()).unwrap();
     }
 
     #[test]
@@ -1426,6 +1758,10 @@ mod tests {
 
     #[tokio::test]
     async fn refresh_v6_to_disk_round_trips() {
+        // Same isolation as the v4 round trip: the write lands in the
+        // throwaway data dir, never the developer's.
+        let _guard = DATA_DIR_LOCK.lock().await;
+        let _isolated = IsolatedDataDir::new();
         let http = FakeHttp("2606:4700::/32\n2400:cb00::/32\n");
         assert_eq!(refresh_v6_to_disk(&http).await.unwrap(), 2);
         let written = fs::read_to_string(paths::refreshed_ranges_v6_path().unwrap()).unwrap();
@@ -1435,7 +1771,6 @@ mod tests {
         );
         let pool = CidrPool::parse(&written).unwrap();
         assert_eq!(pool.ranges().len(), 2);
-        fs::remove_file(paths::refreshed_ranges_v6_path().unwrap()).unwrap();
     }
 
     #[tokio::test]

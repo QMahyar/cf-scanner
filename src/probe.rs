@@ -31,11 +31,11 @@ pub const PROBE_SNI: &str = "cloudflare.com";
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum ProbeError {
     #[error("connect refused/closed: {0}")]
-    Refused(String),
+    Refused(&'static str),
     #[error("timed out after {timeout_ms} ms")]
     Timeout { timeout_ms: u64 },
     #[error("tls handshake failed: {0}")]
-    Tls(String),
+    Tls(&'static str),
 }
 
 /// `Ok(latency_ms)` when the endpoint completed TCP+TLS within the budget.
@@ -52,9 +52,13 @@ pub trait Transport: Send + Sync {
 }
 
 /// Real transport: tokio TcpStream + rustls, no cert verification (see the
-/// module note).
+/// module note). The SNI `ServerName` is built once here and cloned per
+/// probe: `ServerName` holds an `Arc`-backed name, so a clone is a refcount
+/// bump instead of the parse + allocation a per-probe build would cost on
+/// every one of millions of probes.
 pub struct TlsTransport {
     connector: TlsConnector,
+    server_name: ServerName<'static>,
 }
 
 impl TlsTransport {
@@ -69,6 +73,8 @@ impl TlsTransport {
             .with_no_client_auth();
         Self {
             connector: TlsConnector::from(Arc::new(config)),
+            server_name: ServerName::try_from(PROBE_SNI.to_owned())
+                .expect("static SNI is a valid hostname"),
         }
     }
 }
@@ -87,18 +93,21 @@ impl Transport for TlsTransport {
         timeout_ms: u64,
     ) -> Pin<Box<dyn Future<Output = Result<u32, ProbeError>> + Send + '_>> {
         let start = Instant::now();
-        let server_name =
-            ServerName::try_from(PROBE_SNI.to_owned()).expect("static SNI is a valid hostname");
+        let server_name = self.server_name.clone();
         Box::pin(async move {
             let fut = async {
                 let stream = TcpStream::connect((ip, port))
                     .await
-                    .map_err(|e| ProbeError::Refused(e.to_string()))?;
+                    // Static reason, not the io error text: connect-refused is
+                    // the common-case outcome on millions of probes, and the
+                    // reason is diagnostic enough (the underlying errno text
+                    // added nothing callers branch on).
+                    .map_err(|_| ProbeError::Refused("connection refused/closed"))?;
                 let mut tls = self
                     .connector
-                    .connect(server_name.clone(), stream)
+                    .connect(server_name, stream)
                     .await
-                    .map_err(|e| ProbeError::Tls(e.to_string()))?;
+                    .map_err(|_| ProbeError::Tls("handshake failed"))?;
                 // Half-close to signal we want no response data back.
                 let _ = tls.shutdown().await;
                 Ok(())
@@ -222,7 +231,7 @@ impl FakeTransport {
                 outcome: outcomes
                     .last()
                     .cloned()
-                    .unwrap_or_else(|| Err(ProbeError::Refused("empty sequence".to_owned()))),
+                    .unwrap_or(Err(ProbeError::Refused("empty sequence"))),
                 delay_ms: 0,
                 sequence: outcomes.into(),
             },
@@ -251,7 +260,7 @@ impl Transport for FakeTransport {
         let mut scripted = match self.script.lock().unwrap().get(&(ip, port)) {
             Some(s) => s.clone(),
             None => Scripted {
-                outcome: Err(ProbeError::Refused("not scripted".to_owned())),
+                outcome: Err(ProbeError::Refused("not scripted")),
                 delay_ms: 0,
                 sequence: std::collections::VecDeque::new(),
             },
@@ -283,13 +292,34 @@ mod tests {
         let _ = TlsTransport::new();
     }
 
+    #[test]
+    fn transport_builds_its_server_name_once_at_construction() {
+        // The ServerName lives on the transport, so per-probe work is a
+        // refcount bump on an Arc, never a parse + allocation (millions of
+        // probes on a Full scan).
+        let transport = TlsTransport::new();
+        let expected = ServerName::try_from(PROBE_SNI.to_owned()).unwrap();
+        match (&transport.server_name, &expected) {
+            (ServerName::DnsName(a), ServerName::DnsName(b)) => {
+                assert_eq!(a, b, "transport must use the documented probe SNI");
+            }
+            _ => panic!(
+                "probe SNI must be a DNS name, got {:?}",
+                transport.server_name
+            ),
+        }
+        // Clones are cheap and equal: the per-probe path clones the stored
+        // name, and the clone must round-trip identically.
+        assert_eq!(transport.server_name.clone(), transport.server_name);
+    }
+
     #[tokio::test]
     async fn fake_returns_scripted_outcomes() {
         let t = FakeTransport::new().ok("1.2.3.4".parse().unwrap(), 443, 42);
         assert_eq!(t.probe("1.2.3.4".parse().unwrap(), 443, 3000).await, Ok(42));
         assert_eq!(
             t.probe("5.6.7.8".parse().unwrap(), 443, 3000).await,
-            Err(ProbeError::Refused("not scripted".to_owned()))
+            Err(ProbeError::Refused("not scripted"))
         );
         let t = FakeTransport::new().fail(
             "9.9.9.9".parse().unwrap(),

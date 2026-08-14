@@ -9,13 +9,16 @@
 //! Dummy-key probes work because Cloudflare answers handshakes for arbitrary
 //! client keys.
 
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::collections::HashMap;
+use std::net::{IpAddr, Ipv4Addr};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
 use anyhow::Result;
 use boringtun::noise::{Tunn, TunnResult};
 use boringtun::x25519::{PublicKey, StaticSecret};
+use rand_core::RngCore;
 use tokio::net::UdpSocket;
 use tokio::time::timeout;
 
@@ -50,6 +53,9 @@ pub fn bundled_pool() -> CidrPool {
 }
 
 /// A real UDP WireGuard handshake probe: Init in, Response/Cookie out.
+/// Unit struct on purpose: the engine constructs it as a bare path
+/// (`Arc::new(warp::WarpTransport)`), so the socket reuse cache lives in a
+/// process-wide static instead of on the transport.
 pub struct WarpTransport;
 
 impl WarpTransport {
@@ -64,6 +70,49 @@ impl Default for WarpTransport {
     }
 }
 
+/// Bound on sockets held by the per-endpoint reuse cache: a full pool would
+/// otherwise pin ~14K open fds (one per endpoint x port) for the whole scan.
+/// In-flight probes hold their own `Arc`, so evicting an entry never breaks
+/// them; the next probe for that endpoint binds a fresh socket.
+const MAX_SOCKETS: usize = 1024;
+
+/// Per-endpoint connected UDP sockets, reused across `probes_per_endpoint`
+/// attempts of the same endpoint. The engine probes each (ip, port) group
+/// back to back, so a fresh bind per attempt (43K on the full pool) is pure
+/// overhead; at most `MAX_SOCKETS` fds stay open at once.
+#[derive(Default)]
+struct SocketCache {
+    sockets: tokio::sync::Mutex<HashMap<(Ipv4Addr, u16), Arc<UdpSocket>>>,
+}
+
+impl SocketCache {
+    async fn get_or_bind(&self, ip: Ipv4Addr, port: u16) -> Result<Arc<UdpSocket>, ProbeError> {
+        let mut map = self.sockets.lock().await;
+        if let Some(socket) = map.get(&(ip, port)) {
+            return Ok(socket.clone());
+        }
+        if map.len() >= MAX_SOCKETS {
+            let victim = map.keys().next().copied().expect("cache is non-empty here");
+            map.remove(&victim);
+        }
+        let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0))
+            .await
+            .map_err(|_| ProbeError::Refused("udp bind failed"))?;
+        socket
+            .connect((ip, port))
+            .await
+            .map_err(|_| ProbeError::Refused("udp connect failed"))?;
+        let socket = Arc::new(socket);
+        map.insert((ip, port), socket.clone());
+        Ok(socket)
+    }
+}
+
+/// Shared across every dummy-key `WarpTransport` (the engine builds one per
+/// controller; `Arc<dyn Transport>` keeps it for the controller's lifetime).
+static WARP_SOCKETS: std::sync::LazyLock<SocketCache> =
+    std::sync::LazyLock::new(SocketCache::default);
+
 /// The same probe driven by a user's wgconf keypair instead of the dummy key
 /// (Task 13): a real handshake under the user's identity proves the endpoint
 /// works with THEIR config. Endpoint swap = probe the candidate (ip, port);
@@ -71,6 +120,7 @@ impl Default for WarpTransport {
 pub struct WgVerifyTransport {
     static_secret: StaticSecret,
     peer_public: PublicKey,
+    sockets: SocketCache,
 }
 
 impl WgVerifyTransport {
@@ -78,6 +128,7 @@ impl WgVerifyTransport {
         Ok(Self {
             static_secret: StaticSecret::from(crate::wgconf::decode_key(&wg.private_key)?),
             peer_public: PublicKey::from(crate::wgconf::decode_key(&wg.peer.public_key)?),
+            sockets: SocketCache::default(),
         })
     }
 }
@@ -91,15 +142,20 @@ impl Transport for WgVerifyTransport {
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<u32, ProbeError>> + Send + '_>>
     {
         let IpAddr::V4(ip) = ip else {
-            return Box::pin(async move {
-                Err(ProbeError::Refused(
-                    "WARP endpoints are IPv4-only".to_owned(),
-                ))
-            });
+            return Box::pin(
+                async move { Err(ProbeError::Refused("WARP endpoints are IPv4-only")) },
+            );
         };
         let static_secret = StaticSecret::from(self.static_secret.to_bytes());
         let peer_public = self.peer_public;
-        Box::pin(probe_once(static_secret, peer_public, ip, port, timeout_ms))
+        Box::pin(probe_once(
+            &self.sockets,
+            static_secret,
+            peer_public,
+            ip,
+            port,
+            timeout_ms,
+        ))
     }
 }
 
@@ -112,13 +168,12 @@ impl Transport for WarpTransport {
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<u32, ProbeError>> + Send + '_>>
     {
         let IpAddr::V4(ip) = ip else {
-            return Box::pin(async move {
-                Err(ProbeError::Refused(
-                    "WARP endpoints are IPv4-only".to_owned(),
-                ))
-            });
+            return Box::pin(
+                async move { Err(ProbeError::Refused("WARP endpoints are IPv4-only")) },
+            );
         };
         Box::pin(probe_once(
+            &WARP_SOCKETS,
             StaticSecret::from(DUMMY_STATIC_PRIVATE),
             server_public_key(),
             ip,
@@ -128,15 +183,22 @@ impl Transport for WarpTransport {
     }
 }
 
-/// One WG handshake attempt shared by both transports: fresh Tunn + connected
-/// UDP socket, Init in, structurally valid Response/Cookie out.
+/// One WG handshake attempt shared by both transports: reuses the endpoint's
+/// bound socket, Init in, structurally valid Response/Cookie out.
 async fn probe_once(
+    sockets: &SocketCache,
     static_secret: StaticSecret,
     peer_public: PublicKey,
     ip: Ipv4Addr,
     port: u16,
     timeout_ms: u64,
 ) -> Result<u32, ProbeError> {
+    // Randomized 10-40ms pacing between handshakes: synchronized Init bursts
+    // trip WARP's per-IP rate shaping and read as false negatives. Bounded,
+    // so a full pool stays fast even at 200 concurrency.
+    let jitter_ms = 10 + RngCore::next_u64(&mut rand_core::OsRng) % 31;
+    tokio::time::sleep(Duration::from_millis(jitter_ms)).await;
+
     // Fresh index per probe so concurrent sockets can never confuse
     // each other's receiver-index check.
     let index = NEXT_INDEX.fetch_add(1, Ordering::Relaxed);
@@ -144,26 +206,15 @@ async fn probe_once(
     let mut packet = [0u8; 148];
     let init = match tunn.format_handshake_initiation(&mut packet, true) {
         TunnResult::WriteToNetwork(init) => init.to_vec(),
-        TunnResult::Err(e) => return Err(ProbeError::Refused(format!("{e:?}"))),
-        _ => {
-            return Err(ProbeError::Refused(
-                "unexpected handshake result".to_owned(),
-            ));
-        }
+        TunnResult::Err(_) => return Err(ProbeError::Refused("handshake init failed")),
+        _ => return Err(ProbeError::Refused("unexpected handshake result")),
     };
-    let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0))
-        .await
-        .map_err(|e| ProbeError::Refused(e.to_string()))?;
-    let dst: SocketAddr = (ip, port).into();
-    socket
-        .connect(dst)
-        .await
-        .map_err(|e| ProbeError::Refused(e.to_string()))?;
+    let socket = sockets.get_or_bind(ip, port).await?;
     let started = std::time::Instant::now();
     socket
         .send(&init)
         .await
-        .map_err(|e| ProbeError::Refused(e.to_string()))?;
+        .map_err(|_| ProbeError::Refused("udp send failed"))?;
 
     // Note the receiver index WARP put in its reply only for debugging.
     let mut reply = [0u8; 2048];
@@ -180,12 +231,10 @@ async fn probe_once(
                         .map(|b| u32::from_le_bytes(b.try_into().unwrap())),
                     "non-handshake WARP reply"
                 );
-                Err(ProbeError::Refused(
-                    "reply is not a WARP handshake".to_owned(),
-                ))
+                Err(ProbeError::Refused("reply is not a WARP handshake"))
             }
         }
-        Ok(Err(e)) => Err(ProbeError::Refused(e.to_string())),
+        Ok(Err(_)) => Err(ProbeError::Refused("udp receive failed")),
         Err(_) => Err(ProbeError::Timeout { timeout_ms }),
     }
 }
