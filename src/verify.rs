@@ -8,7 +8,7 @@ use std::future::Future;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result, anyhow};
 
@@ -78,21 +78,18 @@ impl TunnelProbe for XrayTunnelProbe {
         } = req;
         Box::pin(async move {
             let work_dir = paths::data_dir().context("no data directory for trial configs")?;
-            std::fs::create_dir_all(&work_dir)?;
-            let trial_dir = fresh_trial_dir(&work_dir);
+            // Hard kills leave stale trial dirs holding plaintext credentials;
+            // sweep them before creating the next trial.
+            sweep_stale_trial_dirs(&work_dir);
+            let trial_dir = make_trial_dir(&work_dir).await?;
 
             // Trial dirs hold configs embedding the user's id/password;
             // remove them even when the attempt dies mid-flight.
             let outcome = async {
-                let xray_bin = match xray::find_binary() {
-                    Some(bin) => bin,
-                    None => {
-                        let fetch = xray::RealFetch;
-                        xray::download_binary(&fetch).await.with_context(
-                            || "xray binary missing; the checksum-verified download also failed",
-                        )?
-                    }
-                };
+                let fetch = xray::RealFetch;
+                let xray_bin = xray::ensure_binary(&fetch).await.with_context(|| {
+                    "no verified xray binary (cached copy failed its checksum or the download failed)"
+                })?;
                 let socks_port = pick_ephemeral_port().context("no free port for xray inbound")?;
                 let cfg = xray::build_config(
                     &spec,
@@ -127,7 +124,7 @@ impl TunnelProbe for XrayTunnelProbe {
             }
             .await;
 
-            let _ = std::fs::remove_dir_all(&trial_dir);
+            cleanup_trial_dir(&trial_dir).await;
             outcome
         })
     }
@@ -138,6 +135,50 @@ fn fresh_trial_dir(work_dir: &Path) -> PathBuf {
     let dir = work_dir.join(format!("trial-{}", next_trial_id()));
     let _ = std::fs::create_dir_all(&dir);
     dir
+}
+
+/// mkdir + trial dir creation on the blocking pool (per-attempt fs).
+async fn make_trial_dir(work_dir: &Path) -> Result<PathBuf> {
+    let work_dir = work_dir.to_path_buf();
+    let dir = tokio::task::spawn_blocking(move || -> std::io::Result<PathBuf> {
+        std::fs::create_dir_all(&work_dir)?;
+        Ok(fresh_trial_dir(&work_dir))
+    })
+    .await
+    .context("trial dir creation task failed")??;
+    Ok(dir)
+}
+
+/// Trial-dir removal off the async executor; best-effort.
+async fn cleanup_trial_dir(trial_dir: &Path) {
+    let dir = trial_dir.to_path_buf();
+    let _ = tokio::task::spawn_blocking(move || std::fs::remove_dir_all(&dir)).await;
+}
+
+/// Stale `trial-*` dirs older than this are swept at the next attempt.
+const STALE_TRIAL_AGE: Duration = Duration::from_secs(60 * 60);
+
+/// Best-effort removal of stale trial dirs; never fails the attempt.
+fn sweep_stale_trial_dirs(work_dir: &Path) {
+    sweep_stale_trial_dirs_before(work_dir, std::time::SystemTime::now() - STALE_TRIAL_AGE);
+}
+
+fn sweep_stale_trial_dirs_before(work_dir: &Path, cutoff: std::time::SystemTime) {
+    let Ok(entries) = std::fs::read_dir(work_dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        if !name.to_string_lossy().starts_with("trial-") {
+            continue;
+        }
+        let Ok(modified) = entry.metadata().and_then(|meta| meta.modified()) else {
+            continue;
+        };
+        if modified < cutoff {
+            let _ = std::fs::remove_dir_all(entry.path());
+        }
+    }
 }
 
 static TRIAL_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -179,8 +220,30 @@ mod tests {
 
     #[test]
     fn trial_dirs_are_unique() {
-        let a = fresh_trial_dir(Path::new("unused"));
-        let b = fresh_trial_dir(Path::new("unused"));
+        let dir = std::env::temp_dir().join("cf-scanner-verify-unique-test");
+        let _ = std::fs::create_dir_all(&dir);
+        let a = fresh_trial_dir(&dir);
+        let b = fresh_trial_dir(&dir);
         assert_ne!(a, b, "concurrent trials must never share a config dir");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn sweep_removes_stale_trial_dirs_and_keeps_others() {
+        let dir = std::env::temp_dir().join("cf-scanner-verify-sweep-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("trial-0")).unwrap();
+        std::fs::create_dir_all(dir.join("trial-1")).unwrap();
+        std::fs::create_dir_all(dir.join("not-a-trial")).unwrap();
+        std::fs::write(dir.join("trial-0/config.json"), "{}").unwrap();
+        // A cutoff in the future makes every dir stale by definition.
+        let cutoff = std::time::SystemTime::now() + Duration::from_secs(60);
+        sweep_stale_trial_dirs_before(&dir, cutoff);
+        assert!(!dir.join("trial-0").exists());
+        assert!(!dir.join("trial-1").exists());
+        assert!(dir.join("not-a-trial").exists());
+        // Sweeping a missing dir is a silent no-op.
+        sweep_stale_trial_dirs_before(&dir.join("missing"), cutoff);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
