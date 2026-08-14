@@ -14,25 +14,68 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: "1.85"
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
       - name: Build
-        run: cargo build --all-targets
+        run: cargo build --all-targets --locked
       - name: Test
-        run: cargo test
+        run: cargo test --locked
+      - name: Doc tests
+        run: cargo test --doc --locked
       - name: Clippy
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --all-targets --locked -- -D warnings
       - name: Format
         run: cargo fmt --check
+
+  coverage:
+    name: coverage (llvm-cov)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.85"
+          components: llvm-tools-preview
+      - uses: taiki-e/install-action@cargo-llvm-cov
+      - uses: Swatinem/rust-cache@v2
+      - name: Measure coverage + gate
+        run: cargo llvm-cov --all-targets --locked --lcov --output-path lcov.info --fail-under-lines 70
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lcov.info
+          path: lcov.info
+
+  placeholder-guard:
+    name: no tracked file > 1MB
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Fail on oversized tracked files
+        shell: bash
+        run: |
+          oversized=$(
+            git ls-files -z \
+              | xargs -0 -r stat --printf='%s\t%n\n' -- 2>/dev/null \
+              | awk -F'\t' '$1 > 1048576 {print $2 " (" $1 " bytes)"}'
+          )
+          if [ -n "$oversized" ]; then
+            echo "::error::tracked files exceed 1MB — a bundled binary (xray, mmdb) was probably committed:"
+            echo "$oversized"
+            echo "restore the 0-byte placeholders with: git restore data/bundled/xray data/bundled/xray.exe"
+            exit 1
+          fi
 
   audit:
     name: cargo audit
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.85"
       - uses: Swatinem/rust-cache@v2
       - name: Install cargo-audit
         run: cargo install cargo-audit --locked

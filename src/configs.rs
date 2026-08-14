@@ -98,6 +98,26 @@ pub async fn fetch_subscription(fetch: &impl SubFetch, url: &str) -> Result<Subs
 }
 
 /// Parses one imported config entry: a vless/trojan/vmess/ss URI.
+///
+/// # Examples
+///
+/// ```
+/// use cf_scanner::configs::parse_uri;
+///
+/// let spec = parse_uri(
+///     "vless://6086b6d5-6874-4299-8ef9-33b01a2125aa@104.17.160.217:2096\
+///      ?security=tls&type=ws&path=/&host=front.example.com&fp=chrome#tag",
+/// )
+/// .unwrap();
+/// assert_eq!(spec.protocol.as_str(), "vless");
+/// assert_eq!(spec.server, "104.17.160.217");
+/// assert_eq!(spec.port, 2096);
+/// assert_eq!(spec.security, "tls");
+/// assert_eq!(spec.ws.as_ref().unwrap().host.as_deref(), Some("front.example.com"));
+///
+/// // Garbage never panics; it errors.
+/// assert!(parse_uri("not a uri").is_err());
+/// ```
 pub fn parse_uri(entry: &str) -> Result<OutboundSpec> {
     let entry = entry.trim();
     let scheme = entry
@@ -193,9 +213,7 @@ fn parse_vmess(entry: &str) -> Result<OutboundSpec> {
         Some((b, t)) => (b, Some(t.to_owned())),
         None => (entry, None),
     };
-    let b64 = b64
-        .strip_prefix("vmess://")
-        .ok_or_else(|| anyhow!("bad vmess prefix"))?;
+    let b64 = strip_scheme(b64, "vmess").ok_or_else(|| anyhow!("bad vmess prefix"))?;
     let decoded = base64_any(b64).map_err(|_| anyhow!("bad vmess base64"))?;
     let json: serde_json::Value =
         serde_json::from_slice(&decoded).map_err(|e| anyhow!("vmess payload is not JSON: {e}"))?;
@@ -243,9 +261,7 @@ fn parse_ss(entry: &str) -> Result<OutboundSpec> {
         Some((b, t)) => (b, Some(t.to_owned())),
         None => (entry, None),
     };
-    let b64 = b64
-        .strip_prefix("ss://")
-        .ok_or_else(|| anyhow!("bad ss prefix"))?;
+    let b64 = strip_scheme(b64, "ss").ok_or_else(|| anyhow!("bad ss prefix"))?;
 
     let (userinfo, host_port) = if let Some((u, hp)) = b64.split_once('@') {
         // SIP002 userinfo form; userinfo may be base64 or plain `m:p`.
@@ -365,6 +381,15 @@ pub fn parse_xray_json(text: &str) -> Result<OutboundSpec> {
 }
 
 // --- helpers ---------------------------------------------------------------
+
+/// Case-insensitive `scheme://` prefix strip, mirroring the lowercase scheme
+/// dispatch in `parse_uri` (vmess/ss payloads are case-sensitive base64, so
+/// the raw entry cannot be lowercased wholesale).
+fn strip_scheme<'a>(s: &'a str, scheme: &str) -> Option<&'a str> {
+    let prefix = format!("{scheme}://");
+    (s.len() >= prefix.len() && s[..prefix.len()].eq_ignore_ascii_case(&prefix))
+        .then(|| &s[prefix.len()..])
+}
 
 fn query_map(url: &Url) -> BTreeMap<String, String> {
     url.query_pairs()
@@ -706,5 +731,77 @@ mod tests {
         .unwrap();
         assert_eq!(spec.security, "TLS");
         assert_eq!(spec.ws.unwrap().path, "/x");
+    }
+
+    #[test]
+    fn schemes_are_case_insensitive() {
+        let spec = parse_uri("VLESS://aaaaaaaa-bbbb-cccc-dddd-eeeeffff0000@1.2.3.4:443").unwrap();
+        assert_eq!(spec.protocol, Protocol::Vless);
+        let creds = base64::engine::general_purpose::STANDARD.encode("aes-128-gcm:secret");
+        let spec = parse_uri(&format!("SS://{creds}@1.2.3.4:8388")).unwrap();
+        assert_eq!(spec.protocol, Protocol::Shadowsocks);
+        let json = r#"{"v":"2","add":"5.6.7.8","port":"8443","id":"u","net":"tcp","tls":"none"}"#;
+        let b64 = base64::engine::general_purpose::STANDARD.encode(json);
+        let spec = parse_uri(&format!("VMESS://{b64}")).unwrap();
+        assert_eq!(spec.protocol, Protocol::Vmess);
+    }
+
+    #[test]
+    fn ss_envelope_accepts_url_safe_base64() {
+        use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        // 0xFF produces a base64 group of 63, which is '_' in the URL-safe
+        // alphabet and '/' in STANDARD: STANDARD decoding must fail and the
+        // URL-safe fallback must kick in.
+        let mut payload = b"chacha20-ietf-poly1305:p".to_vec();
+        payload.extend_from_slice(&[0xFF, 0x73, 0x73]);
+        payload.extend_from_slice(b"@1.2.3.4:443");
+        let env = URL_SAFE_NO_PAD.encode(&payload);
+        let spec = parse_uri(&format!("ss://{env}")).unwrap();
+        assert_eq!(spec.method.as_deref(), Some("chacha20-ietf-poly1305"));
+        assert_eq!(spec.server, "1.2.3.4");
+        assert_eq!(spec.port, 443);
+    }
+
+    #[test]
+    fn vmess_accepts_url_safe_base64() {
+        use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        let json = r#"{"v":"2","add":"5.6.7.8","port":"8443","id":"aaaaaaaa-bbbb-cccc-dddd-eeeeffff0000","net":"tcp","tls":"none"}"#;
+        let b64 = URL_SAFE_NO_PAD.encode(json);
+        let spec = parse_uri(&format!("vmess://{b64}")).unwrap();
+        assert_eq!(spec.server, "5.6.7.8");
+        assert_eq!(spec.port, 8443);
+    }
+
+    #[test]
+    fn ss_sip002_accepts_bracketed_ipv6_host() {
+        let creds = base64::engine::general_purpose::STANDARD.encode("aes-128-gcm:secret");
+        let spec = parse_uri(&format!("ss://{creds}@[2606:4700::1]:8388")).unwrap();
+        assert_eq!(spec.server, "2606:4700::1");
+        assert_eq!(spec.port, 8388);
+    }
+
+    #[test]
+    fn userinfo_is_percent_decoded() {
+        let spec = parse_uri("trojan://p%40ss%3Aword@1.2.3.4:443").unwrap();
+        assert_eq!(spec.user_id, "p@ss:word");
+    }
+
+    #[test]
+    fn userinfo_wins_over_query_id() {
+        let spec = parse_uri(
+            "vless://aaaaaaaa-bbbb-cccc-dddd-eeeeffff0000@1.2.3.4:443?id=query-id&security=none",
+        )
+        .unwrap();
+        assert_eq!(spec.user_id, "aaaaaaaa-bbbb-cccc-dddd-eeeeffff0000");
+    }
+
+    #[test]
+    fn rejects_ports_out_of_range() {
+        // url crate rejects >u16 ports at parse time.
+        assert!(parse_uri("vless://aaaaaaaa-bbbb-cccc-dddd-eeeeffff0000@1.2.3.4:70000").is_err());
+        // vmess carries the port inside base64 JSON: string parse must fail.
+        let json = r#"{"add":"1.2.3.4","port":"abc","id":"u"}"#;
+        let b64 = base64::engine::general_purpose::STANDARD.encode(json);
+        assert!(parse_uri(&format!("vmess://{b64}")).is_err());
     }
 }
