@@ -8,7 +8,8 @@
   <script>
     // 3-state theme: "system" | "light" | "dark". Default = "system".
     (function () {
-      var t = localStorage.getItem("ui-theme");
+      var t;
+      try { t = localStorage.getItem("ui-theme"); } catch { t = null; }
       if (t !== "light" && t !== "dark" && t !== "system") t = "system";
       var resolved = t === "system"
         ? (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light")
@@ -744,7 +745,8 @@
                       <input name="phase2_concurrency" type="number" min="1" max="8" value="3" disabled>
                     </label>
                     <label class="field">SNI variants (comma-separated; empty = config&rsquo;s own)
-                      <input name="phase2_snis" type="text" placeholder="www.cloudflare.com" disabled>
+                      <input name="phase2_snis" type="text" placeholder="www.cloudflare.com" disabled aria-describedby="help-phase2-snis">
+                      <span class="help" id="help-phase2-snis">Optional: override SNI for TLS handshake</span>
                     </label>
                     <label class="field">Probe URL
                       <input name="phase2_probe_url" type="url" value="https://cp.cloudflare.com/" disabled>
@@ -753,13 +755,16 @@
                 </div>
                 <div class="grid grid-3" style="margin-top: 0.9rem;">
                   <label class="field">Packets (custom preset)
-                    <input name="phase2_packets" type="text" value="tlshello" disabled>
+                    <input name="phase2_packets" type="text" value="tlshello" disabled aria-describedby="help-phase2-packets">
+                    <span class="help" id="help-phase2-packets">Packet type for fragment (e.g., tlshello)</span>
                   </label>
                   <label class="field">Length in bytes (custom preset, &ldquo;min-max&rdquo;)
-                    <input name="phase2_length" type="text" placeholder="100-200" disabled>
+                    <input name="phase2_length" type="text" placeholder="100-200" disabled aria-describedby="help-phase2-length">
+                    <span class="help" id="help-phase2-length">Fragment length range, e.g., 100&ndash;200</span>
                   </label>
                   <label class="field">Interval in ms (custom preset, &ldquo;min-max&rdquo;)
-                    <input name="phase2_interval" type="text" placeholder="10-20" disabled>
+                    <input name="phase2_interval" type="text" placeholder="10-20" disabled aria-describedby="help-phase2-interval">
+                    <span class="help" id="help-phase2-interval">Fragment interval range, e.g., 10&ndash;20</span>
                   </label>
                 </div>
               </div>
@@ -855,6 +860,11 @@
 
   <script>
     "use strict";
+
+    const store = {
+      get(k, d) { try { const v = localStorage.getItem(k); return v == null ? d : v; } catch { return d; } },
+      set(k, v) { try { localStorage.setItem(k, v); } catch { /* blocked */ } }
+    };
 
     const results = [];
     const seenKeys = new Set();
@@ -968,7 +978,7 @@
       var cur = getThemePref();
       var idx = THEME_ORDER.indexOf(cur);
       var next = THEME_ORDER[(idx + 1) % THEME_ORDER.length];
-      localStorage.setItem("ui-theme", next);
+      store.set("ui-theme", next);
       applyTheme(next);
     });
     matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => {
@@ -980,10 +990,10 @@
       densityBtn.textContent = compact ? "Normal view" : "Compact view";
       densityBtn.setAttribute("aria-pressed", String(compact));
     }
-    applyDensity(localStorage.getItem("ui-density") === "compact");
+    applyDensity(store.get("ui-density", "") === "compact");
     densityBtn.addEventListener("click", () => {
       const next = document.getElementById("results-section").dataset.density !== "compact";
-      localStorage.setItem("ui-density", next ? "compact" : "normal");
+      store.set("ui-density", next ? "compact" : "normal");
       applyDensity(next);
     });
 
@@ -1111,6 +1121,8 @@
       startBtn.disabled = false;
       startBtn.innerHTML = START_LABEL_HTML;
       hideRetry();
+      hideErrorCard();
+      progressText.textContent = "";
       const live = document.getElementById("results-live");
       if (live) {
         live.textContent = cancelled
@@ -1131,6 +1143,8 @@
       startBtn.innerHTML = START_LABEL_HTML;
       showStatus(msg, "error");
       document.title = "Failed \u2014 CF-Scanner";
+      hideErrorCard();
+      progressText.textContent = "";
       showRetry();
       flushNow();
     }
@@ -1235,14 +1249,18 @@
       td.colSpan = 7;
       td.style.textAlign = "center";
       td.style.padding = "2.5rem 1rem";
+      const isPostScan = scanState === "done" || scanState === "cancelled" || scanState === "failed";
+      const copy = isPostScan
+        ? "No working endpoints found \u2014 try wider ports or different ranges."
+        : "Results will appear here once you start a scan.";
       td.innerHTML = `
         <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="var(--muted)" stroke-width="1.5" stroke-linecap="round" style="margin-bottom:0.75rem">
           <circle cx="12" cy="12" r="9"/>
           <circle cx="12" cy="12" r="3"/>
           <path d="M12 3v2M12 19v2M3 12h2M19 12h2"/>
         </svg>
-        <div style="font-weight:600;margin-bottom:0.3rem">No scan results yet</div>
-        <div class="muted" style="font-size:0.85rem;margin-bottom:0.8rem">Results will appear here once you start a scan</div>
+        <div style="font-weight:600;margin-bottom:0.3rem">${isPostScan ? "No results" : "No scan results yet"}</div>
+        <div class="muted" style="font-size:0.85rem;margin-bottom:0.8rem">${copy}</div>
         <button class="secondary" onclick="document.getElementById('scan-form').scrollIntoView({behavior:'smooth',block:'start'})">Configure a scan</button>
       `;
       tr.appendChild(td);

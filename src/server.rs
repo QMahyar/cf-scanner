@@ -373,7 +373,21 @@ fn debug_fallback(_uri: Uri) -> Response {
 #[cfg(debug_assertions)]
 fn serve_index_file() -> Response {
     match fs::read("embed/index.html") {
-        Ok(bytes) => ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], bytes).into_response(),
+        Ok(bytes) => {
+            let mut headers = axum::http::HeaderMap::new();
+            headers.insert(
+                header::CONTENT_TYPE,
+                "text/html; charset=utf-8".parse().unwrap(),
+            );
+            headers.insert(
+                "content-security-policy",
+                "default-src 'self'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'"
+                    .parse()
+                    .unwrap(),
+            );
+            headers.insert("x-content-type-options", "nosniff".parse().unwrap());
+            (headers, bytes).into_response()
+        }
         Err(err) => {
             tracing::warn!("could not read embed/index.html: {err}");
             ApiError::internal("embedded UI missing (run from the repo root)").into_response()
@@ -678,7 +692,15 @@ fn validate_profile_name(name: &str) -> Result<(), String> {
 }
 
 async fn index() -> impl IntoResponse {
-    Html(EMBEDDED_INDEX)
+    let mut headers = axum::http::HeaderMap::new();
+    headers.insert(
+        "content-security-policy",
+        "default-src 'self'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'"
+            .parse()
+            .unwrap(),
+    );
+    headers.insert("x-content-type-options", "nosniff".parse().unwrap());
+    (headers, Html(EMBEDDED_INDEX))
 }
 
 struct ApiError {
