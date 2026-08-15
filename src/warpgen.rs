@@ -344,15 +344,16 @@ fn peer_endpoint(endpoint: &PeerEndpoint) -> String {
 
 // --- public flows ------------------------------------------------------------
 
-/// `warpconfig generate`: keygen -> register -> enable -> (license) -> fetch
-/// -> persist identity -> write wgconf to `out` (or stdout). Returns the
-/// rendered wgconf for callers that need it (wizard auto-import).
-pub async fn generate(
-    out: Option<&Path>,
+/// The v0a884 flow: keygen -> register -> enable -> (license) -> fetch ->
+/// persist identity, returning the rendered wgconf text. Never prints or
+/// writes anything; `base` is injectable so tests run against a loopback
+/// mock. Every network call carries a timeout and retries (WarpClient).
+async fn register_flow(
+    base: &str,
     license: Option<&str>,
     endpoint_override: Option<&str>,
 ) -> Result<String> {
-    let client = WarpClient::new(DEFAULT_API_BASE.into(), DEFAULT_TIMEOUT);
+    let client = WarpClient::new(base.to_owned(), DEFAULT_TIMEOUT);
     let (secret, public) = keygen();
     let public_b64 = base64::engine::general_purpose::STANDARD.encode(public.as_bytes());
     let reg = client.register(&public_b64).await?;
@@ -379,8 +380,36 @@ pub async fn generate(
         created_at: unix_now(),
     };
     save_identity(&identity)?;
+    Ok(text)
+}
+
+/// `warpconfig generate`: register, then write the wgconf to `out` (or
+/// stdout). Returns the rendered wgconf for callers that need it (wizard
+/// auto-import).
+pub async fn generate(
+    out: Option<&Path>,
+    license: Option<&str>,
+    endpoint_override: Option<&str>,
+) -> Result<String> {
+    let text = register_flow(DEFAULT_API_BASE, license, endpoint_override).await?;
     write_out(out, &text)?;
     Ok(text)
+}
+
+/// Server path (`POST /api/warp/register`): register a fresh identity and
+/// return the wgconf text without printing it (the CLI prints via
+/// `generate`). The Cloudflare flow carries its own per-attempt timeout and
+/// retries; errors are anyhow at this boundary.
+pub async fn register(license: Option<&str>) -> Result<String> {
+    register_flow(DEFAULT_API_BASE, license, None).await
+}
+
+/// Test-only entry: same flow as `register` against an explicit API base
+/// (loopback mock), so the server-facing path never touches the network in
+/// tests.
+#[cfg(test)]
+async fn register_with_base(base: String, license: Option<&str>) -> Result<String> {
+    register_flow(&base, license, None).await
 }
 
 /// `warpconfig export`: reuse the persisted identity, refresh the config, and
@@ -543,6 +572,17 @@ mod tests {
         Ok(Json(mock_registration()))
     }
 
+    /// The full registration API surface, scripted; asserts auth + records
+    /// every request into `seen`.
+    fn mock_app(seen: MockSeen) -> Router {
+        Router::new()
+            .route("/v0a884/reg", post(mock_register))
+            .route("/v0a884/reg/{id}", patch(mock_patch))
+            .route("/v0a884/reg/{id}", get(mock_fetch))
+            .route("/v0a884/reg/{id}/account", put(mock_put_account))
+            .with_state(seen)
+    }
+
     #[test]
     fn keygen_produces_valid_distinct_keys() {
         let (a, pa) = keygen();
@@ -667,12 +707,7 @@ mod tests {
     #[tokio::test]
     async fn client_flow_against_a_loopback_mock() {
         let seen: MockSeen = Default::default();
-        let app = Router::new()
-            .route("/v0a884/reg", post(mock_register))
-            .route("/v0a884/reg/{id}", patch(mock_patch))
-            .route("/v0a884/reg/{id}", get(mock_fetch))
-            .route("/v0a884/reg/{id}/account", put(mock_put_account))
-            .with_state(seen.clone());
+        let app = mock_app(seen.clone());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move {
@@ -718,5 +753,38 @@ mod tests {
         let (method, path, _) = &seen[3];
         assert_eq!(method, "GET");
         assert_eq!(path, "/v0a884/reg/reg-1");
+    }
+
+    /// The server-facing `register` path (no output writing, identity
+    /// persisted) against the same loopback mock. Sync test + explicit
+    /// runtime so the identity-dir guard is not held across awaits.
+    #[test]
+    fn register_returns_a_rendered_wgconf_and_persists_identity() {
+        let _guard = IDENTITY_LOCK.lock().unwrap();
+        isolated_identity_dir();
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            let seen: MockSeen = Default::default();
+            let app = mock_app(seen.clone());
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            tokio::spawn(async move {
+                axum::serve(listener, app).await.unwrap();
+            });
+            let text = register_with_base(format!("http://{addr}"), Some("LIC-9"))
+                .await
+                .unwrap();
+            assert!(text.contains("PrivateKey"), "{text}");
+            assert!(text.contains("172.16.0.2/32"), "{text}");
+            assert!(text.contains("AllowedIPs"), "{text}");
+            assert!(
+                !text.contains("LIC-9"),
+                "the license must not leak into the config"
+            );
+            let identity = load_identity().unwrap();
+            assert_eq!(identity.id, "reg-1");
+            assert_eq!(identity.license.as_deref(), Some("LIC-9"));
+            let seen = seen.lock().unwrap();
+            assert_eq!(seen.len(), 4, "register must emit reg/enable/license/fetch");
+        });
     }
 }

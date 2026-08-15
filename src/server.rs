@@ -18,7 +18,7 @@ use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock as TokioRwLock;
 use tokio_stream::Stream;
 use tokio_stream::StreamExt as _;
@@ -29,12 +29,16 @@ use crate::api::types::{ScanConfig, ScanEvent, ScanSummary, Verdict};
 use crate::engine::ScanController;
 use crate::paths;
 use crate::ranges::{self, CidrPool, HttpGet};
+use crate::warpgen;
 
 const EMBEDDED_INDEX: &str = include_str!("../embed/index.html");
 const DEFAULT_RANGES_REFRESH_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
 /// Cap on concurrent SSE event streams so hung tabs cannot hoard broadcast
 /// receivers; the UI needs one, extras are an abuse signal.
 const MAX_SSE_CONNECTIONS: usize = 4;
+/// Cap on saved profiles so an unauthenticated local caller cannot grow the
+/// in-memory map without bound (memory-DoS guard; review Domain 7).
+const MAX_PROFILES: usize = 50;
 
 /// Host header values the API answers to. Anything else is rejected before
 /// routing (DNS-rebinding / drive-by protection); the server only ever binds
@@ -115,6 +119,12 @@ struct ProfilePayload {
     config: ScanConfig,
 }
 
+/// WARP registration seam: production drives warpgen::register (the
+/// Cloudflare v0a884 flow) on a blocking thread; tests inject a fake so the
+/// endpoint never touches the network (mirrors the ranges::HttpGet
+/// injectability).
+type WarpRegistrar = Arc<dyn Fn(Option<String>) -> anyhow::Result<String> + Send + Sync>;
+
 struct AppState {
     controller: Arc<ScanController>,
     profiles: TokioRwLock<HashMap<String, ScanConfig>>,
@@ -123,6 +133,7 @@ struct AppState {
     /// atomic, else two concurrent POSTs both pass `is_running()`.
     start_lock: tokio::sync::Mutex<()>,
     sse_connections: Arc<AtomicUsize>,
+    warp_register: WarpRegistrar,
 }
 
 /// What /api/ranges serves: the current pool plus when it was last refreshed.
@@ -228,17 +239,22 @@ impl RangesState {
 pub fn router(controller: Arc<ScanController>) -> Router {
     let ranges = RangesState::load();
     ranges.spawn_refresh(None, Arc::new(ranges::RealHttp));
-    router_with(controller, ranges)
+    router_with(controller, ranges, default_registrar())
 }
 
-/// Router with an injected ranges state (tests).
-fn router_with(controller: Arc<ScanController>, ranges_state: Arc<RangesState>) -> Router {
+/// Router with injected ranges state and registrar (tests).
+fn router_with(
+    controller: Arc<ScanController>,
+    ranges_state: Arc<RangesState>,
+    registrar: WarpRegistrar,
+) -> Router {
     let state = Arc::new(AppState {
         controller,
         profiles: TokioRwLock::new(HashMap::new()),
         ranges: ranges_state,
         start_lock: tokio::sync::Mutex::new(()),
         sse_connections: Arc::new(AtomicUsize::new(0)),
+        warp_register: registrar,
     });
     let mut router = Router::new()
         .route("/", get(index))
@@ -249,6 +265,7 @@ fn router_with(controller: Arc<ScanController>, ranges_state: Arc<RangesState>) 
         .route("/api/cancel", post(cancel))
         .route("/api/reset", post(reset))
         .route("/api/ranges", get(ranges))
+        .route("/api/warp/register", post(warp_register))
         .route("/api/profiles", get(list_profiles))
         .route(
             "/api/profiles/{name}",
@@ -368,6 +385,48 @@ async fn reset(State(state): State<Arc<AppState>>) -> StatusCode {
     StatusCode::NO_CONTENT
 }
 
+/// `POST /api/warp/register` body: the optional WARP+ license key; null or
+/// missing means a free account.
+#[derive(Deserialize)]
+struct RegisterRequest {
+    #[serde(default)]
+    license: Option<String>,
+}
+
+#[derive(Serialize)]
+struct RegisterResponse {
+    wgconf: String,
+}
+
+/// Production registrar: the Cloudflare flow has its own per-attempt timeout
+/// and retries (warpgen); the captured runtime handle lets the handler push
+/// it onto a blocking thread.
+fn default_registrar() -> WarpRegistrar {
+    let handle = tokio::runtime::Handle::current();
+    Arc::new(move |license| handle.block_on(warpgen::register(license.as_deref())))
+}
+
+/// Opt-in WARP registration (review Domain 2): registers a fresh identity
+/// with Cloudflare and returns the rendered wgconf. The UI contract is
+/// `{"license": <string|null>} -> {"wgconf": "..."}`. The network flow can
+/// take up to ~45 s (3 attempts x 15 s), so it runs on a blocking thread;
+/// failures answer the uniform error envelope.
+async fn warp_register(
+    State(state): State<Arc<AppState>>,
+    JsonBody(req): JsonBody<RegisterRequest>,
+) -> Result<Json<RegisterResponse>, ApiError> {
+    let license = req
+        .license
+        .map(|l| l.trim().to_owned())
+        .filter(|l| !l.is_empty());
+    let registrar = Arc::clone(&state.warp_register);
+    let wgconf = tokio::task::spawn_blocking(move || registrar(license))
+        .await
+        .map_err(|_| ApiError::internal("registration task panicked"))?
+        .map_err(|err| ApiError::bad_gateway(format!("registration failed: {err:#}")))?;
+    Ok(Json(RegisterResponse { wgconf }))
+}
+
 #[derive(Serialize)]
 struct StatusPayload {
     version: &'static str,
@@ -416,12 +475,24 @@ async fn list_profiles(State(state): State<Arc<AppState>>) -> Json<Vec<ProfilePa
     Json(out)
 }
 
-fn sanitize_config(cfg: ScanConfig) -> ScanConfig {
+fn sanitize_config(mut cfg: ScanConfig) -> ScanConfig {
+    // Profiles must never carry WARP key material (review Domain 7): the
+    // wgconf is stripped on the way in and the verification flag that depends
+    // on it is cleared, so stored/returned profiles stay valid. The scan path
+    // (POST /api/scan) still accepts wgconf-bearing configs.
+    if let Some(warp) = &mut cfg.warp {
+        if warp.wgconf.take().is_some() {
+            warp.verify_with_wgconf = false;
+        }
+    }
     cfg
 }
 
 /// Upsert: 201 when the name is new, 200 when it replaces an existing
-/// profile; the body is always the stored profile.
+/// profile; the body is always the stored profile. New names are rejected
+/// with 413 once MAX_PROFILES is reached; updating an existing name stays
+/// allowed. The check and insert share the write lock, so concurrent PUTs
+/// cannot exceed the cap.
 async fn put_profile(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
@@ -431,6 +502,11 @@ async fn put_profile(
     cfg.validate().map_err(ApiError::bad_request)?;
     let cfg = sanitize_config(cfg);
     let mut profiles = state.profiles.write().await;
+    if !profiles.contains_key(&name) && profiles.len() >= MAX_PROFILES {
+        return Err(ApiError::payload_too_large(format!(
+            "profile limit reached ({MAX_PROFILES} max)"
+        )));
+    }
     let created = profiles.insert(name.clone(), cfg.clone()).is_none();
     let status = if created {
         StatusCode::CREATED
@@ -504,6 +580,27 @@ impl ApiError {
         }
     }
 
+    fn bad_gateway(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::BAD_GATEWAY,
+            message: message.into(),
+        }
+    }
+
+    fn internal(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            message: message.into(),
+        }
+    }
+
+    fn payload_too_large(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::PAYLOAD_TOO_LARGE,
+            message: message.into(),
+        }
+    }
+
     fn conflict(message: impl Into<String>) -> Self {
         Self {
             status: StatusCode::CONFLICT,
@@ -547,9 +644,10 @@ impl IntoResponse for ApiError {
 mod tests {
     use super::*;
     use std::net::SocketAddr;
+    use std::sync::Mutex;
     use std::time::Duration;
 
-    use crate::api::types::{Mode, Phase2Config, ScanTarget, StopCondition};
+    use crate::api::types::{Mode, Phase2Config, ScanTarget, StopCondition, WarpConfig};
     use crate::probe::FakeTransport;
     use crate::ranges::BUNDLED_RANGES;
 
@@ -592,17 +690,45 @@ mod tests {
     }
 
     async fn serve_with_ranges(t: FakeTransport, ranges: Arc<RangesState>) -> SocketAddr {
+        serve_with_registrar(t, ranges, canned_registrar()).await
+    }
+
+    async fn serve_with_registrar(
+        t: FakeTransport,
+        ranges: Arc<RangesState>,
+        registrar: WarpRegistrar,
+    ) -> SocketAddr {
         let controller = Arc::new(ScanController::new(Arc::new(t)));
         let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
             .await
             .unwrap();
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move {
-            axum::serve(listener, router_with(controller, ranges))
+            axum::serve(listener, router_with(controller, ranges, registrar))
                 .await
                 .unwrap();
         });
         addr
+    }
+
+    /// Registration fakes never touch the network.
+    fn canned_registrar() -> WarpRegistrar {
+        Arc::new(|_| Ok("fake-wgconf".to_owned()))
+    }
+
+    fn failing_registrar() -> WarpRegistrar {
+        Arc::new(|_| Err(anyhow::anyhow!("upstream unreachable")))
+    }
+
+    /// Records the license each call received; returns the canned wgconf.
+    fn recording_registrar(wgconf: &'static str) -> (WarpRegistrar, Arc<Mutex<Option<String>>>) {
+        let seen = Arc::new(Mutex::new(None));
+        let capture = Arc::clone(&seen);
+        let registrar: WarpRegistrar = Arc::new(move |license| {
+            *capture.lock().unwrap() = license;
+            Ok(wgconf.to_owned())
+        });
+        (registrar, seen)
     }
 
     /// Raw HTTP/1.1 over a throwaway TCP connection. Reads until EOF or
@@ -675,6 +801,15 @@ mod tests {
         let req = format!(
             "DELETE /api/profiles/{} HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
             name
+        );
+        request(addr, &req, None).await
+    }
+
+    async fn post_register(addr: SocketAddr, body: &str) -> (u16, String) {
+        let req = format!(
+            "POST /api/warp/register HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
         );
         request(addr, &req, None).await
     }
@@ -1203,5 +1338,194 @@ mod tests {
         for stream in streams {
             stream.abort();
         }
+    }
+
+    #[tokio::test]
+    async fn warp_register_with_null_license_returns_wgconf() {
+        let (registrar, seen) = recording_registrar("fake-wgconf-text");
+        let addr = serve_with_registrar(
+            FakeTransport::new(),
+            RangesState::load_text(BUNDLED_RANGES, None),
+            registrar,
+        )
+        .await;
+        let (status, text) = post_register(addr, r#"{"license":null}"#).await;
+        assert_eq!(status, 200, "{text}");
+        assert_eq!(json_body(&text), r#"{"wgconf":"fake-wgconf-text"}"#);
+        assert_eq!(*seen.lock().unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn warp_register_forwards_the_license_string() {
+        let (registrar, seen) = recording_registrar("fake-wgconf-text");
+        let addr = serve_with_registrar(
+            FakeTransport::new(),
+            RangesState::load_text(BUNDLED_RANGES, None),
+            registrar,
+        )
+        .await;
+        let (status, text) = post_register(addr, r#"{"license":"WARP-PLUS-ABC"}"#).await;
+        assert_eq!(status, 200, "{text}");
+        assert_eq!(seen.lock().unwrap().as_deref(), Some("WARP-PLUS-ABC"));
+    }
+
+    #[tokio::test]
+    async fn warp_register_absent_or_blank_license_is_none() {
+        let (registrar, seen) = recording_registrar("fake-wgconf-text");
+        let addr = serve_with_registrar(
+            FakeTransport::new(),
+            RangesState::load_text(BUNDLED_RANGES, None),
+            registrar,
+        )
+        .await;
+        for body in [
+            r#"{}"#,
+            r#"{"license":null}"#,
+            r#"{"license":""}"#,
+            r#"{"license":"   "}"#,
+        ] {
+            let (status, text) = post_register(addr, body).await;
+            assert_eq!(status, 200, "{text}");
+            assert_eq!(
+                *seen.lock().unwrap(),
+                None,
+                "body {body} must pass license None"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn warp_register_failure_returns_uniform_envelope() {
+        let addr = serve_with_registrar(
+            FakeTransport::new(),
+            RangesState::load_text(BUNDLED_RANGES, None),
+            failing_registrar(),
+        )
+        .await;
+        let (status, text) = post_register(addr, r#"{"license":null}"#).await;
+        assert_eq!(status, 502, "{text}");
+        let parsed: serde_json::Value =
+            serde_json::from_str(json_body(&text)).expect("error envelope is JSON");
+        assert_eq!(parsed["error"], "Bad Gateway");
+        assert!(parsed["message"].as_str().is_some_and(|m| !m.is_empty()));
+    }
+
+    #[tokio::test]
+    async fn warp_register_malformed_body_gets_uniform_400() {
+        let addr = serve_with_registrar(
+            FakeTransport::new(),
+            RangesState::load_text(BUNDLED_RANGES, None),
+            failing_registrar(),
+        )
+        .await;
+        let (status, text) = post_register(addr, "{nope").await;
+        assert_eq!(status, 400, "{text}");
+        let parsed: serde_json::Value =
+            serde_json::from_str(json_body(&text)).expect("error envelope is JSON");
+        assert_eq!(parsed["error"], "Bad Request");
+        assert!(parsed["message"].as_str().is_some_and(|m| !m.is_empty()));
+    }
+
+    #[tokio::test]
+    async fn profile_cap_rejects_new_names_but_allows_updates() {
+        let addr = serve(FakeTransport::new()).await;
+        let body = serde_json::to_string(&cfg(1, 1)).unwrap();
+        for i in 0..MAX_PROFILES {
+            let (status, text) = put_profile(addr, &format!("p{i:02}"), &body).await;
+            assert_eq!(status, 201, "{text}");
+        }
+        let (status, text) = put_profile(addr, "overflow", &body).await;
+        assert_eq!(status, 413, "{text}");
+        let parsed: serde_json::Value =
+            serde_json::from_str(json_body(&text)).expect("error envelope is JSON");
+        assert_eq!(parsed["error"], "Payload Too Large");
+        // Updates of existing names stay allowed at the cap.
+        assert_eq!(put_profile(addr, "p00", &body).await.0, 200);
+        let (_, text) = get_profiles(addr).await;
+        let parsed: Vec<serde_json::Value> = serde_json::from_str(response_body(&text)).unwrap();
+        assert_eq!(parsed.len(), MAX_PROFILES, "{text}");
+        assert!(!parsed.iter().any(|p| p["name"] == "overflow"), "{text}");
+    }
+
+    /// A valid WARP-mode config carrying wgconf key material, as the UI sends
+    /// it before masking.
+    fn warp_cfg_with_wgconf() -> ScanConfig {
+        let mut c = cfg(1, 1);
+        c.mode = Mode::Warp;
+        c.ports = vec![2408];
+        c.warp = Some(WarpConfig {
+            custom_endpoints: vec!["10.0.0.1".to_owned()],
+            wgconf: Some(
+                "PrivateKey = TOP-SECRET-WG-KEY\n[Peer]\nPublicKey = bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo="
+                    .to_owned(),
+            ),
+            verify_with_wgconf: true,
+            ..WarpConfig::default()
+        });
+        c
+    }
+
+    #[tokio::test]
+    async fn profiles_never_store_or_return_warp_wgconf() {
+        let addr = serve(FakeTransport::new()).await;
+        let body = serde_json::to_string(&warp_cfg_with_wgconf()).unwrap();
+        let (status, text) = put_profile(addr, "warp-verify", &body).await;
+        assert_eq!(status, 201, "{text}");
+        assert!(
+            !text.contains("TOP-SECRET-WG-KEY"),
+            "PUT response must not echo the wgconf: {text}"
+        );
+        assert!(text.contains("\"verify_with_wgconf\":false"), "{text}");
+        let (_, text) = get_profiles(addr).await;
+        assert!(
+            !text.contains("TOP-SECRET-WG-KEY"),
+            "profile list must not expose the wgconf: {text}"
+        );
+        let req = "GET /api/profiles/warp-verify HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n";
+        let (status, text) = request(addr, req, None).await;
+        assert_eq!(status, 200, "{text}");
+        assert!(
+            !text.contains("TOP-SECRET-WG-KEY"),
+            "single profile must not expose the wgconf: {text}"
+        );
+        // The stored profile is valid and loadable without the key.
+        let parsed: serde_json::Value = serde_json::from_str(response_body(&text)).unwrap();
+        let stored: ScanConfig = serde_json::from_value(parsed["config"].clone()).unwrap();
+        assert_eq!(stored.validate(), Ok(()));
+        assert_eq!(stored.warp.unwrap().wgconf, None);
+    }
+
+    #[tokio::test]
+    async fn scan_path_still_accepts_wgconf_configs() {
+        // Masking is profile-only: the engine's scan path keeps accepting
+        // verification configs (review Domain 7: the real config stays in the
+        // engine's scan path).
+        let addr = serve(FakeTransport::new()).await;
+        let mut c = warp_cfg_with_wgconf();
+        c.warp.as_mut().unwrap().verify_with_wgconf = false;
+        assert_eq!(
+            post_scan(addr, &serde_json::to_string(&c).unwrap()).await,
+            202
+        );
+    }
+
+    #[test]
+    fn sanitize_config_masks_wgconf_and_keeps_other_fields() {
+        let mut c = cfg(1, 1);
+        c.mode = Mode::Warp;
+        c.warp = Some(WarpConfig {
+            custom_endpoints: vec!["1.2.3.4:2408".to_owned()],
+            wgconf: Some("secret-key".to_owned()),
+            verify_with_wgconf: true,
+            ..WarpConfig::default()
+        });
+        let masked = sanitize_config(c);
+        let warp = masked.warp.unwrap();
+        assert_eq!(warp.wgconf, None);
+        assert!(!warp.verify_with_wgconf);
+        assert_eq!(warp.custom_endpoints, vec!["1.2.3.4:2408"]);
+        // Configs without a warp section pass through untouched.
+        let c = cfg(1, 1);
+        assert_eq!(sanitize_config(c.clone()), c);
     }
 }
