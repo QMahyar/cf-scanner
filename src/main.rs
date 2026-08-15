@@ -266,7 +266,6 @@ fn build_scan_config(args: &ScanArgs) -> Result<ScanConfig> {
         probes_per_endpoint: args.warp_probes,
         wgconf,
         verify_with_wgconf: args.warp_verify,
-        ..Default::default()
     });
     let cfg = ScanConfig {
         mode,

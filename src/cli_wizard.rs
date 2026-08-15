@@ -84,7 +84,6 @@ fn prompt_warp() -> Result<ScanConfig> {
             probes_per_endpoint: probes,
             wgconf,
             verify_with_wgconf: verify,
-            ..Default::default()
         }),
         concurrency,
         timeout_ms,

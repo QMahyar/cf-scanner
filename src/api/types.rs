@@ -12,6 +12,12 @@ pub const DEFAULT_CONCURRENCY: u16 = 200;
 pub const DEFAULT_TIMEOUT_MS: u64 = 3_000;
 pub const DEFAULT_PROBE_URL: &str = "https://cp.cloudflare.com/";
 pub const MAX_SCAN_COUNT: u32 = 100_000;
+/// Unique ports allowed in one scan; bounds the probe fan-out (OOM guard).
+pub const MAX_PORTS: usize = 64;
+/// CIDR entries allowed in `exclude`/`custom_cidrs`.
+pub const MAX_CIDRS: usize = 64;
+/// Config/SNI entries allowed in a phase-2 plan (xray spawns per combo).
+pub const MAX_PHASE2_ENTRIES: usize = 8;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Mode {
@@ -108,10 +114,6 @@ pub struct WarpConfig {
     pub wgconf: Option<String>,
     /// Run the real handshake with the user's keypair after discovery.
     pub verify_with_wgconf: bool,
-    /// Opt-in: register a fresh WARP identity and build a config.
-    pub generate_config: bool,
-    /// Optional WARP+ license binding during registration.
-    pub warp_plus_license: Option<String>,
 }
 
 impl Default for WarpConfig {
@@ -121,8 +123,6 @@ impl Default for WarpConfig {
             probes_per_endpoint: 3,
             wgconf: None,
             verify_with_wgconf: false,
-            generate_config: false,
-            warp_plus_license: None,
         }
     }
 }
@@ -202,6 +202,10 @@ pub struct ScanSummary {
     pub scanned: u64,
     pub found: u64,
     pub duration_ms: u64,
+    /// True when the run was stopped by a cancel request instead of finishing
+    /// its plan. `serde(default)` keeps old clients decoding additive fields.
+    #[serde(default)]
+    pub cancelled: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -247,6 +251,18 @@ pub enum ConfigError {
     InvalidPhase2Concurrency(u8),
     #[error("verify_with_wgconf requires wgconf text")]
     VerifyNeedsWgconf,
+    #[error("ports must have at most 64 unique entries, got {0}")]
+    TooManyPorts(usize),
+    #[error("exclude must have at most 64 entries, got {0}")]
+    TooManyExcludes(usize),
+    #[error("custom_cidrs must have at most 64 entries, got {0}")]
+    TooManyCidrs(usize),
+    #[error("phase2.configs must have at most 8 entries, got {0}")]
+    TooManyConfigs(usize),
+    #[error("phase2.snis must have at most 8 entries, got {0}")]
+    TooManySnis(usize),
+    #[error("custom fragment {0} must be an integer or a range like 100-200, got {1:?}")]
+    InvalidFragment(&'static str, String),
 }
 
 impl ScanConfig {
@@ -265,6 +281,12 @@ impl ScanConfig {
         }
         if self.stop.found == 0 {
             return Err(ConfigError::InvalidFound(0));
+        }
+        if self.exclude.len() > MAX_CIDRS {
+            return Err(ConfigError::TooManyExcludes(self.exclude.len()));
+        }
+        if self.custom_cidrs.len() > MAX_CIDRS {
+            return Err(ConfigError::TooManyCidrs(self.custom_cidrs.len()));
         }
         if !(1..=1000).contains(&self.concurrency) {
             return Err(ConfigError::InvalidConcurrency(self.concurrency));
@@ -321,6 +343,14 @@ fn validate_ports(ports: &[u16]) -> Result<(), ConfigError> {
             return Err(ConfigError::InvalidPort(p));
         }
     }
+    // Duplicate ports probe the same endpoint twice: dedupe, then cap the
+    // unique set so an unauthenticated API call cannot fan out unbounded.
+    let mut unique = ports.to_vec();
+    unique.sort_unstable();
+    unique.dedup();
+    if unique.len() > MAX_PORTS {
+        return Err(ConfigError::TooManyPorts(unique.len()));
+    }
     Ok(())
 }
 
@@ -328,11 +358,20 @@ fn validate_phase2(p2: &Phase2Config) -> Result<(), ConfigError> {
     if p2.configs.is_empty() {
         return Err(ConfigError::NoConfigs);
     }
+    if p2.configs.len() > MAX_PHASE2_ENTRIES {
+        return Err(ConfigError::TooManyConfigs(p2.configs.len()));
+    }
+    if p2.snis.len() > MAX_PHASE2_ENTRIES {
+        return Err(ConfigError::TooManySnis(p2.snis.len()));
+    }
     if !(p2.probe_url.starts_with("https://") || p2.probe_url.starts_with("http://")) {
         return Err(ConfigError::InvalidProbeUrl);
     }
     if p2.fragment == FragmentPreset::Custom && p2.custom_fragment.is_none() {
         return Err(ConfigError::MissingCustomFragment);
+    }
+    if let Some(f) = &p2.custom_fragment {
+        validate_fragment(f)?;
     }
     if p2.concurrency == 0 || p2.concurrency > 8 {
         return Err(ConfigError::InvalidPhase2Concurrency(p2.concurrency));
@@ -340,27 +379,49 @@ fn validate_phase2(p2: &Phase2Config) -> Result<(), ConfigError> {
     Ok(())
 }
 
-/// Validates `ip/prefix` for both address families.
-fn validate_cidr(s: &str) -> Result<(), ConfigError> {
-    let (ip, prefix) = s
-        .split_once('/')
-        .ok_or_else(|| ConfigError::InvalidCidr(s.to_owned(), "missing /prefix".to_owned()))?;
-    let ip: IpAddr = ip
-        .parse()
-        .map_err(|_| ConfigError::InvalidCidr(s.to_owned(), "not an IP address".to_owned()))?;
-    let max_prefix = if ip.is_ipv4() { 32 } else { 128 };
-    let prefix: u8 = prefix
-        .parse()
-        .map_err(|_| ConfigError::InvalidCidr(s.to_owned(), "prefix is not a number".to_owned()))?;
-    if prefix > max_prefix {
-        return Err(ConfigError::InvalidCidr(
-            s.to_owned(),
-            format!("prefix out of range 0-{max_prefix}"),
-        ));
+/// Fragment values are xray Int32Range strings: an integer or a `lo-hi`
+/// range. `packets` additionally accepts the special `tlshello` value the
+/// presets hardcode.
+fn validate_fragment(f: &CustomFragment) -> Result<(), ConfigError> {
+    validate_fragment_field("packets", &f.packets, true)?;
+    validate_fragment_field("length", &f.length, false)?;
+    validate_fragment_field("interval", &f.interval, false)
+}
+
+fn validate_fragment_field(
+    field: &'static str,
+    value: &str,
+    allow_tlshello: bool,
+) -> Result<(), ConfigError> {
+    if allow_tlshello && value == "tlshello" {
+        return Ok(());
     }
+    let mut parts = value.split('-');
+    let ok = match (parts.next(), parts.next(), parts.next()) {
+        (Some(lo), None, None) => is_ascii_digits(lo),
+        (Some(lo), Some(hi), None) => is_ascii_digits(lo) && is_ascii_digits(hi),
+        _ => false,
+    };
+    if ok {
+        Ok(())
+    } else {
+        Err(ConfigError::InvalidFragment(field, value.to_owned()))
+    }
+}
+
+fn is_ascii_digits(s: &str) -> bool {
+    !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit())
+}
+
+/// Validates `ip/prefix` for both address families. Delegates parsing to the
+/// canonical `ranges::parse_cidr`; only the deliberate v6 /0 rejection (host
+/// count exceeds u128) stays here, checked after the parse succeeds.
+fn validate_cidr(s: &str) -> Result<(), ConfigError> {
+    let cidr = crate::ranges::parse_cidr(s)
+        .map_err(|e| ConfigError::InvalidCidr(s.to_owned(), format!("{e}")))?;
     // A v6 /0 covers 2^128 addresses: `Cidr::host_count` saturates at
     // u128::MAX, so exclusion/planning math on it would be off by one.
-    if ip.is_ipv6() && prefix == 0 {
+    if cidr.addr.is_ipv6() && cidr.prefix == 0 {
         return Err(ConfigError::InvalidCidr(
             s.to_owned(),
             "IPv6 /0 is not supported (host count exceeds u128)".to_owned(),
@@ -369,8 +430,10 @@ fn validate_cidr(s: &str) -> Result<(), ConfigError> {
     Ok(())
 }
 
-/// Validates `ip` or `ip:port` (IPv4 only by design).
-fn validate_endpoint(s: &str) -> Result<(), ConfigError> {
+/// Parses `ip` or `ip:port` endpoint entries. IPv4 only by design: WARP
+/// dials raw IPv4 addresses. The port stays optional — a bare IP inherits
+/// the scan's port list. Canonical parser shared with the engine.
+pub(crate) fn parse_endpoint(s: &str) -> Result<(IpAddr, Option<u16>), ConfigError> {
     let (ip, port) = match s.rsplit_once(':') {
         Some((ip, port)) => (ip, Some(port)),
         None => (s, None),
@@ -381,21 +444,30 @@ fn validate_endpoint(s: &str) -> Result<(), ConfigError> {
             "IPv6 is not supported".to_owned(),
         ));
     }
-    ip.parse::<Ipv4Addr>().map_err(|_| {
+    let ip: Ipv4Addr = ip.trim().parse().map_err(|_| {
         ConfigError::InvalidEndpoint(s.to_owned(), "not an IPv4 address".to_owned())
     })?;
-    if let Some(p) = port {
-        let p: u16 = p.parse().map_err(|_| {
-            ConfigError::InvalidEndpoint(s.to_owned(), "port is not a number".to_owned())
-        })?;
-        if p == 0 {
-            return Err(ConfigError::InvalidEndpoint(
-                s.to_owned(),
-                "port is 0".to_owned(),
-            ));
+    let port = match port {
+        Some(p) => {
+            let p: u16 = p.trim().parse().map_err(|_| {
+                ConfigError::InvalidEndpoint(s.to_owned(), "port is not a number".to_owned())
+            })?;
+            if p == 0 {
+                return Err(ConfigError::InvalidEndpoint(
+                    s.to_owned(),
+                    "port is 0".to_owned(),
+                ));
+            }
+            Some(p)
         }
-    }
-    Ok(())
+        None => None,
+    };
+    Ok((IpAddr::V4(ip), port))
+}
+
+/// Validates `ip` or `ip:port` (IPv4 only by design).
+fn validate_endpoint(s: &str) -> Result<(), ConfigError> {
+    parse_endpoint(s).map(|_| ())
 }
 
 #[cfg(test)]
@@ -717,6 +789,7 @@ mod tests {
                 scanned: 10,
                 found: 2,
                 duration_ms: 5,
+                cancelled: false,
             }),
         ] {
             let json = serde_json::to_string(&event).unwrap();
@@ -731,8 +804,253 @@ mod tests {
             scanned: 0,
             found: 0,
             duration_ms: 0,
+            cancelled: false,
         }))
         .unwrap();
         assert!(json.contains("\"type\":\"finished\""), "{json}");
+    }
+
+    #[test]
+    fn summary_cancelled_defaults_to_false() {
+        let json = r#"{"scanned":1,"found":0,"duration_ms":10}"#;
+        let s: ScanSummary = serde_json::from_str(json).unwrap();
+        assert!(!s.cancelled, "omitted field must deserialize as false");
+        let event_json = r#"{"type":"finished","scanned":1,"found":0,"duration_ms":10}"#;
+        let event: ScanEvent = serde_json::from_str(event_json).unwrap();
+        assert!(matches!(event, ScanEvent::Finished(s) if !s.cancelled));
+    }
+
+    #[test]
+    fn summary_cancelled_round_trips() {
+        let s = ScanSummary {
+            scanned: 7,
+            found: 3,
+            duration_ms: 42,
+            cancelled: true,
+        };
+        let json = serde_json::to_string(&s).unwrap();
+        assert!(json.contains("\"cancelled\":true"), "{json}");
+        assert_eq!(serde_json::from_str::<ScanSummary>(&json).unwrap(), s);
+    }
+
+    #[test]
+    fn ports_are_deduped_for_the_cap() {
+        // 100 raw entries collapse to 2 unique ports: valid, not an error.
+        let mut c = valid_config();
+        c.ports = (0..100).map(|_| 443).collect();
+        assert_eq!(c.validate(), Ok(()));
+        let mut c = valid_config();
+        c.ports = vec![443, 8443, 443, 2408, 443];
+        assert_eq!(c.validate(), Ok(()));
+    }
+
+    #[test]
+    fn rejects_too_many_unique_ports() {
+        let mut c = valid_config();
+        c.ports = (1..=65).collect();
+        assert_eq!(c.validate(), Err(ConfigError::TooManyPorts(65)));
+        let mut c = valid_config();
+        c.ports = (1..=MAX_PORTS as u16).collect();
+        assert_eq!(c.validate(), Ok(()), "64 unique ports must be accepted");
+    }
+
+    #[test]
+    fn rejects_too_many_exclude_and_custom_cidrs() {
+        let mut c = valid_config();
+        c.exclude = (0..=MAX_CIDRS).map(|i| format!("10.0.{i}.0/24")).collect();
+        assert_eq!(
+            c.validate(),
+            Err(ConfigError::TooManyExcludes(MAX_CIDRS + 1))
+        );
+        let mut c = valid_config();
+        c.custom_cidrs = (0..=MAX_CIDRS).map(|i| format!("10.0.{i}.0/24")).collect();
+        assert_eq!(c.validate(), Err(ConfigError::TooManyCidrs(MAX_CIDRS + 1)));
+        let mut c = valid_config();
+        c.custom_cidrs = (0..MAX_CIDRS).map(|i| format!("10.0.{i}.0/24")).collect();
+        assert_eq!(c.validate(), Ok(()), "64 CIDRs must be accepted");
+    }
+
+    #[test]
+    fn rejects_too_many_phase2_configs_and_snis() {
+        let mut c = valid_config();
+        c.phase2 = Some(Phase2Config {
+            configs: (0..=MAX_PHASE2_ENTRIES)
+                .map(|i| format!("vless://uuid@example.com:{i}"))
+                .collect(),
+            ..Default::default()
+        });
+        assert_eq!(
+            c.validate(),
+            Err(ConfigError::TooManyConfigs(MAX_PHASE2_ENTRIES + 1))
+        );
+        let mut c = valid_config();
+        c.phase2 = Some(Phase2Config {
+            configs: vec!["vless://uuid@example.com:443".to_owned()],
+            snis: (0..=MAX_PHASE2_ENTRIES)
+                .map(|i| format!("sni{i}.example.com"))
+                .collect(),
+            ..Default::default()
+        });
+        assert_eq!(
+            c.validate(),
+            Err(ConfigError::TooManySnis(MAX_PHASE2_ENTRIES + 1))
+        );
+        let mut c = valid_config();
+        c.phase2 = Some(Phase2Config {
+            configs: (0..MAX_PHASE2_ENTRIES)
+                .map(|i| format!("vless://uuid@example.com:{i}"))
+                .collect(),
+            snis: (0..MAX_PHASE2_ENTRIES)
+                .map(|i| format!("sni{i}.example.com"))
+                .collect(),
+            ..Default::default()
+        });
+        assert_eq!(c.validate(), Ok(()), "8 configs + 8 snis must be accepted");
+    }
+
+    #[test]
+    fn rejects_malformed_custom_fragment_values() {
+        for (field, bad) in [
+            ("packets", "nope"),
+            ("packets", ""),
+            ("packets", "1-2-3"),
+            ("packets", "-5"),
+            ("packets", "5-"),
+            ("length", "abc"),
+            ("length", "100,200"),
+            ("length", "1 0"),
+            ("length", ""),
+            ("interval", "10.5"),
+            ("interval", "10-20-30"),
+        ] {
+            let f = CustomFragment {
+                packets: "tlshello".to_owned(),
+                length: "100-200".to_owned(),
+                interval: "10-20".to_owned(),
+            };
+            let f = match field {
+                "packets" => CustomFragment {
+                    packets: bad.to_owned(),
+                    ..f
+                },
+                "length" => CustomFragment {
+                    length: bad.to_owned(),
+                    ..f
+                },
+                _ => CustomFragment {
+                    interval: bad.to_owned(),
+                    ..f
+                },
+            };
+            let mut c = valid_config();
+            c.phase2 = Some(Phase2Config {
+                configs: vec!["vless://uuid@example.com:443".to_owned()],
+                fragment: FragmentPreset::Custom,
+                custom_fragment: Some(f),
+                ..Default::default()
+            });
+            assert!(
+                matches!(c.validate(), Err(ConfigError::InvalidFragment(f, _)) if f == field),
+                "expected {bad:?} in {field} to be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn accepts_valid_custom_fragment_values() {
+        for (packets, length, interval) in [
+            ("tlshello", "100", "10"),
+            ("tlshello", "100-200", "10-20"),
+            ("1-3", "100-200", "10-20"),
+            ("2", "50", "5-50"),
+        ] {
+            let mut c = valid_config();
+            c.phase2 = Some(Phase2Config {
+                configs: vec!["vless://uuid@example.com:443".to_owned()],
+                fragment: FragmentPreset::Custom,
+                custom_fragment: Some(CustomFragment {
+                    packets: packets.to_owned(),
+                    length: length.to_owned(),
+                    interval: interval.to_owned(),
+                }),
+                ..Default::default()
+            });
+            assert_eq!(c.validate(), Ok(()), "{packets}/{length}/{interval}");
+        }
+    }
+
+    #[test]
+    fn parse_endpoint_accepts_ip_with_and_without_port() {
+        assert_eq!(
+            parse_endpoint("1.2.3.4").unwrap(),
+            ("1.2.3.4".parse::<IpAddr>().unwrap(), None)
+        );
+        assert_eq!(
+            parse_endpoint("1.2.3.4:2408").unwrap(),
+            ("1.2.3.4".parse::<IpAddr>().unwrap(), Some(2408))
+        );
+        assert_eq!(
+            parse_endpoint(" 1.2.3.4 : 443 ").unwrap(),
+            ("1.2.3.4".parse::<IpAddr>().unwrap(), Some(443))
+        );
+    }
+
+    #[test]
+    fn parse_endpoint_rejects_invalid_input() {
+        for bad in [
+            "garbage",
+            "1.2.3.4:abc",
+            "1.2.3.4:0",
+            "1.2.3.4:99999",
+            "::1",
+            "::1:443",
+            "1.2.3.4:443:443",
+        ] {
+            assert!(
+                parse_endpoint(bad).is_err(),
+                "expected {bad} to be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_endpoint_and_parse_endpoint_agree() {
+        // WarpConfig validation must accept exactly what the shared parser does.
+        for good in ["1.2.3.4", "1.2.3.4:2408", "1.2.3.4:443"] {
+            let w = WarpConfig {
+                custom_endpoints: vec![good.to_owned()],
+                ..Default::default()
+            };
+            assert_eq!(w.validate(), Ok(()), "{good}");
+        }
+        for bad in ["::1", "1.2.3.4:0", "1.2.3.4:abc"] {
+            let w = WarpConfig {
+                custom_endpoints: vec![bad.to_owned()],
+                ..Default::default()
+            };
+            assert!(w.validate().is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn cidr_validation_delegates_to_ranges_parser() {
+        // The shared ranges parser masks host bits; validation must still
+        // accept host-ful CIDRs like the legacy validator did.
+        for good in ["1.2.3.99/24", "10.0.0.0/8", "2001:db8::1/64", "0.0.0.0/0"] {
+            let mut c = valid_config();
+            c.custom_cidrs = vec![good.to_owned()];
+            assert_eq!(c.validate(), Ok(()), "{good}");
+        }
+        for bad in [
+            "garbage",
+            "1.2.3.4/33",
+            "2606:4700::/129",
+            "::/0",
+            "1.2.3.4/abc",
+        ] {
+            let mut c = valid_config();
+            c.custom_cidrs = vec![bad.to_owned()];
+            assert!(c.validate().is_err(), "{bad}");
+        }
     }
 }

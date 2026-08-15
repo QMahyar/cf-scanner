@@ -667,17 +667,25 @@ impl ScanController {
     }
 
     fn finish(&self, started: Instant, scanned: u64, found: u64) -> ScanSummary {
+        let cancel_tx = self
+            .cancel_tx
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
+        // A live cancel slot holds the watch value: `true` once `cancel()`
+        // fired, so the summary can distinguish stop-from-cancel.
+        let cancelled = cancel_tx
+            .as_ref()
+            .map(|tx| *tx.subscribe().borrow())
+            .unwrap_or(false);
         let summary = ScanSummary {
             scanned,
             found,
             duration_ms: started.elapsed().as_millis() as u64,
+            cancelled,
         };
         *self.summary.lock().unwrap_or_else(|e| e.into_inner()) = Some(summary.clone());
         self.emit(ScanEvent::Finished(summary.clone()));
-        self.cancel_tx
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .take();
         summary
     }
 
@@ -770,24 +778,12 @@ fn insert_sorted(store: &Store, verdict: Verdict) {
     results.insert(pos, verdict);
 }
 
-/// `ip` or `ip:port`; the API validator already ran, so this only returns
-/// errors for impossible input.
+/// `ip` or `ip:port`; delegates to the canonical parser in the API contract
+/// (the API validator already ran, so errors mean impossible input).
 fn parse_endpoint(s: &str) -> Result<(std::net::Ipv4Addr, Option<u16>)> {
-    let (ip, port) = match s.rsplit_once(':') {
-        Some((ip, port)) => (ip, Some(port)),
-        None => (s, None),
-    };
-    let ip: Ipv4Addr = ip
-        .trim()
-        .parse()
-        .map_err(|_| anyhow!("invalid endpoint {s:?}"))?;
-    let port = match port {
-        Some(p) => Some(
-            p.trim()
-                .parse()
-                .map_err(|_| anyhow!("invalid endpoint port in {s:?}"))?,
-        ),
-        None => None,
+    let (ip, port) = crate::api::types::parse_endpoint(s).map_err(|e| anyhow!("{e}"))?;
+    let IpAddr::V4(ip) = ip else {
+        bail!("invalid endpoint {s:?}");
     };
     Ok((ip, port))
 }
