@@ -8,6 +8,7 @@ use std::io::Read as _;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use anyhow::{Context as _, Result, anyhow, bail};
@@ -175,41 +176,136 @@ impl Drop for XrayProcess {
 /// accepts connections. The config must be written to `config_dir` first.
 pub async fn spawn(config_dir: &Path, xray_bin: &Path, config_json: &Value) -> Result<XrayProcess> {
     let config_path = config_dir.join("config.json");
-    std::fs::write(&config_path, serde_json::to_string_pretty(config_json)?)?;
+    write_trial_config(&config_path, config_json).await?;
 
-    let child = tokio::process::Command::new(xray_bin)
+    let mut child = tokio::process::Command::new(xray_bin)
         .arg("run")
         .arg("-c")
         .arg(&config_path)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .kill_on_drop(true)
         .spawn()
         .context("failed to spawn xray; is the binary present?")?;
+
+    // Stderr is xray's own diagnostics (glibc mismatches, corrupt binary);
+    // it never carries config material, so it is safe to log and to surface
+    // in the failure error — the only way a dead-on-arrival child is
+    // diagnosable.
+    let stderr_tail = capture_stderr(child.stderr.take().expect("stderr is piped"));
 
     let socks_port = config_json
         .pointer("/inbounds/0/port")
         .and_then(Value::as_u64)
         .ok_or_else(|| anyhow!("config has no socks inbound"))? as u16;
     let socks_addr = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), socks_port);
-    wait_for_socks(socks_addr, READY_TIMEOUT)
-        .await
-        .context("xray socks inbound never came up")?;
-
+    if let Err(err) = wait_for_socks(&mut child, socks_addr, READY_TIMEOUT).await {
+        // The child may still be running (poll timed out): kill and reap it
+        // so the stderr reader hits EOF and the tail is complete.
+        let _ = child.start_kill();
+        let _ = child.wait().await;
+        let tail = stderr_tail.tail().await;
+        let message = if tail.is_empty() {
+            format!("{err:#}")
+        } else {
+            format!("{err:#}; xray stderr:\n{tail}")
+        };
+        return Err(anyhow!(message));
+    }
     Ok(XrayProcess { child, socks_addr })
 }
 
-/// Polls a TCP connect until it succeeds (proves the socks inbound is up).
-async fn wait_for_socks(addr: SocketAddr, timeout: Duration) -> Result<()> {
+/// Polls a TCP connect until it succeeds (proves the socks inbound is up),
+/// racing the child's exit so a corrupt/arch-mismatched binary that dies on
+/// arrival fails in ~20ms with its actual exit code instead of polling the
+/// full timeout.
+async fn wait_for_socks(
+    child: &mut tokio::process::Child,
+    addr: SocketAddr,
+    timeout: Duration,
+) -> Result<()> {
     let deadline = tokio::time::Instant::now() + timeout;
     loop {
+        if let Some(status) = child.try_wait().context("failed to poll xray")? {
+            bail!("{}", early_exit_message(&status));
+        }
         match tokio::net::TcpStream::connect(addr).await {
             Ok(_) => return Ok(()),
             Err(_) if tokio::time::Instant::now() >= deadline => {
                 bail!("socks {addr} not reachable within {timeout:?}")
             }
-            Err(_) => tokio::time::sleep(Duration::from_millis(100)).await,
+            Err(_) => tokio::time::sleep(Duration::from_millis(20)).await,
+        }
+    }
+}
+
+fn early_exit_message(status: &std::process::ExitStatus) -> String {
+    let Some(code) = status.code() else {
+        return "xray was terminated by a signal before its socks inbound came up".to_owned();
+    };
+    if code == 0 {
+        return "xray exited before its socks inbound came up".to_owned();
+    }
+    format!(
+        "xray exited with code {code} before its socks inbound came up \
+         (a corrupt or mismatched binary usually exits immediately — \
+         re-download it or check the platform runtime, e.g. glibc on Termux)"
+    )
+}
+
+/// Writes the trial config (which embeds the user's id/password) and locks
+/// it down to the owning user on Unix; the blocking fs runs off the async
+/// executor.
+async fn write_trial_config(path: &Path, config_json: &Value) -> Result<()> {
+    let path = path.to_path_buf();
+    let json = serde_json::to_string_pretty(config_json)?;
+    tokio::task::spawn_blocking(move || {
+        std::fs::write(&path, json)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+        }
+        Ok::<(), std::io::Error>(())
+    })
+    .await
+    .context("config write task failed")??;
+    Ok(())
+}
+
+const STDERR_TAIL_LINES: usize = 20;
+
+/// Bounded stderr capture for a spawned child: lines are debug-logged as
+/// they arrive and the last `STDERR_TAIL_LINES` are kept for error reports.
+struct StderrCapture {
+    tail: Arc<Mutex<Vec<String>>>,
+    done: tokio::task::JoinHandle<()>,
+}
+
+impl StderrCapture {
+    /// Awaits EOF (the child exited) and returns the captured tail.
+    async fn tail(self) -> String {
+        let _ = self.done.await;
+        self.tail.lock().unwrap().join("\n")
+    }
+}
+
+fn capture_stderr(stderr: tokio::process::ChildStderr) -> StderrCapture {
+    let tail = Arc::new(Mutex::new(Vec::new()));
+    let done = tokio::spawn(drain_stderr(stderr, tail.clone()));
+    StderrCapture { tail, done }
+}
+
+async fn drain_stderr(stderr: tokio::process::ChildStderr, tail: Arc<Mutex<Vec<String>>>) {
+    use tokio::io::AsyncBufReadExt as _;
+    let mut lines = tokio::io::BufReader::new(stderr).lines();
+    while let Ok(Some(line)) = lines.next_line().await {
+        tracing::debug!(stderr_line = %line, "xray stderr");
+        let mut guard = tail.lock().unwrap();
+        guard.push(line);
+        if guard.len() > STDERR_TAIL_LINES {
+            guard.remove(0);
         }
     }
 }
@@ -255,9 +351,71 @@ pub fn find_binary() -> Option<PathBuf> {
     find_bundled().or_else(cached_in_data_dir)
 }
 
+/// Stored beside the cached binary: `SHA2-256= <hex>` of the binary file
+/// itself, written at download time so use-time re-verification is fully
+/// offline (the release `.dgst` covers the zip only).
+fn dgst_path(bin: &Path) -> PathBuf {
+    bin.with_extension("dgst")
+}
+
+/// Once-per-process outcome of "make a verified xray binary available":
+/// bundled first, then the data-dir cache (checksum-verified), then a
+/// single-flight download that every concurrent attempt awaits.
+static BINARY_STATE: OnceLock<tokio::sync::Mutex<Option<Result<PathBuf, String>>>> =
+    OnceLock::new();
+
+/// Resolves the xray binary for phase 2, verifying the cached copy against
+/// its `.dgst` exactly once per process. A corrupt (or unverifiable) cache
+/// is removed and re-downloaded; concurrent attempts share one outcome.
+pub async fn ensure_binary(fetch: &impl BinaryFetch) -> Result<PathBuf> {
+    let state = BINARY_STATE.get_or_init(|| tokio::sync::Mutex::new(None));
+    let mut guard = state.lock().await;
+    if let Some(result) = &*guard {
+        return match result {
+            Ok(path) => Ok(path.clone()),
+            Err(message) => Err(anyhow!(message.clone())),
+        };
+    }
+    let result = resolve_binary(fetch).await.map_err(|err| err.to_string());
+    let outcome = result.clone();
+    *guard = Some(outcome);
+    result.map_err(anyhow::Error::msg)
+}
+
+async fn resolve_binary(fetch: &impl BinaryFetch) -> Result<PathBuf> {
+    if let Some(bundled) = find_bundled() {
+        return Ok(bundled);
+    }
+    if let Some(cached) = cached_in_data_dir() {
+        if cached_matches_dgst(&cached) {
+            return Ok(cached);
+        }
+        tracing::warn!(path = %cached.display(), "cached xray binary failed its checksum; re-downloading");
+        let _ = std::fs::remove_file(dgst_path(&cached));
+        let _ = std::fs::remove_file(&cached);
+    }
+    download_binary(fetch).await
+}
+
+/// SHA-256 of the on-disk binary vs its stored `.dgst`; a missing or
+/// unparsable `.dgst` counts as a mismatch (refuse the unverifiable cache).
+fn cached_matches_dgst(bin: &Path) -> bool {
+    let Ok(text) = std::fs::read_to_string(dgst_path(bin)) else {
+        return false;
+    };
+    let Ok(expected) = parse_dgst(&text, exe_name()) else {
+        return false;
+    };
+    let Ok(bytes) = std::fs::read(bin) else {
+        return false;
+    };
+    hex_lower(&Sha256::digest(&bytes)) == expected
+}
+
 /// Downloads the pinned release, verifies its `.dgst` SHA-256, extracts the
-/// binary into the data dir, and returns its path. Refuses to overwrite an
-/// existing file.
+/// binary into the data dir (writing its own `.dgst` for use-time
+/// re-verification), and returns the path. Refuses to overwrite an existing
+/// file.
 pub async fn download_binary(fetch: &impl BinaryFetch) -> Result<PathBuf> {
     let asset = asset_name()?;
     let url = format!("{RELEASE_BASE}/{VERSION}/{asset}");
@@ -276,13 +434,22 @@ pub async fn download_binary(fetch: &impl BinaryFetch) -> Result<PathBuf> {
     if dest.exists() {
         bail!("{} already exists; refusing to overwrite", dest.display());
     }
-    if let Some(parent) = dest.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let tmp = PathBuf::from(format!("{}.tmp", dest.display()));
-    extract_xray_from_zip(&zip, &tmp)?;
-    make_executable(&tmp)?;
-    std::fs::rename(&tmp, &dest)?;
+    let dgst_dest = dgst_path(&dest);
+    let install_dest = dest.clone();
+    tokio::task::spawn_blocking(move || -> Result<()> {
+        if let Some(parent) = install_dest.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let tmp = PathBuf::from(format!("{}.tmp", install_dest.display()));
+        extract_xray_from_zip(&zip, &tmp)?;
+        make_executable(&tmp)?;
+        std::fs::rename(&tmp, &install_dest)?;
+        let digest = hex_lower(&Sha256::digest(&std::fs::read(&install_dest)?));
+        std::fs::write(dgst_dest, format!("SHA2-256= {digest}\n"))?;
+        Ok(())
+    })
+    .await
+    .context("xray install task failed")??;
     Ok(dest)
 }
 
@@ -598,5 +765,196 @@ mod tests {
         let expected = parse_dgst(&fetch.1, "Xray-windows-64.zip").unwrap();
         let actual = hex_lower(&Sha256::digest(&bad_zip));
         assert_ne!(actual, expected);
+    }
+
+    /// Builds a zip containing `payload` under the platform exe name plus
+    /// the matching zip-level `.dgst` text (mirrors the release artifacts).
+    fn fake_zip(payload: &[u8]) -> (Vec<u8>, String) {
+        let mut buf = std::io::Cursor::new(Vec::new());
+        {
+            let mut w = zip::ZipWriter::new(&mut buf);
+            w.start_file(exe_name(), zip::write::SimpleFileOptions::default())
+                .unwrap();
+            std::io::Write::write_all(&mut w, payload).unwrap();
+            w.finish().unwrap();
+        }
+        let zip_bytes = buf.into_inner();
+        let dgst = format!("SHA2-256= {}", hex_lower(&Sha256::digest(&zip_bytes)));
+        (zip_bytes, dgst)
+    }
+
+    /// Drops the once-per-process outcome so each test starts from a cold
+    /// cache; callers hold `paths::test_env::DATA_DIR_LOCK` so the reset
+    /// never races another test's `ensure_binary`.
+    async fn reset_binary_state() {
+        let state = BINARY_STATE.get_or_init(|| tokio::sync::Mutex::new(None));
+        *state.lock().await = None;
+    }
+
+    /// Points `paths::data_dir()` at a fresh temp dir for the lifetime of
+    /// the guard. Uses the test seam instead of the process-wide
+    /// `CF_SCANNER_DATA_DIR` env var so the warpgen tests (which flip that
+    /// var themselves) can never be clobbered by ours mid-body.
+    struct SeamDir(PathBuf);
+
+    impl Drop for SeamDir {
+        fn drop(&mut self) {
+            *crate::paths::test_env::SEAM_DATA_DIR.lock().unwrap() = None;
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    async fn isolated_data_dir() -> SeamDir {
+        let dir = std::env::temp_dir().join("cf-scanner-xray-tests");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        *crate::paths::test_env::SEAM_DATA_DIR.lock().unwrap() = Some(dir.clone());
+        SeamDir(dir)
+    }
+
+    #[cfg(unix)]
+    fn exit_3_command() -> tokio::process::Command {
+        let mut command = tokio::process::Command::new("/bin/sh");
+        command.arg("-c").arg("exit 3");
+        command
+    }
+
+    #[cfg(windows)]
+    fn exit_3_command() -> tokio::process::Command {
+        let mut command = tokio::process::Command::new("cmd");
+        command.arg("/C").arg("exit 3");
+        command
+    }
+
+    fn free_loopback_addr() -> SocketAddr {
+        std::net::TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+            .unwrap()
+            .local_addr()
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn wait_for_socks_fails_fast_with_exit_code_on_early_child_exit() {
+        let mut child = exit_3_command()
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let started = tokio::time::Instant::now();
+        // Generous timeout so the deadline cannot fire first; a child that
+        // dies on arrival must fail via the early-exit path in well under a
+        // second (Windows may stall one refused connect ~2s, hence the 5s
+        // bound — still a fraction of the 10s poll).
+        let err = wait_for_socks(&mut child, free_loopback_addr(), Duration::from_secs(60))
+            .await
+            .unwrap_err();
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "early exit must fail fast, took {elapsed:?}"
+        );
+        let message = err.to_string();
+        assert!(
+            message.contains("with code 3"),
+            "missing exit code: {message}"
+        );
+        assert!(message.contains("glibc"), "missing hint: {message}");
+    }
+
+    #[tokio::test]
+    async fn cached_binary_passes_use_time_checksum_verification() {
+        let _guard = crate::paths::test_env::DATA_DIR_LOCK.lock().await;
+        let _isolated = isolated_data_dir().await;
+        let bin = paths::xray_binary_path().unwrap();
+        std::fs::write(&bin, b"fake xray payload").unwrap();
+        let digest = hex_lower(&Sha256::digest(b"fake xray payload"));
+        std::fs::write(dgst_path(&bin), format!("SHA2-256= {digest}\n")).unwrap();
+        reset_binary_state().await;
+
+        struct NeverFetch;
+        impl BinaryFetch for NeverFetch {
+            async fn bytes(&self, _url: &str) -> Result<Vec<u8>> {
+                bail!("a verified cache must not trigger a download")
+            }
+        }
+        let resolved = ensure_binary(&NeverFetch).await.unwrap();
+        assert_eq!(resolved, bin);
+    }
+
+    #[tokio::test]
+    async fn corrupt_cached_binary_is_refused_and_redownloaded() {
+        let _guard = crate::paths::test_env::DATA_DIR_LOCK.lock().await;
+        let _isolated = isolated_data_dir().await;
+        let bin = paths::xray_binary_path().unwrap();
+        std::fs::write(&bin, b"corrupt payload").unwrap();
+        std::fs::write(dgst_path(&bin), format!("SHA2-256= {}\n", "0".repeat(64))).unwrap();
+        reset_binary_state().await;
+
+        let (zip_bytes, zip_dgst) = fake_zip(b"good xray payload");
+        struct FakeFetch(Vec<u8>, String);
+        impl BinaryFetch for FakeFetch {
+            async fn bytes(&self, url: &str) -> Result<Vec<u8>> {
+                if url.ends_with(".dgst") {
+                    Ok(self.1.clone().into_bytes())
+                } else {
+                    Ok(self.0.clone())
+                }
+            }
+        }
+        let resolved = ensure_binary(&FakeFetch(zip_bytes, zip_dgst))
+            .await
+            .unwrap();
+        assert_eq!(resolved, bin);
+        assert_eq!(std::fs::read(&bin).unwrap(), b"good xray payload");
+        assert!(
+            cached_matches_dgst(&bin),
+            "re-download must leave a verifiable dgst"
+        );
+    }
+
+    #[tokio::test]
+    async fn concurrent_attempts_share_one_download() {
+        let _guard = crate::paths::test_env::DATA_DIR_LOCK.lock().await;
+        let _isolated = isolated_data_dir().await;
+        reset_binary_state().await;
+
+        let (zip_bytes, zip_dgst) = fake_zip(b"shared download payload");
+        struct CountingFetch {
+            calls: std::sync::atomic::AtomicUsize,
+            zip: Vec<u8>,
+            dgst: String,
+        }
+        impl BinaryFetch for CountingFetch {
+            async fn bytes(&self, url: &str) -> Result<Vec<u8>> {
+                self.calls
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                if url.ends_with(".dgst") {
+                    Ok(self.dgst.clone().into_bytes())
+                } else {
+                    Ok(self.zip.clone())
+                }
+            }
+        }
+        impl BinaryFetch for std::sync::Arc<CountingFetch> {
+            async fn bytes(&self, url: &str) -> Result<Vec<u8>> {
+                (**self).bytes(url).await
+            }
+        }
+        let fetch = std::sync::Arc::new(CountingFetch {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            zip: zip_bytes,
+            dgst: zip_dgst,
+        });
+        let mut handles = Vec::new();
+        for _ in 0..4 {
+            let fetch = fetch.clone();
+            handles.push(tokio::spawn(async move { ensure_binary(&fetch).await }));
+        }
+        for handle in handles {
+            handle.await.unwrap().unwrap();
+        }
+        // One download = one zip fetch + one dgst fetch; the rest reused
+        // the cached outcome.
+        assert_eq!(fetch.calls.load(std::sync::atomic::Ordering::Relaxed), 2);
     }
 }
