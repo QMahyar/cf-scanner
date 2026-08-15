@@ -24,9 +24,7 @@
       --surface: #10161f;
       --surface-2: #151d28;
       --surface-3: #1a2431;
-      --surface-4: #1f2d3d;
       --border: #232e3d;
-      --border-subtle: #1a2433;
       --border-strong: #2e3c4f;
       --text: #e6edf5;
       --muted: #94a3b8;
@@ -39,7 +37,6 @@
       --danger: #f87171;
       --danger-soft: rgba(248, 113, 113, 0.12);
       --warning: #fbbf24;
-      --warning-contrast: #422006;
       --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.25);
       --shadow: 0 1px 3px rgba(0, 0, 0, 0.3), 0 8px 24px rgba(0, 0, 0, 0.18);
       --shadow-lg: 0 4px 12px rgba(0, 0, 0, 0.35), 0 16px 48px rgba(0, 0, 0, 0.22);
@@ -61,9 +58,7 @@
       --surface: #ffffff;
       --surface-2: #eef2f7;
       --surface-3: #e5ebf2;
-      --surface-4: #dde3eb;
       --border: #d8e0ea;
-      --border-subtle: #e8edf3;
       --border-strong: #c3cedb;
       --text: #17222f;
       --muted: #5b6b84;
@@ -71,12 +66,12 @@
       --accent-strong: #0e7490;
       --accent-soft: rgba(6, 182, 212, 0.11);
       --accent-contrast: #04303c;
+      --focus: #0891b2;
       --success: #047857;
       --success-soft: rgba(4, 120, 87, 0.11);
       --danger: #b91c1c;
       --danger-soft: rgba(185, 28, 28, 0.09);
       --warning: #b45309;
-      --warning-contrast: #451a03;
       --shadow-sm: 0 1px 2px rgba(16, 32, 54, 0.04);
       --shadow: 0 1px 3px rgba(16, 32, 54, 0.06), 0 8px 24px rgba(16, 32, 54, 0.06);
       --shadow-lg: 0 4px 12px rgba(16, 32, 54, 0.08), 0 16px 48px rgba(16, 32, 54, 0.08);
@@ -262,11 +257,11 @@
     }
     input[type="checkbox"], input[type="radio"] { width: auto; accent-color: var(--accent); }
     input:focus-visible, select:focus-visible, textarea:focus-visible {
-      outline: 2px solid var(--accent); outline-offset: 1px;
+      outline: 2px solid var(--focus, var(--accent)); outline-offset: 1px;
       border-color: var(--accent);
     }
     input:disabled, select:disabled, textarea:disabled { opacity: 0.45; cursor: not-allowed; }
-    input::placeholder, textarea::placeholder { color: var(--muted); color: color-mix(in srgb, var(--muted) 70%, transparent); }
+    input::placeholder, textarea::placeholder { color: var(--muted); }
 
     .check { display: flex; align-items: center; gap: 0.5rem; font-size: 0.85rem; color: var(--muted); cursor: pointer; user-select: none; }
     .check input { margin: 0; flex: none; }
@@ -359,6 +354,7 @@
       box-shadow: 0 2px 10px rgba(34, 211, 238, 0.28);
     }
     button.primary:hover { background: var(--accent-strong); }
+    [data-theme="light"] button.primary:hover { background: color-mix(in srgb, var(--accent) 85%, #fff); }
     button.primary:disabled { box-shadow: none; }
     button.secondary { background: var(--accent-soft); border-color: var(--border); border-color: color-mix(in srgb, var(--accent) 35%, var(--border)); color: var(--accent-strong); }
     button.secondary:hover { background: var(--accent-soft); background: color-mix(in srgb, var(--accent-soft) 70%, var(--accent) 12%); }
@@ -542,7 +538,7 @@
   <main class="wrap">
 
     <!-- live scan status -->
-    <section class="card status-card spacer" data-state="" aria-busy="false">
+    <section class="card status-card spacer" data-state="">
       <div class="card-body">
         <div class="status-row">
           <span class="status-dot" aria-hidden="true"></span>
@@ -611,7 +607,7 @@
             <div class="grid grid-3">
               <label class="field">Ports (comma-separated)
                 <input name="ports" type="text" value="443" required aria-describedby="help-ports">
-                <span class="help" id="help-ports">e.g., 443,8443 — valid range 1-65535</span>
+                <span class="help" id="help-ports">e.g., 443,8443 — valid range 1&ndash;65535</span>
               </label>
               <label class="field">Concurrency (1&ndash;1000)
                 <input name="concurrency" type="number" min="1" max="1000" value="200" required aria-describedby="help-concurrency">
@@ -1011,7 +1007,6 @@
     function showStatus(text, state) {
       status.dataset.state = state || "";
       statusCard.dataset.state = state || "";
-      statusCard.setAttribute("aria-busy", String(state === "running"));
       status.textContent = text;
     }
     function resetBanner() {
@@ -1035,7 +1030,6 @@
       cancelBtn.disabled = true;
       resetBtn.disabled = false;
       document.title = "CF-Scanner";
-      statusCard.setAttribute("aria-busy", "false");
     }
     function beginRun() {
       scanState = "running";
@@ -1533,18 +1527,18 @@
         if (parts.length === 0) return "Enter at least one port";
         for (const p of parts) {
           if (!/^\d{1,5}$/.test(p) || Number(p) < 1 || Number(p) > 65535) {
-            return `Invalid port "${p}" \u2014 use 1-65535`;
+            return `Invalid port "${p}" \u2014 use 1\u201365535`;
           }
         }
         return null;
       },
-      concurrency: intRange(1, 1000, "Concurrency must be 1-1000"),
-      timeout_ms: intRange(100, 30000, "Timeout must be 100-30000 ms"),
-      count: (v, f) => f.elements["count"].disabled ? null : intRange(1, 100000, "Count must be 1-100000")(v),
+      concurrency: intRange(1, 1000, "Concurrency must be 1\u20131000"),
+      timeout_ms: intRange(100, 30000, "Timeout must be 100\u201330000 ms"),
+      count: (v, f) => f.elements["count"].disabled ? null : intRange(1, 100000, "Count must be 1\u2013100000")(v),
       found: intRange(1, 100000000, "Stop-after must be at least 1"),
       cap: (v) => v.trim() === "" ? null : intRange(1, 100000000, "Cap must be at least 1")(v),
-      warp_probes: (v, f) => f.elements["mode"].value !== "Warp" ? null : intRange(1, 10, "Probes per endpoint must be 1-10")(v),
-      phase2_concurrency: (v, f) => f.elements["phase2_concurrency"].disabled ? null : intRange(1, 8, "Parallel instances must be 1-8")(v),
+      warp_probes: (v, f) => f.elements["mode"].value !== "Warp" ? null : intRange(1, 10, "Probes per endpoint must be 1\u201310")(v),
+      phase2_concurrency: (v, f) => f.elements["phase2_concurrency"].disabled ? null : intRange(1, 8, "Parallel instances must be 1\u20138")(v),
       custom_cidrs: cidrList("custom CIDR"),
       exclude: cidrList("excluded CIDR"),
       warp_endpoints: (v, f) => f.elements["mode"].value === "Warp" ? endpointList(v) : null,
@@ -1634,7 +1628,11 @@
         th.setAttribute("aria-sort", sortAsc ? "ascending" : "descending");
         flushNow();
         const live = document.getElementById("results-live");
-        if (live) live.textContent = `Sorted by ${th.textContent.trim()} ${sortAsc ? "ascending" : "descending"}, ${results.length} results`;
+        if (live) {
+          const caret = th.querySelector('.caret');
+          const label = caret ? th.textContent.replace(caret.textContent, '').trim() : th.textContent.trim();
+          live.textContent = `Sorted by ${label} ${sortAsc ? "ascending" : "descending"}, ${results.length} results`;
+        }
       });
       th.addEventListener("keydown", (e) => {
         if (e.key === "Enter" || e.key === " ") {
@@ -2103,6 +2101,7 @@
     }
 
     async function deleteProfile(name) {
+      if (!confirm(`Delete profile "${name}"?`)) return;
       try {
         const resp = await fetch(`/api/profiles/${encodeURIComponent(name)}`, { method: "DELETE" });
         if (!resp.ok && resp.status !== 404) { showStatus(`Profile delete failed: ${resp.status}`); return; }
@@ -2186,7 +2185,7 @@
         e.preventDefault();
         document.getElementById("start-btn").click();
       }
-      if (e.key === "Escape" && !cancelBtn.disabled) {
+      if (e.key === "Escape" && !e.target.matches("input, textarea, select") && !cancelBtn.disabled) {
         cancelBtn.click();
       }
     });
