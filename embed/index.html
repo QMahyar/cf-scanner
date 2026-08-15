@@ -744,32 +744,32 @@
             <div class="details-body">
               <div class="panel">
                 <h3 class="panel-title">Verification</h3>
-                <div class="grid grid-2">
-                  <label class="field">Configs (URIs, subscription URLs, or xray JSON paths; one per line)
-                    <textarea name="phase2_configs" rows="3" placeholder="vless://uuid@host:443?encryption=none" aria-describedby="help-phase2-configs"></textarea>
-                    <span class="help" id="help-phase2-configs">Enter configs above to enable Phase 2 verification options.</span>
+                <label class="field">Configs (URIs, subscription URLs, or xray JSON paths; one per line)
+                  <textarea name="phase2_configs" rows="3" placeholder="vless://uuid@host:443?encryption=none" aria-describedby="help-phase2-configs"></textarea>
+                  <span class="help" id="help-phase2-configs">Enter configs above to enable Phase 2 verification options.</span>
+                </label>
+                <div class="grid grid-2" style="margin-top: 0.9rem;">
+                  <label class="field">Fragment preset
+                    <select name="phase2_fragment" disabled>
+                      <option value="Off" selected>Off</option>
+                      <option value="Light">Light (100-200 / 10-20)</option>
+                      <option value="Medium">Medium (50-200 / 10-40)</option>
+                      <option value="Heavy">Heavy (10-300 / 5-50)</option>
+                      <option value="Custom">Custom</option>
+                    </select>
                   </label>
-                  <div class="grid grid-2" style="gap: 0.9rem; align-content: start;">
-                    <label class="field">Fragment preset
-                      <select name="phase2_fragment" disabled>
-                        <option value="Off" selected>Off</option>
-                        <option value="Light">Light (100-200 / 10-20)</option>
-                        <option value="Medium">Medium (50-200 / 10-40)</option>
-                        <option value="Heavy">Heavy (10-300 / 5-50)</option>
-                        <option value="Custom">Custom</option>
-                      </select>
-                    </label>
-                    <label class="field">Parallel instances (1&ndash;8)
-                      <input name="phase2_concurrency" type="number" min="1" max="8" value="3" disabled>
-                    </label>
-                    <label class="field">SNI variants (comma-separated; empty = config&rsquo;s own)
-                      <input name="phase2_snis" type="text" placeholder="www.cloudflare.com" disabled aria-describedby="help-phase2-snis">
-                      <span class="help" id="help-phase2-snis">Optional: override SNI for TLS handshake</span>
-                    </label>
-                    <label class="field">Probe URL
-                      <input name="phase2_probe_url" type="url" value="https://cp.cloudflare.com/" disabled>
-                    </label>
-                  </div>
+                  <label class="field">Parallel instances (1&ndash;8)
+                    <input name="phase2_concurrency" type="number" min="1" max="8" value="3" disabled>
+                  </label>
+                </div>
+                <div class="grid grid-2">
+                  <label class="field">SNI variants (comma-separated; empty = config&rsquo;s own)
+                    <input name="phase2_snis" type="text" placeholder="www.cloudflare.com" disabled aria-describedby="help-phase2-snis">
+                    <span class="help" id="help-phase2-snis">Optional: override SNI for TLS handshake</span>
+                  </label>
+                  <label class="field">Probe URL
+                    <input name="phase2_probe_url" type="url" value="https://cp.cloudflare.com/" disabled>
+                  </label>
                 </div>
                 <div class="grid grid-3" style="margin-top: 0.9rem;">
                   <label class="field">Packets (custom preset)
