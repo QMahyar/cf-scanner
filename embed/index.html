@@ -401,6 +401,7 @@
       white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
     }
     tbody tr:last-child td { border-bottom: none; }
+    tbody tr { content-visibility: auto; contain-intrinsic-size: auto 34px; }
     tbody tr:nth-child(even) td { background: var(--surface-2); background: color-mix(in srgb, var(--surface-2) 55%, transparent); }
     tbody tr:hover td { background: var(--accent-soft); }
     td.mono, .stat-value, .mono { font-variant-numeric: tabular-nums slashed-zero; }
@@ -1058,7 +1059,10 @@
       reconnectLost = false;
       results.length = 0;
       seenKeys.clear();
+      sortedCache = null;
       histBuiltFor = -1;
+      tableDirty = true;
+      histDirty = true;
       latestProgress = null;
       scannedCount = 0;
       statsEl.hidden = false;
@@ -1201,6 +1205,8 @@
     let flushQueued = false;
     let flushTimer = null;
     let histBuiltFor = -1;
+    let tableDirty = false;
+    let histDirty = false;
 
     function rowKey(v) {
       return v.ip + "|" + v.port;
@@ -1210,19 +1216,44 @@
       if (seenKeys.has(k)) return false;
       seenKeys.add(k);
       results.push(v);
+      tableDirty = true;
+      histDirty = true;
       return true;
     }
-    function sortedResults() {
-      return results.slice().sort(compareRows);
+
+    let sortedCache = null, cacheLen = 0, cacheKey = null, cacheAsc = true;
+    function cmpIp(a, b) {
+      const an = a.split(".").map(Number), bn = b.split(".").map(Number);
+      for (let i = 0; i < 4; i++) { const d = an[i] - bn[i]; if (d) return d; }
+      return 0;
     }
     function compareRows(a, b) {
       if (sortKey === null) {
         return (a.latency_ms ?? Infinity) - (b.latency_ms ?? Infinity);
       }
+      if (sortKey === "ip") return sortAsc ? cmpIp(a.ip, b.ip) : cmpIp(b.ip, a.ip);
       const av = a[sortKey], bv = b[sortKey];
-      if (typeof av === "string") return sortAsc ? av.localeCompare(bv) : bv.localeCompare(av);
+      if (typeof av === "string") return sortAsc ? (av < bv ? -1 : av > bv ? 1 : 0) : (bv < av ? -1 : bv > av ? 1 : 0);
       return sortAsc ? (av ?? Infinity) - (bv ?? Infinity) : (bv ?? Infinity) - (av ?? Infinity);
     }
+    function sortedResults() {
+      if (sortedCache && cacheLen === results.length && cacheKey === sortKey && cacheAsc === sortAsc) {
+        return sortedCache;
+      }
+      if (sortedCache && cacheKey === sortKey && cacheAsc === sortAsc) {
+        for (let i = cacheLen; i < results.length; i++) {
+          const r = results[i];
+          let lo = 0, hi = sortedCache.length;
+          while (lo < hi) { const mid = (lo + hi) >> 1; compareRows(sortedCache[mid], r) <= 0 ? lo = mid + 1 : hi = mid; }
+          sortedCache.splice(lo, 0, r);
+        }
+      } else {
+        sortedCache = results.slice().sort(compareRows);
+      }
+      cacheLen = results.length; cacheKey = sortKey; cacheAsc = sortAsc;
+      return sortedCache;
+    }
+
     function scheduleRender() {
       if (flushQueued) return;
       flushQueued = true;
@@ -1236,8 +1267,8 @@
     function flushRender() {
       flushQueued = false;
       flushTimer = null;
-      renderTable();
-      renderHistogram();
+      if (tableDirty) { renderTable(); tableDirty = false; }
+      if (histDirty) { renderHistogram(); histDirty = false; }
       statFound.textContent = results.length.toLocaleString();
       applyProgress();
     }
@@ -1655,6 +1686,8 @@
         th.querySelector(".caret").textContent = sortAsc ? "\u25B4" : "\u25BE";
         th.closest("tr").querySelectorAll("th").forEach(t => t.removeAttribute("aria-sort"));
         th.setAttribute("aria-sort", sortAsc ? "ascending" : "descending");
+        sortedCache = null;
+        tableDirty = true;
         flushNow();
         const live = document.getElementById("results-live");
         if (live) {
@@ -1695,6 +1728,7 @@
       if (results.length > 0 && !confirm(`Clear all ${results.length} results?`)) return;
       results.length = 0;
       seenKeys.clear();
+      sortedCache = null;
       histBuiltFor = -1;
       latestProgress = null;
       scannedCount = 0;
