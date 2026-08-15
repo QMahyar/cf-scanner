@@ -18,7 +18,8 @@ Status legend: [ ] todo · [~] in progress · [x] done
 working CF IPs via curl, latency-sorted, with summary)
 
 ## Phase 2: Frontend + CLI
-- [x] Task 7: Frontend embed (htmx + SSE + Pico, sortable table)
+- [x] Task 7: Frontend embed (single-file HTML, vanilla JS + native
+      EventSource, custom design system, sortable table)
 - [x] Task 8: CLI (serve/scan/ranges, JSON lines, wizard)
 
 **Checkpoint C:** full UX loop in browser + CLI (phase-2 fields in CLI, wizard,
@@ -59,3 +60,31 @@ registered keypair)
 - [x] Task 19: Final review (review/simplify/security pass)
 
 **Checkpoint G:** v0.1.0 release ready
+
+## Phase 7: v0.2/v0.3 backlog (post-release)
+- [x] Task 20: CI hardening — checkout@v6 (Node 20 deprecation), `cargo audit`
+      as a CI Checks job
+- [x] Task 21: Packaging — foreign 0-byte placeholder dropped from release
+      archives at build time
+- [x] Task 22: UI polish — dark mode, result density toggle, latency
+      histogram in the summary bar
+- [x] Task 23: Fragment preset editor in the UI (custom light/medium/heavy),
+      round-trip through the existing API config
+- [x] Task 24: Scan profiles — in-memory save/load of named configs (no
+      persistence without spec sign-off)
+- [x] Task 25: Results export — client-side CSV/JSON, explicit user action
+- [x] Task 26: WARP wgconf import UX — paste box + file picker
+- [x] Task 27: IPv6 candidate ranges in phase 1 (official CF v6 lists, opt-in
+      toggle)
+- [x] Task 28: `ranges refresh` background refresh + last-updated timestamp
+      in the UI
+
+**Checkpoint H:** v0.2 features complete — 4 parallel branches + PRs #1-#4,
+merged 2026-08-13, 193 tests green; v0.3.0 shipped after (custom design
+system, /api/status, toast system, multi-format export, profile
+sanitization).
+
+> Current state: see the [finished-product review
+> (2026-08-13)](../docs/review/product-review-2026-08-13.md) and
+> `CHANGELOG.md`. This ledger records shipped tasks; the review report tracks
+> the open work.

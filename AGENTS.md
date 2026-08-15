@@ -14,6 +14,8 @@ browser UI + CLI, all over one in-process engine.
 - `docs/development.md` — local build + test flow (incl. dist smoke test + placeholder restore)
 - `docs/release-process.md` — versioning control + publishing pipeline (release/tag/fix flows)
 - `docs/decisions/` — ADRs (ADR-007 = versioning + publishing decision)
+- `docs/review/product-review-2026-08-13.md` — finished-product review
+  (implementation contract for the `review/*` branches)
 - `tasks/plan.md`, `tasks/todo.md` — implementation plan and task list (Task N references in commits)
 
 ## Skills
@@ -31,7 +33,7 @@ cargo test                # unit + integration tests
 cargo clippy --all-targets -- -D warnings
 cargo fmt --check
 cargo audit               # dependency vulnerability scan (cargo install cargo-audit)
-dist plan --artifacts=all --tag=v0.1.0   # release dry-run (dist, formerly cargo-dist)
+dist plan --artifacts=all --tag=v0.3.0   # release dry-run (dist, formerly cargo-dist)
 # local packaging smoke test, then restore the tracked 0-byte placeholders:
 dist build --artifacts=local --target=<host-target>
 git restore data/bundled/xray data/bundled/xray.exe
@@ -62,7 +64,8 @@ Release flow (tag → CI → GitHub Release) is in `docs/release-process.md` —
 
 ## Code conventions
 
-- Rust edition 2024, `#![deny(warnings)]` only in CI, `Result<T, anyhow::Error>`
+- Rust edition 2024, clippy `--all-targets -- -D warnings` in CI (no
+  crate-level `#![deny(warnings)]`), `Result<T, anyhow::Error>`
   at boundaries, typed errors internally.
 - snake_case; verbs for functions, nouns for types; no comments unless WHY.
 - All network-touching async functions take timeouts; every scan loop checks
@@ -73,8 +76,8 @@ Release flow (tag → CI → GitHub Release) is in `docs/release-process.md` —
 
 - Always: cargo test + clippy -D warnings + fmt --check before committing;
   validate user input (ports, CIDRs, URI schemes); verify `.dgst` checksums
-  for downloaded xray binaries; bind 127.0.0.1 unless an explicit flag exists;
-  keep configs/keys out of logs.
+  for downloaded xray binaries; bind 127.0.0.1 only, port configurable via
+  `--port`; keep configs/keys out of logs.
 - Ask first: adding dependencies; changing `src/api/`; dist/release config;
   bundling new binaries/data files; changing default scan behavior.
 - Never: log/transmit imported configs or keys; embed secrets; delete tests
