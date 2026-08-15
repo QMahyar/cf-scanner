@@ -687,7 +687,9 @@ async fn fetch_tls(url: &str) -> Result<String> {
 
 async fn fetch_tls_inner(url: &str, extra_headers: &str) -> Result<Vec<u8>> {
     // GitHub release URLs and subscription links 30x to CDNs; follow up to
-    // 5 redirects so downloads survive the common 302 hop.
+    // 5 redirects so downloads survive the common 302 hop. The initial URL
+    // and every hop go through the same https + routable-host guard.
+    validate_fetch_url(url)?;
     let mut current = url.to_owned();
     for _ in 0..5 {
         let (_fetched_url, status, headers, body) = fetch_one(&current, extra_headers).await?;
@@ -699,14 +701,44 @@ async fn fetch_tls_inner(url: &str, extra_headers: &str) -> Result<Vec<u8>> {
                 .filter(|l| !l.is_empty())
                 .ok_or_else(|| anyhow!("redirect without Location from {current}"))?;
             current = url::Url::parse(&current)?.join(location)?.to_string();
-            if !current.starts_with("https://") {
-                bail!("refusing non-https redirect to {current}");
-            }
+            validate_fetch_url(&current)?;
             continue;
         }
         return Ok(body);
     }
     bail!("too many redirects fetching {url}")
+}
+
+/// SSRF guard for every outbound fetch: https scheme only, and literal
+/// loopback/link-local/unspecified IP hosts are refused. DNS names stay
+/// allowed (GitHub, CDNs, subscription hosts); the API binds 127.0.0.1, so
+/// only local code could have crafted a hostile URL in the first place, and
+/// private LAN ranges are kept working for self-hosted subscription feeds.
+fn validate_fetch_url(url: &str) -> Result<()> {
+    let parsed = url::Url::parse(url).context("bad URL")?;
+    if parsed.scheme() != "https" {
+        bail!("only https:// URLs supported (got {}://)", parsed.scheme());
+    }
+    if let Some(host) = parsed.host() {
+        // Loopback, link-local and unspecified IPs are refused; DNS names
+        // pass (GitHub, CDNs, subscription hosts). Link-local ranges
+        // (169.254.0.0/16, fe80::/10) are spelled out because std lacks a
+        // stable is_link_local on both address types in this toolchain.
+        let unroutable = match host {
+            url::Host::Ipv4(v4) => {
+                let [a, b, _, _] = v4.octets();
+                v4.is_loopback() || v4.is_unspecified() || (a == 169 && b == 254)
+            }
+            url::Host::Ipv6(v6) => {
+                v6.is_loopback() || v6.is_unspecified() || v6.segments()[0] & 0xffc0 == 0xfe80
+            }
+            url::Host::Domain(_) => false,
+        };
+        if unroutable {
+            bail!("refusing fetch from non-routable host {host}");
+        }
+    }
+    Ok(())
 }
 
 /// One HTTPS GET: returns (requested_url, status, headers, body). Bodies are
@@ -922,6 +954,22 @@ mod tests {
                 prefix: 24
             }
         );
+    }
+
+    #[test]
+    fn fetch_url_guard_rejects_non_https_and_local_hosts() {
+        assert!(validate_fetch_url("https://example.com/sub").is_ok());
+        assert!(validate_fetch_url("https://8.8.8.8/sub").is_ok());
+        assert!(validate_fetch_url("https://10.0.0.5:8443/sub").is_ok());
+        assert!(validate_fetch_url("https://example.com:8443/sub").is_ok());
+        assert!(validate_fetch_url("http://example.com/sub").is_err());
+        assert!(validate_fetch_url("ftp://example.com/x").is_err());
+        assert!(validate_fetch_url("file:///etc/passwd").is_err());
+        assert!(validate_fetch_url("https://127.0.0.1:8765/x").is_err());
+        assert!(validate_fetch_url("https://[::1]/x").is_err());
+        assert!(validate_fetch_url("https://169.254.0.1/x").is_err());
+        assert!(validate_fetch_url("https://0.0.0.0/x").is_err());
+        assert!(validate_fetch_url("not a url").is_err());
     }
 
     #[test]

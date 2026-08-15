@@ -42,6 +42,8 @@ impl Geo {
 /// malformed body yields `None`.
 pub fn parse_colo(body: &[u8]) -> Option<String> {
     let text = std::str::from_utf8(body).ok()?;
+    // First matching `colo=` line wins; the community endpoint returns at
+    // most one per body, but a defensive first-match is the documented pick.
     text.lines().find_map(|line| {
         let (key, value) = line.split_once('=')?;
         (key.trim() == "colo" && !value.trim().is_empty()).then(|| value.trim().to_owned())

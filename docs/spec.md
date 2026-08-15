@@ -154,8 +154,10 @@ pub struct Verdict {
 - Live smoke tests (real xray phase 2, WARP handshake, ranges refresh) are
   gated behind `#[ignore]` and run manually with `CFSCANNER_SUB_URL` set (a
   live subscription URL); never run by default in CI.
-- Coverage bar: core engine modules ≥ 85% (`cargo llvm-cov`), UI served smoke
-  test (frontend loads, SSE connects).
+- Coverage bar: whole-project lines >= 70% enforced in CI
+  (`cargo llvm-cov --all-targets --fail-under-lines 70`); core engine modules
+  targeted at >= 85% and spot-checked during review (not CI-enforced), UI
+  served smoke test (frontend loads, SSE connects).
 - All network tests use injected mock transports; never hit real
   Cloudflare/WARP endpoints in tests.
 

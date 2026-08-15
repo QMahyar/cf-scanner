@@ -34,7 +34,9 @@ fn v4_contains(c: &Cidr, ip: u32) -> bool {
 
 fn v4_hosts(c: &Cidr) -> impl Iterator<Item = u32> {
     let base = v4_base(c);
-    (0..c.host_count() as u32).map(move |i| base + i)
+    // host_count is u128 (a /0 counts 2^32); cast per element with wrapping
+    // adds so every address family stays a total enumeration.
+    (0..c.host_count()).map(move |i| base.wrapping_add(i as u32))
 }
 
 fn brute_force_union(outer: &Cidr, excluded: &[Cidr]) -> HashSet<u32> {

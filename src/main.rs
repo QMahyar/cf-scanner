@@ -14,6 +14,7 @@ use tracing_subscriber::filter::LevelFilter;
 #[command(
     name = "cf-scanner",
     version,
+    propagate_version = true,
     about = "Find working Cloudflare IPs/endpoints on ISP-restricted networks"
 )]
 struct Cli {
@@ -504,7 +505,9 @@ async fn serve(port: u16) -> Result<()> {
         Err(err) => return Err(anyhow!("{}", bind_error(port, &err))),
     };
     let url = serve_url(listener.local_addr()?);
-    tracing::info!("CF-Scanner running at {url}");
+    // Unconditional stderr print: the user must see where the server is even
+    // without --verbose (info-level logs are hidden by default).
+    eprintln!("CF-Scanner running at {url}");
     axum::serve(listener, server::router(controller.clone()))
         .with_graceful_shutdown(shutdown_signal(controller))
         .await?;

@@ -13,7 +13,9 @@ use std::time::Duration;
 
 use axum::extract::rejection::JsonRejection;
 use axum::extract::{FromRequest, Path, Request, State};
-use axum::http::StatusCode;
+#[cfg(debug_assertions)]
+use axum::http::header;
+use axum::http::{StatusCode, Uri};
 use axum::middleware::{self, Next};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{Html, IntoResponse, Response};
@@ -24,7 +26,6 @@ use tokio::sync::RwLock as TokioRwLock;
 use tokio_stream::Stream;
 use tokio_stream::StreamExt as _;
 use tokio_stream::wrappers::BroadcastStream;
-use tower_http::services::ServeDir;
 
 use crate::api::types::{ScanConfig, ScanEvent, ScanSummary, Verdict};
 use crate::engine::ScanController;
@@ -319,7 +320,7 @@ fn router_with_dir(
         warp_register: registrar,
         profiles_dir,
     });
-    let mut router = Router::new()
+    Router::new()
         .route("/", get(index))
         .route("/api/status", get(status_handler))
         .route("/api/scan", post(start_scan))
@@ -334,14 +335,57 @@ fn router_with_dir(
             "/api/profiles/{name}",
             get(get_profile).put(put_profile).delete(delete_profile),
         )
-        .with_state(state);
-    // Dev only: serve `embed/` from disk so the UI can be iterated without
-    // rebuilding. Release builds have the UI embedded and 404 unknown paths.
-    #[cfg(debug_assertions)]
-    {
-        router = router.fallback_service(ServeDir::new("embed"));
+        .with_state(state)
+        .fallback(fallback)
+        .method_not_allowed_fallback(method_not_allowed)
+        .layer(middleware::from_fn(localhost_only))
+}
+
+/// Unmatched paths keep the uniform JSON error envelope: `/api/*` always,
+/// everything else in release builds (the UI is a single embedded page).
+/// Dev builds serve `embed/` from disk so the UI can be iterated without
+/// rebuilding.
+async fn fallback(uri: Uri) -> Response {
+    if uri.path().starts_with("/api/") {
+        return ApiError::not_found(format!("no such endpoint: {}", uri.path())).into_response();
     }
-    router.layer(middleware::from_fn(localhost_only))
+    debug_fallback(uri)
+}
+
+/// Dev builds serve the single-page UI from disk so it can be iterated
+/// without rebuilding; the page is fully self-contained (inline CSS/JS).
+#[cfg(debug_assertions)]
+fn debug_fallback(uri: Uri) -> Response {
+    if matches!(uri.path(), "/" | "/index.html") {
+        return serve_index_file();
+    }
+    ApiError::not_found("not found").into_response()
+}
+
+#[cfg(not(debug_assertions))]
+fn debug_fallback(_uri: Uri) -> Response {
+    ApiError::not_found("not found").into_response()
+}
+
+/// Dev-only: read `embed/index.html` from the working directory (the release
+/// binary embeds it via include_str!; a debug build run from the repo root
+/// finds it on disk).
+#[cfg(debug_assertions)]
+fn serve_index_file() -> Response {
+    match fs::read("embed/index.html") {
+        Ok(bytes) => ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], bytes).into_response(),
+        Err(err) => {
+            tracing::warn!("could not read embed/index.html: {err}");
+            ApiError::internal("embedded UI missing (run from the repo root)").into_response()
+        }
+    }
+}
+
+/// Wrong method on a known path: 405 with the same JSON envelope as every
+/// other error. axum 0.8 passes no Allow header to this handler; the status
+/// alone is the contract the UI and CLI rely on.
+async fn method_not_allowed() -> Response {
+    ApiError::method_not_allowed("method not allowed for this path").into_response()
 }
 
 /// 202 with no body; the run's progress is observable on /api/events. 409
@@ -586,6 +630,7 @@ async fn delete_profile(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
 ) -> Result<StatusCode, ApiError> {
+    validate_profile_name(&name).map_err(ApiError::bad_request)?;
     let (removed, snapshot) = {
         let mut profiles = state.profiles.write().await;
         let removed = profiles.remove(&name).is_some();
@@ -606,6 +651,7 @@ async fn get_profile(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
 ) -> Result<Json<ProfilePayload>, ApiError> {
+    validate_profile_name(&name).map_err(ApiError::bad_request)?;
     let cfg = state.profiles.read().await.get(&name).cloned();
     match cfg {
         Some(cfg) => Ok(Json(ProfilePayload { name, config: cfg })),
@@ -685,6 +731,13 @@ impl ApiError {
     fn not_found(message: impl Into<String>) -> Self {
         Self {
             status: StatusCode::NOT_FOUND,
+            message: message.into(),
+        }
+    }
+
+    fn method_not_allowed(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::METHOD_NOT_ALLOWED,
             message: message.into(),
         }
     }
