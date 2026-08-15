@@ -9,6 +9,9 @@ cargo-dist-version = "0.32.0"
 ci = "github"
 # The installers to generate for each app
 installers = ["msi", "powershell", "shell"]
+# wix/main.wxs carries a hand-added xray.exe component (self-contained MSI);
+# stop dist from regenerating/syncing it.
+allow-dirty = ["msi"]
 # Target platforms to build apps for (Rust target-triple syntax)
 # macOS targets dropped: unsigned binaries + bundled xray trip Gatekeeper
 # quarantine; see docs/decisions/ADR-009.md. Restore once signing exists.

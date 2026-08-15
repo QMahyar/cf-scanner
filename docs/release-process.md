@@ -88,9 +88,9 @@ release exists, never rewrite it — cut a new PATCH.
   files: `gh auth refresh -h github.com -s workflow`.
 - **The 0-byte `data/bundled/*` placeholders are git-tracked** — release
   builds overwrite one of them locally during `dist build` and delete the
-  other target's placeholder; always restore both before committing
-  (`git restore data/bundled/xray data/bundled/xray.exe`). CI is unaffected
-  (per-job checkouts).
+  other target's placeholder (later builds recreate it); always restore both
+  before committing (`git restore data/bundled/xray data/bundled/xray.exe`).
+  CI is unaffected (per-job checkouts).
 - **Windows binaries are unsigned** → SmartScreen warning. Accepted.
 - **WiX is CI-only** — MSI builds fail on dev boxes without WiX. Expected.
 

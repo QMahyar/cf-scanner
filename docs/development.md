@@ -9,8 +9,11 @@ locally here should be exercised before pushing.
 - Rust stable, edition 2024 (`rustup default stable`).
 - `curl` on PATH — build.rs uses it to fetch the GeoIP mmdb and (dist builds
   only) the pinned xray binary.
-- Network access on the first build for the db-ip download. Tests themselves
-  never touch the network (probe transports are injectable).
+- Network access for the db-ip download: the mmdb is pinned by SHA-256 and a
+  failed download or checksum mismatch **fails the build** (no empty-db
+  fallback). The validated download is cached in `target/**/out`, so repeat
+  builds are offline after the first one until `cargo clean`. Tests
+  themselves never touch the network (probe transports are injectable).
 - cargo-dist 0.32 for release-artifact smoke tests: `cargo install cargo-dist`
   (binary `dist` / `cargo dist`). If your shell doesn't have
   `~/.cargo/bin` on PATH, call it by full path.
@@ -57,12 +60,12 @@ the real binary. Never commit the real binary (see ADR-001).
   installed. This is expected: GitHub's windows runners ship WiX, so CI
   produces the `.msi` even when your dev box can't. The zip archive is the
   artifact to inspect locally.
-- **Sequential multi-target dist builds locally need placeholder restores.**
-  Each dist build deletes the foreign platform's placeholder
-  (`data/bundled/xray.exe` on linux builds and vice versa), so a second
-  dist build for the other target fails with "placeholder missing" until you
-  `git restore data/bundled/xray data/bundled/xray.exe` between runs. CI is
-  unaffected (each job has its own checkout).
+- **Sequential multi-target dist builds self-heal.** Each dist build deletes
+  the foreign platform's placeholder (`data/bundled/xray.exe` on linux
+  builds and vice versa); the next build recreates it automatically
+  (`build.rs::ensure_placeholder`), so no manual restore is needed between
+  runs. `git restore` is still required before committing (placeholders are
+  git-tracked; the real binary must never be committed).
 - **SmartScreen warning** on unsigned Windows binaries — accepted, documented.
 - **Termux**: static musl build; xray linux-arm64 is glibc (needs the Termux
   glibc package). Document, don't fix.
@@ -81,7 +84,7 @@ blocks unsigned binaries — see ADR-009).
 | Symptom | Cause / fix |
 |---|---|
 | `error: could not download .../Xray-*.zip` at build | Asset name mapping stale in `build.rs::xray_asset`; verify names via `gh api repos/XTLS/Xray-core/releases/tags/<v>/assets` |
-| `error: ... placeholder missing; refusing to write xray` | Foreign-target placeholder deleted by a previous dist build; `git restore data/bundled/xray data/bundled/xray.exe` |
+| `error: db-ip download failed` or `db-ip mmdb checksum mismatch` | No network, or `data/geoip-version.txt` pin is stale; update the version + SHA-256 (`Get-FileHash`/`sha256sum` on the `.mmdb.gz`) |
 | `xray checksum mismatch` | Pinned tag in `data/xray-version.txt` re-released; re-verify `.dgst` and pin the new tag |
 | `dist: command not found` | `~/.cargo/bin` not on PATH; call `dist.exe` by full path |
 | MSI step error (`candle`) | Local-only; WiX missing — see limitations above |
