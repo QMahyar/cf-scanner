@@ -8,15 +8,26 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 use anyhow::{Result, anyhow, bail};
-use tokio::sync::{Semaphore, watch};
+use tokio::sync::mpsc;
+use tokio::sync::mpsc::error::TrySendError;
+use tokio::sync::watch;
 use tokio::task::JoinSet;
 
-use super::{ScanController, insert_sorted, plan_hosts, progress_cadence};
+use super::{
+    BATCH_FLUSH, ProbeContext, ScanController, merge_sorted, plan_hosts_iter, progress_cadence,
+};
 use crate::api::types::{
     ScanConfig, ScanEvent, ScanProgress, ScanSummary, ScanTarget, Verdict, WarpConfig,
 };
 use crate::probe::Transport;
 use crate::ranges::{self, SplitMix64};
+
+/// One WARP probe unit: a concrete (endpoint, port) group.
+#[derive(Clone)]
+struct WarpTask {
+    ip: IpAddr,
+    port: u16,
+}
 
 impl ScanController {
     /// WARP run: every (endpoint, port) group gets `probes_per_endpoint`
@@ -59,83 +70,137 @@ impl ScanController {
 
         let (cancel_tx, cancel_rx) = watch::channel(false);
         *self.cancel_tx.lock().unwrap_or_else(|e| e.into_inner()) = Some(cancel_tx);
-        let scanned = Arc::new(AtomicU64::new(0));
-        let found = Arc::new(AtomicU64::new(0));
-        let semaphore = Arc::new(Semaphore::new(cfg.concurrency as usize));
 
-        let mut tasks = JoinSet::new();
-        for (ip, ports) in &groups {
-            let ip = IpAddr::from(*ip);
-            for &port in ports {
-                let transport = transport.clone();
-                let store = self.store.clone();
-                let events = self.events.clone();
-                let semaphore = semaphore.clone();
-                let scanned = scanned.clone();
-                let found = found.clone();
-                let stop = cfg.stop.clone();
-                let cancel = cancel_rx.clone();
-                let geo = self.geo.clone();
-                tasks.spawn(async move {
-                    let _permit = semaphore
-                        .acquire_owned()
-                        .await
-                        .map_err(|_| anyhow!("semaphore closed"))?;
-                    if *cancel.borrow()
-                        || found.load(Ordering::Relaxed) >= u64::from(stop.found)
-                        || stop
-                            .cap
-                            .is_some_and(|cap| scanned.load(Ordering::Relaxed) >= u64::from(cap))
-                    {
-                        return Ok(());
+        let ctx = Arc::new(ProbeContext {
+            cancel: cancel_rx,
+            stop: cfg.stop.clone(),
+            scanned: Arc::new(AtomicU64::new(0)),
+            found: Arc::new(AtomicU64::new(0)),
+            cadence,
+            total,
+            store: self.store.clone(),
+            events: self.events.clone(),
+            geo: self.geo.clone(),
+        });
+
+        let concurrency = usize::from(cfg.concurrency).max(1);
+        let (tx, rx) = mpsc::channel::<WarpTask>(concurrency * 2);
+        let rx = Arc::new(tokio::sync::Mutex::new(rx));
+
+        // Producer: feeds (endpoint, port) groups, checking the stop
+        // conditions before every send (same lazy-stop contract as CDN).
+        let producer = {
+            let tx = tx;
+            let ctx = Arc::clone(&ctx);
+            tokio::spawn(async move {
+                for (ip, ports) in &groups {
+                    let ip = IpAddr::from(*ip);
+                    for &port in ports {
+                        if ctx.should_stop() {
+                            return;
+                        }
+                        let task = WarpTask { ip, port };
+                        loop {
+                            if ctx.should_stop() {
+                                return;
+                            }
+                            match tx.try_send(task.clone()) {
+                                Ok(()) => break,
+                                Err(TrySendError::Closed(_)) => return,
+                                Err(TrySendError::Full(_)) => {
+                                    tokio::task::yield_now().await;
+                                }
+                            }
+                        }
                     }
+                }
+            })
+        };
+
+        // Workers: one fixed task per concurrency slot; each group's
+        // handshakes are serial, and a cancel between handshakes drops the
+        // group uncounted (same semantics as the pre-E2 per-task cancel).
+        let mut workers = JoinSet::new();
+        for _ in 0..concurrency {
+            let ctx = Arc::clone(&ctx);
+            let rx = Arc::clone(&rx);
+            let transport = transport.clone();
+            let timeout_ms = cfg.timeout_ms;
+            workers.spawn(async move {
+                let mut batch: Vec<Verdict> = Vec::new();
+                loop {
+                    if ctx.should_stop() {
+                        break;
+                    }
+                    let task = {
+                        let mut guard = rx.lock().await;
+                        if ctx.should_stop() {
+                            break;
+                        }
+                        match guard.recv().await {
+                            Some(task) => task,
+                            None => break,
+                        }
+                    };
                     let mut latency_ms: Option<u32> = None;
                     let mut failed = 0u64;
+                    let mut cancelled = false;
                     for _ in 0..probes_per_endpoint {
-                        if *cancel.borrow() {
-                            return Ok(());
+                        if *ctx.cancel.borrow() {
+                            cancelled = true;
+                            break;
                         }
-                        match transport.probe(ip, port, cfg.timeout_ms).await {
+                        match transport.probe(task.ip, task.port, timeout_ms).await {
                             Ok(latency) => {
                                 latency_ms = Some(latency_ms.map_or(latency, |m| m.min(latency)));
                             }
                             Err(_) => failed += 1,
                         }
                     }
-                    scanned.fetch_add(1, Ordering::Relaxed);
+                    if cancelled {
+                        break;
+                    }
+                    ctx.scanned.fetch_add(1, Ordering::Relaxed);
                     if let Some(latency) = latency_ms {
-                        found.fetch_add(1, Ordering::Relaxed);
+                        ctx.found.fetch_add(1, Ordering::Relaxed);
                         let verdict = Verdict {
-                            ip,
-                            port,
+                            ip: task.ip,
+                            port: task.port,
                             latency_ms: Some(latency),
                             loss_pct: Some(failed as f32 / probes_per_endpoint as f32 * 100.0),
-                            country: geo.country(ip),
+                            country: ctx.geo.country(task.ip),
                             colo: None,
                             phase2: None,
                         };
-                        insert_sorted(&store, verdict.clone());
-                        let _ = events.send(ScanEvent::Result(Box::new(verdict)));
+                        batch.push(verdict.clone());
+                        if batch.len() >= BATCH_FLUSH {
+                            merge_sorted(&ctx.store, std::mem::take(&mut batch));
+                        }
+                        let _ = ctx.events.send(ScanEvent::Result(Box::new(verdict)));
                     }
-                    if scanned.load(Ordering::Relaxed) % cadence == 0 {
-                        let _ = events.send(ScanEvent::Progress(ScanProgress {
-                            scanned: scanned.load(Ordering::Relaxed),
-                            found: found.load(Ordering::Relaxed),
-                            total: Some(total),
-                        }));
+                    let scanned = ctx.scanned.load(Ordering::Relaxed);
+                    if scanned % ctx.cadence == 0 {
+                        ctx.progress(scanned, ctx.found.load(Ordering::Relaxed));
                     }
-                    Ok::<(), anyhow::Error>(())
-                });
+                }
+                merge_sorted(&ctx.store, batch);
+            });
+        }
+
+        while let Some(res) = workers.join_next().await {
+            if let Err(join_err) = res {
+                self.cancel();
+                return Err(anyhow!("WARP probe worker panicked: {join_err}"));
             }
         }
-        while let Some(res) = tasks.join_next().await {
-            res.map_err(|e| anyhow!("WARP probe task panicked: {e}"))??;
-        }
+        producer
+            .await
+            .map_err(|e| anyhow!("WARP probe producer panicked: {e}"))?;
 
         Ok(self.finish(
             started,
-            scanned.load(Ordering::Relaxed),
-            found.load(Ordering::Relaxed),
+            ctx.scanned.load(Ordering::Relaxed),
+            ctx.found.load(Ordering::Relaxed),
         ))
     }
 
@@ -158,7 +223,7 @@ impl ScanController {
             let pool = crate::warp::bundled_pool().excluding(&excluded);
             let plan = ranges::plan(&pool, &cfg.target, &mut SplitMix64::new(seed));
             for item in &plan {
-                for host in plan_hosts(item, &mut SplitMix64::new(seed)) {
+                for host in plan_hosts_iter(item, &mut SplitMix64::new(seed)) {
                     match host {
                         IpAddr::V4(ip) => groups.push((ip, ports.clone())),
                         IpAddr::V6(_) => bail!("WARP pools must stay IPv4"),

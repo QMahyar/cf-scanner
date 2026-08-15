@@ -7,13 +7,16 @@ mod phase2;
 mod warp;
 
 use std::net::IpAddr;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Instant, SystemTime};
 
 use anyhow::{Result, anyhow};
 use tokio::sync::{broadcast, watch};
 
-use crate::api::types::{Mode, ScanConfig, ScanEvent, ScanSummary, Verdict};
+use crate::api::types::{
+    Mode, ScanConfig, ScanEvent, ScanProgress, ScanSummary, StopCondition, Verdict,
+};
 use crate::configs::{RealSubFetch, SubFetch};
 use crate::geo::Geo;
 use crate::probe::Transport;
@@ -284,29 +287,29 @@ fn time_seed() -> u64 {
         .unwrap_or(0)
 }
 
-/// Concrete host addresses a plan item yields. `Sample` rolls fresh random
-/// hosts with a per-port seed so multi-port scans don't repeat the same host.
+/// Concrete hosts a plan item yields, streamed lazily so a Full scan never
+/// materializes an entire `Every` range. `Sample` rolls fresh random hosts
+/// with a per-port seed so multi-port scans don't repeat the same host.
 /// v6 host spaces need u128 sampling (see `SplitMix64::below_u128`).
-fn plan_hosts(item: &PlanItem, rng: &mut SplitMix64) -> Vec<IpAddr> {
+fn plan_hosts_iter<'a>(
+    item: &'a PlanItem,
+    rng: &'a mut SplitMix64,
+) -> Box<dyn Iterator<Item = IpAddr> + Send + 'a> {
     match item {
-        PlanItem::Every { cidr } => (0..cidr.host_count())
-            .map(|i| cidr.host(i))
-            .collect::<Vec<_>>(),
+        PlanItem::Every { cidr } => Box::new((0..cidr.host_count()).map(move |i| cidr.host(i))),
         PlanItem::Sample { cidr, count } => {
-            let count = (*count).min(cidr.host_count().min(u64::MAX as u128) as u64);
-            let mut hosts = Vec::with_capacity(count as usize);
-            for _ in 0..count {
+            let count = (*count as u128).min(cidr.host_count());
+            Box::new((0..count).map(move |_| {
                 let idx = if cidr.addr.is_ipv4() && cidr.prefix == 24 {
                     // Skip network and broadcast addresses on full /24 blocks.
                     (rng.below(254) + 1) as u128
                 } else {
                     rng.below_u128(cidr.host_count())
                 };
-                hosts.push(cidr.host(idx));
-            }
-            hosts
+                cidr.host(idx)
+            }))
         }
-        PlanItem::Hosts { cidr, offsets } => offsets.iter().map(|&o| cidr.host(o)).collect(),
+        PlanItem::Hosts { cidr, offsets } => Box::new(offsets.iter().map(move |&o| cidr.host(o))),
     }
 }
 
@@ -323,12 +326,73 @@ fn plan_probe_count(plan: &[PlanItem], ports: &[u16]) -> u64 {
     probes.min(u64::MAX as u128) as u64
 }
 
-fn insert_sorted(store: &Store, verdict: Verdict) {
+/// Verdicts a worker accumulates before flushing to the shared store, so the
+/// store lock is taken once per batch instead of once per verdict.
+const BATCH_FLUSH: usize = 64;
+
+/// Shared state for one probe phase: stop conditions, counters, and the
+/// event/store handles every worker needs. `Arc`-shared between the producer
+/// and all workers of a phase.
+struct ProbeContext {
+    cancel: watch::Receiver<bool>,
+    stop: StopCondition,
+    scanned: Arc<AtomicU64>,
+    found: Arc<AtomicU64>,
+    cadence: u64,
+    total: u64,
+    store: Store,
+    events: broadcast::Sender<ScanEvent>,
+    geo: Arc<Geo>,
+}
+
+impl ProbeContext {
+    /// Pre-probe stop check: cancel, found reached, or hard cap reached.
+    /// Overshoot beyond the stop condition is bounded by `concurrency`
+    /// (each worker holds at most one in-flight probe past the check).
+    fn should_stop(&self) -> bool {
+        *self.cancel.borrow()
+            || self.found.load(Ordering::Relaxed) >= u64::from(self.stop.found)
+            || self
+                .stop
+                .cap
+                .is_some_and(|cap| self.scanned.load(Ordering::Relaxed) >= u64::from(cap))
+    }
+
+    fn progress(&self, scanned: u64, found: u64) {
+        let _ = self.events.send(ScanEvent::Progress(ScanProgress {
+            scanned,
+            found,
+            total: Some(self.total),
+        }));
+    }
+}
+
+/// Sorted merge of a worker's verdict batch into the global store: one lock,
+/// O(n + b) instead of b single-insert O(n) memmoves.
+fn merge_sorted(store: &Store, mut batch: Vec<Verdict>) {
+    if batch.is_empty() {
+        return;
+    }
+    batch.sort_unstable_by_key(|v| v.latency_ms);
     let mut results = store.lock().unwrap_or_else(|e| e.into_inner());
-    let pos = results
-        .binary_search_by_key(&verdict.latency_ms, |v| v.latency_ms)
-        .unwrap_or_else(|e| e);
-    results.insert(pos, verdict);
+    if results.is_empty() {
+        *results = batch;
+        return;
+    }
+    let mut merged = Vec::with_capacity(results.len() + batch.len());
+    let (mut i, mut j) = (0, 0);
+    while i < results.len() && j < batch.len() {
+        if results[i].latency_ms <= batch[j].latency_ms {
+            merged.push(results[i].clone());
+            i += 1;
+        } else {
+            merged.push(batch[j].clone());
+            j += 1;
+        }
+    }
+    merged.extend_from_slice(&results[i..]);
+    merged.extend_from_slice(&batch[j..]);
+    *results = merged;
 }
 
 #[cfg(test)]
@@ -475,5 +539,45 @@ mod tests {
         let summary = first.await.unwrap();
         assert_eq!(summary.found, 8);
         assert_eq!(c.results().len(), 8, "reset must not clear an active run");
+    }
+
+    #[tokio::test]
+    async fn empty_pool_finishes_with_zero_summary() {
+        // A pool emptied by exclusions yields zero probes: the run must end
+        // cleanly with a 0/0 summary and no probes (no fake scripting needed).
+        let (c, _) = controller(Arc::new(FakeTransport::new()));
+        let pool = ranges::CidrPool::parse("10.0.0.0/29")
+            .unwrap()
+            .excluding(&[ranges::parse_cidr("10.0.0.0/29").unwrap()]);
+        let summary = c
+            .run_seeded_with_pool(ok_cfg(1, None), 1, pool)
+            .await
+            .unwrap();
+        assert_eq!(summary.scanned, 0);
+        assert_eq!(summary.found, 0);
+        assert!(!summary.cancelled);
+    }
+
+    #[tokio::test]
+    async fn late_subscribers_see_complete_results() {
+        // The store is the authoritative snapshot: whoever subscribes whenever
+        // must end up with the same found set as the summary, even if they
+        // missed every live event (the store is flushed before Finished).
+        let t = FakeTransport::new()
+            .ok("10.0.0.1".parse().unwrap(), 443, 50)
+            .ok("10.0.0.2".parse().unwrap(), 443, 10)
+            .ok("10.0.0.3".parse().unwrap(), 443, 30);
+        let (c, mut rx) = controller(Arc::new(t));
+        let summary = run_local(&c, ok_cfg(3, None), 1).await.unwrap();
+        let results = c.results();
+        assert_eq!(summary.found as usize, results.len());
+        let mut events = vec![];
+        while let Ok(e) = rx.try_recv() {
+            events.push(e);
+        }
+        assert!(matches!(events.last(), Some(ScanEvent::Finished(_))));
+        // Results must be latency-sorted in the store.
+        let lats: Vec<u32> = results.iter().filter_map(|v| v.latency_ms).collect();
+        assert!(lats.windows(2).all(|w| w[0] <= w[1]), "{lats:?}");
     }
 }
