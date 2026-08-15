@@ -6,6 +6,7 @@
 use std::collections::HashMap;
 use std::convert::Infallible;
 use std::fs;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
@@ -39,6 +40,48 @@ const MAX_SSE_CONNECTIONS: usize = 4;
 /// Cap on saved profiles so an unauthenticated local caller cannot grow the
 /// in-memory map without bound (memory-DoS guard; review Domain 7).
 const MAX_PROFILES: usize = 50;
+/// Persisted profiles file inside the data dir (identity.json lives
+/// alongside it); written on every mutation, loaded at serve start so saved
+/// profiles survive restarts (review Domain 2, rec 10).
+const PROFILES_FILE: &str = "profiles.json";
+
+fn load_profiles(dir: &std::path::Path) -> HashMap<String, ScanConfig> {
+    let path = dir.join(PROFILES_FILE);
+    let Ok(text) = fs::read_to_string(path) else {
+        return HashMap::new();
+    };
+    match serde_json::from_str(&text) {
+        Ok(profiles) => profiles,
+        Err(err) => {
+            tracing::warn!("profiles: ignoring unreadable {PROFILES_FILE}: {err:#}");
+            HashMap::new()
+        }
+    }
+}
+
+/// Best-effort disk write on a blocking thread; a failure is logged, never
+/// fatal (the in-memory store stays authoritative for the session).
+async fn persist_profiles(dir: &std::path::Path, profiles: &HashMap<String, ScanConfig>) {
+    let path = dir.join(PROFILES_FILE);
+    let Ok(json) = serde_json::to_string_pretty(profiles) else {
+        return;
+    };
+    let _ = tokio::task::spawn_blocking(move || {
+        if let Some(parent) = path.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        if fs::write(&path, json).is_ok() {
+            // Profiles can hold sensitive scan configs: keep the file
+            // user-only where the filesystem supports permissions.
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt as _;
+                let _ = fs::set_permissions(&path, fs::Permissions::from_mode(0o600));
+            }
+        }
+    })
+    .await;
+}
 
 /// Host header values the API answers to. Anything else is rejected before
 /// routing (DNS-rebinding / drive-by protection); the server only ever binds
@@ -134,6 +177,9 @@ struct AppState {
     start_lock: tokio::sync::Mutex<()>,
     sse_connections: Arc<AtomicUsize>,
     warp_register: WarpRegistrar,
+    /// Where profiles.json lives; production = the data dir, tests = an
+    /// isolated temp dir so no test touches a real user's profiles.
+    profiles_dir: PathBuf,
 }
 
 /// What /api/ranges serves: the current pool plus when it was last refreshed.
@@ -239,22 +285,39 @@ impl RangesState {
 pub fn router(controller: Arc<ScanController>) -> Router {
     let ranges = RangesState::load();
     ranges.spawn_refresh(None, Arc::new(ranges::RealHttp));
-    router_with(controller, ranges, default_registrar())
+    let profiles_dir =
+        paths::data_dir().unwrap_or_else(|_| std::env::temp_dir().join("cf-scanner-profiles"));
+    router_with_dir(controller, ranges, default_registrar(), profiles_dir)
 }
 
-/// Router with injected ranges state and registrar (tests).
-fn router_with(
+/// Every test server persists to its own throwaway dir, so no test can read
+/// another test's profiles (and none touches a real user's data dir).
+#[cfg(test)]
+fn unique_test_profiles_dir() -> PathBuf {
+    static COUNTER: AtomicUsize = AtomicUsize::new(0);
+    let dir = std::env::temp_dir().join(format!(
+        "cf-scanner-server-profiles-{}-{}",
+        std::process::id(),
+        COUNTER.fetch_add(1, Ordering::Relaxed)
+    ));
+    let _ = fs::create_dir_all(&dir);
+    dir
+}
+
+fn router_with_dir(
     controller: Arc<ScanController>,
     ranges_state: Arc<RangesState>,
     registrar: WarpRegistrar,
+    profiles_dir: PathBuf,
 ) -> Router {
     let state = Arc::new(AppState {
         controller,
-        profiles: TokioRwLock::new(HashMap::new()),
+        profiles: TokioRwLock::new(load_profiles(&profiles_dir)),
         ranges: ranges_state,
         start_lock: tokio::sync::Mutex::new(()),
         sse_connections: Arc::new(AtomicUsize::new(0)),
         warp_register: registrar,
+        profiles_dir,
     });
     let mut router = Router::new()
         .route("/", get(index))
@@ -513,6 +576,9 @@ async fn put_profile(
     } else {
         StatusCode::OK
     };
+    let snapshot = profiles.clone();
+    drop(profiles);
+    persist_profiles(&state.profiles_dir, &snapshot).await;
     Ok((status, Json(ProfilePayload { name, config: cfg })))
 }
 
@@ -520,8 +586,13 @@ async fn delete_profile(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
 ) -> Result<StatusCode, ApiError> {
-    let removed = state.profiles.write().await.remove(&name).is_some();
+    let (removed, snapshot) = {
+        let mut profiles = state.profiles.write().await;
+        let removed = profiles.remove(&name).is_some();
+        (removed, profiles.clone())
+    };
     if removed {
+        persist_profiles(&state.profiles_dir, &snapshot).await;
         Ok(StatusCode::NO_CONTENT)
     } else {
         Err(ApiError::not_found(format!(
@@ -553,6 +624,9 @@ fn validate_profile_name(name: &str) -> Result<(), String> {
     }
     if name.chars().any(char::is_control) {
         return Err("profile name must not contain control characters".to_owned());
+    }
+    if name.contains('/') {
+        return Err("profile name must not contain '/'".to_owned());
     }
     Ok(())
 }
@@ -698,15 +772,27 @@ mod tests {
         ranges: Arc<RangesState>,
         registrar: WarpRegistrar,
     ) -> SocketAddr {
+        serve_with_dir(t, ranges, registrar, unique_test_profiles_dir()).await
+    }
+
+    async fn serve_with_dir(
+        t: FakeTransport,
+        ranges: Arc<RangesState>,
+        registrar: WarpRegistrar,
+        profiles_dir: PathBuf,
+    ) -> SocketAddr {
         let controller = Arc::new(ScanController::new(Arc::new(t)));
         let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
             .await
             .unwrap();
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move {
-            axum::serve(listener, router_with(controller, ranges, registrar))
-                .await
-                .unwrap();
+            axum::serve(
+                listener,
+                router_with_dir(controller, ranges, registrar, profiles_dir),
+            )
+            .await
+            .unwrap();
         });
         addr
     }
@@ -1130,6 +1216,8 @@ mod tests {
         assert_eq!(put_profile(addr, &long, &body).await.0, 400);
         // Percent-encoded control character.
         assert_eq!(put_profile(addr, "bad%01name", &body).await.0, 400);
+        // Percent-encoded slash would make the name unroutable.
+        assert_eq!(put_profile(addr, "a%2Fb", &body).await.0, 400);
         let (_, text) = get_profiles(addr).await;
         assert_eq!(
             response_body(&text).trim(),
@@ -1145,6 +1233,7 @@ mod tests {
         assert!(validate_profile_name("").is_err());
         assert!(validate_profile_name(&"a".repeat(65)).is_err());
         assert!(validate_profile_name("has\tcontrol").is_err());
+        assert!(validate_profile_name("a/b").is_err());
     }
 
     #[tokio::test]
@@ -1338,6 +1427,71 @@ mod tests {
         for stream in streams {
             stream.abort();
         }
+    }
+
+    #[tokio::test]
+    async fn profiles_persist_across_servers() {
+        // Two server instances sharing one profiles dir simulate a restart:
+        // the second must reload what the first stored.
+        let dir =
+            std::env::temp_dir().join(format!("cf-scanner-server-persist-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let addr = serve_with_dir(
+            FakeTransport::new(),
+            RangesState::load_text(BUNDLED_RANGES, None),
+            canned_registrar(),
+            dir.clone(),
+        )
+        .await;
+        let body = serde_json::to_string(&cfg(1, 1)).unwrap();
+        assert_eq!(put_profile(addr, "quick", &body).await.0, 201);
+        let addr2 = serve_with_dir(
+            FakeTransport::new(),
+            RangesState::load_text(BUNDLED_RANGES, None),
+            canned_registrar(),
+            dir.clone(),
+        )
+        .await;
+        let (status, text) = get_profiles(addr2).await;
+        assert_eq!(status, 200);
+        assert!(text.contains("\"name\":\"quick\""), "{text}");
+        let on_disk = fs::read_to_string(dir.join(PROFILES_FILE)).expect("profiles.json exists");
+        assert!(on_disk.contains("\"quick\""), "{on_disk}");
+        assert!(on_disk.contains("\"mode\": \"Cdn\""), "{on_disk}");
+    }
+
+    #[tokio::test]
+    async fn persisted_profiles_are_masked() {
+        // Key material must not survive the round trip to disk.
+        let dir =
+            std::env::temp_dir().join(format!("cf-scanner-server-mask-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let addr = serve_with_dir(
+            FakeTransport::new(),
+            RangesState::load_text(BUNDLED_RANGES, None),
+            canned_registrar(),
+            dir.clone(),
+        )
+        .await;
+        let mut c = cfg(1, 1);
+        c.mode = crate::api::types::Mode::Warp;
+        c.warp = Some(crate::api::types::WarpConfig {
+            wgconf: Some(
+                "PrivateKey = SECRETKEY123\nAddress = 172.16.0.2/32\n[Peer]\nPublicKey = kkk\nAllowedIPs = 0.0.0.0/0"
+                    .to_owned(),
+            ),
+            verify_with_wgconf: true,
+            ..Default::default()
+        });
+        let body = serde_json::to_string(&c).unwrap();
+        assert_eq!(put_profile(addr, "warpy", &body).await.0, 201);
+        let on_disk = fs::read_to_string(dir.join(PROFILES_FILE)).expect("profiles.json exists");
+        assert!(!on_disk.contains("SECRETKEY123"), "{on_disk}");
+        let (status, text) = get_profiles(addr).await;
+        assert_eq!(status, 200);
+        assert!(!text.contains("SECRETKEY123"), "{text}");
     }
 
     #[tokio::test]
