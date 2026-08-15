@@ -44,6 +44,12 @@ on:
     tags:
       - '**[0-9]+.[0-9]+.[0-9]+*'
 
+# Tag-force fix flow (release-process.md) re-pushes the same tag; cancel the
+# superseded run so two Release workflows cannot race `gh release create`.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   # Run 'dist plan' (or host) to determine what tasks we need to do
   plan:
@@ -87,12 +93,59 @@ jobs:
           name: artifacts-plan-dist-manifest
           path: plan-dist-manifest.json
 
+  # Hand-added (review Domain 1 rec 5): a tag push must not publish binaries
+  # built from a commit that fails the same gates as checks.yml. Runs on the
+  # exact tagged commit; every build job depends on it.
+  gate:
+    needs:
+      - plan
+    runs-on: "ubuntu-22.04"
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.85"
+      - name: Test
+        run: cargo test --locked
+      - name: Clippy
+        run: cargo clippy --all-targets --locked -- -D warnings
+      - name: Format
+        run: cargo fmt --check
+
+  # Hand-added (review Domain 1 rec 3): compile-check every release target in
+  # PRs so a broken target surfaces before tag-push. `cargo check` avoids
+  # cross-linkers (no MSVC CRT / aarch64 gcc needed); --all-features turns on
+  # dist-bundle-xray, so build.rs also validates the xray asset naming +
+  # checksum path for each target on every PR.
+  cross-check:
+    if: ${{ github.event_name == 'pull_request' }}
+    runs-on: "ubuntu-22.04"
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.85"
+          targets: aarch64-unknown-linux-gnu, x86_64-pc-windows-msvc
+      - name: Check host target with all features
+        run: cargo check --locked --all-features
+      - name: Check aarch64 linux
+        run: cargo check --locked --all-features --target aarch64-unknown-linux-gnu
+      - name: Check windows msvc
+        run: cargo check --locked --all-features --target x86_64-pc-windows-msvc
+
   # Build and packages all the platform-specific things
   build-local-artifacts:
     name: build-local-artifacts (${{ join(matrix.targets, ', ') }})
     # Let the initial task tell us to not run (currently very blunt)
     needs:
       - plan
+      - gate
     if: ${{ fromJson(needs.plan.outputs.val).ci.github.artifacts_matrix.include != null && (needs.plan.outputs.publishing == 'true' || fromJson(needs.plan.outputs.val).ci.github.pr_run_mode == 'upload') }}
     strategy:
       fail-fast: false
@@ -266,6 +319,12 @@ jobs:
         run: |
           # Remove the granular manifests
           rm -f artifacts/*-dist-manifest.json
+      # Hand-added (review Domain 1 rec 9): provenance for every published
+      # artifact, verifiable via gh attestation verify.
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: artifacts/*
       - name: Create GitHub Release
         env:
           PRERELEASE_FLAG: "${{ fromJson(steps.host.outputs.manifest).announcement_is_prerelease && '--prerelease' || '' }}"

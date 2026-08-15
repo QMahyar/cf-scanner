@@ -9,8 +9,13 @@ cargo-dist-version = "0.32.0"
 ci = "github"
 # The installers to generate for each app
 installers = ["msi", "powershell", "shell"]
+# wix/main.wxs carries a hand-added xray.exe component (self-contained MSI);
+# stop dist from regenerating/syncing it.
+allow-dirty = ["msi"]
 # Target platforms to build apps for (Rust target-triple syntax)
-targets = ["aarch64-apple-darwin", "aarch64-unknown-linux-gnu", "x86_64-apple-darwin", "x86_64-unknown-linux-gnu", "x86_64-pc-windows-msvc"]
+# macOS targets dropped: unsigned binaries + bundled xray trip Gatekeeper
+# quarantine; see docs/decisions/ADR-009.md. Restore once signing exists.
+targets = ["aarch64-unknown-linux-gnu", "x86_64-unknown-linux-gnu", "x86_64-pc-windows-msvc"]
 
 # Archives carry the per-platform xray binary next to cf-scanner itself:
 # build.rs overwrites the committed placeholder with the checksum-verified

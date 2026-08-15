@@ -1,7 +1,8 @@
 //! Build-time data embedding (Task 15, Task 17):
-//! - db-ip Lite country mmdb (embedded; the official host only ships gzipped
-//!   builds, so download + decompress + cache; offline builds embed an empty
-//!   file and `Geo::embedded()` degrades gracefully).
+//! - db-ip Lite country mmdb (embedded): the official host only ships gzipped
+//!   builds, so download + decompress + cache. The version and its SHA-256
+//!   are pinned in `data/geoip-version.txt`; a failed download or checksum
+//!   mismatch fails the build (never embed an empty db).
 //! - dist builds only (`dist-bundle-xray` feature): the pinned, checksum
 //!   verified xray binary, written over the committed placeholder in
 //!   `data/bundled/` so release archives carry it next to the app binary.
@@ -22,7 +23,12 @@ const XRAY_BASE: &str = "https://github.com/XTLS/Xray-core/releases/download";
 const MIN_VALID_BYTES: u64 = 100_000;
 
 fn version() -> &'static str {
-    VERSION_FILE.trim_end()
+    VERSION_FILE.lines().next().unwrap_or("").trim_end()
+}
+
+/// SHA-256 of the pinned `.mmdb.gz` download (review Domain 1 rec 6).
+fn geoip_pin() -> &'static str {
+    VERSION_FILE.lines().nth(1).unwrap_or("").trim_end()
 }
 
 fn xray_version() -> &'static str {
@@ -39,22 +45,40 @@ fn main() {
 fn embed_geoip() {
     let out_dir = PathBuf::from(std::env::var("OUT_DIR").unwrap());
     let dest = out_dir.join("geoip.mmdb");
-    let cache = std::env::temp_dir().join(format!("cf-scanner-dbip-country-v{}.mmdb", version()));
+    // OUT_DIR survives between builds (unlike the OS temp dir, which is
+    // shared and unpredictable); the git-tracked data/ dir stays untouched.
+    let cache = out_dir.join(format!("dbip-country-lite-{}.mmdb", version()));
 
     if !looks_valid(&cache) {
         match download(&URL.replace("{version}", version())) {
             Some(bytes) => {
+                let actual = hex_lower(&Sha256::digest(&bytes));
+                if actual != geoip_pin().to_ascii_lowercase() {
+                    eprintln!(
+                        "error: db-ip mmdb checksum mismatch: got {actual}, want {}",
+                        geoip_pin()
+                    );
+                    std::process::exit(1);
+                }
                 let mut decoder = GzDecoder::new(bytes.as_slice());
                 let mut raw = Vec::new();
-                if decoder.read_to_end(&mut raw).is_ok() && !raw.is_empty() {
-                    let _ = std::fs::write(&cache, &raw);
+                if decoder.read_to_end(&mut raw).is_err() || raw.is_empty() {
+                    eprintln!("error: db-ip download is not valid gzip");
+                    std::process::exit(1);
+                }
+                if std::fs::write(&cache, &raw).is_err() {
+                    eprintln!("error: could not cache {}", cache.display());
+                    std::process::exit(1);
                 }
             }
             None => {
                 eprintln!(
-                    "warn: db-ip download failed; embedding empty geoip db \
-                     (offline build?)"
+                    "error: db-ip download failed; refusing to embed an empty geoip db \
+                     (pinned version {}, sha256 {}...)",
+                    version(),
+                    &geoip_pin()[..8]
                 );
+                std::process::exit(1);
             }
         }
     }
@@ -79,18 +103,22 @@ fn bundle_xray_if_requested() {
         "xray"
     };
     let dest = PathBuf::from("data/bundled").join(exe);
-    if !dest.exists() {
-        eprintln!(
-            "error: {} placeholder missing; refusing to write xray",
-            dest.display()
-        );
-        std::process::exit(1);
-    }
-    if std::fs::metadata(&dest)
+    ensure_placeholder(&dest);
+    // A leftover real binary from an earlier dist build only counts when it
+    // was bundled for the pinned version: the stamp lives in OUT_DIR, so it
+    // survives between builds but resets on `cargo clean` — re-bundling
+    // after a data/xray-version.txt bump or a placeholder restore, never
+    // silently shipping a stale binary.
+    let out_dir = PathBuf::from(std::env::var("OUT_DIR").unwrap());
+    let stamp = out_dir.join("bundled-xray-version.txt");
+    let stamped = std::fs::read_to_string(&stamp)
+        .map(|v| v.trim() == xray_version())
+        .unwrap_or(false);
+    let dest_real = std::fs::metadata(&dest)
         .map(|m| m.len() > 0)
-        .unwrap_or(false)
-    {
-        return; // already bundled by an earlier dist build
+        .unwrap_or(false);
+    if stamped && dest_real {
+        return; // already bundled for this pinned version
     }
 
     let url = format!("{XRAY_BASE}/{}/{}", xray_version(), asset);
@@ -131,8 +159,13 @@ fn bundle_xray_if_requested() {
         eprintln!("error: moving {}: {err}", tmp.display());
         std::process::exit(1)
     });
+    std::fs::write(&stamp, xray_version()).unwrap_or_else(|err| {
+        eprintln!("error: writing stamp {}: {err}", stamp.display());
+        std::process::exit(1)
+    });
     // Archives must carry only this target's binary: drop the foreign
-    // 0-byte placeholder so dist's include glob picks up a single xray.
+    // 0-byte placeholder so dist's include glob picks up a single xray. A
+    // later build of the other target recreates it via ensure_placeholder.
     let foreign = if exe == "xray.exe" {
         "xray"
     } else {
@@ -140,6 +173,19 @@ fn bundle_xray_if_requested() {
     };
     let _ = std::fs::remove_file(PathBuf::from("data/bundled").join(foreign));
     println!("bundled {asset} -> {}", dest.display());
+}
+
+/// dist builds overwrite the git-tracked 0-byte placeholders with real
+/// binaries; a prior build of the other target may have deleted this
+/// placeholder (foreign-target sweep), so recreate it instead of failing.
+fn ensure_placeholder(path: &std::path::Path) {
+    if path.exists() {
+        return;
+    }
+    if std::fs::write(path, []).is_err() {
+        eprintln!("error: could not create placeholder {}", path.display());
+        std::process::exit(1);
+    }
 }
 
 fn read_all<R: Read>(entry: &mut R) -> Vec<u8> {
