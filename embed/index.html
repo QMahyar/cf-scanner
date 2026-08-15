@@ -159,7 +159,7 @@
       background: var(--surface);
       border: 1px solid var(--border);
       border-radius: var(--radius-lg);
-      box-shadow: var(--shadow);
+      box-shadow: none;
     }
     .card-head {
       display: flex; align-items: baseline; gap: 0.6rem; flex-wrap: wrap;
@@ -226,9 +226,11 @@
 
     /* ============ forms ============ */
     .panel {
-      background: var(--surface-2); border: 1px solid var(--border);
-      border-radius: var(--radius-md); padding: 1rem 1.1rem; margin-top: 1rem;
+      background: transparent; border: 0; border-radius: 0;
+      border-top: 1px solid var(--border);
+      padding: 1rem 1.1rem; margin-top: 1rem;
     }
+    .panel:first-of-type { border-top: 0; }
     .panel-title {
       font-size: 0.72rem; font-weight: 700; letter-spacing: 0.09em; text-transform: uppercase;
       color: var(--muted); margin-bottom: 0.75rem;
@@ -336,6 +338,17 @@
     input[name="cap"] { max-width: 10ch; }
     input[name="warp_probes"] { max-width: 8ch; }
     input[name="phase2_concurrency"] { max-width: 8ch; }
+    textarea[name="phase2_configs"],
+    input[name="ports"],
+    textarea[name="custom_cidrs"],
+    textarea[name="exclude_cidrs"],
+    textarea[name="warp_wgconf"],
+    input[name="phase2_snis"],
+    input[name="phase2_packets"],
+    input[name="phase2_length"],
+    input[name="phase2_interval"] {
+      font-family: "Cascadia Code", "JetBrains Mono", ui-monospace, Consolas, monospace;
+    }
 
     /* ============ buttons ============ */
     button {
@@ -364,6 +377,8 @@
     button.danger { background: var(--danger-soft); border-color: var(--border); border-color: color-mix(in srgb, var(--danger) 40%, var(--border)); color: var(--danger); }
     button.danger:hover { background: var(--danger-soft); background: color-mix(in srgb, var(--danger-soft) 70%, var(--danger) 14%); }
     .btn-lg { padding: 0.62rem 1.4rem; font-size: 0.95rem; }
+    #start-btn { min-width: 11rem; }
+    #start-btn.is-running svg, #start-btn.is-running kbd { display: none; }
 
     .actions { display: flex; gap: 0.7rem; margin-top: 1.25rem; flex-wrap: wrap; }
     .actions .spacer-grow { flex: 1 1 auto; }
@@ -428,7 +443,9 @@
     #results-section[data-density="compact"] td,
     #results-section[data-density="compact"] th { padding: 0.28rem 0.55rem; font-size: 0.79rem; }
 
-    #empty-row td { text-align: center; padding: 2.2rem 1rem; font-style: italic; }
+    #empty-row td { text-align: center; padding: 2.2rem 1rem; font-style: normal; }
+    #empty-row .empty-title { font-style: italic; font-weight: 600; }
+    #empty-row button { font-style: normal; }
 
     thead th:nth-child(2),
     thead th:nth-child(3),
@@ -1049,6 +1066,7 @@
       hideRetry();
       startBtn.disabled = false;
       startBtn.innerHTML = START_LABEL_HTML;
+      startBtn.classList.remove("is-running");
       cancelBtn.disabled = true;
       resetBtn.disabled = false;
       document.title = "CF-Scanner";
@@ -1083,6 +1101,7 @@
       resetBtn.disabled = true;
       startBtn.disabled = true;
       startBtn.textContent = "Scanning\u2026";
+      startBtn.classList.add("is-running");
       hideErrorCard();
       hideRetry();
       showStatus("Scanning\u2026", "running");
@@ -1124,6 +1143,7 @@
       resetBtn.disabled = false;
       startBtn.disabled = false;
       startBtn.innerHTML = START_LABEL_HTML;
+      startBtn.classList.remove("is-running");
       hideRetry();
       hideErrorCard();
       progressText.textContent = "";
@@ -1145,6 +1165,7 @@
       resetBtn.disabled = false;
       startBtn.disabled = false;
       startBtn.innerHTML = START_LABEL_HTML;
+      startBtn.classList.remove("is-running");
       showStatus(msg, "error");
       document.title = "Failed \u2014 CF-Scanner";
       hideErrorCard();
@@ -1186,6 +1207,7 @@
           scanState = "idle";
           startBtn.disabled = false;
           startBtn.innerHTML = START_LABEL_HTML;
+      startBtn.classList.remove("is-running");
           resetBtn.disabled = false;
           showErrorCard(msg);
           if (resp.status === 409) startPolling();
@@ -1196,6 +1218,7 @@
         scanState = "idle";
         startBtn.disabled = false;
         startBtn.innerHTML = START_LABEL_HTML;
+      startBtn.classList.remove("is-running");
         resetBtn.disabled = false;
         showErrorCard("Server unreachable: " + err);
       }
@@ -1290,7 +1313,7 @@
           <circle cx="12" cy="12" r="3"/>
           <path d="M12 3v2M12 19v2M3 12h2M19 12h2"/>
         </svg>
-        <div style="font-weight:600;margin-bottom:0.3rem">${isPostScan ? "No results" : "No scan results yet"}</div>
+        <div class="empty-title" style="margin-bottom:0.3rem">${isPostScan ? "No results" : "No scan results yet"}</div>
         <div class="muted" style="font-size:0.85rem;margin-bottom:0.8rem">${copy}</div>
         <button class="secondary" onclick="document.getElementById('scan-form').scrollIntoView({behavior:'smooth',block:'start'})">Configure a scan</button>
       `;
@@ -1422,7 +1445,7 @@
 
     function lossCell(v) {
       if (v.loss_pct == null) return cell(null, "muted");
-      const cls = v.loss_pct > 0 ? "lat-bad" : "";
+      const cls = v.loss_pct > 0 ? "lat-bad mono" : "mono";
       return cell(v.loss_pct > 0 ? v.loss_pct.toFixed(1) + "%" : "0%", cls);
     }
 
@@ -1930,6 +1953,7 @@
       resetBtn.disabled = false;
       startBtn.disabled = false;
       startBtn.innerHTML = START_LABEL_HTML;
+      startBtn.classList.remove("is-running");
       showStatus("Scan ended \u2014 live updates were lost; results below may be partial.", "error");
       document.title = "Scan ended \u2014 CF-Scanner";
       showRetry();
