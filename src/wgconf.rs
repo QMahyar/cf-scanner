@@ -61,6 +61,25 @@ pub fn parse_wg_entry(entry: &str) -> Result<WgConfig> {
 
 /// Parses wg-quick INI text: `[Interface]` + `[Peer]` sections, `Key = Value`
 /// lines, `#`/`;` full-line comments, case-insensitive keys.
+///
+/// # Examples
+///
+/// ```
+/// use cf_scanner::wgconf::parse_wgconf;
+///
+/// let wg = parse_wgconf(
+///     "[Interface]\n\
+///      PrivateKey = 39l0houfixtSIA4O3MQRDMX5fBNUQw72H+RivqX2EbI=\n\
+///      Address = 172.16.0.2/32\n\
+///      [Peer]\n\
+///      PublicKey = bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=\n\
+///      Endpoint = 8.6.112.31:4198\n\
+///      AllowedIPs = 0.0.0.0/0, ::/0\n",
+/// )
+/// .unwrap();
+/// assert_eq!(wg.peer.endpoint.as_deref(), Some("8.6.112.31:4198"));
+/// assert_eq!(wg.peer.allowed_ips, ["0.0.0.0/0", "::/0"]);
+/// ```
 pub fn parse_wgconf(text: &str) -> Result<WgConfig> {
     let mut section: Option<String> = None;
     let mut iface = BTreeMap::new();
@@ -251,6 +270,25 @@ fn build_wg_config(
 }
 
 /// Renders a canonical wg-quick text (export + display; Task 14 reuses it).
+///
+/// # Examples
+///
+/// ```
+/// use cf_scanner::wgconf::{parse_wgconf, render_wgconf};
+///
+/// let wg = parse_wgconf(
+///     "[Interface]\n\
+///      PrivateKey = 39l0houfixtSIA4O3MQRDMX5fBNUQw72H+RivqX2EbI=\n\
+///      [Peer]\n\
+///      PublicKey = bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=\n",
+/// )
+/// .unwrap();
+///
+/// // The rendered text is canonical and re-parses to an equal config.
+/// let text = render_wgconf(&wg);
+/// assert!(text.contains("[Interface]") && text.contains("[Peer]"));
+/// assert_eq!(parse_wgconf(&text).unwrap(), wg);
+/// ```
 pub fn render_wgconf(wg: &WgConfig) -> String {
     let mut out = String::new();
     out.push_str("[Interface]\n");
@@ -473,5 +511,61 @@ mod tests {
         assert!(wg.peer.allowed_ips.is_empty());
         assert_eq!(wg.address, "");
         assert_eq!(wg.dns, None);
+    }
+
+    #[test]
+    fn crlf_line_endings_and_stray_lines_are_tolerated() {
+        // Windows-copied INI text arrives with CRLF; stray non-key lines
+        // (e.g. pasted banner text) must not fail the batch.
+        let text = "[Interface]\r\nPrivateKey = 39l0houfixtSIA4O3MQRDMX5fBNUQw72H+RivqX2EbI=\r\nthis is not a key line\r\n[Peer]\r\nPublicKey = bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=\r\n";
+        let wg = parse_wgconf(text).unwrap();
+        assert!(wg.peer.endpoint.is_none());
+        assert_eq!(
+            wg.private_key,
+            "39l0houfixtSIA4O3MQRDMX5fBNUQw72H+RivqX2EbI="
+        );
+    }
+
+    #[test]
+    fn unknown_sections_and_duplicate_keys_are_handled() {
+        // Unknown sections are skipped; duplicate keys follow last-wins.
+        let text = "[Interface]\nPrivateKey = 39l0houfixtSIA4O3MQRDMX5fBNUQw72H+RivqX2EbI=\nMTU = 1000\nMTU = 1500\n[Other]\nWhatever = 1\n[Peer]\nPublicKey = bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=\n";
+        let wg = parse_wgconf(text).unwrap();
+        assert_eq!(wg.mtu, Some(1500));
+    }
+
+    #[test]
+    fn allowed_ips_split_tolerates_spaces() {
+        let wg = parse_wgconf("[Interface]\nPrivateKey = 39l0houfixtSIA4O3MQRDMX5fBNUQw72H+RivqX2EbI=\n[Peer]\nPublicKey = bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=\nAllowedIPs = 0.0.0.0/0, ::/0\n")
+            .unwrap();
+        assert_eq!(wg.peer.allowed_ips, vec!["0.0.0.0/0", "::/0"]);
+    }
+
+    #[test]
+    fn rejects_u16_overflow_in_amnezia_numbers() {
+        let text = INI_FIXTURE.replace("Jc = 5", "Jc = 99999");
+        assert!(parse_wgconf(&text).is_err());
+    }
+
+    #[test]
+    fn awg_uri_percent_decodes_key_characters() {
+        // `+` inside base64 must survive raw AND percent-encoded.
+        let uri = "wg://8.47.69.246:7103?private_key=39l0houfixtSIA4O3MQRDMX5fBNUQw72H%2BRivqX2EbI%3D&public_key=bmXOC%2BF1FxEMF9dyiK2H5%2F1SUtzH0JuVo51h2wPfgyo%3D";
+        let wg = parse_wg_entry(uri).unwrap();
+        assert_eq!(
+            wg.private_key,
+            "39l0houfixtSIA4O3MQRDMX5fBNUQw72H+RivqX2EbI="
+        );
+        assert_eq!(
+            wg.peer.public_key,
+            "bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo="
+        );
+    }
+
+    #[test]
+    fn wg_entry_requires_a_recognized_form() {
+        // Plain text that is neither a URI nor an INI with keys fails.
+        assert!(parse_wg_entry("not a config at all").is_err());
+        assert!(parse_wg_entry("[Interface]\nAddress = 1.2.3.4/32\n").is_err());
     }
 }

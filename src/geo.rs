@@ -75,6 +75,16 @@ mod tests {
     }
 
     #[test]
+    fn fallback_state_returns_none_without_a_db() {
+        // Deterministic: constructs the degraded state directly, so this runs
+        // unconditionally (no build-time download, no network, no skipping).
+        let geo = Geo { country: None };
+        assert_eq!(geo.country("8.8.8.8".parse().unwrap()), None);
+        assert_eq!(geo.country("2607:f8b0:4001::1".parse().unwrap()), None);
+        assert_eq!(geo.country("127.0.0.1".parse().unwrap()), None);
+    }
+
+    #[test]
     fn embedded_db_resolves_a_known_public_ip_when_present() {
         // db-ip Lite is a real database; assert against a stable allocation.
         // Skipped implicitly when the build-time download was unavailable.
