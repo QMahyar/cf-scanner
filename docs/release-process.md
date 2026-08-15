@@ -41,7 +41,7 @@ git push origin vX.Y.Z          # the only trigger — never "publish" manually
         │
         ▼
 GitHub Actions "Release" workflow (release.yml)
-  plan        → resolves the 5-target matrix + manifest
+  plan        → resolves the 3-target matrix + manifest
   build-local → per target: dist build (bundles checksum-verified xray),
                 archives + .sha256 + MSI (windows runner ships WiX)
   build-global→ aggregate sha256.sum, source tarball
@@ -55,7 +55,7 @@ Tag pushes and PRs additionally run the Release workflow in "plan" mode.
 ## Post-publish verification
 
 1. `gh run watch <run-id>` to completion.
-2. `gh release view vX.Y.Z` — 5 platform archives + installers + sha256 sums
+2. `gh release view vX.Y.Z` — 3 platform archives + installers + sha256 sums
    present, `isPrerelease: false`.
 3. Spot-check: download one archive, compare its SHA-256 against the
    published `.sha256`, and confirm the real xray binary (non-zero size) is

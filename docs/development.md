@@ -69,10 +69,12 @@ the real binary. Never commit the real binary (see ADR-001).
 
 ## Cross-target builds
 
-Only the host target is realistically testable locally. The other four
-targets (aarch64/linux, aarch64/macos, x86_64/macos) are validated by the CI
-release matrix; the asset-name mapping in `build.rs` (`xray_asset`) must stay
-in sync with XTLS release naming (arm64 = `-v8a` suffix, macOS = `macos`).
+Only the host target is realistically testable locally. The other two
+targets (aarch64-unknown-linux-gnu, x86_64-pc-windows-msvc) are validated by
+the CI release matrix; the asset-name mapping in `build.rs` (`xray_asset`)
+must stay in sync with XTLS release naming (arm64 = `-v8a` suffix).
+macOS targets were dropped from the matrix (no signing certs, Gatekeeper
+blocks unsigned binaries — see ADR-009).
 
 ## Troubleshooting
 

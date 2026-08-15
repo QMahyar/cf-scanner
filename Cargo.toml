@@ -11,7 +11,10 @@ rust-version = "1.85"
 [package.metadata.wix]
 upgrade-guid = "B4B16BC8-2905-4E0E-A024-47552733A782"
 path-guid = "77D27897-3FD7-4F5E-8E8D-752186082D10"
-license = false
+# Renders the license sidecar component into wix/main.wxs (cargo-wix writes
+# wix/LICENSE.rtf from the MIT template); required for MSI to be self-contained
+# per review Domain 5. `eula` stays false so no EULA dialog is shown.
+license = true
 eula = false
 
 [dependencies]
@@ -32,7 +35,7 @@ serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 sha2 = "0.11.0"
 thiserror = "2.0.3"
-tokio = { version = "1.53.1", features = ["full"] }
+tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "time", "net", "io-util", "sync", "process", "signal"] }
 tokio-rustls = "0.26"
 tokio-stream = { version = "0.1", features = ["sync"] }
 tower-http = { version = "0.6", features = ["fs"] }
@@ -56,3 +59,9 @@ zip = { version = "7.2.0", default-features = false, features = ["deflate"] }
 [profile.dist]
 inherits = "release"
 lto = "thin"
+
+# Review Domain 4: keep dev `cargo build --release` on par with dist builds
+# (release artifacts are produced with LTO + single codegen unit).
+[profile.release]
+lto = "thin"
+codegen-units = 1
