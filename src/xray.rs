@@ -256,18 +256,29 @@ fn early_exit_message(status: &std::process::ExitStatus) -> String {
 
 /// Writes the trial config (which embeds the user's id/password) and locks
 /// it down to the owning user on Unix; the blocking fs runs off the async
-/// executor.
+/// executor. The 0o600 mode is applied at open time (not via a later chmod)
+/// so the file is never world-readable, not even for a microsecond.
 async fn write_trial_config(path: &Path, config_json: &Value) -> Result<()> {
     let path = path.to_path_buf();
     let json = serde_json::to_string_pretty(config_json)?;
-    tokio::task::spawn_blocking(move || {
-        std::fs::write(&path, json)?;
+    tokio::task::spawn_blocking(move || -> std::io::Result<()> {
         #[cfg(unix)]
         {
-            use std::os::unix::fs::PermissionsExt as _;
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+            use std::io::Write as _;
+            use std::os::unix::fs::OpenOptionsExt as _;
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .mode(0o600)
+                .open(&path)?;
+            file.write_all(json.as_bytes())?;
         }
-        Ok::<(), std::io::Error>(())
+        #[cfg(not(unix))]
+        {
+            std::fs::write(&path, json)?;
+        }
+        Ok(())
     })
     .await
     .context("config write task failed")??;
@@ -367,6 +378,8 @@ static BINARY_STATE: OnceLock<tokio::sync::Mutex<Option<Result<PathBuf, String>>
 /// Resolves the xray binary for phase 2, verifying the cached copy against
 /// its `.dgst` exactly once per process. A corrupt (or unverifiable) cache
 /// is removed and re-downloaded; concurrent attempts share one outcome.
+/// Only successes are memoized — a transient network failure must not brick
+/// phase 2 for the process lifetime, so failures retry on the next attempt.
 pub async fn ensure_binary(fetch: &impl BinaryFetch) -> Result<PathBuf> {
     let state = BINARY_STATE.get_or_init(|| tokio::sync::Mutex::new(None));
     let mut guard = state.lock().await;
@@ -376,10 +389,16 @@ pub async fn ensure_binary(fetch: &impl BinaryFetch) -> Result<PathBuf> {
             Err(message) => Err(anyhow!(message.clone())),
         };
     }
-    let result = resolve_binary(fetch).await.map_err(|err| err.to_string());
-    let outcome = result.clone();
-    *guard = Some(outcome);
-    result.map_err(anyhow::Error::msg)
+    let result = resolve_binary(fetch).await;
+    match &result {
+        Ok(path) => {
+            *guard = Some(Ok(path.clone()));
+        }
+        Err(err) => {
+            tracing::warn!("xray binary resolution failed; the next attempt will retry: {err:#}");
+        }
+    }
+    result
 }
 
 async fn resolve_binary(fetch: &impl BinaryFetch) -> Result<PathBuf> {
@@ -439,6 +458,15 @@ pub async fn download_binary(fetch: &impl BinaryFetch) -> Result<PathBuf> {
     tokio::task::spawn_blocking(move || -> Result<()> {
         if let Some(parent) = install_dest.parent() {
             std::fs::create_dir_all(parent)?;
+        }
+        // Re-check inside the closure: the outer check raced with any other
+        // process installing between it and the rename, and `rename` would
+        // silently replace whatever appeared.
+        if install_dest.exists() {
+            bail!(
+                "{} already exists; refusing to overwrite",
+                install_dest.display()
+            );
         }
         let tmp = PathBuf::from(format!("{}.tmp", install_dest.display()));
         extract_xray_from_zip(&zip, &tmp)?;

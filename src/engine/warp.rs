@@ -146,7 +146,7 @@ impl ScanController {
                     let mut failed = 0u64;
                     let mut cancelled = false;
                     for _ in 0..probes_per_endpoint {
-                        if *ctx.cancel.borrow() {
+                        if ctx.should_stop() {
                             cancelled = true;
                             break;
                         }

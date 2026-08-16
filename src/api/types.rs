@@ -18,6 +18,12 @@ pub const MAX_PORTS: usize = 64;
 pub const MAX_CIDRS: usize = 64;
 /// Config/SNI entries allowed in a phase-2 plan (xray spawns per combo).
 pub const MAX_PHASE2_ENTRIES: usize = 8;
+/// Per-entry caps so a multi-MB paste cannot land in memory, profiles, or
+/// generated configs (the count caps alone leave per-string size unbounded).
+pub const MAX_CONFIG_ENTRY_BYTES: usize = 8 * 1024;
+pub const MAX_SNI_BYTES: usize = 256;
+pub const MAX_PROBE_URL_BYTES: usize = 2 * 1024;
+pub const MAX_WGCONF_BYTES: usize = 64 * 1024;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Mode {
@@ -145,6 +151,10 @@ pub struct ScanConfig {
     pub concurrency: u16,
     /// Per-probe timeout in ms (100..=30_000).
     pub timeout_ms: u64,
+    /// Verify the LAST scan's candidates only, skipping phase-1 probing
+    /// entirely (requires `phase2` configs and a store with candidates).
+    #[serde(default)]
+    pub phase2_only: bool,
     pub phase2: Option<Phase2Config>,
     pub warp: Option<WarpConfig>,
 }
@@ -161,6 +171,7 @@ impl Default for ScanConfig {
             include_v6: false,
             concurrency: DEFAULT_CONCURRENCY,
             timeout_ms: DEFAULT_TIMEOUT_MS,
+            phase2_only: false,
             phase2: None,
             warp: None,
         }
@@ -187,6 +198,18 @@ pub struct Phase2Verdict {
     pub fragment: String,
     pub sni: String,
     pub latency_ms: Option<u32>,
+    /// Redacted failure detail from the last failed attempt, when `passed`
+    /// is false (why the candidate did not verify). Absent = no detail.
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
+/// Phase-2 progress: how many of the total (candidate × config × SNI)
+/// attempts have completed. Sent while the verification phase runs.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Phase2Progress {
+    pub done: u64,
+    pub total: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -214,6 +237,8 @@ pub enum ScanEvent {
     Progress(ScanProgress),
     Result(Box<Verdict>),
     Finished(ScanSummary),
+    /// Phase-2 verification progress (additive event; old clients ignore it).
+    Phase2Progress(Phase2Progress),
     /// The run aborted before finishing (e.g. phase-2 setup failed); the
     /// message is redacted and safe for the UI/stderr. No `Finished` follows.
     Failed(String),
@@ -261,6 +286,18 @@ pub enum ConfigError {
     TooManyConfigs(usize),
     #[error("phase2.snis must have at most 8 entries, got {0}")]
     TooManySnis(usize),
+    #[error("phase2 config entry exceeds {0} bytes")]
+    ConfigEntryTooLong(usize),
+    #[error("phase2 SNI entry exceeds {0} bytes")]
+    SniTooLong(usize),
+    #[error("probe_url exceeds {0} bytes")]
+    ProbeUrlTooLong(usize),
+    #[error("wgconf exceeds {0} bytes")]
+    WgconfTooLong(usize),
+    #[error("phase2_only requires phase2 configs")]
+    Phase2OnlyNeedsConfigs,
+    #[error("phase2_only is only valid in Cdn mode")]
+    Phase2OnlyWrongMode,
     #[error("custom fragment {0} must be an integer or a range like 100-200, got {1:?}")]
     InvalidFragment(&'static str, String),
 }
@@ -302,11 +339,17 @@ impl ScanConfig {
                 if self.warp.is_some() {
                     return Err(ConfigError::WarpWrongMode);
                 }
+                if self.phase2_only && self.phase2.is_none() {
+                    return Err(ConfigError::Phase2OnlyNeedsConfigs);
+                }
                 if let Some(p2) = &self.phase2 {
                     validate_phase2(p2)?;
                 }
             }
             Mode::Warp => {
+                if self.phase2_only {
+                    return Err(ConfigError::Phase2OnlyWrongMode);
+                }
                 if self.phase2.is_some() {
                     return Err(ConfigError::Phase2WrongMode);
                 }
@@ -326,6 +369,13 @@ impl WarpConfig {
         }
         if self.verify_with_wgconf && self.wgconf.is_none() {
             return Err(ConfigError::VerifyNeedsWgconf);
+        }
+        if self
+            .wgconf
+            .as_ref()
+            .is_some_and(|w| w.len() > MAX_WGCONF_BYTES)
+        {
+            return Err(ConfigError::WgconfTooLong(MAX_WGCONF_BYTES));
         }
         for ep in &self.custom_endpoints {
             validate_endpoint(ep)?;
@@ -361,8 +411,17 @@ fn validate_phase2(p2: &Phase2Config) -> Result<(), ConfigError> {
     if p2.configs.len() > MAX_PHASE2_ENTRIES {
         return Err(ConfigError::TooManyConfigs(p2.configs.len()));
     }
+    if p2.configs.iter().any(|c| c.len() > MAX_CONFIG_ENTRY_BYTES) {
+        return Err(ConfigError::ConfigEntryTooLong(MAX_CONFIG_ENTRY_BYTES));
+    }
     if p2.snis.len() > MAX_PHASE2_ENTRIES {
         return Err(ConfigError::TooManySnis(p2.snis.len()));
+    }
+    if p2.snis.iter().any(|s| s.len() > MAX_SNI_BYTES) {
+        return Err(ConfigError::SniTooLong(MAX_SNI_BYTES));
+    }
+    if p2.probe_url.len() > MAX_PROBE_URL_BYTES {
+        return Err(ConfigError::ProbeUrlTooLong(MAX_PROBE_URL_BYTES));
     }
     if !(p2.probe_url.starts_with("https://") || p2.probe_url.starts_with("http://")) {
         return Err(ConfigError::InvalidProbeUrl);

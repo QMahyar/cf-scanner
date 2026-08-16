@@ -429,9 +429,18 @@ fn write_out(out: Option<&Path>, text: &str) -> Result<()> {
         Some(path) => {
             fs::write(path, text).with_context(|| format!("writing {}", path.display()))?;
         }
-        None => println!("{text}"),
+        None => write_stdout(text),
     }
     Ok(())
+}
+
+/// A closed downstream pipe (e.g. `warpgen | head`) must not panic the
+/// process; the write is best-effort.
+fn write_stdout(text: &str) {
+    use std::io::Write as _;
+    let mut out = std::io::stdout().lock();
+    let _ = writeln!(out, "{text}");
+    let _ = out.flush();
 }
 
 fn unix_now() -> u64 {

@@ -381,7 +381,7 @@ fn serve_index_file() -> Response {
             );
             headers.insert(
                 "content-security-policy",
-                "default-src 'self'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'"
+                "default-src 'self'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'"
                     .parse()
                     .unwrap(),
             );
@@ -427,7 +427,10 @@ async fn start_scan(
     let controller = state.controller.clone();
     tokio::spawn(async move {
         if let Err(err) = controller.run(cfg).await {
-            tracing::error!("scan failed: {err:#}");
+            tracing::error!(
+                "scan failed: {}",
+                crate::configs::sanitize_error_text(&format!("{err:#}"))
+            );
         }
     });
     // The engine's running flag is set inside the spawned task, so keep the
@@ -456,6 +459,9 @@ async fn events(
             Ok(ScanEvent::Progress(p)) => Event::default().event("progress").json_data(p).ok(),
             Ok(ScanEvent::Result(v)) => Event::default().event("result").json_data(*v).ok(),
             Ok(ScanEvent::Finished(s)) => Event::default().event("finished").json_data(s).ok(),
+            Ok(ScanEvent::Phase2Progress(p)) => {
+                Event::default().event("phase2-progress").json_data(p).ok()
+            }
             Ok(ScanEvent::Failed(msg)) => Event::default().event("failed").json_data(msg).ok(),
             Err(_lagged) => None,
         }
@@ -544,7 +550,12 @@ async fn warp_register(
     let wgconf = tokio::task::spawn_blocking(move || registrar(license))
         .await
         .map_err(|_| ApiError::internal("registration task panicked"))?
-        .map_err(|err| ApiError::bad_gateway(format!("registration failed: {err:#}")))?;
+        .map_err(|err| {
+            ApiError::bad_gateway(format!(
+                "registration failed: {}",
+                crate::configs::sanitize_error_text(&format!("{err:#}"))
+            ))
+        })?;
     Ok(Json(RegisterResponse { wgconf }))
 }
 
@@ -695,7 +706,7 @@ async fn index() -> impl IntoResponse {
     let mut headers = axum::http::HeaderMap::new();
     headers.insert(
         "content-security-policy",
-        "default-src 'self'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'"
+        "default-src 'self'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'"
             .parse()
             .unwrap(),
     );

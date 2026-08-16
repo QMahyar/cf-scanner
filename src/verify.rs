@@ -90,16 +90,38 @@ impl TunnelProbe for XrayTunnelProbe {
                 let xray_bin = xray::ensure_binary(&fetch).await.with_context(|| {
                     "no verified xray binary (cached copy failed its checksum or the download failed)"
                 })?;
-                let socks_port = pick_ephemeral_port().context("no free port for xray inbound")?;
-                let cfg = xray::build_config(
-                    &spec,
-                    dial_ip,
-                    &preset,
-                    custom.as_ref(),
-                    sni.as_deref(),
-                    socks_port,
-                )?;
-                let mut proc = xray::spawn(&trial_dir, &xray_bin, &cfg).await?;
+                // The picked port can be stolen between the ephemeral bind
+                // probe and xray's own bind; retry with a fresh port instead
+                // of failing the whole probe on that race.
+                let mut proc = None;
+                for attempt in 1..=3u32 {
+                    let socks_port =
+                        pick_ephemeral_port().context("no free port for xray inbound")?;
+                    let cfg = xray::build_config(
+                        &spec,
+                        dial_ip,
+                        &preset,
+                        custom.as_ref(),
+                        sni.as_deref(),
+                        socks_port,
+                    )?;
+                    match xray::spawn(&trial_dir, &xray_bin, &cfg).await {
+                        Ok(child) => {
+                            proc = Some(child);
+                            break;
+                        }
+                        Err(err) if attempt < 3 => {
+                            tracing::debug!(
+                                %err, ip = %dial_ip, attempt,
+                                "xray spawn failed; retrying with a fresh port"
+                            );
+                        }
+                        Err(err) => {
+                            return Err(err).context("xray spawn failed after 3 attempts");
+                        }
+                    }
+                }
+                let mut proc = proc.expect("the retry loop always sets proc");
 
                 let started = Instant::now();
                 let outcome = ranges::get_via_socks(&probe_url, proc.socks_addr, timeout_ms).await;

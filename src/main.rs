@@ -140,6 +140,10 @@ struct ScanArgs {
     #[arg(long, value_delimiter = ',')]
     phase2_configs: Vec<String>,
 
+    /// Skip phase-1 probing and verify the last scan's candidates (CDN only)
+    #[arg(long, requires = "phase2_configs")]
+    phase2_only: bool,
+
     /// Fragment preset for phase 2 (custom needs --phase2-custom)
     #[arg(long, value_enum, requires = "phase2_configs")]
     phase2_fragment: Option<FragmentArg>,
@@ -294,6 +298,7 @@ fn build_scan_config(args: &ScanArgs) -> Result<ScanConfig> {
         concurrency: args.concurrency,
         timeout_ms: args.timeout_ms,
         phase2,
+        phase2_only: args.phase2_only,
         warp,
     };
     cfg.validate()
@@ -346,6 +351,7 @@ async fn main() -> ExitCode {
     let _ = rustls::crypto::ring::default_provider().install_default();
     let cli = Cli::parse();
     tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
         .with_env_filter(env_filter(
             cli.verbose,
             std::env::var("RUST_LOG").ok().as_deref(),
@@ -450,13 +456,16 @@ async fn run_scan(args: ScanArgs) -> Result<()> {
     let streaming = |e: ScanEvent| match e {
         ScanEvent::Result(v) => {
             if let Some(line) = serialize_event(&v) {
-                println!("{line}");
+                write_stdout_line(&line);
             }
         }
         ScanEvent::Finished(s) => {
             if let Some(line) = serialize_event(&s) {
-                println!("{line}");
+                write_stdout_line(&line);
             }
+        }
+        ScanEvent::Phase2Progress(p) => {
+            eprintln!("phase 2: {}/{} verified", p.done, p.total);
         }
         ScanEvent::Failed(msg) => {
             eprintln!("scan failed: {msg}");
@@ -494,6 +503,15 @@ fn serialize_event<T: serde::Serialize>(value: &T) -> Option<String> {
             None
         }
     }
+}
+
+/// NDJSON line to stdout. A downstream pipe that closed (e.g. `head`, jq)
+/// must stop the write, not kill the process with a panic.
+fn write_stdout_line(line: &str) {
+    use std::io::Write as _;
+    let mut out = std::io::stdout().lock();
+    let _ = writeln!(out, "{line}");
+    let _ = out.flush();
 }
 
 async fn serve(port: u16) -> Result<()> {
@@ -562,6 +580,7 @@ mod tests {
             custom_cidrs: vec![],
             ipv6: false,
             phase2_configs: vec![],
+            phase2_only: false,
             phase2_fragment: None,
             phase2_custom: None,
             phase2_snis: vec![],

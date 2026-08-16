@@ -16,6 +16,54 @@ use crate::ranges;
 
 const SUB_UA: &str = "cf-scanner/0.1.0";
 const WS: &str = "ws";
+/// Error lines longer than this are truncated (e.g. xray stderr tails).
+const MAX_ERROR_LINE_BYTES: usize = 512;
+
+/// Best-effort redaction of error text before it reaches logs, the wire, or
+/// the UI: masks `scheme://user:pass@` userinfo, truncates over-long lines,
+/// and strips control characters. Not a security boundary on its own —
+/// parsers must still avoid echoing raw entries (see `parse_uri`) — but it
+/// stops the common leak shapes from imported configs.
+pub fn sanitize_error_text(text: &str) -> String {
+    text.lines()
+        .map(|line| {
+            let line: String = line.chars().filter(|c| !c.is_control()).collect();
+            let masked = mask_userinfo(&line);
+            if masked.chars().count() > MAX_ERROR_LINE_BYTES {
+                let mut truncated: String = masked.chars().take(MAX_ERROR_LINE_BYTES).collect();
+                truncated.push('…');
+                truncated
+            } else {
+                masked
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Masks the `userinfo` in a `scheme://user:pass@host` fragment, keeping the
+/// scheme and everything after the last '@'. Lines without that shape pass
+/// through untouched.
+fn mask_userinfo(line: &str) -> String {
+    let Some(scheme_end) = line.find("://") else {
+        return line.to_owned();
+    };
+    let rest = &line[scheme_end + 3..];
+    let Some(at) = rest.find('@') else {
+        return line.to_owned();
+    };
+    // The '@' belongs to userinfo only when it sits before the first path
+    // separator/whitespace; otherwise it is part of the host/path.
+    let first_sep = rest.find(['/', '?', '#', ' ']).unwrap_or(usize::MAX);
+    if at > first_sep {
+        return line.to_owned();
+    }
+    let mut out = String::with_capacity(line.len());
+    out.push_str(&line[..scheme_end + 3]);
+    out.push_str("***@");
+    out.push_str(&rest[at + 1..]);
+    out
+}
 
 /// One normalized outbound after IP swap the engine can rebuild as Xray JSON.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -123,7 +171,7 @@ pub fn parse_uri(entry: &str) -> Result<OutboundSpec> {
     let scheme = entry
         .split_once("://")
         .map(|(s, _)| s.to_ascii_lowercase())
-        .ok_or_else(|| anyhow!("'{entry}' has no scheme"))?;
+        .ok_or_else(|| anyhow!("config entry has no scheme"))?;
     match scheme.as_str() {
         "vless" | "trojan" => parse_sip002(entry),
         "vmess" => parse_vmess(entry),

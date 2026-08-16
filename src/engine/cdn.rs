@@ -9,7 +9,6 @@ use std::time::Instant;
 
 use anyhow::{Result, anyhow};
 use tokio::sync::mpsc;
-use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::watch;
 use tokio::task::JoinSet;
 
@@ -27,6 +26,10 @@ struct ProbeTask {
     port: u16,
 }
 
+/// How long a full-queue producer sleeps between send attempts; long enough
+/// to let workers drain, short enough to react to cancel promptly.
+const PRODUCER_POLL: std::time::Duration = std::time::Duration::from_millis(5);
+
 impl ScanController {
     /// CDN-mode run: pool planning, phase-1 probe fan-out, then phase-2
     /// verification of the candidates when configured.
@@ -39,6 +42,32 @@ impl ScanController {
         let phase2 = cfg.phase2.take();
 
         let started = Instant::now();
+        // Verify-last-results mode: skip phase-1 probing entirely and run
+        // phase-2 verification against the candidates already in the store.
+        if cfg.phase2_only {
+            let Some(p2) = phase2 else {
+                return Err(anyhow!("phase2_only requires phase2 configs"));
+            };
+            if self
+                .store
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .is_empty()
+            {
+                return Err(anyhow!(
+                    "phase2_only: no candidates to verify (run a full scan first)"
+                ));
+            }
+            self.verify_phase(&cfg, &p2).await?;
+            let found = self
+                .store
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .iter()
+                .filter(|v| v.phase2.as_ref().is_some_and(|p| p.passed))
+                .count() as u64;
+            return Ok(self.finish(started, 0, found));
+        }
         self.clear_store();
         let plan = ranges::plan(&pool, &cfg.target, &mut SplitMix64::new(seed));
         let total = plan_probe_count(&plan, &cfg.ports);
@@ -73,9 +102,12 @@ impl ScanController {
         let rx = Arc::new(tokio::sync::Mutex::new(rx));
 
         // Producer: streams plan hosts lazily into the queue, checking the
-        // stop conditions before every send. Workers exiting on a stop
-        // condition must never trap a parked producer, so it never blocks:
-        // a full queue yields until a worker pulls (or the run stops).
+        // stop conditions before every send. A full queue parks the producer
+        // briefly instead of blocking forever: a parked `send` can never
+        // resolve once every worker has exited (the last receiver is gone
+        // and tokio mpsc wakes no senders on receiver drop), so the poll
+        // loop re-checks stop conditions and the channel's closed state
+        // instead of trusting the send to return.
         let producer = {
             let tx = tx;
             let ctx = Arc::clone(&ctx);
@@ -95,9 +127,9 @@ impl ScanController {
                                 }
                                 match tx.try_send(task.clone()) {
                                     Ok(()) => break,
-                                    Err(TrySendError::Closed(_)) => return,
-                                    Err(TrySendError::Full(_)) => {
-                                        tokio::task::yield_now().await;
+                                    Err(mpsc::error::TrySendError::Closed(_)) => break 'outer,
+                                    Err(mpsc::error::TrySendError::Full(_)) => {
+                                        tokio::time::sleep(PRODUCER_POLL).await;
                                     }
                                 }
                             }

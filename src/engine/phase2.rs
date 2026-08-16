@@ -8,20 +8,29 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context as _, Result, anyhow, bail};
-use tokio::sync::{Semaphore, watch};
+use tokio::sync::watch;
 use tokio::task::JoinSet;
 
 use super::{ScanController, Store};
 use crate::api::types::{
-    FragmentPreset, Phase2Config, Phase2Verdict, ScanConfig, ScanEvent, Verdict,
+    FragmentPreset, Phase2Config, Phase2Progress, Phase2Verdict, ScanConfig, ScanEvent, Verdict,
 };
 use crate::configs::{OutboundSpec, parse_subscription, parse_uri, parse_xray_json};
 use crate::verify::ProbeRequest;
+
+/// Phase-2 progress events: every 32 completed attempts (plus the final
+/// one), so a long verification run stays observable without flooding.
+const PROGRESS_EVERY_P2: u64 = 32;
 
 impl ScanController {
     /// Verifies every phase-1 candidate through the user's configs, trying
     /// (config, SNI) combos until one passes per candidate. Updates verdicts
     /// in place and re-emits them so clients see the fragment/SNI detail.
+    ///
+    /// Combos are never materialized: a fixed set of `concurrency` workers
+    /// pull combo indices off a shared counter, so memory stays bounded
+    /// regardless of candidates × configs × SNIs, and stop conditions
+    /// (cancel, hard cap) are honored before every attempt.
     pub(super) async fn verify_phase(&self, cfg: &ScanConfig, p2: &Phase2Config) -> Result<()> {
         let specs = self.parse_phase2_configs(p2).await?;
         if specs.is_empty() {
@@ -33,100 +42,148 @@ impl ScanController {
             p2.snis.iter().map(|s| Some(s.clone())).collect()
         };
         let candidates = self.store.lock().unwrap_or_else(|e| e.into_inner()).clone();
-        if candidates.is_empty() {
+        // Phase 2 dials the candidate through xray, which takes a raw IPv4
+        // address; v6 phase-1 finds stay phase-1-only for now. Rows are
+        // keyed by (ip, port) so multi-port scans update the right row.
+        let v4_candidates: Vec<(Ipv4Addr, u16)> = candidates
+            .iter()
+            .filter_map(|v| match v.ip {
+                IpAddr::V4(ip) => Some((ip, v.port)),
+                IpAddr::V6(_) => None,
+            })
+            .collect();
+        if v4_candidates.is_empty() {
             return Ok(());
         }
 
         let (cancel_tx, cancel_rx) = watch::channel(false);
         *self.cancel_tx.lock().unwrap_or_else(|e| e.into_inner()) = Some(cancel_tx);
-        let semaphore = Arc::new(Semaphore::new(p2.concurrency as usize));
-        let passed_ips: Arc<Mutex<HashSet<Ipv4Addr>>> = Arc::new(Mutex::new(HashSet::new()));
+        let combos_per_candidate = (specs.len() * snis.len()) as u64;
+        let total = v4_candidates.len() as u64 * combos_per_candidate;
+        let next = Arc::new(AtomicU64::new(0));
+        let passed: Arc<Mutex<HashSet<(Ipv4Addr, u16)>>> = Arc::new(Mutex::new(HashSet::new()));
         let attempts = Arc::new(AtomicU64::new(0));
         let completed = Arc::new(AtomicU64::new(0));
         let first_error: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        let cap = cfg.stop.cap;
 
         let mut tasks = JoinSet::new();
-        for v in &candidates {
-            // Phase 2 dials the candidate through xray, which takes a raw
-            // IPv4 address; v6 phase-1 finds stay phase-1-only for now.
-            let IpAddr::V4(ip) = v.ip else { continue };
-            for spec in &specs {
-                for sni in &snis {
-                    let probe = self.tunnel_probe.clone();
-                    let store = self.store.clone();
-                    let events = self.events.clone();
-                    let semaphore = semaphore.clone();
-                    let cancel = cancel_rx.clone();
-                    let passed_ips = passed_ips.clone();
-                    let attempts = attempts.clone();
-                    let completed = completed.clone();
-                    let first_error = first_error.clone();
-                    let spec = spec.clone();
-                    let sni = sni.clone();
-                    let p2 = p2.clone();
-                    let timeout_ms = cfg.timeout_ms;
-                    tasks.spawn(async move {
-                        let _permit = semaphore
-                            .acquire_owned()
-                            .await
-                            .map_err(|_| anyhow!("semaphore closed"))?;
-                        if *cancel.borrow()
-                            || passed_ips
-                                .lock()
-                                .unwrap_or_else(|e| e.into_inner())
-                                .contains(&ip)
-                        {
-                            return Ok(());
-                        }
-                        attempts.fetch_add(1, Ordering::Relaxed);
-                        match probe
-                            .probe(ProbeRequest {
-                                spec: &spec,
-                                dial_ip: ip,
-                                preset: &p2.fragment,
-                                custom: p2.custom_fragment.as_ref(),
-                                sni: sni.as_deref(),
-                                probe_url: &p2.probe_url,
-                                timeout_ms,
-                            })
-                            .await
-                        {
-                            Ok(result) => {
-                                completed.fetch_add(1, Ordering::Relaxed);
-                                let colo = result.colo.clone();
-                                let verdict = Phase2Verdict {
-                                    passed: result.passed,
-                                    fragment: fragment_label(&p2.fragment),
-                                    sni: sni.unwrap_or_default(),
-                                    latency_ms: result.latency_ms,
-                                };
-                                if result.passed {
-                                    passed_ips
-                                        .lock()
-                                        .unwrap_or_else(|e| e.into_inner())
-                                        .insert(ip);
-                                }
-                                if let Some(updated) =
-                                    update_verdict_phase2(&store, ip, verdict, colo)
-                                {
-                                    let _ = events.send(ScanEvent::Result(Box::new(updated)));
-                                }
+        for _ in 0..p2.concurrency {
+            let probe = self.tunnel_probe.clone();
+            let store = self.store.clone();
+            let events = self.events.clone();
+            let cancel = cancel_rx.clone();
+            let passed = passed.clone();
+            let attempts = attempts.clone();
+            let completed = completed.clone();
+            let first_error = first_error.clone();
+            let next = next.clone();
+            let candidates = v4_candidates.clone();
+            let specs = specs.clone();
+            let snis = snis.clone();
+            let p2 = p2.clone();
+            let timeout_ms = cfg.timeout_ms;
+            tasks.spawn(async move {
+                loop {
+                    if *cancel.borrow()
+                        || cap.is_some_and(|c| attempts.load(Ordering::Relaxed) >= u64::from(c))
+                    {
+                        break;
+                    }
+                    let idx = next.fetch_add(1, Ordering::Relaxed);
+                    if idx >= total {
+                        break;
+                    }
+                    let (ci, rest) = (idx / combos_per_candidate, idx % combos_per_candidate);
+                    let (si, ni) = (rest / snis.len() as u64, rest % snis.len() as u64);
+                    let (ip, port) = candidates[ci as usize];
+                    let spec = &specs[si as usize];
+                    let sni = &snis[ni as usize];
+                    if passed
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .contains(&(ip, port))
+                    {
+                        continue;
+                    }
+                    attempts.fetch_add(1, Ordering::Relaxed);
+                    match probe
+                        .probe(ProbeRequest {
+                            spec,
+                            dial_ip: ip,
+                            preset: &p2.fragment,
+                            custom: p2.custom_fragment.as_ref(),
+                            sni: sni.as_deref(),
+                            probe_url: &p2.probe_url,
+                            timeout_ms,
+                        })
+                        .await
+                    {
+                        Ok(result) => {
+                            completed.fetch_add(1, Ordering::Relaxed);
+                            let colo = result.colo.clone();
+                            let verdict = Phase2Verdict {
+                                passed: result.passed,
+                                fragment: fragment_label(&p2.fragment),
+                                sni: sni.clone().unwrap_or_default(),
+                                latency_ms: result.latency_ms,
+                                error: None,
+                            };
+                            if result.passed {
+                                passed
+                                    .lock()
+                                    .unwrap_or_else(|e| e.into_inner())
+                                    .insert((ip, port));
                             }
-                            Err(err) => {
-                                let mut slot =
-                                    first_error.lock().unwrap_or_else(|e| e.into_inner());
-                                if slot.is_none() {
-                                    *slot = Some(err.to_string());
-                                }
+                            if let Some(updated) =
+                                update_verdict_phase2(&store, ip, port, verdict, colo)
+                            {
+                                let _ = events.send(ScanEvent::Result(Box::new(updated)));
                             }
                         }
-                        Ok::<(), anyhow::Error>(())
-                    });
+                        Err(err) => {
+                            // Local failures (spawn, config build) are kept
+                            // redacted and surfaced on the row so clients see
+                            // why the candidate did not verify.
+                            let msg = crate::configs::sanitize_error_text(&err.to_string());
+                            let mut slot = first_error.lock().unwrap_or_else(|e| e.into_inner());
+                            if slot.is_none() {
+                                *slot = Some(msg.clone());
+                            }
+                            let verdict = Phase2Verdict {
+                                passed: false,
+                                fragment: fragment_label(&p2.fragment),
+                                sni: sni.clone().unwrap_or_default(),
+                                latency_ms: None,
+                                error: Some(msg),
+                            };
+                            if let Some(updated) =
+                                update_verdict_phase2(&store, ip, port, verdict, None)
+                            {
+                                let _ = events.send(ScanEvent::Result(Box::new(updated)));
+                            }
+                        }
+                    }
+                    let done = completed.load(Ordering::Relaxed);
+                    if done % PROGRESS_EVERY_P2 == 0 || done == total {
+                        let _ =
+                            events.send(ScanEvent::Phase2Progress(Phase2Progress { done, total }));
+                    }
                 }
-            }
+                Ok::<(), anyhow::Error>(())
+            });
         }
         while let Some(res) = tasks.join_next().await {
             res.map_err(|e| anyhow!("phase-2 task panicked: {e}"))??;
+        }
+        // Terminal progress: workers short-circuit combos of already-passed
+        // candidates, so `done` can land below `total`; emit the final
+        // numbers regardless so clients always resolve to a final event.
+        let done = completed.load(Ordering::Relaxed);
+        if done > 0 || attempts.load(Ordering::Relaxed) > 0 {
+            let _ = self
+                .events
+                .send(ScanEvent::Phase2Progress(Phase2Progress { done, total }));
         }
 
         if attempts.load(Ordering::Relaxed) > 0 && completed.load(Ordering::Relaxed) == 0 {
@@ -141,47 +198,67 @@ impl ScanController {
     }
 
     /// Configs entries are vless/trojan/vmess/ss URIs, http(s) subscription
-    /// URLs, or local xray JSON file paths. Keeps every parse result so one
-    /// bad entry never sinks a good batch.
+    /// URLs, or local xray JSON file paths. One bad entry is skipped (and
+    /// counted) so a typo'd line never sinks a good batch; only a batch
+    /// with zero usable entries aborts the phase.
     async fn parse_phase2_configs(&self, p2: &Phase2Config) -> Result<Vec<OutboundSpec>> {
         let mut specs = Vec::new();
+        let mut skipped = 0u32;
         for entry in &p2.configs {
             let entry = entry.trim();
             if entry.is_empty() {
                 continue;
             }
-            if entry.starts_with("http://") || entry.starts_with("https://") {
+            let result = if entry.starts_with("http://") || entry.starts_with("https://") {
                 let body = self
                     .sub_fetch
                     .fetch(entry)
                     .await
-                    .with_context(|| format!("subscription {} failed", redact_entry(entry)))?;
-                let parsed = parse_subscription(&body);
-                tracing::debug!(
-                    url = %redact_entry(entry),
-                    ok = parsed.specs.len(),
-                    ignored = parsed.ignored,
-                    "subscription fetched"
-                );
-                specs.extend(parsed.specs);
+                    .with_context(|| format!("subscription {} failed", redact_entry(entry)));
+                body.map(|body| {
+                    let parsed = parse_subscription(&body);
+                    tracing::debug!(
+                        url = %redact_entry(entry),
+                        ok = parsed.specs.len(),
+                        ignored = parsed.ignored,
+                        "subscription fetched"
+                    );
+                    parsed.specs
+                })
             } else if entry.contains("://") {
-                specs.push(
-                    parse_uri(entry).with_context(|| {
-                        format!("config {} failed to parse", redact_entry(entry))
-                    })?,
-                );
+                parse_uri(entry)
+                    .with_context(|| format!("config {} failed to parse", redact_entry(entry)))
+                    .map(|spec| vec![spec])
             } else {
                 // File reads are blocking; keep them off the tokio workers.
                 let path = entry.to_owned();
                 let text = tokio::task::spawn_blocking(move || std::fs::read_to_string(&path))
                     .await
                     .context("config file read task panicked")?
-                    .with_context(|| format!("config file {entry} unreadable"))?;
-                specs.push(
-                    parse_xray_json(&text)
-                        .with_context(|| format!("config file {entry} has no usable outbound"))?,
+                    .with_context(|| format!("config file {} unreadable", redact_entry(entry)));
+                text.and_then(|text| {
+                    parse_xray_json(&text).with_context(|| {
+                        format!("config file {} has no usable outbound", redact_entry(entry))
+                    })
+                })
+                .map(|spec| vec![spec])
+            };
+            match result {
+                Ok(parsed) => specs.extend(parsed),
+                Err(err) => {
+                    skipped += 1;
+                    tracing::warn!("phase-2 config skipped: {err:#}");
+                }
+            }
+        }
+        if specs.is_empty() {
+            if skipped > 0 {
+                bail!(
+                    "phase 2: no usable configs ({skipped} of {} entries failed to parse)",
+                    p2.configs.len()
                 );
             }
+            bail!("phase 2: no configs to verify with");
         }
         Ok(specs)
     }
@@ -189,15 +266,22 @@ impl ScanController {
 
 /// Attaches a phase-2 verdict (and the colo observed during verification) to
 /// the stored row and returns the updated verdict for re-emission. `None`
-/// when the row vanished (reset mid-phase).
+/// when the row vanished (reset mid-phase) or a passing verdict is already
+/// recorded: concurrent combos race, and a pass must never be downgraded.
 fn update_verdict_phase2(
     store: &Store,
     ip: Ipv4Addr,
+    port: u16,
     p2v: Phase2Verdict,
     colo: Option<String>,
 ) -> Option<Verdict> {
     let mut results = store.lock().unwrap_or_else(|e| e.into_inner());
-    let pos = results.iter().position(|v| v.ip == ip)?;
+    let pos = results
+        .iter()
+        .position(|v| v.ip == IpAddr::V4(ip) && v.port == port)?;
+    if results[pos].phase2.as_ref().is_some_and(|p| p.passed) {
+        return None;
+    }
     results[pos].phase2 = Some(p2v);
     if colo.is_some() {
         results[pos].colo = colo;
@@ -227,7 +311,18 @@ fn redact_entry(entry: &str) -> String {
         && entry.as_bytes()[1] == b':'
         && matches!(entry.as_bytes().get(2), Some(b'\\') | Some(b'/'));
     let Ok(mut url) = url::Url::parse(entry) else {
-        return entry.rsplit(['/', '\\']).next().unwrap_or(entry).to_owned();
+        // Not a URL: keep only the trailing segment and strip anything
+        // before the last '@' (plus query/fragment), so a malformed URI can
+        // never surface its userinfo (uuid/password) in an error or log.
+        let tail = entry.rsplit(['/', '\\']).next().unwrap_or(entry);
+        return tail
+            .rsplit_once('@')
+            .map(|(_, hostish)| hostish)
+            .unwrap_or(tail)
+            .split(['?', '#'])
+            .next()
+            .unwrap_or(tail)
+            .to_owned();
     };
     if looks_like_path {
         return entry.rsplit(['/', '\\']).next().unwrap_or(entry).to_owned();
@@ -478,7 +573,7 @@ mod tests {
         let mut cfg = ok_cfg(1, None);
         cfg.phase2 = Some(p2_cfg(&["ftp://nope"], &[]));
         let err = run_local(&c, cfg, 1).await.unwrap_err();
-        assert!(err.to_string().contains("failed to parse"), "{err}");
+        assert!(err.to_string().contains("no usable configs"), "{err}");
     }
 
     #[tokio::test]
@@ -518,5 +613,100 @@ mod tests {
         );
         // Non-URLs (local file paths) degrade to the file name only.
         assert_eq!(redact_entry("C:\\users\\me\\config.json"), "config.json");
+        // Parseable URIs keep their (masked) scheme so diagnostics stay readable.
+        assert_eq!(
+            redact_entry("vless://deadbeef-0000-0000-0000-000000000000@1.2.3.4:443?type=tcp"),
+            "vless://***:***@1.2.3.4:443"
+        );
+        assert_eq!(redact_entry("not a uri at all"), "not a uri at all");
+    }
+
+    #[tokio::test]
+    async fn phase2_one_bad_config_entry_is_skipped_not_fatal() {
+        let t = FakeTransport::new().ok("10.0.0.1".parse().unwrap(), 443, 50);
+        let probe = FakeTunnelProbe::new().pass("10.0.0.1".parse().unwrap());
+        let c = p2_controller(t, FakeSub(""), probe.clone());
+        let mut cfg = ok_cfg(1, None);
+        cfg.phase2 = Some(p2_cfg(&["ftp://nope", VLESS], &[]));
+        run_local(&c, cfg, 1).await.unwrap();
+        assert!(c.results()[0].phase2.as_ref().unwrap().passed);
+        assert_eq!(probe.attempts.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn phase2_all_config_entries_bad_aborts_with_count() {
+        let t = FakeTransport::new().ok("10.0.0.1".parse().unwrap(), 443, 50);
+        let c = p2_controller(t, FakeSub(""), FakeTunnelProbe::new());
+        let mut cfg = ok_cfg(1, None);
+        cfg.phase2 = Some(p2_cfg(&["ftp://nope"], &[]));
+        let err = run_local(&c, cfg, 1).await.unwrap_err();
+        assert!(err.to_string().contains("no usable configs"), "{err}");
+    }
+
+    #[test]
+    fn update_verdict_phase2_never_downgrades_a_pass() {
+        let store: Store = Arc::new(Mutex::new(vec![Verdict {
+            ip: "10.0.0.1".parse().unwrap(),
+            port: 443,
+            latency_ms: Some(5),
+            loss_pct: None,
+            country: None,
+            colo: Some("FRA".to_owned()),
+            phase2: Some(Phase2Verdict {
+                passed: true,
+                fragment: "light".to_owned(),
+                sni: "".to_owned(),
+                latency_ms: Some(42),
+                error: None,
+            }),
+        }]));
+        // A racing failed combo must not clobber the passing verdict.
+        let failed = Phase2Verdict {
+            passed: false,
+            fragment: "off".to_owned(),
+            sni: "".to_owned(),
+            latency_ms: None,
+            error: Some("spawn failed".to_owned()),
+        };
+        let updated = update_verdict_phase2(&store, "10.0.0.1".parse().unwrap(), 443, failed, None);
+        assert!(updated.is_none(), "a pass must never be downgraded");
+        let row = &store.lock().unwrap_or_else(|e| e.into_inner())[0];
+        assert!(row.phase2.as_ref().unwrap().passed);
+        assert_eq!(row.colo.as_deref(), Some("FRA"));
+    }
+
+    #[tokio::test]
+    async fn phase2_progress_events_track_attempts() {
+        let t = FakeTransport::new()
+            .ok("10.0.0.1".parse().unwrap(), 443, 50)
+            .ok("10.0.0.2".parse().unwrap(), 443, 10);
+        let probe = FakeTunnelProbe::new()
+            .pass("10.0.0.1".parse().unwrap())
+            .pass("10.0.0.2".parse().unwrap());
+        let c = p2_controller(t, FakeSub(""), probe);
+        let mut rx = c.subscribe();
+        let mut cfg = ok_cfg(2, None);
+        cfg.phase2 = Some(p2_cfg(&[VLESS], &["a.me", "b.me"]));
+        run_local(&c, cfg, 1).await.unwrap();
+        let mut events: Vec<ScanEvent> = Vec::new();
+        while let Ok(e) = rx.try_recv() {
+            events.push(e);
+        }
+        let mut progress = 0u64;
+        let mut total = 0u64;
+        for e in &events {
+            if let ScanEvent::Phase2Progress(p) = e {
+                progress = progress.max(p.done);
+                total = p.total;
+            }
+        }
+        assert_eq!(total, 4, "2 candidates x 2 SNIs — events: {events:?}");
+        // Pass-short-circuit: once a candidate passes, its remaining SNI
+        // combos are skipped, so the final event reports the probes that
+        // actually ran (one per candidate).
+        assert_eq!(
+            progress, 2,
+            "the terminal progress event must report done == executed combos"
+        );
     }
 }

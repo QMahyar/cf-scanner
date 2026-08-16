@@ -134,7 +134,10 @@ async fn run_wizard(controller: Arc<ScanController>) -> Result<()> {
                     Some(_) => "\t[phase2 ✗]".to_owned(),
                     None => String::new(),
                 };
-                println!(
+                use std::io::Write as _;
+                let mut out = std::io::stdout().lock();
+                let _ = writeln!(
+                    out,
                     "\r\x1b[K{}\t{}ms{}",
                     v.ip,
                     v.latency_ms.unwrap_or(0),
@@ -142,6 +145,9 @@ async fn run_wizard(controller: Arc<ScanController>) -> Result<()> {
                 );
             }
             ScanEvent::Finished(_) => print!("\r\x1b[K"),
+            ScanEvent::Phase2Progress(p) => {
+                eprint!("\r\x1b[Kphase 2: {}/{} verified", p.done, p.total);
+            }
             ScanEvent::Failed(msg) => {
                 print!("\r\x1b[K");
                 eprintln!("scan failed: {msg}");

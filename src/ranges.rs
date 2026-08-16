@@ -358,6 +358,17 @@ fn plan_preset(pool: &CidrPool, per: u64, _rng: &mut SplitMix64) -> Vec<PlanItem
             });
             continue;
         }
+        // A coarse custom CIDR (e.g. /0) would decompose into 2^24 plan
+        // items: the same OOM the count path guards against. Beyond the cap
+        // the whole block is sampled directly instead — one item, same
+        // per-block semantics.
+        if cidr.sub24_count() > MAX_PRESET_BLOCKS {
+            items.push(PlanItem::Sample {
+                cidr,
+                count: per.min(cidr.host_count().min(u64::MAX as u128) as u64),
+            });
+            continue;
+        }
         let base = u32::from(ipv4(cidr.addr)) as u64;
         for i in 0..cidr.sub24_count() {
             let sub = Cidr {
@@ -372,6 +383,10 @@ fn plan_preset(pool: &CidrPool, per: u64, _rng: &mut SplitMix64) -> Vec<PlanItem
     }
     items
 }
+
+/// Plan items a preset run may materialize (one per /24 block); beyond this
+/// the block is sampled whole instead of being decomposed.
+const MAX_PRESET_BLOCKS: u64 = 1 << 16;
 
 /// `n` distinct random offsets spread across the whole pool.
 fn plan_count(pool: &CidrPool, n: u64, rng: &mut SplitMix64) -> Vec<PlanItem> {
@@ -706,7 +721,26 @@ async fn fetch_tls_inner(url: &str, extra_headers: &str) -> Result<Vec<u8>> {
         }
         return Ok(body);
     }
-    bail!("too many redirects fetching {url}")
+    bail!(
+        "too many redirects fetching {}",
+        sanitize_url_for_error(url)
+    )
+}
+
+/// URL text safe for errors/logs: userinfo (and query/fragment) stripped.
+fn sanitize_url_for_error(url: &str) -> String {
+    match url::Url::parse(url) {
+        Ok(mut parsed) => {
+            if !parsed.username().is_empty() || parsed.password().is_some() {
+                let _ = parsed.set_username("***");
+                let _ = parsed.set_password(Some("***"));
+            }
+            parsed.set_query(None);
+            parsed.set_fragment(None);
+            parsed.to_string()
+        }
+        Err(_) => url.to_owned(),
+    }
 }
 
 /// SSRF guard for every outbound fetch: https scheme only, and literal

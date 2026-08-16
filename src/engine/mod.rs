@@ -115,11 +115,15 @@ impl ScanController {
 
     /// Clears the last scan's results. No-op while a run is active so an
     /// in-flight run can never repopulate a store the user just cleared.
+    /// The running lock is held across the check AND the clear so a run
+    /// starting between them cannot lose its results to a stale reset.
     pub fn reset(&self) {
-        if self.is_running() {
+        let running = self.running.lock().unwrap_or_else(|e| e.into_inner());
+        if *running {
             return;
         }
         self.clear_store();
+        drop(running);
     }
 
     /// Internal reset for run start; bypasses the running guard (the run
@@ -185,7 +189,18 @@ impl ScanController {
                         return handle.await?;
                     }
                     Ok(event) => on_event(event),
-                    Err(_) => continue, // lagged: keep streaming
+                    Err(_) => {
+                        // Lagged: the channel dropped missed events. Re-sync
+                        // the authoritative store so a slow consumer never
+                        // ends up with a silently incomplete stream (the
+                        // store is flushed before Finished, so this can only
+                        // under-report mid-run verdicts, never over-report).
+                        // Duplicate rows are possible after a re-sync;
+                        // consumers keyed on (ip, port) dedupe naturally.
+                        for verdict in self.results() {
+                            on_event(ScanEvent::Result(Box::new(verdict)));
+                        }
+                    }
                 },
             }
         }
@@ -206,7 +221,10 @@ impl ScanController {
         }
         let result = self.run_seeded_unguarded(cfg, seed).await;
         if let Err(err) = &result {
-            self.emit(ScanEvent::Failed(format!("{err:#}")));
+            // The chain can carry imported config material (URLs, paths);
+            // sanitize before it reaches logs or the wire.
+            let msg = crate::configs::sanitize_error_text(&format!("{err:#}"));
+            self.emit(ScanEvent::Failed(msg));
         }
         // RAII: clears the busy flag (and the cancel slot) even if the run
         // panics, so one bad run can never brick the controller for the rest
@@ -299,14 +317,32 @@ fn plan_hosts_iter<'a>(
         PlanItem::Every { cidr } => Box::new((0..cidr.host_count()).map(move |i| cidr.host(i))),
         PlanItem::Sample { cidr, count } => {
             let count = (*count as u128).min(cidr.host_count());
-            Box::new((0..count).map(move |_| {
-                let idx = if cidr.addr.is_ipv4() && cidr.prefix == 24 {
-                    // Skip network and broadcast addresses on full /24 blocks.
-                    (rng.below(254) + 1) as u128
-                } else {
-                    rng.below_u128(cidr.host_count())
-                };
-                cidr.host(idx)
+            // Full v4 /24 blocks skip network and broadcast addresses; every
+            // other block samples its whole host space.
+            let (draw_max, skip_net_bcast) = if cidr.addr.is_ipv4() && cidr.prefix == 24 {
+                (254u128, true)
+            } else {
+                (cidr.host_count(), false)
+            };
+            let mut seen = std::collections::HashSet::new();
+            let mut emitted = 0u128;
+            Box::new(std::iter::from_fn(move || {
+                // Draws are deduped per block: sampling with replacement
+                // produced duplicate verdicts and inflated `found` counts.
+                if emitted >= count || seen.len() as u128 >= draw_max {
+                    return None;
+                }
+                loop {
+                    let idx = if skip_net_bcast {
+                        (rng.below(254) + 1) as u128
+                    } else {
+                        rng.below_u128(cidr.host_count())
+                    };
+                    if seen.insert(idx) {
+                        emitted += 1;
+                        return Some(cidr.host(idx));
+                    }
+                }
             }))
         }
         PlanItem::Hosts { cidr, offsets } => Box::new(offsets.iter().map(move |&o| cidr.host(o))),
