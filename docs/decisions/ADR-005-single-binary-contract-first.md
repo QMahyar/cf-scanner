@@ -1,7 +1,9 @@
 # ADR-005: Single binary, one engine, embedded UI, contract-first API
 
 ## Status
-Accepted
+Accepted. Amended by
+[ADR-011](ADR-011-contract-boundary.md) — the contract boundary stands as
+decided; ADR-011 pins down what "domain types" means.
 
 ## Date
 2026-08-13
