@@ -101,15 +101,15 @@ pub async fn run(controller: Arc<ScanController>) -> Result<()> {
 }
 
 async fn run_wizard(controller: Arc<ScanController>) -> Result<()> {
-    println!("CF-Scanner wizard — CDN/proxy scan with optional xray phase-2 verification");
+    eprintln!("CF-Scanner wizard — CDN/proxy scan with optional xray phase-2 verification");
     let cfg = prompt_config()?;
-    println!();
+    eprintln!();
     if !Confirm::new()
         .with_prompt("Start scan now?")
         .default(true)
         .interact()?
     {
-        println!("aborted");
+        eprintln!("aborted");
         return Ok(());
     }
     let is_warp = cfg.mode == Mode::Warp;
@@ -135,21 +135,21 @@ async fn run_wizard(controller: Arc<ScanController>) -> Result<()> {
                     None => String::new(),
                 };
                 use std::io::Write as _;
-                let mut out = std::io::stdout().lock();
+                let mut err = std::io::stderr().lock();
                 let _ = writeln!(
-                    out,
+                    err,
                     "\r\x1b[K{}\t{}ms{}",
                     v.ip,
                     v.latency_ms.unwrap_or(0),
                     phase2
                 );
             }
-            ScanEvent::Finished(_) => print!("\r\x1b[K"),
+            ScanEvent::Finished(_) => eprint!("\r\x1b[K"),
             ScanEvent::Phase2Progress(p) => {
                 eprint!("\r\x1b[Kphase 2: {}/{} verified", p.done, p.total);
             }
             ScanEvent::Failed(msg) => {
-                print!("\r\x1b[K");
+                eprint!("\r\x1b[K");
                 eprintln!("scan failed: {msg}");
             }
         })
@@ -193,7 +193,7 @@ async fn prompt_registration(controller: &ScanController) -> Result<()> {
             _ => format!("{}:{}", v.ip, v.port),
         });
     if let Some(endpoint) = &best {
-        println!("best scan result: {endpoint} — will be the WireGuard endpoint");
+        eprintln!("best scan result: {endpoint} — will be the WireGuard endpoint");
     }
     let license: String = Input::new()
         .with_prompt("WARP+ license key (empty = free account)")
@@ -216,7 +216,7 @@ async fn prompt_registration(controller: &ScanController) -> Result<()> {
         Some(path) => eprintln!("wgconf written to {}", path.display()),
         None => eprintln!("wgconf printed above"),
     }
-    println!(
+    eprintln!(
         "tip: verify it with `cf-scanner scan --mode warp --warp-verify --warp-wgconf-file <saved>`"
     );
     Ok(())
@@ -323,7 +323,7 @@ fn prompt_config() -> Result<ScanConfig> {
         None
     };
     if phase2.is_some() && crate::verify::require_xray_binary().is_err() {
-        println!(
+        eprintln!(
             "note: xray binary not found yet - it will be downloaded (checksum-verified) when phase 2 starts"
         );
     }
