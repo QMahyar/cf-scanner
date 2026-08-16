@@ -2,6 +2,7 @@
 //! group, optional wgconf-verified keypair transport, Count-capped custom
 //! endpoint sampling.
 
+use std::collections::HashSet;
 use std::net::IpAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -231,9 +232,16 @@ impl ScanController {
                 }
             }
         } else {
+            // Identical (endpoint, ports) entries must not create duplicate
+            // groups: they would share one connected socket and skew the
+            // `scanned` count. Per-port overrides stay distinct groups.
+            let mut seen: HashSet<(std::net::Ipv4Addr, Vec<u16>)> = HashSet::new();
             for ep in &warp.custom_endpoints {
                 let (ip, port) = parse_endpoint(ep)?;
-                groups.push((ip, port.map_or_else(|| ports.clone(), |p| vec![p])));
+                let ports = port.map_or_else(|| ports.clone(), |p| vec![p]);
+                if seen.insert((ip, ports.clone())) {
+                    groups.push((ip, ports));
+                }
             }
             if let ScanTarget::Count(n) = cfg.target {
                 // 0x5EED ("SEED"): fixed offset so the cap draw never mirrors
@@ -372,6 +380,18 @@ mod tests {
         let summary = run_local(&c, cfg, 1).await.unwrap();
         assert_eq!(summary.scanned, 8 * 256, "all bundled pool hosts");
         assert_eq!(summary.found, 0);
+    }
+
+    #[tokio::test]
+    async fn warp_duplicate_custom_endpoints_probe_once() {
+        let t = FakeTransport::new().ok("10.0.0.1".parse().unwrap(), 2408, 5);
+        let (c, _) = warp_controller(t);
+        // Identical endpoints (bare, repeated, and port-suffixed) must dedupe
+        // into a single group.
+        let cfg = warp_cfg(1, &["10.0.0.1", "10.0.0.1", "10.0.0.1:2408"]);
+        let summary = run_local(&c, cfg, 1).await.unwrap();
+        assert_eq!(summary.scanned, 1, "duplicate endpoints must probe once");
+        assert_eq!(summary.found, 1);
     }
 
     #[tokio::test]

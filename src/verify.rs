@@ -79,12 +79,14 @@ impl TunnelProbe for XrayTunnelProbe {
         Box::pin(async move {
             let work_dir = paths::data_dir().context("no data directory for trial configs")?;
             // Hard kills leave stale trial dirs holding plaintext credentials;
-            // sweep them before creating the next trial.
-            sweep_stale_trial_dirs(&work_dir);
+            // sweep them before creating the next trial (off the executor).
+            sweep_stale_trial_dirs_async(&work_dir).await;
             let trial_dir = make_trial_dir(&work_dir).await?;
 
-            // Trial dirs hold configs embedding the user's id/password;
-            // remove them even when the attempt dies mid-flight.
+            // Trial dirs hold configs embedding the user's id/password; the
+            // guard removes them even when the attempt dies mid-flight (the
+            // explicit cleanup below handles the normal resolve path).
+            let _guard = TrialDirGuard(trial_dir.clone());
             let outcome = async {
                 let fetch = xray::RealFetch;
                 let xray_bin = xray::ensure_binary(&fetch).await.with_context(|| {
@@ -177,12 +179,30 @@ async fn cleanup_trial_dir(trial_dir: &Path) {
     let _ = tokio::task::spawn_blocking(move || std::fs::remove_dir_all(&dir)).await;
 }
 
+/// Removes the trial dir on drop so a hard teardown (engine cancel, server
+/// shutdown) never leaves a plaintext-credential config behind. The normal
+/// path removes the dir explicitly first; a drop after that is a cheap no-op
+/// (`remove_dir_all` of a missing path returns Ok).
+struct TrialDirGuard(PathBuf);
+
+impl Drop for TrialDirGuard {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
 /// Stale `trial-*` dirs older than this are swept at the next attempt.
 const STALE_TRIAL_AGE: Duration = Duration::from_secs(60 * 60);
 
 /// Best-effort removal of stale trial dirs; never fails the attempt.
 fn sweep_stale_trial_dirs(work_dir: &Path) {
     sweep_stale_trial_dirs_before(work_dir, std::time::SystemTime::now() - STALE_TRIAL_AGE);
+}
+
+/// The sweep runs off the async executor (per-attempt blocking fs).
+async fn sweep_stale_trial_dirs_async(work_dir: &Path) {
+    let work_dir = work_dir.to_path_buf();
+    let _ = tokio::task::spawn_blocking(move || sweep_stale_trial_dirs(&work_dir)).await;
 }
 
 fn sweep_stale_trial_dirs_before(work_dir: &Path, cutoff: std::time::SystemTime) {
@@ -248,6 +268,24 @@ mod tests {
         let b = fresh_trial_dir(&dir);
         assert_ne!(a, b, "concurrent trials must never share a config dir");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn trial_dir_guard_removes_the_dir_on_drop() {
+        let dir = std::env::temp_dir().join(format!(
+            "cf-scanner-verify-guard-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        {
+            let guard = TrialDirGuard(dir.clone());
+            assert!(dir.exists());
+            drop(guard);
+        }
+        assert!(!dir.exists(), "drop must remove the credential dir");
+        // Dropping after an explicit cleanup is a no-op, not an error.
+        let _ = TrialDirGuard(dir.clone());
     }
 
     #[test]

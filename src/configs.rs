@@ -20,48 +20,52 @@ const WS: &str = "ws";
 const MAX_ERROR_LINE_BYTES: usize = 512;
 
 /// Best-effort redaction of error text before it reaches logs, the wire, or
-/// the UI: masks `scheme://user:pass@` userinfo, truncates over-long lines,
-/// and strips control characters. Not a security boundary on its own —
-/// parsers must still avoid echoing raw entries (see `parse_uri`) — but it
-/// stops the common leak shapes from imported configs.
+/// the UI: URL-bearing lines lose their query/fragment (the usual carrier of
+/// ids/passwords) and their userinfo (raw `user:pass@` or percent-encoded
+/// `%40`), over-long lines are truncated, and control characters are
+/// stripped. Not a security boundary on its own — parsers must still avoid
+/// echoing raw entries (see `parse_uri`) — but it stops the common leak
+/// shapes from imported configs and API bodies.
 pub fn sanitize_error_text(text: &str) -> String {
     text.lines()
         .map(|line| {
             let line: String = line.chars().filter(|c| !c.is_control()).collect();
-            let masked = mask_userinfo(&line);
-            if masked.chars().count() > MAX_ERROR_LINE_BYTES {
-                let mut truncated: String = masked.chars().take(MAX_ERROR_LINE_BYTES).collect();
+            let redacted = redact_line(&line);
+            if redacted.chars().count() > MAX_ERROR_LINE_BYTES {
+                let mut truncated: String = redacted.chars().take(MAX_ERROR_LINE_BYTES).collect();
                 truncated.push('…');
                 truncated
             } else {
-                masked
+                redacted
             }
         })
         .collect::<Vec<_>>()
         .join("\n")
 }
 
-/// Masks the `userinfo` in a `scheme://user:pass@host` fragment, keeping the
-/// scheme and everything after the last '@'. Lines without that shape pass
-/// through untouched.
-fn mask_userinfo(line: &str) -> String {
+/// One line of error text: if it carries a `scheme://`, the query/fragment
+/// is cut first (a stray '@' inside the query must not defeat the userinfo
+/// mask), then the userinfo up to the first '@' — raw or percent-encoded
+/// `%40` — is replaced. An '@' that sits after a space is prose, not
+/// userinfo, and is left alone.
+fn redact_line(line: &str) -> String {
     let Some(scheme_end) = line.find("://") else {
         return line.to_owned();
     };
     let rest = &line[scheme_end + 3..];
-    let Some(at) = rest.find('@') else {
-        return line.to_owned();
-    };
-    // The '@' belongs to userinfo only when it sits before the first path
-    // separator/whitespace; otherwise it is part of the host/path.
-    let first_sep = rest.find(['/', '?', '#', ' ']).unwrap_or(usize::MAX);
-    if at > first_sep {
-        return line.to_owned();
-    }
+    let cut = rest.find(['?', '#']).unwrap_or(rest.len());
+    let head = &rest[..cut];
+    let at = head.find('@').or_else(|| head.find("%40"));
     let mut out = String::with_capacity(line.len());
     out.push_str(&line[..scheme_end + 3]);
-    out.push_str("***@");
-    out.push_str(&rest[at + 1..]);
+    match at.filter(|at| !head[..*at].contains(' ')) {
+        Some(at) => {
+            let sep_len = if head[at..].starts_with('@') { 1 } else { 4 };
+            out.push_str("***@");
+            out.push_str(&head[at + sep_len..]);
+        }
+        None => out.push_str(head),
+    }
     out
 }
 
@@ -76,13 +80,20 @@ pub struct OutboundSpec {
     pub user_id: String,
     /// Shadowsocks cipher (e.g. `aes-128-gcm`).
     pub method: Option<String>,
-    /// `none`, `tls`, or `reality`.
+    /// `none` or `tls` (`reality` is rejected at parse time: the builder
+    /// cannot emit a working reality outbound, and xray would silently fail
+    /// phase 2).
     pub security: String,
     pub tls_server_name: Option<String>,
     /// Client fingerprint, e.g. `chrome`.
     pub fingerprint: Option<String>,
     pub ws: Option<WsSettings>,
     pub tag: Option<String>,
+    /// VMess legacy `alterId` (0 = AEAD-only); ignored by other protocols.
+    pub alter_id: u16,
+    /// VMess AEAD security (`scy` in v2ray JSON); xray's default applies
+    /// when absent. Ignored by other protocols.
+    pub vmess_security: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -230,6 +241,7 @@ fn parse_sip002(entry: &str) -> Result<OutboundSpec> {
             "none".to_owned()
         }
     });
+    reject_unsupported_security(&security)?;
     let ws = match q.get("type").map(String::as_str) {
         Some(WS) => Some(WsSettings {
             path: q.get("path").cloned().unwrap_or_else(|| "/".to_owned()),
@@ -250,6 +262,8 @@ fn parse_sip002(entry: &str) -> Result<OutboundSpec> {
         fingerprint: q.get("fp").cloned(),
         ws,
         tag: url.fragment().map(percent_decode),
+        alter_id: 0,
+        vmess_security: None,
     })
 }
 
@@ -279,6 +293,12 @@ fn parse_vmess(entry: &str) -> Result<OutboundSpec> {
     let user_id = get("id")
         .filter(|s| !s.is_empty())
         .ok_or_else(|| anyhow!("vmess missing id"))?;
+    let security = get("tls").unwrap_or("none").to_owned();
+    reject_unsupported_security(&security)?;
+    let alter_id: u16 = get("aid").and_then(|a| a.parse().ok()).unwrap_or(0);
+    let vmess_security = get("scy")
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned);
     let ws = match get("net") {
         Some(WS) => Some(WsSettings {
             path: get("path").unwrap_or("/").to_owned(),
@@ -293,11 +313,13 @@ fn parse_vmess(entry: &str) -> Result<OutboundSpec> {
         port,
         user_id: user_id.to_owned(),
         method: None,
-        security: get("tls").unwrap_or("none").to_owned(),
+        security,
         tls_server_name: get("sni").filter(|s| !s.is_empty()).map(str::to_owned),
         fingerprint: get("fp").filter(|s| !s.is_empty()).map(str::to_owned),
         ws,
         tag: tag.as_deref().map(percent_decode),
+        alter_id,
+        vmess_security,
     })
 }
 
@@ -345,6 +367,8 @@ fn parse_ss(entry: &str) -> Result<OutboundSpec> {
         fingerprint: None,
         ws: None,
         tag: tag.as_deref().map(percent_decode),
+        alter_id: 0,
+        vmess_security: None,
     })
 }
 
@@ -387,12 +411,29 @@ pub fn parse_xray_json(text: &str) -> Result<OutboundSpec> {
                 (s.address.clone(), s.port, password, s.method.clone())
             }
         };
+        let vmess_meta = match protocol {
+            Protocol::Vmess => {
+                let user = out
+                    .settings
+                    .vnext
+                    .first()
+                    .and_then(|v| v.users.first());
+                (
+                    user.and_then(|u| u.alter_id).unwrap_or(0),
+                    user.and_then(|u| u.security.as_ref())
+                        .filter(|s| !s.is_empty())
+                        .cloned(),
+                )
+            }
+            _ => (0, None),
+        };
 
         let stream = out.stream_settings.as_ref();
         let network = stream.map(|s| s.network.as_str()).unwrap_or("");
         let security = stream
             .map(|s| s.security.clone())
             .unwrap_or_else(|| "none".to_owned());
+        reject_unsupported_security(&security)?;
         let ws = if network == WS {
             let w = stream.and_then(|s| s.ws_settings.as_ref());
             Some(WsSettings {
@@ -423,6 +464,8 @@ pub fn parse_xray_json(text: &str) -> Result<OutboundSpec> {
                 .and_then(|t| t.fingerprint.clone()),
             ws,
             tag: out.tag.clone(),
+            alter_id: vmess_meta.0,
+            vmess_security: vmess_meta.1,
         });
     }
     bail!("no usable outbound found")
@@ -443,6 +486,16 @@ fn query_map(url: &Url) -> BTreeMap<String, String> {
     url.query_pairs()
         .map(|(k, v)| (k.into_owned().to_ascii_lowercase(), v.into_owned()))
         .collect()
+}
+
+/// Security modes the outbound builder cannot emit correctly. `reality`
+/// needs realitySettings/serverName, which `build_outbound` does not produce;
+/// accepting it would make xray reject the config and phase 2 silently fail.
+fn reject_unsupported_security(security: &str) -> Result<()> {
+    if security.eq_ignore_ascii_case("reality") {
+        bail!("security 'reality' is not supported; use tls or none")
+    }
+    Ok(())
 }
 
 fn percent_decode(s: &str) -> String {
@@ -509,6 +562,10 @@ struct XrayVnext {
 #[derive(Deserialize)]
 struct XrayUser {
     id: String,
+    #[serde(default, rename = "alterId")]
+    alter_id: Option<u16>,
+    #[serde(default)]
+    security: Option<String>,
 }
 
 #[derive(Deserialize)]

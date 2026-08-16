@@ -9,7 +9,6 @@ use std::time::Instant;
 
 use anyhow::{Result, anyhow};
 use tokio::sync::mpsc;
-use tokio::sync::watch;
 use tokio::task::JoinSet;
 
 use super::{
@@ -40,6 +39,7 @@ impl ScanController {
         pool: ranges::CidrPool,
     ) -> Result<ScanSummary> {
         let phase2 = cfg.phase2.take();
+        let phase2_configured = phase2.is_some();
 
         let started = Instant::now();
         // Verify-last-results mode: skip phase-1 probing entirely and run
@@ -59,14 +59,7 @@ impl ScanController {
                 ));
             }
             self.verify_phase(&cfg, &p2).await?;
-            let found = self
-                .store
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .iter()
-                .filter(|v| v.phase2.as_ref().is_some_and(|p| p.passed))
-                .count() as u64;
-            return Ok(self.finish(started, 0, found));
+            return Ok(self.finish(started, 0, self.phase2_passed()));
         }
         self.clear_store();
         let plan = ranges::plan(&pool, &cfg.target, &mut SplitMix64::new(seed));
@@ -82,8 +75,11 @@ impl ScanController {
             return Ok(self.finish(started, 0, 0));
         }
 
-        let (cancel_tx, cancel_rx) = watch::channel(false);
-        *self.cancel_tx.lock().unwrap_or_else(|e| e.into_inner()) = Some(cancel_tx);
+        // One cancel signal per run, shared by every phase: `cancel_signal`
+        // (re)creates the channel on first use and later phases subscribe to
+        // the same one, so a cancel fired during phase 1 is still visible to
+        // phase-2 workers and to `finish` — never lost to a fresh install.
+        let cancel_rx = self.cancel_signal();
 
         let ctx = Arc::new(ProbeContext {
             cancel: cancel_rx,
@@ -208,10 +204,18 @@ impl ScanController {
             self.verify_phase(&cfg, &p2).await?;
         }
 
+        // With phase 2 configured, the summary reflects verified working
+        // endpoints (candidates phase 2 failed are excluded; v6 finds phase 2
+        // never touched keep counting), mirroring the phase2_only path.
+        let found = if phase2_configured {
+            self.working_found()
+        } else {
+            ctx.found.load(Ordering::Relaxed)
+        };
         Ok(self.finish(
             started,
             ctx.scanned.load(Ordering::Relaxed),
-            ctx.found.load(Ordering::Relaxed),
+            found,
         ))
     }
 }

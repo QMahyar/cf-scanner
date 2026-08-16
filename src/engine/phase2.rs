@@ -8,7 +8,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context as _, Result, anyhow, bail};
-use tokio::sync::watch;
 use tokio::task::JoinSet;
 
 use super::{ScanController, Store};
@@ -56,8 +55,10 @@ impl ScanController {
             return Ok(());
         }
 
-        let (cancel_tx, cancel_rx) = watch::channel(false);
-        *self.cancel_tx.lock().unwrap_or_else(|e| e.into_inner()) = Some(cancel_tx);
+        // Subscribe to the run's cancel signal: when phase 2 follows a phase
+        // 1, this is the same channel phase 1 used, so a cancel fired during
+        // phase 1 (or in the gap) stops verification immediately.
+        let cancel_rx = self.cancel_signal();
         let combos_per_candidate = (specs.len() * snis.len()) as u64;
         let total = v4_candidates.len() as u64 * combos_per_candidate;
         let next = Arc::new(AtomicU64::new(0));
@@ -673,6 +674,45 @@ mod tests {
         let row = &store.lock().unwrap_or_else(|e| e.into_inner())[0];
         assert!(row.phase2.as_ref().unwrap().passed);
         assert_eq!(row.colo.as_deref(), Some("FRA"));
+    }
+
+    #[tokio::test]
+    async fn cancel_during_phase1_stops_phase2_work() {
+        // A cancel fired while phase-1 probes are still in flight must be
+        // visible to phase-2 workers: verification runs zero tunnel probes
+        // and the summary reports the cancel.
+        let t = FakeTransport::new()
+            .ok_slow("10.0.0.1".parse().unwrap(), 443, 50, 200)
+            .ok_slow("10.0.0.2".parse().unwrap(), 443, 50, 200);
+        let probe = FakeTunnelProbe::new().pass("10.0.0.1".parse().unwrap());
+        let c = p2_controller(t, FakeSub(""), probe.clone());
+        let mut rx = c.subscribe();
+        let mut cfg = ok_cfg(2, None);
+        cfg.phase2 = Some(p2_cfg(&[VLESS], &[]));
+        let handle = tokio::spawn({
+            let c = c.clone();
+            async move { run_local(&c, cfg, 1).await.unwrap() }
+        });
+        loop {
+            let mut saw_result = false;
+            while let Ok(e) = rx.try_recv() {
+                if matches!(e, ScanEvent::Result(_)) {
+                    saw_result = true;
+                }
+            }
+            if saw_result {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+        }
+        c.cancel();
+        let summary = handle.await.unwrap();
+        assert_eq!(
+            probe.attempts.load(Ordering::Relaxed),
+            0,
+            "phase-2 workers must see the phase-1 cancel signal"
+        );
+        assert!(summary.cancelled, "summary must report the cancel");
     }
 
     #[tokio::test]

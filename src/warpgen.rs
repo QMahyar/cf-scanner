@@ -11,7 +11,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use anyhow::{Context as _, Result, anyhow};
 use base64::Engine as _;
 use boringtun::x25519::{PublicKey, StaticSecret};
-use rand_core::OsRng;
+use rand_core::{OsRng, RngCore};
 use serde::{Deserialize, Serialize};
 
 use crate::paths;
@@ -248,6 +248,11 @@ struct Identity {
     account_type: String,
     license: Option<String>,
     created_at: u64,
+    /// WARP server public key from the registration response; the probe
+    /// prefers this over the bundled constant (ADR-002 "refresh when
+    /// available"). Absent in identities written before this field existed.
+    #[serde(default)]
+    peer_public_key: Option<String>,
 }
 
 fn identity_path() -> Result<PathBuf> {
@@ -261,24 +266,78 @@ fn identity_path() -> Result<PathBuf> {
 
 fn save_identity(identity: &Identity) -> Result<()> {
     let path = identity_path()?;
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
     let json = serde_json::to_string_pretty(identity)?;
-    fs::write(&path, json)?;
-    // The file holds a WireGuard private key: keep it user-only where the
-    // filesystem supports permissions.
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        let _ = fs::set_permissions(&path, fs::Permissions::from_mode(0o600));
-    }
-    Ok(())
+    write_private_replace(&path, &json).with_context(|| format!("writing {}", path.display()))
 }
 
 fn load_identity() -> Result<Identity> {
     let json = fs::read_to_string(identity_path()?)?;
     serde_json::from_str(&json).context("corrupt identity file")
+}
+
+/// Public: the WARP server public key persisted at registration, if any. The
+/// probe prefers this over the bundled constant (a registration refresh).
+pub fn persisted_server_public_key() -> Option<String> {
+    load_identity()
+        .ok()
+        .and_then(|id| id.peer_public_key)
+        .filter(|k| !k.is_empty())
+}
+
+/// Writes `text` to `path` locked down to the owning user. The 0o600 mode is
+/// applied at open (not via a later chmod) so a private key on disk is never
+/// world-readable, not even for a microsecond; a pre-existing file with wider
+/// perms is re-locked afterwards. Windows has no POSIX modes — best-effort.
+fn write_private(path: &Path, text: &str) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::io::Write as _;
+        use std::os::unix::fs::OpenOptionsExt as _;
+        use std::os::unix::fs::PermissionsExt as _;
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(path)?;
+        file.write_all(text.as_bytes())?;
+        let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o600));
+    }
+    #[cfg(not(unix))]
+    {
+        fs::write(path, text)?;
+    }
+    Ok(())
+}
+
+/// Atomic private write: unique temp file in the same dir, then rename into
+/// place, so a crash mid-write never leaves a truncated private-key file and
+/// concurrent registrations cannot interleave bytes. The temp name carries the
+/// process id + randomness so two processes sharing the data dir cannot
+/// collide.
+fn write_private_replace(dest: &Path, text: &str) -> Result<()> {
+    if let Some(parent) = dest.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let name = dest
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "out".to_owned());
+    let tmp = dest.with_file_name(format!("{name}.tmp-{}-{:08x}", std::process::id(), random_u32()));
+    write_private(&tmp, text)?;
+    match fs::rename(&tmp, dest) {
+        Ok(()) => Ok(()),
+        Err(_err) if cfg!(windows) => {
+            // Windows rename does not replace an existing file.
+            let _ = fs::remove_file(dest);
+            fs::rename(&tmp, dest).map_err(Into::into)
+        }
+        Err(err) => Err(err.into()),
+    }
+}
+
+fn random_u32() -> u32 {
+    RngCore::next_u32(&mut OsRng)
 }
 
 // --- wgconf builder ----------------------------------------------------------
@@ -369,7 +428,9 @@ async fn register_flow(
     let wgconf = build_wgconf(&secret, &reg, endpoint_override)?;
     let text = render_wgconf(&wgconf);
     // The identity (keys included) is persisted so `export` works offline of
-    // the keygen step; it is never printed or logged.
+    // the keygen step; it is never printed or logged. The registration peer
+    // public key is stored too, so the WARP probe can prefer the live key
+    // over the bundled constant (ADR-002 "refresh when available").
     let identity = Identity {
         id: reg.id.clone(),
         token,
@@ -378,6 +439,7 @@ async fn register_flow(
         account_type: reg.account.account_type.clone(),
         license: license.map(str::to_owned),
         created_at: unix_now(),
+        peer_public_key: reg.config.peers.first().map(|p| p.public_key.clone()),
     };
     save_identity(&identity)?;
     Ok(text)
@@ -427,7 +489,7 @@ pub async fn export(out: Option<&Path>, endpoint_override: Option<&str>) -> Resu
 fn write_out(out: Option<&Path>, text: &str) -> Result<()> {
     match out {
         Some(path) => {
-            fs::write(path, text).with_context(|| format!("writing {}", path.display()))?;
+            write_private(path, text).with_context(|| format!("writing {}", path.display()))?;
         }
         None => write_stdout(text),
     }
@@ -471,7 +533,7 @@ fn tos_timestamp() -> String {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     use std::sync::Mutex;
@@ -665,8 +727,8 @@ mod tests {
 
     /// Both identity tests share one file on disk and one temp dir; serialize
     /// them so the remove/create dance never races (tests run in parallel by
-    /// default).
-    static IDENTITY_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    /// default). warp.rs's persisted-key test serializes on the same lock.
+    pub(crate) static IDENTITY_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     fn isolated_identity_dir() -> std::path::PathBuf {
         let dir = std::env::temp_dir().join("cf-scanner-warpgen-tests");
@@ -691,6 +753,7 @@ mod tests {
             account_type: "free".into(),
             license: None,
             created_at: 1,
+            peer_public_key: None,
         };
         save_identity(&identity).unwrap();
         let loaded = load_identity().unwrap();

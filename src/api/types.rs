@@ -298,6 +298,10 @@ pub enum ConfigError {
     Phase2OnlyNeedsConfigs,
     #[error("phase2_only is only valid in Cdn mode")]
     Phase2OnlyWrongMode,
+    #[error("preset targets are CDN-only; WARP scans take a count of endpoints")]
+    WarpPresetNotAllowed,
+    #[error("custom_cidrs is CDN-only; WARP takes custom_endpoints")]
+    WarpCidrsNotAllowed,
     #[error("custom fragment {0} must be an integer or a range like 100-200, got {1:?}")]
     InvalidFragment(&'static str, String),
 }
@@ -352,6 +356,12 @@ impl ScanConfig {
                 }
                 if self.phase2.is_some() {
                     return Err(ConfigError::Phase2WrongMode);
+                }
+                if let ScanTarget::Preset(_) = self.target {
+                    return Err(ConfigError::WarpPresetNotAllowed);
+                }
+                if !self.custom_cidrs.is_empty() {
+                    return Err(ConfigError::WarpCidrsNotAllowed);
                 }
                 if let Some(w) = &self.warp {
                     w.validate()?;

@@ -12,11 +12,12 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use anyhow::{Context as _, Result, anyhow, bail};
+use rand_core::{OsRng, RngCore};
 use serde_json::{Value, json};
 use sha2::{Digest as _, Sha256};
 
 use crate::api::types::{CustomFragment, FragmentPreset};
-use crate::configs::{OutboundSpec, Protocol, WsSettings};
+use crate::configs::{OutboundSpec, Protocol, WsSettings, sanitize_error_text};
 use crate::paths;
 use crate::ranges;
 
@@ -133,11 +134,16 @@ pub fn build_config(
     socks_port: u16,
 ) -> Result<Value> {
     let mut outbounds: Vec<Value> = vec![];
-    if let Some(frag) = fragment_outbound(preset, custom) {
+    // The chain exists only when the fragment outbound exists: a Custom preset
+    // with no values yields no fragment outbound, and a `dialerProxy` naming a
+    // missing tag would make xray refuse the whole config.
+    let fragment = fragment_outbound(preset, custom);
+    let has_fragment = fragment.is_some();
+    if let Some(frag) = fragment {
         outbounds.push(frag);
     }
     let mut proxy = build_outbound(spec, dial_ip, sni_override);
-    if preset != &FragmentPreset::Off {
+    if has_fragment {
         proxy["streamSettings"]["sockopt"] = json!({"dialerProxy": "fragment"});
     }
     outbounds.push(proxy);
@@ -189,11 +195,13 @@ pub async fn spawn(config_dir: &Path, xray_bin: &Path, config_json: &Value) -> R
         .spawn()
         .context("failed to spawn xray; is the binary present?")?;
 
-    // Stderr is xray's own diagnostics (glibc mismatches, corrupt binary);
-    // it never carries config material, so it is safe to log and to surface
-    // in the failure error — the only way a dead-on-arrival child is
-    // diagnosable.
-    let stderr_tail = capture_stderr(child.stderr.take().expect("stderr is piped"));
+    // Stderr is xray's own diagnostics (glibc mismatches, corrupt binary).
+    // Config-material values can show up in it (e.g. a parse-error dump), so
+    // every line is masked against the trial config's secrets before it is
+    // logged or kept for the failure error — the only way a dead-on-arrival
+    // child is diagnosable.
+    let secrets = config_secrets(config_json);
+    let stderr_tail = capture_stderr(child.stderr.take().expect("stderr is piped"), secrets);
 
     let socks_port = config_json
         .pointer("/inbounds/0/port")
@@ -287,6 +295,53 @@ async fn write_trial_config(path: &Path, config_json: &Value) -> Result<()> {
 
 const STDERR_TAIL_LINES: usize = 20;
 
+/// Credential-adjacent values embedded in the trial config; the stderr
+/// capture masks them so a diagnostic that echoes config material never
+/// leaks the user's id/password or fronting identity.
+fn config_secrets(config_json: &Value) -> Vec<String> {
+    let mut secrets = Vec::new();
+    let Some(outbounds) = config_json["outbounds"].as_array() else {
+        return secrets;
+    };
+    for outbound in outbounds {
+        if let Some(users) = outbound.pointer("/settings/vnext/0/users").and_then(Value::as_array) {
+            for user in users {
+                if let Some(id) = user["id"].as_str() {
+                    secrets.push(id.to_owned());
+                }
+            }
+        }
+        if let Some(servers) = outbound.pointer("/settings/servers").and_then(Value::as_array) {
+            for server in servers {
+                if let Some(password) = server["password"].as_str() {
+                    secrets.push(password.to_owned());
+                }
+            }
+        }
+        let stream = &outbound["streamSettings"];
+        if let Some(name) = stream.pointer("/tlsSettings/serverName").and_then(Value::as_str) {
+            secrets.push(name.to_owned());
+        }
+        if let Some(host) = stream.pointer("/wsSettings/headers/Host").and_then(Value::as_str) {
+            secrets.push(host.to_owned());
+        }
+    }
+    secrets
+}
+
+/// Replaces every secret occurrence with `***`, longest first so a value
+/// that is a prefix of another cannot leave a partial leak behind.
+fn mask_values(line: &str, secrets: &[String]) -> String {
+    let mut sorted = secrets.to_vec();
+    sorted.retain(|s| !s.is_empty());
+    sorted.sort_by_key(|s| std::cmp::Reverse(s.len()));
+    let mut out = line.to_owned();
+    for secret in sorted {
+        out = out.replace(&secret, "***");
+    }
+    out
+}
+
 /// Bounded stderr capture for a spawned child: lines are debug-logged as
 /// they arrive and the last `STDERR_TAIL_LINES` are kept for error reports.
 struct StderrCapture {
@@ -302,19 +357,24 @@ impl StderrCapture {
     }
 }
 
-fn capture_stderr(stderr: tokio::process::ChildStderr) -> StderrCapture {
+fn capture_stderr(stderr: tokio::process::ChildStderr, secrets: Vec<String>) -> StderrCapture {
     let tail = Arc::new(Mutex::new(Vec::new()));
-    let done = tokio::spawn(drain_stderr(stderr, tail.clone()));
+    let done = tokio::spawn(drain_stderr(stderr, tail.clone(), secrets));
     StderrCapture { tail, done }
 }
 
-async fn drain_stderr(stderr: tokio::process::ChildStderr, tail: Arc<Mutex<Vec<String>>>) {
+async fn drain_stderr(
+    stderr: tokio::process::ChildStderr,
+    tail: Arc<Mutex<Vec<String>>>,
+    secrets: Vec<String>,
+) {
     use tokio::io::AsyncBufReadExt as _;
     let mut lines = tokio::io::BufReader::new(stderr).lines();
     while let Ok(Some(line)) = lines.next_line().await {
-        tracing::debug!(stderr_line = %line, "xray stderr");
+        let masked = sanitize_error_text(&mask_values(&line, &secrets));
+        tracing::debug!(stderr_line = %masked, "xray stderr");
         let mut guard = tail.lock().unwrap();
-        guard.push(line);
+        guard.push(masked);
         if guard.len() > STDERR_TAIL_LINES {
             guard.remove(0);
         }
@@ -344,11 +404,25 @@ fn exe_name() -> &'static str {
 pub fn find_bundled() -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
     let parent = exe.parent()?;
+    find_bundled_in(parent)
+}
+
+fn find_bundled_in(parent: &Path) -> Option<PathBuf> {
     let candidates = [parent.to_path_buf(), parent.join("bundled")];
     candidates
         .into_iter()
         .map(|dir| dir.join(exe_name()))
-        .find(|path| path.is_file())
+        .find(|path| valid_bundled(path))
+}
+
+/// A bundled binary must be a real file with real content: release archives
+/// carry the actual xray, but the repo's tracked 0-byte placeholders (and
+/// any truncated write) must never be mistaken for a working binary. Real
+/// xray binaries are tens of megabytes, so 1 MiB is a safe floor.
+const MIN_BUNDLED_BYTES: u64 = 1 << 20;
+
+fn valid_bundled(path: &Path) -> bool {
+    path.is_file() && path.metadata().is_ok_and(|m| m.len() >= MIN_BUNDLED_BYTES)
 }
 
 /// Checked-out xray in the data dir (dev/fallback installs).
@@ -468,7 +542,14 @@ pub async fn download_binary(fetch: &impl BinaryFetch) -> Result<PathBuf> {
                 install_dest.display()
             );
         }
-        let tmp = PathBuf::from(format!("{}.tmp", install_dest.display()));
+        // Unique temp name (pid + randomness): two processes resolving the
+        // binary concurrently must not extract into the same file.
+        let tmp = install_dest.with_file_name(format!(
+            "{}.tmp-{}-{:08x}",
+            install_dest.file_name().unwrap_or_default().to_string_lossy(),
+            std::process::id(),
+            random_u32()
+        ));
         extract_xray_from_zip(&zip, &tmp)?;
         make_executable(&tmp)?;
         std::fs::rename(&tmp, &install_dest)?;
@@ -487,6 +568,10 @@ fn hex_lower(bytes: &[u8]) -> String {
         s.push_str(&format!("{b:02x}"));
     }
     s
+}
+
+fn random_u32() -> u32 {
+    RngCore::next_u32(&mut OsRng)
 }
 
 /// Parses XTLS `.dgst` text (the current format has no filename, just
@@ -582,6 +667,8 @@ mod tests {
                 packet_encoding: Some("xudp".to_owned()),
             }),
             tag: None,
+            alter_id: 0,
+            vmess_security: None,
         }
     }
 
@@ -709,7 +796,79 @@ mod tests {
     }
 
     #[test]
-    fn parses_realistic_dgst_text() {
+    fn custom_fragment_without_values_is_not_chained() {
+        // Custom preset with no values: no fragment outbound exists, so the
+        // proxy must not carry a dialerProxy naming a missing tag (xray
+        // would refuse the whole config).
+        let cfg = build_config(&spec(), dial(), &FragmentPreset::Custom, None, None, 28007).unwrap();
+        let outbounds = cfg["outbounds"].as_array().unwrap();
+        assert_eq!(outbounds.len(), 1);
+        assert!(outbounds[0]["streamSettings"].get("sockopt").is_none());
+        let custom = CustomFragment {
+            packets: "1-3".to_owned(),
+            length: "1-2".to_owned(),
+            interval: "3-4".to_owned(),
+        };
+        let cfg =
+            build_config(&spec(), dial(), &FragmentPreset::Custom, Some(&custom), None, 28008)
+                .unwrap();
+        let outbounds = cfg["outbounds"].as_array().unwrap();
+        assert_eq!(outbounds.len(), 2);
+        assert_eq!(
+            outbounds[1]["streamSettings"]["sockopt"]["dialerProxy"],
+            "fragment"
+        );
+    }
+
+    #[test]
+    fn stderr_lines_mask_config_secrets() {
+        let mut cfg = build_config(&spec(), dial(), &FragmentPreset::Light, None, None, 28009)
+            .unwrap();
+        let mut s = spec();
+        s.protocol = Protocol::Shadowsocks;
+        s.user_id = "shadowsocks-password".to_owned();
+        let cfg2 = build_config(&s, dial(), &FragmentPreset::Off, None, None, 28010).unwrap();
+        if let Some(ss_outbound) = cfg2["outbounds"].as_array().and_then(|a| a.first()) {
+            cfg["outbounds"]
+                .as_array_mut()
+                .unwrap()
+                .push(ss_outbound.clone());
+        }
+        let secrets = config_secrets(&cfg);
+        assert!(secrets.contains(&"aaaaaaaa-bbbb-cccc-dddd-eeeeffff0000".to_owned()));
+        assert!(secrets.contains(&"shadowsocks-password".to_owned()));
+        assert!(secrets.contains(&"front.example.com".to_owned()));
+        let masked = mask_values(
+            "failed to dial aaaaaaaa-bbbb-cccc-dddd-eeeeffff0000 via shadowsocks-password at front.example.com",
+            &secrets,
+        );
+        assert!(!masked.contains("aaaaaaaa-bbbb-cccc-dddd-eeeeffff0000"), "{masked}");
+        assert!(!masked.contains("shadowsocks-password"), "{masked}");
+        assert!(!masked.contains("front.example.com"), "{masked}");
+        assert_eq!(masked.matches("***").count(), 3, "{masked}");
+    }
+
+    #[test]
+    fn bundled_placeholder_files_are_not_valid() {
+        let dir = std::env::temp_dir().join(format!(
+            "cf-scanner-bundled-test-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("bundled")).unwrap();
+        let bundled = dir.join("bundled").join(exe_name());
+        std::fs::write(&bundled, b"").unwrap();
+        assert!(
+            find_bundled_in(&dir).is_none(),
+            "0-byte placeholder must not resolve"
+        );
+        std::fs::write(&bundled, vec![0u8; (MIN_BUNDLED_BYTES as usize) + 1]).unwrap();
+        assert_eq!(find_bundled_in(&dir), Some(bundled));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn parses_realistic_dgst_text() {
         // The format XTLS actually ships: labeled digests, no filename.
         let dgst = format!(
             "MD5= {}\nSHA1= {}\nSHA2-256= {}\nSHA2-512= {}",

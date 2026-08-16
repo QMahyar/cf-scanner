@@ -6,12 +6,14 @@ mod cdn;
 mod phase2;
 mod warp;
 
+use std::collections::HashSet;
 use std::net::IpAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Instant, SystemTime};
 
 use anyhow::{Result, anyhow};
+use tokio::sync::broadcast::error::TryRecvError;
 use tokio::sync::{broadcast, watch};
 
 use crate::api::types::{
@@ -108,6 +110,28 @@ impl ScanController {
         self.store.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
+    /// Rows that passed phase-2 verification (phase2_only summary semantics).
+    fn phase2_passed(&self) -> u64 {
+        self.store
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .filter(|v| v.phase2.as_ref().is_some_and(|p| p.passed))
+            .count() as u64
+    }
+
+    /// Rows still considered working after a phase-2 pass: candidates that
+    /// passed verification plus candidates phase 2 never touched (v6 finds
+    /// stay phase-1-only, so they keep counting as working).
+    fn working_found(&self) -> u64 {
+        self.store
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .filter(|v| v.phase2.as_ref().is_none_or(|p| p.passed))
+            .count() as u64
+    }
+
     /// True while a run is active; the server rejects new scans then.
     pub fn is_running(&self) -> bool {
         *self.running.lock().unwrap_or_else(|e| e.into_inner())
@@ -147,6 +171,20 @@ impl ScanController {
         }
     }
 
+    /// The run's cancel signal: one watch channel per run, reused by every
+    /// phase, so a cancel fired during phase 1 (or in the gap before phase
+    /// 2) is still visible to phase-2 workers and to `finish` — never lost
+    /// to a fresh channel install.
+    fn cancel_signal(&self) -> watch::Receiver<bool> {
+        let mut slot = self.cancel_tx.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(tx) = slot.as_ref() {
+            return tx.subscribe();
+        }
+        let (tx, rx) = watch::channel(false);
+        *slot = Some(tx);
+        rx
+    }
+
     pub async fn run(&self, cfg: ScanConfig) -> Result<ScanSummary> {
         self.run_seeded(cfg, time_seed()).await
     }
@@ -173,22 +211,62 @@ impl ScanController {
         let mut rx = self.subscribe();
         let controller = self.clone();
         let mut handle = tokio::spawn(async move { controller.run_seeded(cfg, seed).await });
+        // Rows this consumer already saw; every branch records into it so the
+        // end-of-run store re-sync only emits rows the consumer truly missed
+        // (fast consumers get exactly-once, lagging ones get a deduped tail).
+        let mut seen: HashSet<(IpAddr, u16)> = HashSet::new();
         loop {
             tokio::select! {
                 done = &mut handle => {
+                    let result = done?;
                     // The run may have finished with events still buffered;
-                    // deliver them so callers never miss the tail.
-                    while let Ok(e) = rx.try_recv() {
-                        on_event(e);
+                    // deliver them so callers never miss the tail. A receiver
+                    // that fell behind (Lagged) has dropped events: keep
+                    // draining past the gap, then re-emit store rows the
+                    // drain never delivered.
+                    loop {
+                        match rx.try_recv() {
+                            Ok(event) => {
+                                if let ScanEvent::Result(verdict) = &event {
+                                    seen.insert((verdict.ip, verdict.port));
+                                }
+                                on_event(event);
+                            }
+                            Err(TryRecvError::Empty | TryRecvError::Closed) => break,
+                            Err(TryRecvError::Lagged(_)) => continue,
+                        }
                     }
-                    return done?;
+                    // Verdicts still in worker-local batches when the
+                    // broadcast window overflowed are in the store, not the
+                    // stream: re-emit any row the consumer never saw (deduped
+                    // by (ip, port)) so a lagging consumer never loses one.
+                    for verdict in self.results() {
+                        if seen.insert((verdict.ip, verdict.port)) {
+                            on_event(ScanEvent::Result(Box::new(verdict)));
+                        }
+                    }
+                    return result;
                 }
                 recv = rx.recv() => match recv {
                     Ok(event @ ScanEvent::Finished(_)) => {
                         on_event(event);
+                        // The same tail reconciliation as the handle-done
+                        // branch: rows dropped from the broadcast window (and
+                        // not covered by an earlier re-sync) must still reach
+                        // the consumer exactly once.
+                        for verdict in self.results() {
+                            if seen.insert((verdict.ip, verdict.port)) {
+                                on_event(ScanEvent::Result(Box::new(verdict)));
+                            }
+                        }
                         return handle.await?;
                     }
-                    Ok(event) => on_event(event),
+                    Ok(event) => {
+                        if let ScanEvent::Result(verdict) = &event {
+                            seen.insert((verdict.ip, verdict.port));
+                        }
+                        on_event(event);
+                    }
                     Err(_) => {
                         // Lagged: the channel dropped missed events. Re-sync
                         // the authoritative store so a slow consumer never
@@ -198,7 +276,9 @@ impl ScanController {
                         // Duplicate rows are possible after a re-sync;
                         // consumers keyed on (ip, port) dedupe naturally.
                         for verdict in self.results() {
-                            on_event(ScanEvent::Result(Box::new(verdict)));
+                            if seen.insert((verdict.ip, verdict.port)) {
+                                on_event(ScanEvent::Result(Box::new(verdict)));
+                            }
                         }
                     }
                 },
@@ -317,10 +397,10 @@ fn plan_hosts_iter<'a>(
         PlanItem::Every { cidr } => Box::new((0..cidr.host_count()).map(move |i| cidr.host(i))),
         PlanItem::Sample { cidr, count } => {
             let count = (*count as u128).min(cidr.host_count());
-            // Full v4 /24 blocks skip network and broadcast addresses; every
-            // other block samples its whole host space.
-            let (draw_max, skip_net_bcast) = if cidr.addr.is_ipv4() && cidr.prefix == 24 {
-                (254u128, true)
+            // Dense v4 blocks (/24 and tighter) skip network and broadcast
+            // addresses; every other block samples its whole host space.
+            let (draw_max, skip_net_bcast) = if cidr.addr.is_ipv4() && cidr.prefix >= 24 {
+                (cidr.host_count().saturating_sub(2), true)
             } else {
                 (cidr.host_count(), false)
             };
@@ -334,7 +414,7 @@ fn plan_hosts_iter<'a>(
                 }
                 loop {
                     let idx = if skip_net_bcast {
-                        (rng.below(254) + 1) as u128
+                        (rng.below(draw_max.max(1) as u64) + 1) as u128
                     } else {
                         rng.below_u128(cidr.host_count())
                     };
@@ -615,5 +695,115 @@ mod tests {
         // Results must be latency-sorted in the store.
         let lats: Vec<u32> = results.iter().filter_map(|v| v.latency_ms).collect();
         assert!(lats.windows(2).all(|w| w[0] <= w[1]), "{lats:?}");
+    }
+
+    #[test]
+    fn sampling_skips_network_and_broadcast_for_dense_v4_blocks() {
+        let mut rng = SplitMix64::new(1);
+        // /25: network 10.0.0.0, broadcast 10.0.0.127; a count beyond the
+        // usable space must draw every usable host and neither edge.
+        let item = PlanItem::Sample {
+            cidr: ranges::parse_cidr("10.0.0.0/25").unwrap(),
+            count: 200,
+        };
+        let hosts: Vec<IpAddr> = plan_hosts_iter(&item, &mut rng).collect();
+        assert_eq!(hosts.len(), 126, "all usable /25 hosts must be drawn");
+        assert!(!hosts.contains(&"10.0.0.0".parse::<IpAddr>().unwrap()));
+        assert!(!hosts.contains(&"10.0.0.127".parse::<IpAddr>().unwrap()));
+
+        // /24 keeps its existing 254-usable-host behavior.
+        let item = PlanItem::Sample {
+            cidr: ranges::parse_cidr("10.0.0.0/24").unwrap(),
+            count: 300,
+        };
+        let hosts: Vec<IpAddr> = plan_hosts_iter(&item, &mut rng).collect();
+        assert_eq!(hosts.len(), 254);
+
+        // /31 and /32 have no usable host left once both edges are skipped.
+        for dense in ["10.0.0.0/31", "10.0.0.0/32"] {
+            let item = PlanItem::Sample {
+                cidr: ranges::parse_cidr(dense).unwrap(),
+                count: 4,
+            };
+            assert!(
+                plan_hosts_iter(&item, &mut rng).next().is_none(),
+                "{dense} must yield no hosts"
+            );
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn run_streaming_recovers_verdicts_an_overflowing_consumer_dropped() {
+        // A /22 (1024 hosts) emits more events than the 1024-slot broadcast
+        // window. The consumer parks on its first event until the scan
+        // itself has finished, so the receiver provably falls behind and
+        // the window drops messages before the end-of-run drain: every
+        // verdict must still arrive (store re-sync), each at least once.
+        let t = FakeTransport::new();
+        for i in 0..1024u32 {
+            t.insert(
+                format!("10.0.{}.{}", i / 256, i % 256).parse().unwrap(),
+                443,
+                Ok((i % 100) as u32),
+            );
+        }
+        let c = Arc::new(ScanController::new(Arc::new(t)));
+        let mut cfg = ok_cfg(1024, None);
+        cfg.custom_cidrs = vec!["10.0.0.0/22".to_owned()];
+        cfg.target = ScanTarget::Count(1024 + 100);
+        cfg.concurrency = 500;
+
+        let (park_tx, park_rx) = std::sync::mpsc::sync_channel::<()>(0);
+        let park_rx = Arc::new(std::sync::Mutex::new(park_rx));
+        let handle = tokio::spawn({
+            let c = c.clone();
+            let cfg = cfg.clone();
+            let park_rx = park_rx.clone();
+            async move {
+                let mut parked = false;
+                let events: Arc<Mutex<Vec<ScanEvent>>> = Arc::new(Mutex::new(Vec::new()));
+                let events_c = events.clone();
+                let summary = c
+                    .run_streaming(cfg, move |e| {
+                        if !parked {
+                            parked = true;
+                            let rx = park_rx.lock().unwrap_or_else(|e| e.into_inner());
+                            let _ = rx.recv();
+                        }
+                        events_c
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .push(e);
+                    })
+                    .await
+                    .unwrap();
+                let events = Arc::try_unwrap(events).ok().unwrap().into_inner().unwrap();
+                (summary, events)
+            }
+        });
+        while c.is_running() {
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+        // The scan finished (store fully flushed, Finished emitted); release
+        // the parked consumer and let the end-of-run drain + store re-sync run.
+        let _ = park_tx.send(());
+        let (summary, events) = handle.await.unwrap();
+        assert_eq!(summary.found, 1024);
+        let mut seen: HashSet<(IpAddr, u16)> = HashSet::new();
+        for e in &events {
+            if let ScanEvent::Result(v) = e {
+                seen.insert((v.ip, v.port));
+            }
+        }
+        assert_eq!(
+            seen.len(),
+            1024,
+            "every verdict must arrive at least once ({} unique of 1024)",
+            seen.len()
+        );
+        assert!(
+            events.iter().any(|e| matches!(e, ScanEvent::Finished(_))),
+            "the terminal event must arrive too"
+        );
     }
 }

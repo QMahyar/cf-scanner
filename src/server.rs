@@ -1563,6 +1563,7 @@ mod tests {
         .await;
         let mut c = cfg(1, 1);
         c.mode = crate::api::types::Mode::Warp;
+        c.custom_cidrs = vec![]; // CDN-only; WARP takes custom_endpoints
         c.warp = Some(crate::api::types::WarpConfig {
             wgconf: Some(
                 "PrivateKey = SECRETKEY123\nAddress = 172.16.0.2/32\n[Peer]\nPublicKey = kkk\nAllowedIPs = 0.0.0.0/0"
@@ -1692,6 +1693,7 @@ mod tests {
     fn warp_cfg_with_wgconf() -> ScanConfig {
         let mut c = cfg(1, 1);
         c.mode = Mode::Warp;
+        c.custom_cidrs = vec![]; // CDN-only; WARP takes custom_endpoints
         c.ports = vec![2408];
         c.warp = Some(WarpConfig {
             custom_endpoints: vec!["10.0.0.1".to_owned()],

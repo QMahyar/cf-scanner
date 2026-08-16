@@ -37,13 +37,15 @@ pub const SERVER_PUBLIC_KEY_B64: &str = "bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wP
 const DUMMY_STATIC_PRIVATE: [u8; 32] = [0u8; 32];
 
 fn server_public_key() -> PublicKey {
-    let bytes = base64::Engine::decode(
-        &base64::engine::general_purpose::STANDARD,
-        SERVER_PUBLIC_KEY_B64,
-    )
-    .expect("bundled WARP server key must decode");
+    // A registration refresh wins over the bundled constant; the identity
+    // file is only ever written by us (0o600, atomic), so a corrupt entry
+    // falls back silently.
+    let b64 = crate::warpgen::persisted_server_public_key()
+        .unwrap_or_else(|| SERVER_PUBLIC_KEY_B64.to_owned());
+    let bytes = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, b64)
+        .expect("WARP server key must decode");
     PublicKey::from(
-        <[u8; 32]>::try_from(bytes.as_slice()).expect("bundled WARP server key must be 32 bytes"),
+        <[u8; 32]>::try_from(bytes.as_slice()).expect("WARP server key must be 32 bytes"),
     )
 }
 
@@ -264,6 +266,28 @@ mod tests {
         )
         .unwrap();
         assert_eq!(decoded.len(), 32);
+    }
+
+    #[test]
+    fn persisted_server_key_overrides_the_bundled_constant() {
+        // Serialize against warpgen's identity tests: both mutate the
+        // process-global CF_SCANNER_DATA_DIR override.
+        let _guard = crate::warpgen::tests::IDENTITY_LOCK.lock().unwrap();
+        let dir = std::env::temp_dir().join("cf-scanner-warp-key-test");
+        unsafe { std::env::set_var("CF_SCANNER_DATA_DIR", &dir) };
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let key_b64 = base64::Engine::encode(
+            &base64::engine::general_purpose::STANDARD,
+            [7u8; 32],
+        );
+        let identity = format!(
+            r#"{{"id":"t","token":"t","private_key":"{}","client_id":"c","account_type":"free","license":null,"created_at":0,"peer_public_key":"{key_b64}"}}"#,
+            base64::Engine::encode(&base64::engine::general_purpose::STANDARD, [1u8; 32])
+        );
+        std::fs::write(dir.join("identity.json"), identity).unwrap();
+        assert_eq!(server_public_key().to_bytes(), [7u8; 32]);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
