@@ -70,8 +70,12 @@ with `cargo run --`.
 | `cargo test` | Unit + integration tests |
 | `cargo clippy --all-targets -- -D warnings` | Lint |
 | `cargo fmt --check` | Format check |
-| `dist plan` | Release dry-run (cargo-dist 0.32) |
-| `dist build --artifacts=all --tag=v0.3.0` | Build release artifacts (normally via CI) |
+| `dist plan --artifacts=all --tag=v0.4.0` | Release dry-run (cargo-dist 0.32) |
+| `dist build --artifacts=all --tag=v0.4.0` | Build release artifacts (normally via CI) |
+
+Release artifacts are built and published **only by CI** on tag push
+(tag → GitHub Actions → GitHub Release); never publish them manually — see
+`docs/release-process.md`.
 
 ## Architecture
 
@@ -104,9 +108,13 @@ Design rationale lives in [docs/decisions/](docs/decisions/).
 - **Termux (Android).** Termux builds static musl, but the xray
   linux-arm64 release is glibc — install Termux's glibc package or use the
   runtime fallback download instead of the bundled binary.
-- **Offline builds.** If the GeoIP download fails at build time, the binary
-  still builds with an empty embedded database (countries show "unknown").
-  The xray bundle is only attempted for release builds, never dev builds.
+- **Offline builds.** Building requires network for the one-time GeoIP
+  download: `build.rs` fetches the pinned `data/geoip-version.txt` release
+  and verifies its SHA-256 — a failed download or checksum mismatch **fails
+  the build** (no empty-db fallback). The validated database is cached in
+  `target/**/out`, so repeat builds are offline after the first one until
+  `cargo clean`. The xray bundle is only attempted for release builds, never
+  dev builds.
 
 ## Security
 
