@@ -44,8 +44,8 @@ git push origin vX.Y.Z          # the only trigger — never "publish" manually
         │
         ▼
 GitHub Actions "Release" workflow (release.yml)
-  gate        → test + clippy + fmt on the exact tagged commit (fail = no
-                artifacts; the same gates as checks.yml)
+  gate        → test + clippy + fmt + audit on the exact tagged commit (fail =
+                no artifacts; the same gates as checks.yml)
   cross-check → PRs only: cargo check --all-features on every release target
   plan        → resolves the 3-target matrix + manifest
   build-local → per target: dist build (bundles checksum-verified xray),
