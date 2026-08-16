@@ -1,15 +1,21 @@
-//! Property-style tests (no proptest dep): a seeded `SplitMix64` RNG drives
-//! (a) the CIDR exclusion split against a brute-force containment reference,
-//! and (b) wgconf render -> parse round-trips over random-but-valid key
-//! material. The split logic lives in `ranges.rs` (owned by another branch);
-//! it is tested here black-box through the public `CidrPool` API.
+//! Property-style tests: a seeded `SplitMix64` RNG drives (a) the CIDR
+//! exclusion split against a brute-force containment reference, and (b)
+//! wgconf render -> parse round-trips over random-but-valid key material.
+//! `proptest` drives (c) the config/wgconf/CIDR parsers: arbitrary input
+//! must never panic and known-good generated input must round-trip. The
+//! split logic lives in `ranges.rs`; it is tested here black-box through
+//! the public `CidrPool` API.
 
 use std::collections::HashSet;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use base64::Engine as _;
-use cf_scanner::ranges::{Cidr, CidrPool, SplitMix64};
-use cf_scanner::wgconf::{AmneziaParams, WgConfig, WgPeer, parse_wgconf, render_wgconf};
+use cf_scanner::configs::{Protocol, WsSettings, parse_uri};
+use cf_scanner::ranges::{Cidr, CidrPool, SplitMix64, parse_cidr};
+use cf_scanner::wgconf::{
+    AmneziaParams, WgConfig, WgPeer, parse_wg_entry, parse_wgconf, render_wgconf,
+};
+use proptest::prelude::*;
 
 // --- (a) CIDR exclusion split ----------------------------------------------
 
@@ -292,5 +298,205 @@ fn wgconf_render_parse_round_trips_random_valid_configs() {
         let reparsed = parse_wgconf(&text)
             .unwrap_or_else(|e| panic!("round {round} failed to parse:\n{text}\n{e:#}"));
         assert_eq!(wg, reparsed, "round {round} drifted:\n{text}");
+    }
+}
+
+// --- (c) parser fuzz + round-trips (proptest) -------------------------------
+
+#[test]
+fn parse_uri_known_good_samples_across_protocols() {
+    let vless = parse_uri(
+        "vless://00000000-0000-0000-0000-000000000000@104.17.160.217:2096\
+         ?encryption=none&security=tls&sni=edgetunnel.example.workers.dev&fp=chrome\
+         &type=ws&host=edgetunnel.example.workers.dev&path=/&packetEncoding=xudp#tag",
+    )
+    .unwrap();
+    assert_eq!(vless.protocol, Protocol::Vless);
+    assert_eq!(vless.user_id, "00000000-0000-0000-0000-000000000000");
+    assert_eq!(vless.server, "104.17.160.217");
+    assert_eq!(vless.port, 2096);
+    assert_eq!(vless.security, "tls");
+    assert_eq!(
+        vless.tls_server_name.as_deref(),
+        Some("edgetunnel.example.workers.dev")
+    );
+    assert_eq!(vless.fingerprint.as_deref(), Some("chrome"));
+    assert_eq!(
+        vless.ws,
+        Some(WsSettings {
+            path: "/".to_owned(),
+            host: Some("edgetunnel.example.workers.dev".to_owned()),
+            packet_encoding: Some("xudp".to_owned()),
+        })
+    );
+    assert_eq!(vless.tag.as_deref(), Some("tag"));
+
+    let trojan = parse_uri(
+        "trojan://topsecret@example.com:443?security=tls&sni=example.com&type=ws&path=/api#t",
+    )
+    .unwrap();
+    assert_eq!(trojan.protocol, Protocol::Trojan);
+    assert_eq!(trojan.user_id, "topsecret");
+    assert_eq!(trojan.server, "example.com");
+    assert_eq!(trojan.port, 443);
+    assert_eq!(trojan.security, "tls");
+    assert_eq!(trojan.tls_server_name.as_deref(), Some("example.com"));
+    assert_eq!(trojan.ws.as_ref().unwrap().path, "/api");
+
+    let creds = base64::engine::general_purpose::STANDARD.encode("aes-128-gcm:pw123");
+    let ss = parse_uri(&format!("ss://{creds}@9.9.9.9:8388#ss-tag")).unwrap();
+    assert_eq!(ss.protocol, Protocol::Shadowsocks);
+    assert_eq!(ss.method.as_deref(), Some("aes-128-gcm"));
+    assert_eq!(ss.user_id, "pw123");
+    assert_eq!(ss.server, "9.9.9.9");
+    assert_eq!(ss.port, 8388);
+    assert_eq!(ss.tag.as_deref(), Some("ss-tag"));
+
+    let json = r#"{"v":"2","ps":"vmess-tag","add":"5.6.7.8","port":"8443","id":"00000000-0000-0000-0000-000000000000","aid":"0","scy":"auto","net":"ws","type":"none","host":"cdn.example.com","path":"/warp","tls":"tls","sni":"cdn.example.com","fp":"firefox"}"#;
+    let b64 = base64::engine::general_purpose::STANDARD.encode(json);
+    let vmess = parse_uri(&format!("vmess://{b64}#My%20tag")).unwrap();
+    assert_eq!(vmess.protocol, Protocol::Vmess);
+    assert_eq!(vmess.server, "5.6.7.8");
+    assert_eq!(vmess.port, 8443);
+    assert_eq!(vmess.user_id, "00000000-0000-0000-0000-000000000000");
+    assert_eq!(vmess.security, "tls");
+    assert_eq!(vmess.tag.as_deref(), Some("My tag"));
+}
+
+/// Test-local vless renderer (no production renderer exists in configs.rs):
+/// the generated URI must parse back to exactly these fields.
+fn render_vless(
+    user_id: &str,
+    server: &str,
+    port: u16,
+    path: &str,
+    host: Option<&str>,
+    fp: &str,
+    xudp: bool,
+) -> String {
+    let mut uri = format!(
+        "vless://{user_id}@{server}:{port}?security=tls&type=ws&sni={server}&fp={fp}&path={path}"
+    );
+    if let Some(host) = host {
+        uri.push_str(&format!("&host={host}"));
+    }
+    if xudp {
+        uri.push_str("&packetEncoding=xudp");
+    }
+    uri
+}
+
+proptest! {
+    #[test]
+    fn uri_parser_never_panics_on_arbitrary_input(s in ".*") {
+        let _ = parse_uri(&s);
+    }
+
+    #[test]
+    fn vless_uri_round_trips_through_the_parser(
+        user_id in "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
+        server in "[a-z0-9]+(\\.[a-z0-9]+)*",
+        port in 1u16..=65535,
+        path in "(/[a-z0-9/_-]{1,24})",
+        host in prop::option::of(Just("front.example.com")),
+        fp in prop_oneof![Just("chrome"), Just("firefox"), Just("random")],
+        xudp in prop::bool::ANY,
+    ) {
+        let uri = render_vless(&user_id, &server, port, &path, host, fp, xudp);
+        let spec = parse_uri(&uri)
+            .unwrap_or_else(|e| panic!("generated URI must parse:\n{uri}\n{e:#}"));
+        assert_eq!(spec.protocol, Protocol::Vless);
+        assert_eq!(spec.user_id, user_id);
+        assert_eq!(spec.server, server);
+        assert_eq!(spec.port, port, "port must survive the round trip: {uri}");
+        assert!(spec.port >= 1, "parsed port must stay in range: {uri}");
+        assert_eq!(spec.security, "tls");
+        assert_eq!(spec.tls_server_name.as_deref(), Some(server.as_str()));
+        assert_eq!(spec.fingerprint.as_deref(), Some(fp));
+        assert_eq!(
+            spec.ws,
+            Some(WsSettings {
+                path: path.clone(),
+                host: host.map(str::to_owned),
+                packet_encoding: xudp.then(|| "xudp".to_owned()),
+            })
+        );
+    }
+
+    #[test]
+    fn wg_entry_never_panics_on_arbitrary_text(s in "\\PC{1,256}") {
+        let _ = parse_wg_entry(&s);
+    }
+
+    #[test]
+    fn wg_ini_round_trips_through_render_and_parse_wg_entry(
+        private_key in prop::array::uniform32(any::<u8>())
+            .prop_map(|b| base64::engine::general_purpose::STANDARD.encode(b)),
+        address in prop_oneof![
+            Just("172.16.0.2/32"),
+            Just("172.16.0.2/32, 2606:4700:110::1/128"),
+            Just(""),
+        ],
+        mtu in 0u16..=9000,
+        dns in prop_oneof![Just("1.1.1.1"), Just("")],
+        public_key in prop::array::uniform32(any::<u8>())
+            .prop_map(|b| base64::engine::general_purpose::STANDARD.encode(b)),
+        allowed_ips in prop_oneof![
+            Just("0.0.0.0/0, ::/0"),
+            Just("10.0.0.0/16"),
+            Just(""),
+        ],
+        endpoint in prop_oneof![Just("8.6.112.31:4198"), Just("")],
+    ) {
+        let wg = WgConfig {
+            private_key,
+            address: address.to_owned(),
+            dns: (!dns.is_empty()).then(|| dns.to_owned()),
+            mtu: Some(mtu),
+            amnezia: AmneziaParams::default(),
+            peer: WgPeer {
+                public_key,
+                preshared_key: None,
+                allowed_ips: if allowed_ips.is_empty() {
+                    vec![]
+                } else {
+                    allowed_ips.split(',').map(|p| p.trim().to_owned()).collect()
+                },
+                endpoint: (!endpoint.is_empty()).then(|| endpoint.to_owned()),
+                persistent_keepalive: None,
+            },
+        };
+        let text = render_wgconf(&wg);
+        let reparsed = parse_wg_entry(&text)
+            .unwrap_or_else(|e| panic!("rendered INI must parse:\n{text}\n{e:#}"));
+        assert_eq!(reparsed, wg, "round trip drifted:\n{text}");
+    }
+
+    #[test]
+    fn cidr_parser_never_panics_on_arbitrary_input(s in ".*") {
+        let _ = parse_cidr(&s);
+    }
+
+    #[test]
+    fn cidr_parses_and_reprints_canonically(addr in any::<Ipv4Addr>(), prefix in 0u8..=32) {
+        let c = parse_cidr(&format!("{addr}/{prefix}")).unwrap();
+        assert_eq!(c.prefix, prefix);
+        assert_eq!(
+            parse_cidr(&format!("{c}")).unwrap(),
+            c,
+            "the canonical reprint must re-parse to the same range"
+        );
+        assert!(c.addr.is_ipv4(), "a v6 range must not come from a v4 prefix");
+    }
+
+    #[test]
+    fn cidr_v6_parses_and_reprints_canonically(addr in any::<Ipv6Addr>(), prefix in 1u8..=128) {
+        let c = parse_cidr(&format!("{addr}/{prefix}")).unwrap();
+        assert_eq!(c.prefix, prefix);
+        assert_eq!(
+            parse_cidr(&format!("{c}")).unwrap(),
+            c,
+            "the canonical reprint must re-parse to the same range"
+        );
     }
 }
