@@ -55,7 +55,10 @@ Release flow (tag → CI → GitHub Release) is in `docs/release-process.md` —
   `sockopt.dialerProxy` chaining. Presets: light 100-200/10-20, medium
   50-200/10-40, heavy 10-300/5-50 (packets="tlshello").
 - WARP probe: boringtun builds Init (valid MAC1 required, MAC2 zeros OK);
-  Response (92B, type 2) or Cookie (64B, type 3) + receiver-index match = open.
+  open = shape-only classification: Response (92B, type 2) or Cookie (64B,
+  type 3) from the probed endpoint. No receiver-index match — Cloudflare
+  answers dummy-key probes with its own session index (verified live
+  2026-08-13).
 - Results: last-scan-only, in memory; reset clears. NO history, NO telemetry.
 - GeoIP: db-ip Lite mmdb embedded via include_bytes! + maxminddb 0.30
   (geoip2 types built in). Country offline; datacenter = colo from

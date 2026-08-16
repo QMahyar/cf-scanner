@@ -1,9 +1,11 @@
 # Implementation Plan: CF-Scanner
 
-> Superseded as the living ledger by `tasks/todo.md` and the
-> [finished-product review (2026-08-13)](../docs/review/product-review-2026-08-13.md).
-> The boxes below are historical: Tasks 1-14 are verified implemented
-> (CHANGELOG 0.1.0-0.3.0); open work lives in the review report.
+> Completed plan. Tasks 1-28 below are implemented and shipped (CHANGELOG
+> 0.1.0-0.3.0). The current phase is the post-review hardening cycle — the
+> `review/*` branches tracked in the
+> [finished-product review (2026-08-13)](../docs/review/product-review-2026-08-13.md),
+> `tasks/todo.md`, and `CHANGELOG.md`. The boxes below are historical
+> records, not open work.
 
 ## Overview
 
@@ -12,8 +14,9 @@ JSON-lines) over a shared engine. CDN mode (TCP/TLS phase-1 scan; xray-backed
 phase-2 real-config verification with DPI fragmentation) and WARP mode (UDP
 endpoint discovery with real WireGuard handshake probes, optional wgconf
 verification, opt-in config registration). GeoIP offline (db-ip Lite mmdb),
-datacenter via /cdn-cgi/trace colo. Release via dist (5-target matrix, msi +
-shell + powershell installers, mmdb + xray bundled as ExtraArtifacts).
+datacenter via /cdn-cgi/trace colo. Release via dist (3-target matrix —
+Linux aarch64/x86_64 + Windows x86_64 — msi + shell + powershell installers,
+checksum-verified xray bundled in every archive; macOS dropped, see ADR-009).
 
 Source of truth: `docs/spec.md` (approved 2026-08-12) and
 `docs/intent/cf-scanner.md`.
@@ -130,11 +133,11 @@ Source of truth: `docs/spec.md` (approved 2026-08-12) and
 - [x] `dist plan --artifacts=all --tag=v0.1.0` green
 - [x] All tests/clippy/fmt green; review findings closed (optionals deferred)
 
-## Phase 7: v0.2 backlog (post-release)
+## Phase 7: v0.2/v0.3 backlog (post-release)
 
-Candidate tasks only — nothing here is approved spec yet. Each item needs a
-spec pass before implementation; API contract changes (per AGENTS.md) ask
-first. Sized S/M; pick up from the top.
+All shipped: the items below were candidate tasks that went through the
+normal review gates and landed in v0.2.0/v0.3.0. Nothing here is open work —
+see the review report for what remains.
 
 - [x] Task 20: CI hardening - checkout@v6 (Node 20 deprecation), `cargo audit`
       as a Checks job (security gate moves from local-only to enforced).
@@ -156,8 +159,10 @@ first. Sized S/M; pick up from the top.
 - [x] Task 28: `ranges refresh` periodic background refresh + last-updated
       timestamp in the UI.
 
-**Checkpoint H: v0.2 features complete** (delegated: 4 parallel branches +
-PRs #1-#4, merged 2026-08-13, 193 tests green).
+**Checkpoint H: v0.2 features complete** — 4 parallel branches + PRs #1-#4,
+merged 2026-08-13, 193 tests green; v0.3.0 shipped after (custom design
+system, /api/status, toast system, multi-format export, profile
+sanitization).
 
 ## Risks and Mitigations
 

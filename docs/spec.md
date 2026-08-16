@@ -70,7 +70,11 @@ src/
   main.rs            CLI entry (clap): serve | scan | ranges | wizard |
                      warp-config
   server.rs          axum app: API routes, SSE, static frontend
-  engine.rs          ScanController: orchestration, stop conditions, progress
+  engine/            ScanController: orchestration, stop conditions, progress
+    mod.rs           controller, event stream re-sync, pool planning/sampling
+    cdn.rs           CDN phase-1 probe loop + phase-2 handoff
+    phase2.rs        phase-2 real-config verification orchestration
+    warp.rs          WARP UDP probe orchestration
   ranges.rs          bundled CF ranges, refresh, custom CIDR, exclusions
   xray.rs            xray binary management: download/cache/checksum, spawn,
                      config build (fragment/sockopt), per-IP verdict
@@ -117,7 +121,8 @@ wix/                 MSI installer source
 - Naming: snake_case; verbs for tasks (`probe`, `verify`), nouns for types
   (`Verdict`, `ScanConfig`).
 - No comments unless explaining WHY (doubt-driven style); no dead code;
-  `#![deny(warnings)]` in CI.
+  clippy runs with `--all-targets -- -D warnings` in CI (enforced by the
+  CI invocation, not by a crate-level attribute).
 
 Example (style reference):
 

@@ -43,7 +43,8 @@ cf-scanner scan --mode warp --ports 2408,500
 Expected outcomes:
 
 - Open endpoints (Response/Cookie packet shape) with latency + loss %;
-  `--ipv6` opt-in and custom endpoint lists work.
+  custom endpoint lists (`--warp-endpoints`) work. (`--ipv6` is CDN-only —
+  the CLI rejects it for WARP; see `src/main.rs`.)
 
 Record: probe count, open count (e.g. "183/204 open"), ports that answered,
 loss/latency ranges, wall time.

@@ -77,7 +77,11 @@ targets (aarch64-unknown-linux-gnu, x86_64-pc-windows-msvc) are validated by
 the CI release matrix; the asset-name mapping in `build.rs` (`xray_asset`)
 must stay in sync with XTLS release naming (arm64 = `-v8a` suffix).
 macOS targets were dropped from the matrix (no signing certs, Gatekeeper
-blocks unsigned binaries — see ADR-009).
+blocks unsigned binaries — see ADR-009). Note: `build.rs` (`xray_asset`)
+and `src/xray.rs` still map macOS assets — that mapping is dead code after
+ADR-009; keep it in sync with XTLS naming anyway, but never promise macOS
+binaries in the README/spec or re-add the targets without Apple
+signing/notarization.
 
 ## Troubleshooting
 
