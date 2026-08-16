@@ -10,8 +10,12 @@ env:
 
 jobs:
   checks:
-    name: test + clippy + fmt
-    runs-on: ubuntu-latest
+    name: test + clippy + fmt (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@master
@@ -19,6 +23,8 @@ jobs:
           toolchain: "1.85"
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
       - name: Build
         run: cargo build --all-targets --locked
       - name: Test
@@ -28,6 +34,9 @@ jobs:
       - name: Clippy
         run: cargo clippy --all-targets --locked -- -D warnings
       - name: Format
+        # fmt is platform-independent; the windows leg is skipped so a CRLF
+        # working tree (no .gitattributes) cannot produce a spurious diff.
+        if: ${{ runner.os != 'Windows' }}
         run: cargo fmt --check
 
   coverage:
@@ -41,6 +50,8 @@ jobs:
           components: llvm-tools-preview
       - uses: taiki-e/install-action@cargo-llvm-cov
       - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
       - name: Measure coverage + gate
         run: cargo llvm-cov --all-targets --locked --lcov --output-path lcov.info --fail-under-lines 70
       - uses: actions/upload-artifact@v4
@@ -68,6 +79,39 @@ jobs:
             exit 1
           fi
 
+  xray-parity:
+    name: xray pin parity
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Assert pinned tag + bundle/probe parity
+        shell: bash
+        run: |
+          tag=$(cat data/xray-version.txt)
+          case "$tag" in
+            v[0-9]*.[0-9]*.[0-9]*) ;;
+            *)
+              echo "::error::data/xray-version.txt is not a vX.Y.Z tag: '$tag'"
+              exit 1
+              ;;
+          esac
+          grep -q 'xray-version.txt' src/xray.rs || {
+            echo "::error::xray probe (src/xray.rs) no longer reads data/xray-version.txt"
+            exit 1
+          }
+          grep -q 'xray-version.txt' build.rs || {
+            echo "::error::xray bundle step (build.rs) no longer reads data/xray-version.txt"
+            exit 1
+          }
+          # The release bundle downloads XRAY_BASE/<tag>/Xray-*.zip; a pinned
+          # tag XTLS never published fails every release build, so fail fast
+          # on PRs instead of at tag-push.
+          code=$(curl -fsSL -o /dev/null -w '%{http_code}' "https://github.com/XTLS/Xray-core/releases/tag/$tag" 2>/dev/null || echo 000)
+          if [ "$code" != "200" ]; then
+            echo "::error::XTLS release for $tag not found (HTTP $code); release bundling would fail"
+            exit 1
+          fi
+
   audit:
     name: cargo audit
     runs-on: ubuntu-latest
@@ -77,6 +121,8 @@ jobs:
         with:
           toolchain: "1.85"
       - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
       - name: Install cargo-audit
         run: cargo install cargo-audit --locked
       - name: Audit dependencies
