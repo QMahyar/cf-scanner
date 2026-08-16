@@ -3,7 +3,7 @@
 All notable changes to CF-Scanner are documented here, grouped by
 Added / Changed / Fixed / Deprecated / Removed / Security, newest on top.
 
-## [Unreleased]
+## [0.4.0] - 2026-08-16
 
 Review-driven hardening from the
 [finished-product review (2026-08-13)](docs/review/product-review-2026-08-13.md).
@@ -74,7 +74,43 @@ Changes merged by the `review/*` branches land here.
 - README customer quickstart; docs index + QA runbook; task-tracker
   reconciliation.
 
-## [0.3.0] - 2026-08-13
+### Added
+- Property-test suites (proptest) for the config/URI parsers, wgconf, and
+  the chunked-transfer decoder; `decode_chunked` now has bounds tests
+  (huge sizes, truncation, malformed streams).
+- CLI: WARP scans without `--count` now default to the full bundled pool;
+  `--phase2-only` and `--cap 0` are rejected up front; `--phase2-custom`
+  requires `--phase2-configs` + a custom fragment preset.
+- API: `/api/warp/register` is rate-limited (1 per 60 s) and refuses to
+  replace an existing identity unless `overwrite:true` is sent — the UI
+  retries once with consent on a 409.
+- API: custom CIDRs/endpoints that are non-routable (loopback, link-local,
+  unspecified, RFC1918, ULA) are rejected with a 400; the CLI stays
+  unrestricted.
+- WARP scans driven over the API use the canonical WARP port set when the
+  caller left the default port.
+
+### Changed
+- CLI: wizard prose moved to stderr (the wgconf export stays on stdout);
+  Ctrl+C during the wizard exits 0; a closed output pipe cancels the scan
+  instead of panicking; `shutdown_signal` no longer parks forever.
+- Server: an SSE consumer that falls irrecoverably behind is disconnected
+  instead of being replayed a stale run; a client connecting after a run
+  ended gets exactly one terminal event replayed (tagged by run epoch).
+- UI: toast auto-dismiss works under reduced motion; the progress title is
+  throttled; IPv6 sorts correctly; a new run's generation guard stops
+  replayed terminal events from older runs; loading a profile no longer
+  clobbers user-configured ports; results sort by latency by default with
+  missing values last; reconnect refreshes progress.
+- CI: the release workflow attests artifacts (`id-token`/`attestations`
+  permissions), its gate runs test + clippy + fmt + audit and blocks the
+  host job; checks run on Windows too; a parity job fails fast if the
+  pinned xray release disappears; the MSI ships the MIT license; rust-cache
+  re-added.
+- Test fixtures no longer carry real credentials (UUIDs/private keys
+  replaced with inert zeroed values).
+
+## [0.4.0] - 2026-08-16
 
 ### Added
 - `GET /api/status` endpoint returning server version and scan state.
