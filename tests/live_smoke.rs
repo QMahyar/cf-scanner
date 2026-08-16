@@ -12,8 +12,12 @@ fn install_crypto() {
 }
 
 #[tokio::test]
-#[ignore = "hits the user's subscription endpoint; needs CFSCANNER_SUB_URL"]
+#[ignore = "network; hits the user's subscription endpoint; needs CFSCANNER_SUB_URL"]
 async fn subscription_endpoint_returns_parseable_configs() {
+    if std::env::var("CFSCANNER_SUB_URL").is_err() {
+        eprintln!("skipping: subscription tests are gated on CFSCANNER_SUB_URL");
+        return;
+    }
     install_crypto();
     let url = std::env::var("CFSCANNER_SUB_URL").expect("CFSCANNER_SUB_URL not set");
     let parsed = fetch_subscription(&RealSubFetch, &url)
@@ -31,8 +35,8 @@ async fn subscription_endpoint_returns_parseable_configs() {
 }
 
 /// Genuinely dials the fixture's live Cloudflare worker endpoint. The dial is
-/// a short TCP connect (the anycast IP refuses on blocked networks), so a
-/// filtered/offline network SKIPS instead of failing the ignored run.
+/// a short TCP connect; once the gate is enabled, a refused/timeout dial is a
+/// test FAILURE (an ISP-blocked network must never read as a pass).
 #[tokio::test]
 #[ignore = "network; dials the live Cloudflare IP from the fixture"]
 async fn vless_fixture_dials_its_own_server() {
@@ -52,13 +56,7 @@ async fn vless_fixture_dials_its_own_server() {
     .await
     {
         Ok(Ok(_stream)) => {}
-        Ok(Err(err)) => {
-            eprintln!("skipping: {addr} refused the dial ({err})");
-            return;
-        }
-        Err(_) => {
-            eprintln!("skipping: dial to {addr} timed out");
-            return;
-        }
+        Ok(Err(err)) => panic!("{addr} refused the dial ({err})"),
+        Err(_) => panic!("dial to {addr} timed out"),
     }
 }

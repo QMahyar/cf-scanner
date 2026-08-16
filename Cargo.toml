@@ -45,6 +45,9 @@ url = "2.5.8"
 webpki-roots = "0.26"
 zip = { version = "7.2.0", default-features = false, features = ["deflate"] }
 
+[dev-dependencies]
+proptest = "1"
+
 [features]
 # dist-only: build.rs bundles the checksum-verified xray binary into release
 # archives (see dist-workspace.toml). Dev builds never enable this.

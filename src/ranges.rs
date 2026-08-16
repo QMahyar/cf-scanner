@@ -1923,4 +1923,102 @@ mod tests {
             .unwrap_err();
         assert!(err.to_string().contains("timed out"), "{err}");
     }
+
+    // --- decode_chunked bounds (review r6) -----------------------------------
+
+    /// Chunk-encodes `data` (one or two chunks) the way real chunked
+    /// responses do: `size\r\n data \r\n ... 0\r\n\r\n`.
+    fn encode_chunked(data: &[u8]) -> Vec<u8> {
+        if data.is_empty() {
+            return b"0\r\n\r\n".to_vec();
+        }
+        let mut out = Vec::new();
+        for chunk in [&data[..data.len() / 2], &data[data.len() / 2..]] {
+            if chunk.is_empty() {
+                continue;
+            }
+            out.extend_from_slice(format!("{:x}\r\n", chunk.len()).as_bytes());
+            out.extend_from_slice(chunk);
+            out.extend_from_slice(b"\r\n");
+        }
+        out.extend_from_slice(b"0\r\n\r\n");
+        out
+    }
+
+    #[test]
+    fn decode_chunked_empty_input_and_terminal_chunk() {
+        // Empty input has no CRLF-terminated size line: the decoder must
+        // reject it, not loop or panic (matches its actual semantics).
+        assert!(decode_chunked(b"").is_err());
+        // A lone terminal chunk decodes to nothing.
+        assert_eq!(decode_chunked(b"0\r\n").unwrap(), b"");
+        assert_eq!(decode_chunked(b"0\r\n\r\n").unwrap(), b"");
+    }
+
+    #[test]
+    fn decode_chunked_single_chunk_and_concatenated_chunks() {
+        assert_eq!(
+            decode_chunked(b"5\r\nhello\r\n0\r\n\r\n").unwrap(),
+            b"hello"
+        );
+        let body = b"5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n";
+        assert_eq!(decode_chunked(body).unwrap(), b"hello world");
+        // Chunk-size extensions (`;ext`) and uneven chunk lengths are legal.
+        assert_eq!(
+            decode_chunked(b"5;ext=1\r\nhello\r\n0\r\n").unwrap(),
+            b"hello"
+        );
+        assert_eq!(
+            decode_chunked(b"1\r\na\r\n2\r\nbc\r\n0\r\n").unwrap(),
+            b"abc"
+        );
+    }
+
+    #[test]
+    fn decode_chunked_rejects_huge_sizes_without_allocating() {
+        // 0xffffffff overflows the 64 MiB cap on the FIRST chunk: the size
+        // check runs before any buffer growth.
+        assert!(decode_chunked(b"ffffffff\r\n").is_err());
+        // A huge size mid-stream is rejected after the earlier chunks decode.
+        assert!(decode_chunked(b"1\r\na\r\nffffffff\r\n").is_err());
+        // A size that would cross the cap only when accumulated is rejected
+        // by the same check (the first chunk decodes, then the cap binds).
+        assert!(
+            decode_chunked(&format!("1\r\na\r\n{:x}\r\n", MAX_BODY_BYTES).into_bytes()).is_err()
+        );
+    }
+
+    #[test]
+    fn decode_chunked_rejects_truncated_and_malformed_streams() {
+        assert!(decode_chunked(b"5\r\nhel").is_err()); // body shorter than size
+        assert!(decode_chunked(b"5\r\nhello\r").is_err()); // missing trailing CRLF
+        assert!(decode_chunked(b"5\r\nhello\r\n0\r").is_err()); // truncated terminal
+        assert!(decode_chunked(b"zz\r\n").is_err()); // non-hex chunk size
+        assert!(decode_chunked(b"5z\r\n").is_err()); // hex digit followed by garbage
+        assert!(decode_chunked(b"10\r\n0123456789").is_err()); // declared 16, got 10
+        assert!(decode_chunked(&[0xff, 0xff, b'\r', b'\n']).is_err()); // non-UTF-8 size
+    }
+
+    #[test]
+    fn decode_chunked_ignores_bytes_after_the_terminal_chunk() {
+        // The decoder returns as soon as the 0-size line parses: HTTP
+        // trailer lines (`X-foo: bar`) and the final CRLF are never read.
+        assert_eq!(
+            decode_chunked(b"5\r\nhello\r\n0\r\nX-Trail: yes\r\n\r\n").unwrap(),
+            b"hello"
+        );
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn decode_chunked_round_trips_arbitrary_payloads(data in proptest::collection::vec(proptest::prelude::any::<u8>(), 0..512)) {
+            let encoded = encode_chunked(&data);
+            assert_eq!(decode_chunked(&encoded).unwrap(), data);
+        }
+
+        #[test]
+        fn decode_chunked_never_panics_on_arbitrary_bytes(data in proptest::collection::vec(proptest::prelude::any::<u8>(), 0..512)) {
+            let _ = decode_chunked(&data);
+        }
+    }
 }

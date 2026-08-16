@@ -6,7 +6,7 @@
 
 use std::collections::BTreeMap;
 
-use anyhow::{Result, anyhow, bail};
+use anyhow::{anyhow, bail, Result};
 use base64::Engine as _;
 use url::Url;
 
@@ -69,7 +69,7 @@ pub fn parse_wg_entry(entry: &str) -> Result<WgConfig> {
 ///
 /// let wg = parse_wgconf(
 ///     "[Interface]\n\
-///      PrivateKey = 39l0houfixtSIA4O3MQRDMX5fBNUQw72H+RivqX2EbI=\n\
+///      PrivateKey = AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\n\
 ///      Address = 172.16.0.2/32\n\
 ///      [Peer]\n\
 ///      PublicKey = bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=\n\
@@ -278,7 +278,7 @@ fn build_wg_config(
 ///
 /// let wg = parse_wgconf(
 ///     "[Interface]\n\
-///      PrivateKey = 39l0houfixtSIA4O3MQRDMX5fBNUQw72H+RivqX2EbI=\n\
+///      PrivateKey = AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\n\
 ///      [Peer]\n\
 ///      PublicKey = bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=\n",
 /// )
@@ -391,7 +391,7 @@ mod tests {
         let wg = parse_wgconf(INI_FIXTURE).unwrap();
         assert_eq!(
             wg.private_key,
-            "39l0houfixtSIA4O3MQRDMX5fBNUQw72H+RivqX2EbI="
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
         );
         assert_eq!(
             wg.address,
@@ -428,7 +428,7 @@ mod tests {
             let wg = parse_wg_entry(line).unwrap();
             assert_eq!(
                 wg.private_key,
-                "39l0houfixtSIA4O3MQRDMX5fBNUQw72H+RivqX2EbI="
+                "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
             );
             assert_eq!(
                 wg.address,
@@ -461,19 +461,19 @@ mod tests {
 
     #[test]
     fn parser_is_case_insensitive_and_comment_tolerant() {
-        let text = "[interface]\nprivatekey = 39l0houfixtSIA4O3MQRDMX5fBNUQw72H+RivqX2EbI=\n# comment\n; also a comment\n[Peer]\nPUBLICKEY = bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=\n";
+        let text = "[interface]\nprivatekey = AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\n# comment\n; also a comment\n[Peer]\nPUBLICKEY = bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=\n";
         let wg = parse_wgconf(text).unwrap();
         assert!(wg.peer.endpoint.is_none());
     }
 
     #[test]
     fn rejects_missing_or_garbage_keys() {
-        let non_canonical_padding = INI_FIXTURE.replace("RivqX2EbI=", "RivqX2EbI");
+        let non_canonical_padding = INI_FIXTURE.replace("AAA=", "AAA");
         for bad in [
             "",
             "[Interface]\nAddress = 172.16.0.2/32\n",
             "[Interface]\nPrivateKey = ZG9uZ28=\n",
-            "[Peer]\nPublicKey = 39l0houfixtSIA4O3MQRDMX5fBNUQw72H+RivqX2EbI=\n",
+            "[Peer]\nPublicKey = AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\n",
             non_canonical_padding.as_str(),
         ] {
             assert!(
@@ -494,7 +494,7 @@ mod tests {
     #[test]
     fn decode_key_accepts_only_32_bytes() {
         assert_eq!(
-            decode_key("39l0houfixtSIA4O3MQRDMX5fBNUQw72H+RivqX2EbI=")
+            decode_key("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
                 .unwrap()
                 .len(),
             32
@@ -504,7 +504,7 @@ mod tests {
 
     #[test]
     fn missing_optional_fields_stay_optional() {
-        let wg = parse_wgconf("[Interface]\nPrivateKey = 39l0houfixtSIA4O3MQRDMX5fBNUQw72H+RivqX2EbI=\n[Peer]\nPublicKey = bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=\n")
+        let wg = parse_wgconf("[Interface]\nPrivateKey = AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\n[Peer]\nPublicKey = bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=\n")
             .unwrap();
         assert_eq!(wg.mtu, None);
         assert_eq!(wg.peer.endpoint, None);
@@ -517,26 +517,26 @@ mod tests {
     fn crlf_line_endings_and_stray_lines_are_tolerated() {
         // Windows-copied INI text arrives with CRLF; stray non-key lines
         // (e.g. pasted banner text) must not fail the batch.
-        let text = "[Interface]\r\nPrivateKey = 39l0houfixtSIA4O3MQRDMX5fBNUQw72H+RivqX2EbI=\r\nthis is not a key line\r\n[Peer]\r\nPublicKey = bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=\r\n";
+        let text = "[Interface]\r\nPrivateKey = AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\r\nthis is not a key line\r\n[Peer]\r\nPublicKey = bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=\r\n";
         let wg = parse_wgconf(text).unwrap();
         assert!(wg.peer.endpoint.is_none());
         assert_eq!(
             wg.private_key,
-            "39l0houfixtSIA4O3MQRDMX5fBNUQw72H+RivqX2EbI="
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
         );
     }
 
     #[test]
     fn unknown_sections_and_duplicate_keys_are_handled() {
         // Unknown sections are skipped; duplicate keys follow last-wins.
-        let text = "[Interface]\nPrivateKey = 39l0houfixtSIA4O3MQRDMX5fBNUQw72H+RivqX2EbI=\nMTU = 1000\nMTU = 1500\n[Other]\nWhatever = 1\n[Peer]\nPublicKey = bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=\n";
+        let text = "[Interface]\nPrivateKey = AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\nMTU = 1000\nMTU = 1500\n[Other]\nWhatever = 1\n[Peer]\nPublicKey = bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=\n";
         let wg = parse_wgconf(text).unwrap();
         assert_eq!(wg.mtu, Some(1500));
     }
 
     #[test]
     fn allowed_ips_split_tolerates_spaces() {
-        let wg = parse_wgconf("[Interface]\nPrivateKey = 39l0houfixtSIA4O3MQRDMX5fBNUQw72H+RivqX2EbI=\n[Peer]\nPublicKey = bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=\nAllowedIPs = 0.0.0.0/0, ::/0\n")
+        let wg = parse_wgconf("[Interface]\nPrivateKey = AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\n[Peer]\nPublicKey = bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=\nAllowedIPs = 0.0.0.0/0, ::/0\n")
             .unwrap();
         assert_eq!(wg.peer.allowed_ips, vec!["0.0.0.0/0", "::/0"]);
     }
@@ -549,12 +549,12 @@ mod tests {
 
     #[test]
     fn awg_uri_percent_decodes_key_characters() {
-        // `+` inside base64 must survive raw AND percent-encoded.
-        let uri = "wg://8.47.69.246:7103?private_key=39l0houfixtSIA4O3MQRDMX5fBNUQw72H%2BRivqX2EbI%3D&public_key=bmXOC%2BF1FxEMF9dyiK2H5%2F1SUtzH0JuVo51h2wPfgyo%3D";
+        // `+`/`/`/`=` inside base64 must survive raw AND percent-encoded.
+        let uri = "wg://8.47.69.246:7103?private_key=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA%3D&public_key=bmXOC%2BF1FxEMF9dyiK2H5%2F1SUtzH0JuVo51h2wPfgyo%3D";
         let wg = parse_wg_entry(uri).unwrap();
         assert_eq!(
             wg.private_key,
-            "39l0houfixtSIA4O3MQRDMX5fBNUQw72H+RivqX2EbI="
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
         );
         assert_eq!(
             wg.peer.public_key,

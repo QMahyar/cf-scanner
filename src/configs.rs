@@ -164,7 +164,7 @@ pub async fn fetch_subscription(fetch: &impl SubFetch, url: &str) -> Result<Subs
 /// use cf_scanner::configs::parse_uri;
 ///
 /// let spec = parse_uri(
-///     "vless://6086b6d5-6874-4299-8ef9-33b01a2125aa@104.17.160.217:2096\
+///     "vless://00000000-0000-0000-0000-000000000000@104.17.160.217:2096\
 ///      ?security=tls&type=ws&path=/&host=front.example.com&fp=chrome#tag",
 /// )
 /// .unwrap();
@@ -630,7 +630,7 @@ mod tests {
         assert_eq!(spec.protocol, Protocol::Vless);
         assert_eq!(spec.server, "104.17.160.217");
         assert_eq!(spec.port, 2096);
-        assert_eq!(spec.user_id, "6086b6d5-6874-4299-8ef9-33b01a2125aa");
+        assert_eq!(spec.user_id, "00000000-0000-0000-0000-000000000000");
         assert_eq!(spec.security, "tls");
         assert_eq!(
             spec.tls_server_name.as_deref(),
@@ -761,7 +761,7 @@ mod tests {
           "outbounds": [
             {"tag": "xray-tag", "protocol": "vless",
              "settings": {"vnext": [{"address": "104.17.160.217", "port": 2096,
-               "users": [{"id": "6086b6d5-6874-4299-8ef9-33b01a2125aa", "encryption": "none"}]}]},
+               "users": [{"id": "00000000-0000-0000-0000-000000000000", "encryption": "none"}]}]},
              "streamSettings": {"network": "ws", "security": "tls",
                "tlsSettings": {"serverName": "edgetunnel.workers.dev", "fingerprint": "chrome"},
                "wsSettings": {"path": "/", "headers": {"Host": "edgetunnel.workers.dev"},
@@ -772,7 +772,7 @@ mod tests {
         assert_eq!(spec.protocol, Protocol::Vless);
         assert_eq!(spec.server, "104.17.160.217");
         assert_eq!(spec.port, 2096);
-        assert_eq!(spec.user_id, "6086b6d5-6874-4299-8ef9-33b01a2125aa");
+        assert_eq!(spec.user_id, "00000000-0000-0000-0000-000000000000");
         assert_eq!(spec.security, "tls");
         assert_eq!(
             spec.tls_server_name.as_deref(),
@@ -908,5 +908,72 @@ mod tests {
         let json = r#"{"add":"1.2.3.4","port":"abc","id":"u"}"#;
         let b64 = base64::engine::general_purpose::STANDARD.encode(json);
         assert!(parse_uri(&format!("vmess://{b64}")).is_err());
+    }
+
+    // --- sanitize_error_text / redact_line table (review r6) -----------------
+
+    #[test]
+    fn sanitize_error_text_redacts_secret_shapes() {
+        let cases: &[(&str, &str)] = &[
+            // Raw userinfo is masked, path kept.
+            (
+                "fetch failed: https://user:pass@example.com/x",
+                "fetch failed: https://***@example.com/x",
+            ),
+            // Percent-encoded userinfo (`%40` = '@') is masked too.
+            (
+                "fetch failed: https://user%40pass@example.com/x",
+                "fetch failed: https://***@example.com/x",
+            ),
+            // Query/fragment (the usual id/password carrier) is cut first,
+            // so a stray '@' in the query cannot defeat the userinfo mask.
+            (
+                "https://user:pass@example.com/x?id=secret&token=abc#frag",
+                "https://***@example.com/x",
+            ),
+            // An '@' after a space is prose, not userinfo: left alone.
+            (
+                "email me at admin@example.com or use https://example.com",
+                "email me at admin@example.com or use https://example.com",
+            ),
+            // Lines without a scheme are untouched by design (the redactor
+            // only masks URL-shaped text; prose stays readable).
+            ("user:pass@example.com/x", "user:pass@example.com/x"),
+        ];
+        for (input, want) in cases {
+            assert_eq!(
+                sanitize_error_text(input),
+                *want,
+                "input {input:?} must redact to {want:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn sanitize_error_text_strips_control_characters() {
+        let input = "line one\x07 with bell\x1b[31m and escape\u{0085}newline";
+        let out = sanitize_error_text(input);
+        assert!(!out.contains('\x07') && !out.contains('\x1b') && !out.contains('\u{0085}'));
+        assert!(out.contains("line one") && out.contains("escape") && out.contains("newline"));
+    }
+
+    #[test]
+    fn sanitize_error_text_truncates_over_long_lines() {
+        // The length must live in the path: query/fragment is stripped by the
+        // redactor before truncation ever runs.
+        let long = format!("https://example.com/{}", "a".repeat(600));
+        let out = sanitize_error_text(&long);
+        assert!(out.ends_with('…'), "truncation marker missing: {out}");
+        assert_eq!(out.chars().count(), MAX_ERROR_LINE_BYTES + 1);
+        // Multi-line input truncates per line, not as one blob.
+        let two = format!(
+            "https://example.com/{}\nhttps://example.com/{}",
+            "a".repeat(600),
+            "b".repeat(600)
+        );
+        let both = sanitize_error_text(&two);
+        let lines: Vec<&str> = both.lines().collect();
+        assert_eq!(lines.len(), 2);
+        assert!(lines.iter().all(|l| l.ends_with('…')));
     }
 }
