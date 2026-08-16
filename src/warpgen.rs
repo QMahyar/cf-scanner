@@ -275,6 +275,11 @@ fn load_identity() -> Result<Identity> {
     serde_json::from_str(&json).context("corrupt identity file")
 }
 
+/// True when a registration identity is already persisted.
+pub fn has_identity() -> bool {
+    load_identity().is_ok()
+}
+
 /// Public: the WARP server public key persisted at registration, if any. The
 /// probe prefers this over the bundled constant (a registration refresh).
 pub fn persisted_server_public_key() -> Option<String> {

@@ -259,9 +259,20 @@ fn build_scan_config(args: &ScanArgs) -> Result<ScanConfig> {
     if mode == Mode::Warp && args.ipv6 {
         return Err(anyhow!("--ipv6 is CDN-only; WARP pools are IPv4"));
     }
+    if args.phase2_only {
+        return Err(anyhow!(
+            "--phase2-only needs phase-1 results from a running scan; one-shot scans cannot use it"
+        ));
+    }
+    if args.cap == Some(0) {
+        return Err(anyhow!("--cap must be at least 1"));
+    }
     let target = match (args.preset, args.count) {
         (Some(preset), None) => ScanTarget::Preset(CdnPreset::from(preset)),
         (None, Some(count)) => ScanTarget::Count(count),
+        (None, None) if mode == Mode::Warp => {
+            ScanTarget::Count(cf_scanner::warp::bundled_pool().host_count() as u32)
+        }
         (None, None) => ScanTarget::Preset(CdnPreset::Quick),
         _ => unreachable!("clap enforces preset/count exclusivity"),
     };
@@ -328,6 +339,13 @@ fn build_phase2(args: &ScanArgs) -> Result<Option<api::types::Phase2Config>> {
         }
         None => None,
     };
+    if args.phase2_custom.is_some()
+        && (args.phase2_configs.is_empty() || fragment != api::types::FragmentPreset::Custom)
+    {
+        return Err(anyhow!(
+            "--phase2-custom requires --phase2-configs and --phase2-fragment custom"
+        ));
+    }
     if fragment == api::types::FragmentPreset::Custom && custom_fragment.is_none() {
         return Err(anyhow!(
             "--phase2-fragment custom requires --phase2-custom \"length,interval\""
@@ -389,7 +407,12 @@ async fn run(cli: Cli) -> Result<()> {
             let controller = Arc::new(engine::ScanController::new(Arc::new(
                 probe::TlsTransport::new(),
             )));
-            cli_wizard::run(controller).await
+            match cli_wizard::run(controller).await {
+                Ok(()) => Ok(()),
+                // Ctrl+C during the wizard is a user choice, not a failure.
+                Err(err) if err.to_string() == "interrupted" => Ok(()),
+                Err(err) => Err(err),
+            }
         }
         Command::Ranges { action } => match action {
             RangesAction::Refresh { ipv6 } => {
@@ -453,23 +476,28 @@ async fn run_scan(args: ScanArgs) -> Result<()> {
             }
         })
     };
+    let scan_controller = controller.clone();
+    let write_line = |line: &str| {
+        if write_stdout_line(line).is_err() {
+            eprintln!("output pipe closed; cancelling scan");
+            scan_controller.cancel();
+        }
+    };
     let streaming = |e: ScanEvent| match e {
         ScanEvent::Result(v) => {
             if let Some(line) = serialize_event(&v) {
-                write_stdout_line(&line);
+                write_line(&line);
             }
         }
         ScanEvent::Finished(s) => {
             if let Some(line) = serialize_event(&s) {
-                write_stdout_line(&line);
+                write_line(&line);
             }
         }
         ScanEvent::Phase2Progress(p) => {
             eprintln!("phase 2: {}/{} verified", p.done, p.total);
         }
-        ScanEvent::Failed(msg) => {
-            eprintln!("scan failed: {msg}");
-        }
+        ScanEvent::Failed(_msg) => {}
         ScanEvent::Progress(_) => {}
     };
     let result = match args.seed {
@@ -506,12 +534,12 @@ fn serialize_event<T: serde::Serialize>(value: &T) -> Option<String> {
 }
 
 /// NDJSON line to stdout. A downstream pipe that closed (e.g. `head`, jq)
-/// must stop the write, not kill the process with a panic.
-fn write_stdout_line(line: &str) {
+/// reports the write failure so the caller can cancel the pointless scan.
+fn write_stdout_line(line: &str) -> std::io::Result<()> {
     use std::io::Write as _;
     let mut out = std::io::stdout().lock();
-    let _ = writeln!(out, "{line}");
-    let _ = out.flush();
+    writeln!(out, "{line}")?;
+    out.flush()
 }
 
 async fn serve(port: u16) -> Result<()> {
@@ -553,9 +581,10 @@ fn serve_url(addr: std::net::SocketAddr) -> String {
 /// returns reaps xray children via their Drop::start_kill.
 async fn shutdown_signal(controller: Arc<engine::ScanController>) {
     if let Err(err) = tokio::signal::ctrl_c().await {
-        // A broken Ctrl+C hook must not take the server down; keep serving.
+        // A broken Ctrl+C hook must not hang shutdown; serve's graceful
+        // shutdown proceeds immediately.
         tracing::error!("could not listen for Ctrl+C: {err}");
-        std::future::pending::<()>().await;
+        return;
     }
     tracing::info!("shutting down; cancelling any active scan");
     controller.cancel();
@@ -617,6 +646,50 @@ mod tests {
     }
 
     #[test]
+    fn warp_defaults_to_the_full_pool() {
+        let mut a = args();
+        a.mode = ModeArg::Warp;
+        let cfg = build_scan_config(&a).unwrap();
+        assert_eq!(
+            cfg.target,
+            ScanTarget::Count(cf_scanner::warp::bundled_pool().host_count() as u32),
+            "WARP without --count must scan the whole bundled pool"
+        );
+    }
+
+    #[test]
+    fn phase2_only_is_rejected_in_one_shot_scans() {
+        let mut a = args();
+        a.phase2_only = true;
+        let err = build_scan_config(&a).unwrap_err();
+        assert!(err.to_string().contains("--phase2-only"), "{err:#}");
+    }
+
+    #[test]
+    fn phase2_custom_requires_configs_and_custom_fragment() {
+        // clap: --phase2-custom without --phase2-configs never parses.
+        let argv = ["cf-scanner", "scan", "--phase2-custom", "100-200,10-20"];
+        assert!(Cli::try_parse_from(argv).is_err());
+        // build: a custom fragment value with a non-custom preset is rejected.
+        let mut a = args();
+        a.phase2_configs = vec!["vless://a@1.2.3.4:443".to_owned()];
+        a.phase2_custom = Some("100-200,10-20".to_owned());
+        let err = build_scan_config(&a).unwrap_err();
+        assert!(err.to_string().contains("--phase2-custom"), "{err:#}");
+    }
+
+    #[test]
+    fn cap_zero_is_rejected() {
+        let mut a = args();
+        a.cap = Some(0);
+        let err = build_scan_config(&a).unwrap_err();
+        assert!(
+            err.to_string().contains("--cap must be at least 1"),
+            "{err:#}"
+        );
+    }
+
+    #[test]
     fn preset_wins_over_default_when_given() {
         let mut a = args();
         a.preset = Some(PresetArg::Full);
@@ -652,8 +725,8 @@ mod tests {
             "2408,500",
             "--exclude",
             "1.2.3.0/24,2.3.4.0/24",
-            "--custom-cidrs",
-            "10.0.0.0/24",
+            "--warp-endpoints",
+            "203.0.113.1,203.0.113.2:2408",
             "--target",
             "5",
             "--cap",
@@ -673,7 +746,7 @@ mod tests {
             cfg.exclude,
             vec!["1.2.3.0/24".to_owned(), "2.3.4.0/24".to_owned()]
         );
-        assert_eq!(cfg.custom_cidrs, vec!["10.0.0.0/24".to_owned()]);
+        assert_eq!(cfg.custom_cidrs, Vec::<String>::new());
         assert_eq!(
             cfg.stop,
             StopCondition {
@@ -683,7 +756,10 @@ mod tests {
         );
         let warp = cfg.warp.as_ref().unwrap();
         assert_eq!(warp.probes_per_endpoint, 3);
-        assert!(warp.custom_endpoints.is_empty());
+        assert_eq!(
+            warp.custom_endpoints,
+            vec!["203.0.113.1".to_owned(), "203.0.113.2:2408".to_owned()]
+        );
     }
 
     #[test]
