@@ -164,7 +164,7 @@ pub async fn fetch_subscription(fetch: &impl SubFetch, url: &str) -> Result<Subs
 /// use cf_scanner::configs::parse_uri;
 ///
 /// let spec = parse_uri(
-///     "vless://6086b6d5-6874-4299-8ef9-33b01a2125aa@104.17.160.217:2096\
+///     "vless://00000000-0000-0000-0000-000000000000@104.17.160.217:2096\
 ///      ?security=tls&type=ws&path=/&host=front.example.com&fp=chrome#tag",
 /// )
 /// .unwrap();
@@ -630,7 +630,7 @@ mod tests {
         assert_eq!(spec.protocol, Protocol::Vless);
         assert_eq!(spec.server, "104.17.160.217");
         assert_eq!(spec.port, 2096);
-        assert_eq!(spec.user_id, "6086b6d5-6874-4299-8ef9-33b01a2125aa");
+        assert_eq!(spec.user_id, "00000000-0000-0000-0000-000000000000");
         assert_eq!(spec.security, "tls");
         assert_eq!(
             spec.tls_server_name.as_deref(),
@@ -761,7 +761,7 @@ mod tests {
           "outbounds": [
             {"tag": "xray-tag", "protocol": "vless",
              "settings": {"vnext": [{"address": "104.17.160.217", "port": 2096,
-               "users": [{"id": "6086b6d5-6874-4299-8ef9-33b01a2125aa", "encryption": "none"}]}]},
+               "users": [{"id": "00000000-0000-0000-0000-000000000000", "encryption": "none"}]}]},
              "streamSettings": {"network": "ws", "security": "tls",
                "tlsSettings": {"serverName": "edgetunnel.workers.dev", "fingerprint": "chrome"},
                "wsSettings": {"path": "/", "headers": {"Host": "edgetunnel.workers.dev"},
@@ -772,7 +772,7 @@ mod tests {
         assert_eq!(spec.protocol, Protocol::Vless);
         assert_eq!(spec.server, "104.17.160.217");
         assert_eq!(spec.port, 2096);
-        assert_eq!(spec.user_id, "6086b6d5-6874-4299-8ef9-33b01a2125aa");
+        assert_eq!(spec.user_id, "00000000-0000-0000-0000-000000000000");
         assert_eq!(spec.security, "tls");
         assert_eq!(
             spec.tls_server_name.as_deref(),
