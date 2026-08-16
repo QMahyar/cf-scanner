@@ -893,7 +893,7 @@
 
     const results = [];
     const seenKeys = new Set();
-    let sortKey = null;
+    let sortKey = "latency_ms";
     let sortAsc = true;
     let lastCfg = null;
     let scanState = "idle"; // idle | starting | running | cancelled | done | failed
@@ -903,6 +903,9 @@
     let scannedCount = 0;
     let scanStartMs = 0;
     let elapsedTimer = null;
+    let lastTitleUpdate = 0;
+    let scanGeneration = 0;
+    let runGen = 0;
 
     const form = document.getElementById("scan-form");
     const tbody = document.getElementById("results-body");
@@ -959,6 +962,11 @@
       container.appendChild(t);
       if (duration > 0) {
         t._timer = setTimeout(() => dismissToast(t), duration);
+      }
+      if (matchMedia("(prefers-reduced-motion: reduce)").matches) {
+        // Reduced motion kills the toast's CSS animation, so animationend
+        // never fires and the toast would linger forever; use a timeout.
+        t._timer = setTimeout(() => dismissToast(t), 4000);
       }
       return t;
     }
@@ -1077,9 +1085,11 @@
       startBtn.classList.remove("is-running");
       cancelBtn.disabled = true;
       resetBtn.disabled = false;
+      lastTitleUpdate = 0;
       document.title = "CF-Scanner";
     }
     function beginRun() {
+      runGen = ++scanGeneration;
       scanState = "running";
       localCancel = false;
       reconnectLost = false;
@@ -1090,6 +1100,8 @@
       tableDirty = true;
       histDirty = true;
       latestProgress = null;
+      lastTitleUpdate = 0;
+      p2Progress.textContent = "";
       scannedCount = 0;
       statsEl.hidden = false;
       progressTrack.hidden = false;
@@ -1155,6 +1167,7 @@
       hideRetry();
       hideErrorCard();
       progressText.textContent = "";
+      progressText.hidden = true;
       const live = document.getElementById("results-live");
       if (live) {
         live.textContent = cancelled
@@ -1178,6 +1191,7 @@
       document.title = "Failed \u2014 CF-Scanner";
       hideErrorCard();
       progressText.textContent = "";
+      progressText.hidden = true;
       showRetry();
       flushNow();
     }
@@ -1253,9 +1267,28 @@
     }
 
     let sortedCache = null, cacheLen = 0, cacheKey = null, cacheAsc = true;
+    function ipv6Groups(ip) {
+      const s = ip.replace(/^\[|\]$/g, "").split("%")[0];
+      const halves = s.split("::");
+      const head = halves[0] ? halves[0].split(":").map(h => parseInt(h || "0", 16)) : [];
+      if (halves.length < 2) {
+        while (head.length < 8) head.push(0);
+        return head;
+      }
+      const tail = halves[1] ? halves[1].split(":").map(h => parseInt(h || "0", 16)) : [];
+      const pad = Math.max(0, 8 - head.length - tail.length);
+      return head.concat(new Array(pad).fill(0), tail);
+    }
     function cmpIp(a, b) {
-      const an = a.split(".").map(Number), bn = b.split(".").map(Number);
-      for (let i = 0; i < 4; i++) { const d = an[i] - bn[i]; if (d) return d; }
+      const a6 = a.includes(":"), b6 = b.includes(":");
+      if (a6 !== b6) return a6 ? 1 : -1;
+      if (!a6) {
+        const an = a.split(".").map(Number), bn = b.split(".").map(Number);
+        for (let i = 0; i < 4; i++) { const d = an[i] - bn[i]; if (d) return d; }
+        return 0;
+      }
+      const ag = ipv6Groups(a), bg = ipv6Groups(b);
+      for (let i = 0; i < 8; i++) { const d = (ag[i] || 0) - (bg[i] || 0); if (d) return d; }
       return 0;
     }
     function compareRows(a, b) {
@@ -1264,8 +1297,13 @@
       }
       if (sortKey === "ip") return sortAsc ? cmpIp(a.ip, b.ip) : cmpIp(b.ip, a.ip);
       const av = a[sortKey], bv = b[sortKey];
+      const aNull = av == null, bNull = bv == null;
+      if (aNull || bNull) {
+        if (aNull === bNull) return 0;
+        return aNull ? 1 : -1;
+      }
       if (typeof av === "string") return sortAsc ? (av < bv ? -1 : av > bv ? 1 : 0) : (bv < av ? -1 : bv > av ? 1 : 0);
-      return sortAsc ? (av ?? Infinity) - (bv ?? Infinity) : (bv ?? Infinity) - (av ?? Infinity);
+      return sortAsc ? av - bv : bv - av;
     }
     function sortedResults() {
       if (sortedCache && cacheLen === results.length && cacheKey === sortKey && cacheAsc === sortAsc) {
@@ -1406,7 +1444,11 @@
       progressText.textContent = text;
       progressText.hidden = false;
       const pctTitle = pct != null ? pct : null;
-      document.title = pctTitle !== null ? `Scanning ${pctTitle}% \u2014 CF-Scanner` : `Scanning\u2026 \u2014 CF-Scanner`;
+      const now = Date.now();
+      if (now - lastTitleUpdate >= 1000) {
+        lastTitleUpdate = now;
+        document.title = pctTitle !== null ? `Scanning ${pctTitle}% \u2014 CF-Scanner` : `Scanning\u2026 \u2014 CF-Scanner`;
+      }
     }
 
     const HIST_BUCKETS = [
@@ -1948,7 +1990,12 @@
         const resp = await fetch("/api/results");
         if (!resp.ok) return;
         const data = await resp.json();
-        if (!data || !Array.isArray(data.results) || data.results.length === 0) return;
+        if (!data || !Array.isArray(data.results)) return;
+        if (data.progress && typeof data.progress === "object") {
+          latestProgress = data.progress;
+          scheduleRender();
+        }
+        if (data.results.length === 0) return;
         results.length = 0;
         seenKeys.clear();
         data.results.forEach(v => {
@@ -1959,11 +2006,13 @@
       } catch { /* best effort */ }
     }
     async function reconcileTerminal() {
+      const gen = runGen;
       let data = null;
       try {
         const resp = await fetch("/api/results");
         if (resp.ok) data = await resp.json();
       } catch { /* fall through */ }
+      if (gen !== runGen) return;
       if (data && Array.isArray(data.results)) {
         results.length = 0;
         seenKeys.clear();
@@ -1985,6 +2034,8 @@
       startBtn.disabled = false;
       startBtn.innerHTML = START_LABEL_HTML;
       startBtn.classList.remove("is-running");
+      progressText.textContent = "";
+      progressText.hidden = true;
       showStatus("Scan ended \u2014 live updates were lost; results below may be partial.", "error");
       document.title = "Scan ended \u2014 CF-Scanner";
       showRetry();
@@ -2004,6 +2055,7 @@
           } else if (reconnectLost) {
             reconnectLost = false;
             showStatus("Scanning\u2026", "running");
+            loadResults();
           }
         } else if (scanState === "running") {
           await reconcileTerminal();
@@ -2121,11 +2173,26 @@
       warpGenBtn.disabled = true;
       hideErrorCard();
       try {
-        const resp = await fetch("/api/warp/register", {
+        const license = warpLicense.value.trim() || null;
+        let resp = await fetch("/api/warp/register", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ license: warpLicense.value.trim() || null })
+          body: JSON.stringify({ license })
         });
+        let replaced = false;
+        if (resp.status === 409) {
+          const firstMsg = await apiErrorMessage(resp, "Identity already registered (HTTP 409)");
+          replaced = true;
+          resp = await fetch("/api/warp/register", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ license, overwrite: true })
+          });
+          if (!resp.ok) {
+            showErrorCard(firstMsg + " \u2014 retry with overwrite also failed (HTTP " + resp.status + ")");
+            return;
+          }
+        }
         if (!resp.ok) {
           if (resp.status === 404) {
             showErrorCard("WARP registration is not available in this build (endpoint missing).");
@@ -2141,7 +2208,9 @@
         }
         wgconfField.value = data.wgconf;
         syncWarpVerify();
-        showToast("WARP config generated and loaded", "success");
+        showToast(replaced
+          ? "WARP config regenerated \u2014 previous identity replaced"
+          : "WARP config generated and loaded", "success");
       } catch (err) {
         showErrorCard("WARP registration failed: " + err);
       } finally {
@@ -2233,8 +2302,8 @@
     }
 
     function applyConfig(cfg) {
+      const userPorts = form.elements["ports"].value;
       form.elements["mode"].value = cfg.mode === "Warp" ? "Warp" : "Cdn";
-      form.elements["ports"].value = Array.isArray(cfg.ports) ? cfg.ports.join(",") : "443";
       form.elements["concurrency"].value = cfg.concurrency ?? 200;
       form.elements["timeout_ms"].value = cfg.timeout_ms ?? 3000;
       form.elements["include_v6"].checked = !!(cfg.include_v6);
@@ -2275,6 +2344,9 @@
       form.querySelector('input[name="mode"]:checked').dispatchEvent(new Event("change"));
       form.elements["phase2_fragment"].dispatchEvent(new Event("change"));
       syncWarpVerify();
+      // A loaded profile never clobbers user-configured ports; the mode
+      // change dispatched above may rewrite them, so restore after.
+      form.elements["ports"].value = userPorts;
     }
 
     document.getElementById("profile-save-btn").addEventListener("click", async () => {
