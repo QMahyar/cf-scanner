@@ -16,6 +16,15 @@ Changes merged by the `review/*` branches land here.
   stay CLI-only.
 - Profile responses mask WireGuard key material.
 - Trial xray configs written 0600; stale `trial-*` dirs swept on startup.
+- Trial config directories are removed on drop even when the attempt dies
+  mid-flight (cancel, shutdown) — plaintext-credential configs never survive
+  on disk.
+- xray stderr is masked against the trial config's credentials (user ids,
+  passwords, fronting SNI/Host) before it is logged or surfaced; error text
+  is sanitized (URL userinfo/query stripped, lines capped).
+- The WARP identity file is written 0600 (owner-only) atomically (temp +
+  rename), so the private key is never world-readable, not even for a
+  microsecond.
 - List fields (ports, SNIs, exclusions, CIDRs) capped and deduped.
 
 ### Performance
@@ -25,8 +34,35 @@ Changes merged by the `review/*` branches land here.
 ### Reliability
 - xray lifecycle: graceful shutdown reaps children, fast corrupt-binary
   detection, stderr surfaced (redacted), single pre-flight download.
+- Cancelling a scan now stops phase-2 verification too: one cancel signal is
+  shared across phases, so a cancel fired during phase 1 (or in the gap
+  before phase 2) halts tunnel probes immediately instead of leaving them
+  running.
+- The event stream re-syncs against the results store: a consumer that fell
+  behind (dropped events) is re-served the verdicts it missed at end of run,
+  deduplicated by endpoint, so results are never permanently lost.
+- With phase 2 enabled, the found-count summary reflects verified working
+  endpoints — candidates that failed verification no longer count as found.
 - Zero-candidate scans no longer destroy results; run failures surface
   instead of hanging the UI.
+- Bundled xray is size-checked so a corrupt or placeholder binary fails fast
+  with a clear error instead of a confusing run failure.
+
+### Changed
+- WARP input validation: `--preset` and `--custom-cidrs` are rejected for
+  WARP scans (both are CDN-only concepts — WARP takes `--count` +
+  `--warp-endpoints`); duplicate endpoints and ports are deduped so no
+  endpoint is probed twice.
+- Dense IPv4 blocks (/24 and tighter) sample only real hosts — network and
+  broadcast addresses are skipped.
+- The WARP server public key is persisted at registration and preferred over
+  the bundled constant, so probes keep working if Cloudflare rotates it.
+- VMess `alterId` and AEAD `security` settings pass through to the xray
+  config; `reality` security is rejected up front with a clear error (the
+  builder cannot emit a working reality outbound).
+- Phase-2 fragment wiring is gated: the `dialerProxy` chain is only attached
+  when a fragment outbound actually exists, so a custom preset with no
+  values can no longer produce a config xray refuses to run.
 
 ### UI
 - Scan-state machine rework: real "Cancelled" state, start/reset guards,
