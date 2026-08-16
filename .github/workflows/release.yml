@@ -142,6 +142,9 @@ jobs:
         with:
           toolchain: "1.85"
           targets: aarch64-unknown-linux-gnu, x86_64-pc-windows-msvc
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
       - name: Check host target with all features
         run: cargo check --locked --all-features
       - name: Check aarch64 linux
@@ -183,6 +186,9 @@ jobs:
         with:
           persist-credentials: false
           submodules: recursive
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
       - name: Install Rust non-interactively if not already installed
         if: ${{ matrix.container }}
         run: |
@@ -242,6 +248,9 @@ jobs:
         with:
           persist-credentials: false
           submodules: recursive
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
       - name: Install cached dist
         uses: actions/download-artifact@v8
         with:

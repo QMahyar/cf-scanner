@@ -23,6 +23,8 @@ jobs:
           toolchain: "1.85"
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
       - name: Build
         run: cargo build --all-targets --locked
       - name: Test
@@ -48,6 +50,8 @@ jobs:
           components: llvm-tools-preview
       - uses: taiki-e/install-action@cargo-llvm-cov
       - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
       - name: Measure coverage + gate
         run: cargo llvm-cov --all-targets --locked --lcov --output-path lcov.info --fail-under-lines 70
       - uses: actions/upload-artifact@v4
@@ -117,6 +121,8 @@ jobs:
         with:
           toolchain: "1.85"
       - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
       - name: Install cargo-audit
         run: cargo install cargo-audit --locked
       - name: Audit dependencies
