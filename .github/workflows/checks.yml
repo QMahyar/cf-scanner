@@ -10,8 +10,12 @@ env:
 
 jobs:
   checks:
-    name: test + clippy + fmt
-    runs-on: ubuntu-latest
+    name: test + clippy + fmt (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@master
@@ -28,6 +32,9 @@ jobs:
       - name: Clippy
         run: cargo clippy --all-targets --locked -- -D warnings
       - name: Format
+        # fmt is platform-independent; the windows leg is skipped so a CRLF
+        # working tree (no .gitattributes) cannot produce a spurious diff.
+        if: ${{ runner.os != 'Windows' }}
         run: cargo fmt --check
 
   coverage:
