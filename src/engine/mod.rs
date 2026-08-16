@@ -744,7 +744,7 @@ mod tests {
             t.insert(
                 format!("10.0.{}.{}", i / 256, i % 256).parse().unwrap(),
                 443,
-                Ok((i % 100) as u32),
+                Ok(i % 100),
             );
         }
         let c = Arc::new(ScanController::new(Arc::new(t)));

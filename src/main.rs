@@ -683,7 +683,10 @@ mod tests {
         let mut a = args();
         a.cap = Some(0);
         let err = build_scan_config(&a).unwrap_err();
-        assert!(err.to_string().contains("--cap must be at least 1"), "{err:#}");
+        assert!(
+            err.to_string().contains("--cap must be at least 1"),
+            "{err:#}"
+        );
     }
 
     #[test]
@@ -722,8 +725,8 @@ mod tests {
             "2408,500",
             "--exclude",
             "1.2.3.0/24,2.3.4.0/24",
-            "--custom-cidrs",
-            "10.0.0.0/24",
+            "--warp-endpoints",
+            "203.0.113.1,203.0.113.2:2408",
             "--target",
             "5",
             "--cap",
@@ -743,7 +746,7 @@ mod tests {
             cfg.exclude,
             vec!["1.2.3.0/24".to_owned(), "2.3.4.0/24".to_owned()]
         );
-        assert_eq!(cfg.custom_cidrs, vec!["10.0.0.0/24".to_owned()]);
+        assert_eq!(cfg.custom_cidrs, Vec::<String>::new());
         assert_eq!(
             cfg.stop,
             StopCondition {
@@ -753,7 +756,10 @@ mod tests {
         );
         let warp = cfg.warp.as_ref().unwrap();
         assert_eq!(warp.probes_per_endpoint, 3);
-        assert!(warp.custom_endpoints.is_empty());
+        assert_eq!(
+            warp.custom_endpoints,
+            vec!["203.0.113.1".to_owned(), "203.0.113.2:2408".to_owned()]
+        );
     }
 
     #[test]

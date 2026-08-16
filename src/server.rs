@@ -7,9 +7,10 @@ use std::collections::HashMap;
 use std::convert::Infallible;
 use std::fs;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, RwLock};
-use std::time::Duration;
+use std::pin::Pin;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, RwLock};
+use std::time::{Duration, Instant};
 
 use axum::extract::rejection::JsonRejection;
 use axum::extract::{FromRequest, Path, Request, State};
@@ -27,7 +28,9 @@ use tokio_stream::Stream;
 use tokio_stream::StreamExt as _;
 use tokio_stream::wrappers::BroadcastStream;
 
-use crate::api::types::{ScanConfig, ScanEvent, ScanSummary, Verdict};
+use crate::api::types::{
+    DEFAULT_PORT, DEFAULT_WARP_PORTS, Mode, ScanConfig, ScanEvent, ScanSummary, Verdict,
+};
 use crate::engine::ScanController;
 use crate::paths;
 use crate::ranges::{self, CidrPool, HttpGet};
@@ -41,6 +44,9 @@ const MAX_SSE_CONNECTIONS: usize = 4;
 /// Cap on saved profiles so an unauthenticated local caller cannot grow the
 /// in-memory map without bound (memory-DoS guard; review Domain 7).
 const MAX_PROFILES: usize = 50;
+/// WARP registration hits Cloudflare's registration endpoint; one attempt per
+/// 60 s keeps a stuck page from hammering it (process-wide, single-user app).
+const REGISTER_COOLDOWN: Duration = Duration::from_secs(60);
 /// Persisted profiles file inside the data dir (identity.json lives
 /// alongside it); written on every mutation, loaded at serve start so saved
 /// profiles survive restarts (review Domain 2, rec 10).
@@ -181,6 +187,14 @@ struct AppState {
     /// Where profiles.json lives; production = the data dir, tests = an
     /// isolated temp dir so no test touches a real user's profiles.
     profiles_dir: PathBuf,
+    /// Epoch of the latest started run; terminal events are tagged with it
+    /// so an SSE reconnect replays the current run's terminal only.
+    run_epoch: Arc<AtomicU64>,
+    /// Terminal (Finished/Failed) of the latest finished run, tagged with
+    /// its epoch; replayed to SSE clients that connect after the run ended.
+    last_terminal: Arc<Mutex<Option<(u64, ScanEvent)>>>,
+    /// Last WARP registration attempt, for the 1-per-60s limit.
+    last_register: Mutex<Option<Instant>>,
 }
 
 /// What /api/ranges serves: the current pool plus when it was last refreshed.
@@ -319,6 +333,9 @@ fn router_with_dir(
         sse_connections: Arc::new(AtomicUsize::new(0)),
         warp_register: registrar,
         profiles_dir,
+        run_epoch: Arc::new(AtomicU64::new(0)),
+        last_terminal: Arc::new(Mutex::new(None)),
+        last_register: Mutex::new(None),
     });
     Router::new()
         .route("/", get(index))
@@ -410,6 +427,8 @@ async fn start_scan(
     JsonBody(cfg): JsonBody<ScanConfig>,
 ) -> Result<StatusCode, ApiError> {
     cfg.validate().map_err(ApiError::bad_request)?;
+    let cfg = apply_warp_port_default(cfg);
+    reject_non_routable(&cfg).map_err(ApiError::bad_request)?;
     if let Some(phase2) = &cfg.phase2 {
         if let Some(local) = phase2.configs.iter().find(|c| !c.contains("://")) {
             return Err(ApiError::bad_request(format!(
@@ -424,14 +443,24 @@ async fn start_scan(
     if state.controller.is_running() {
         return Err(ApiError::conflict("a scan is already running"));
     }
+    let epoch = state.run_epoch.fetch_add(1, Ordering::SeqCst) + 1;
     let controller = state.controller.clone();
+    let last_terminal = Arc::clone(&state.last_terminal);
     tokio::spawn(async move {
-        if let Err(err) = controller.run(cfg).await {
-            tracing::error!(
-                "scan failed: {}",
-                crate::configs::sanitize_error_text(&format!("{err:#}"))
-            );
-        }
+        let outcome = controller.run(cfg).await;
+        // Record the terminal event so a client connecting after this run
+        // can replay it; the engine already broadcast it live.
+        let terminal = match outcome {
+            Ok(summary) => ScanEvent::Finished(summary),
+            Err(err) => {
+                let msg = crate::configs::sanitize_error_text(&format!("{err:#}"));
+                tracing::error!("scan failed: {msg}");
+                ScanEvent::Failed(msg)
+            }
+        };
+        *last_terminal
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some((epoch, terminal));
     });
     // The engine's running flag is set inside the spawned task, so keep the
     // lock until it lands; a racing second POST must see either the lock or
@@ -445,6 +474,73 @@ async fn start_scan(
     Ok(StatusCode::ACCEPTED)
 }
 
+/// The UI's default port 443 is meaningless for WARP (UDP); substitute the
+/// canonical WARP ports so API-driven WARP scans probe the right ones.
+fn apply_warp_port_default(mut cfg: ScanConfig) -> ScanConfig {
+    if cfg.mode == Mode::Warp && cfg.ports.as_slice() == [DEFAULT_PORT] {
+        cfg.ports = DEFAULT_WARP_PORTS.to_vec();
+    }
+    cfg
+}
+
+/// API-only guard against self-scanning non-routable custom input (the CLI
+/// stays unrestricted): custom CIDRs (CDN) and custom endpoints (WARP) must
+/// not name loopback, link-local, unspecified, private/RFC1918 or ULA space.
+fn reject_non_routable(cfg: &ScanConfig) -> Result<(), String> {
+    match cfg.mode {
+        Mode::Cdn => {
+            for cidr in &cfg.custom_cidrs {
+                let net = cidr.split('/').next().unwrap_or(cidr);
+                if banned(net) {
+                    return Err(format!(
+                        "custom_cidrs entry {cidr:?} is not routable over the API (CLI is unrestricted)"
+                    ));
+                }
+            }
+        }
+        Mode::Warp => {
+            let endpoints = cfg
+                .warp
+                .as_ref()
+                .map(|w| w.custom_endpoints.as_slice())
+                .unwrap_or(&[]);
+            for ep in endpoints {
+                let ip = crate::api::types::parse_endpoint(ep)
+                    .map(|(ip, _)| ip)
+                    .map_err(|_| format!("bad endpoint {ep:?}"))?;
+                if banned_ip(&ip) {
+                    return Err(format!(
+                        "custom endpoint {ep:?} is not routable over the API (CLI is unrestricted)"
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// True when `net` (a CIDR's network part) falls in a banned network. The
+/// explicit 0.0.0.0/8 check is needed because `is_unspecified` covers only
+/// exactly 0.0.0.0.
+fn banned(net: &str) -> bool {
+    net.parse::<std::net::IpAddr>()
+        .map(|addr| banned_ip(&addr))
+        .unwrap_or(false)
+}
+
+fn banned_ip(ip: &std::net::IpAddr) -> bool {
+    if ip.is_loopback() || ip.is_unspecified() {
+        return true;
+    }
+    match ip {
+        std::net::IpAddr::V4(v4) => v4.is_private() || v4.is_link_local() || v4.octets()[0] == 0,
+        std::net::IpAddr::V6(v6) => {
+            // ULA is fc00::/7 = first segment 0xfc00..=0xfdff.
+            v6.is_unicast_link_local() || matches!(v6.segments()[0], 0xfc00..=0xfdff)
+        }
+    }
+}
+
 /// One concurrent SSE stream per app slot; the slot is held by the returned
 /// stream for the connection's lifetime, so a dropped connection frees it.
 async fn events(
@@ -453,21 +549,54 @@ async fn events(
     let Some(_slot) = try_acquire_sse_slot(&state.sse_connections) else {
         return Err(ApiError::too_many("too many open event streams"));
     };
-    let stream = BroadcastStream::new(state.controller.subscribe()).filter_map(move |event| {
-        let _ = &_slot;
-        match event {
-            Ok(ScanEvent::Progress(p)) => Event::default().event("progress").json_data(p).ok(),
-            Ok(ScanEvent::Result(v)) => Event::default().event("result").json_data(*v).ok(),
-            Ok(ScanEvent::Finished(s)) => Event::default().event("finished").json_data(s).ok(),
-            Ok(ScanEvent::Phase2Progress(p)) => {
-                Event::default().event("phase2-progress").json_data(p).ok()
-            }
-            Ok(ScanEvent::Failed(msg)) => Event::default().event("failed").json_data(msg).ok(),
-            Err(_lagged) => None,
-        }
-        .map(Ok)
-    });
+    // A client connecting after the run ended gets its terminal event once:
+    // the broadcast tail would replay the whole finished run (terminal
+    // included), so the replay REPLACES the live stream instead of chaining
+    // onto it, keeping the terminal exactly-once per run. A run in progress
+    // (or starting) streams live with no replay.
+    let replay = if state.controller.is_running() {
+        None
+    } else {
+        state
+            .last_terminal
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+            .filter(|(epoch, _)| *epoch == state.run_epoch.load(Ordering::SeqCst))
+            .map(|(_, ev)| ev)
+    };
+    let stream: Pin<Box<dyn Stream<Item = Result<Event, Infallible>> + Send>> = match replay {
+        Some(ev) => Box::pin(tokio_stream::once((_slot, ev)).map(|(slot, event)| {
+            let _ = &slot;
+            Ok(map_event(event).unwrap_or_default())
+        })),
+        None => Box::pin(
+            BroadcastStream::new(state.controller.subscribe())
+                .take_while(|item| item.is_ok())
+                .filter_map(move |event| {
+                    let _ = &_slot;
+                    match event {
+                        Ok(ev) => map_event(ev).map(Ok),
+                        // A Lagged receiver has irrecoverably lost events;
+                        // take_while above ends the stream on the first one.
+                        Err(_lagged) => None,
+                    }
+                }),
+        ),
+    };
     Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
+}
+
+/// Maps an engine-domain event onto the SSE wire shape; None when the
+/// payload cannot serialize (never expected; the live path drops silently).
+fn map_event(ev: ScanEvent) -> Option<Event> {
+    match ev {
+        ScanEvent::Progress(p) => Event::default().event("progress").json_data(p).ok(),
+        ScanEvent::Result(v) => Event::default().event("result").json_data(*v).ok(),
+        ScanEvent::Finished(s) => Event::default().event("finished").json_data(s).ok(),
+        ScanEvent::Phase2Progress(p) => Event::default().event("phase2-progress").json_data(p).ok(),
+        ScanEvent::Failed(msg) => Event::default().event("failed").json_data(msg).ok(),
+    }
 }
 
 /// RAII SSE slot: acquire bumps the counter, drop releases it. The caller
@@ -513,11 +642,14 @@ async fn reset(State(state): State<Arc<AppState>>) -> StatusCode {
 }
 
 /// `POST /api/warp/register` body: the optional WARP+ license key; null or
-/// missing means a free account.
+/// missing means a free account. `overwrite: true` is required to replace an
+/// identity that is already persisted (a first registration never needs it).
 #[derive(Deserialize)]
 struct RegisterRequest {
     #[serde(default)]
     license: Option<String>,
+    #[serde(default)]
+    overwrite: Option<bool>,
 }
 
 #[derive(Serialize)]
@@ -542,6 +674,28 @@ async fn warp_register(
     State(state): State<Arc<AppState>>,
     JsonBody(req): JsonBody<RegisterRequest>,
 ) -> Result<Json<RegisterResponse>, ApiError> {
+    // Refuse to silently clobber an existing identity; the caller must
+    // explicitly opt in (first-time registration has no identity → proceeds).
+    if crate::warpgen::has_identity() && !req.overwrite.unwrap_or(false) {
+        return Err(ApiError::conflict(
+            "identity already registered; pass {\"overwrite\":true} to replace it",
+        ));
+    }
+    // Check-and-set before doing any work: the limit counts every attempt
+    // that gets past the overwrite guard (the guard rejection above does
+    // not consume the budget).
+    {
+        let mut last = state
+            .last_register
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if last.is_some_and(|at| at.elapsed() < REGISTER_COOLDOWN) {
+            return Err(ApiError::too_many(
+                "registration is rate-limited to one attempt per 60 s",
+            ));
+        }
+        *last = Some(Instant::now());
+    }
     let license = req
         .license
         .map(|l| l.trim().to_owned())
@@ -836,7 +990,7 @@ mod tests {
             target: ScanTarget::Count(count),
             stop: StopCondition { found, cap: None },
             // Explicit pool input keeps tests off the filesystem ranges.
-            custom_cidrs: vec!["10.0.0.0/29".to_owned()],
+            custom_cidrs: vec!["203.0.113.0/29".to_owned()],
             ports: vec![443],
             concurrency: 1,
             ..ScanConfig::default()
@@ -890,6 +1044,43 @@ mod tests {
 
     fn failing_registrar() -> WarpRegistrar {
         Arc::new(|_| Err(anyhow::anyhow!("upstream unreachable")))
+    }
+
+    /// Points `CF_SCANNER_DATA_DIR` at a throwaway dir and returns a guard
+    /// that removes any identity file when dropped. Serialized against
+    /// warpgen's identity tests (which flip the same process-global
+    /// variable), so no register test ever reads another test's identity —
+    /// or a real user's.
+    fn isolate_identity_dir() -> impl Drop {
+        let guard = crate::warpgen::tests::IDENTITY_LOCK.lock().unwrap();
+        let dir = std::env::temp_dir().join("cf-scanner-server-register-tests");
+        unsafe { std::env::set_var("CF_SCANNER_DATA_DIR", &dir) };
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        struct Cleanup {
+            _guard: std::sync::MutexGuard<'static, ()>,
+        }
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                let dir = std::env::temp_dir().join("cf-scanner-server-register-tests");
+                let _ = fs::remove_file(dir.join("identity.json"));
+            }
+        }
+        Cleanup { _guard: guard }
+    }
+
+    /// Registrar that persists a minimal identity file on success, as the
+    /// real warpgen register flow does, so the overwrite guard sees it.
+    fn identity_persisting_registrar() -> WarpRegistrar {
+        let dir = std::env::temp_dir().join("cf-scanner-server-register-tests");
+        Arc::new(move |_| {
+            fs::write(
+                dir.join("identity.json"),
+                r#"{"id":"t","token":"t","private_key":"aGFo","client_id":"c","account_type":"free","created_at":0}"#,
+            )
+            .unwrap();
+            Ok("fake-wgconf".to_owned())
+        })
     }
 
     /// Records the license each call received; returns the canned wgconf.
@@ -990,7 +1181,7 @@ mod tests {
     /// regardless of which hosts the seeded RNG draws.
     fn script_all_hosts(t: &FakeTransport, latency: u32) {
         for i in 0..8u8 {
-            t.insert(format!("10.0.0.{i}").parse().unwrap(), 443, Ok(latency));
+            t.insert(format!("203.0.113.{i}").parse().unwrap(), 443, Ok(latency));
         }
     }
 
@@ -1073,7 +1264,7 @@ mod tests {
         // attach window (no fixed sleeps: fast machines would flake).
         let mut t = FakeTransport::new();
         for i in 0..8u8 {
-            t = t.ok_slow(format!("10.0.0.{i}").parse().unwrap(), 443, 25, 500);
+            t = t.ok_slow(format!("203.0.113.{i}").parse().unwrap(), 443, 25, 500);
         }
         let addr = serve(t).await;
         let events = tokio::spawn(request(
@@ -1111,13 +1302,61 @@ mod tests {
         panic!("scan did not reach the running guard in time");
     }
 
+    /// Polls /api/status until the spawned run task has fully finished
+    /// (running flag cleared), then one more beat so the terminal-event
+    /// store — which lands microseconds after the flag clears — is visible
+    /// to a replaying connection.
+    async fn wait_until_idle(addr: SocketAddr) {
+        for _ in 0..200 {
+            let (status, text) = request(
+                addr,
+                "GET /api/status HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n",
+                None,
+            )
+            .await;
+            if status == 200 && text.contains("\"is_running\":false") {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        panic!("scan did not finish in time");
+    }
+
+    #[tokio::test]
+    async fn events_replay_the_terminal_of_the_latest_finished_run() {
+        // Fast hosts: the run ends quickly and the terminal store lands
+        // right after the running flag clears.
+        let t = FakeTransport::new();
+        for i in 0..8u8 {
+            t.insert(format!("203.0.113.{i}").parse().unwrap(), 443, Ok(10));
+        }
+        let addr = serve(t).await;
+        let body = cfg(1, 1);
+        assert_eq!(
+            post_scan(addr, &serde_json::to_string(&body).unwrap()).await,
+            202
+        );
+        wait_until_idle(addr).await;
+        // A connection after the run ended replays exactly one terminal
+        // event (not the whole finished-run tail).
+        let (status, text) = request(
+            addr,
+            "GET /api/events HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n",
+            Some("event: finished"),
+        )
+        .await;
+        assert_eq!(status, 200);
+        assert_eq!(text.matches("event: finished").count(), 1, "{text}");
+    }
+
     #[tokio::test]
     async fn second_scan_while_running_is_conflict() {
         // All /29 hosts probe slowly so the count-sampled plan keeps the run
         // alive while the second POST arrives.
         let mut t = FakeTransport::new();
         for i in 0..8u8 {
-            t = t.ok_slow(format!("10.0.0.{i}").parse().unwrap(), 443, 25, 500);
+            t = t.ok_slow(format!("203.0.113.{i}").parse().unwrap(), 443, 25, 500);
         }
         let addr = serve(t).await;
         let body = cfg(1, 1);
@@ -1255,7 +1494,7 @@ mod tests {
 
     #[tokio::test]
     async fn background_refresh_populates_last_updated() {
-        let ranges = RangesState::load_text("10.0.0.0/8", None);
+        let ranges = RangesState::load_text("203.0.113.0/24", None);
         ranges.spawn_refresh(
             Some(Duration::from_millis(20)),
             Arc::new(FakeHttp(OFFICIAL_FIXTURE)),
@@ -1280,7 +1519,7 @@ mod tests {
 
     #[tokio::test]
     async fn background_refresh_failure_keeps_last_good_data() {
-        let ranges = RangesState::load_text("10.0.0.0/8", Some("2026-01-01T00:00:00Z"));
+        let ranges = RangesState::load_text("203.0.113.0/24", Some("2026-01-01T00:00:00Z"));
         ranges.spawn_refresh(Some(Duration::from_millis(20)), Arc::new(FailingHttp));
         let addr = serve_with_ranges(FakeTransport::new(), ranges).await;
         // Let several failed cycles elapse; the state must not move.
@@ -1469,7 +1708,7 @@ mod tests {
         // (one 202, one 409), never two accepted runs.
         let mut t = FakeTransport::new();
         for i in 0..8u8 {
-            t = t.ok_slow(format!("10.0.0.{i}").parse().unwrap(), 443, 25, 500);
+            t = t.ok_slow(format!("203.0.113.{i}").parse().unwrap(), 443, 25, 500);
         }
         let addr = serve(t).await;
         let body = serde_json::to_string(&cfg(1, 1)).unwrap();
@@ -1583,6 +1822,7 @@ mod tests {
 
     #[tokio::test]
     async fn warp_register_with_null_license_returns_wgconf() {
+        let _isolated = isolate_identity_dir();
         let (registrar, seen) = recording_registrar("fake-wgconf-text");
         let addr = serve_with_registrar(
             FakeTransport::new(),
@@ -1598,6 +1838,7 @@ mod tests {
 
     #[tokio::test]
     async fn warp_register_forwards_the_license_string() {
+        let _isolated = isolate_identity_dir();
         let (registrar, seen) = recording_registrar("fake-wgconf-text");
         let addr = serve_with_registrar(
             FakeTransport::new(),
@@ -1612,19 +1853,22 @@ mod tests {
 
     #[tokio::test]
     async fn warp_register_absent_or_blank_license_is_none() {
+        let _isolated = isolate_identity_dir();
         let (registrar, seen) = recording_registrar("fake-wgconf-text");
-        let addr = serve_with_registrar(
-            FakeTransport::new(),
-            RangesState::load_text(BUNDLED_RANGES, None),
-            registrar,
-        )
-        .await;
         for body in [
             r#"{}"#,
             r#"{"license":null}"#,
             r#"{"license":""}"#,
             r#"{"license":"   "}"#,
         ] {
+            // A fresh app state per attempt: the 60 s registration cooldown
+            // would 429 a second POST on the same server.
+            let addr = serve_with_registrar(
+                FakeTransport::new(),
+                RangesState::load_text(BUNDLED_RANGES, None),
+                Arc::clone(&registrar),
+            )
+            .await;
             let (status, text) = post_register(addr, body).await;
             assert_eq!(status, 200, "{text}");
             assert_eq!(
@@ -1637,6 +1881,7 @@ mod tests {
 
     #[tokio::test]
     async fn warp_register_failure_returns_uniform_envelope() {
+        let _isolated = isolate_identity_dir();
         let addr = serve_with_registrar(
             FakeTransport::new(),
             RangesState::load_text(BUNDLED_RANGES, None),
@@ -1653,6 +1898,7 @@ mod tests {
 
     #[tokio::test]
     async fn warp_register_malformed_body_gets_uniform_400() {
+        let _isolated = isolate_identity_dir();
         let addr = serve_with_registrar(
             FakeTransport::new(),
             RangesState::load_text(BUNDLED_RANGES, None),
@@ -1665,6 +1911,113 @@ mod tests {
             serde_json::from_str(json_body(&text)).expect("error envelope is JSON");
         assert_eq!(parsed["error"], "Bad Request");
         assert!(parsed["message"].as_str().is_some_and(|m| !m.is_empty()));
+    }
+
+    #[tokio::test]
+    async fn register_is_rate_limited() {
+        let _isolated = isolate_identity_dir();
+        let addr = serve_with_registrar(
+            FakeTransport::new(),
+            RangesState::load_text(BUNDLED_RANGES, None),
+            canned_registrar(),
+        )
+        .await;
+        let (status, _) = post_register(addr, r#"{"license":null}"#).await;
+        assert_eq!(status, 200);
+        let (status, text) = post_register(addr, r#"{"license":null}"#).await;
+        assert_eq!(status, 429, "{text}");
+        let parsed: serde_json::Value = serde_json::from_str(json_body(&text)).unwrap();
+        assert_eq!(parsed["error"], "Too Many Requests");
+    }
+
+    #[tokio::test]
+    async fn register_refuses_overwrite_without_consent() {
+        let _isolated = isolate_identity_dir();
+        // First registration on a fresh app state: no identity yet → 200.
+        let addr = serve_with_registrar(
+            FakeTransport::new(),
+            RangesState::load_text(BUNDLED_RANGES, None),
+            identity_persisting_registrar(),
+        )
+        .await;
+        let (status, text) = post_register(addr, r#"{"license":null}"#).await;
+        assert_eq!(status, 200, "{text}");
+        // The persisted identity now exists: a plain re-register must 409...
+        let (status, text) = post_register(addr, r#"{"license":null}"#).await;
+        assert_eq!(status, 409, "{text}");
+        // ...and explicit consent replaces it (fresh app state: the 60 s
+        // cooldown is per app state, not per identity).
+        let addr = serve_with_registrar(
+            FakeTransport::new(),
+            RangesState::load_text(BUNDLED_RANGES, None),
+            canned_registrar(),
+        )
+        .await;
+        let (status, text) = post_register(addr, r#"{"license":null,"overwrite":true}"#).await;
+        assert_eq!(status, 200, "{text}");
+    }
+
+    #[tokio::test]
+    async fn scan_rejects_non_routable_custom_cidrs() {
+        let addr = serve(FakeTransport::new()).await;
+        for cidr in [
+            "127.0.0.1/32",   // loopback
+            "169.254.0.0/16", // link-local
+            "0.0.0.0/8",      // unspecified block
+            "10.0.0.0/8",     // RFC1918
+            "172.16.0.0/12",  // RFC1918
+            "192.168.1.0/24", // RFC1918
+            "::1/128",        // loopback v6
+            "::/128",         // unspecified v6
+            "fc00::/7",       // ULA
+            "fe80::/10",      // link-local v6
+        ] {
+            let mut c = cfg(1, 1);
+            c.custom_cidrs = vec![cidr.to_owned()];
+            let status = post_scan(addr, &serde_json::to_string(&c).unwrap()).await;
+            assert_eq!(status, 400, "custom_cidrs {cidr} must be rejected");
+        }
+        // TEST-NET ranges stay routable over the API.
+        assert_eq!(
+            post_scan(addr, &serde_json::to_string(&cfg(1, 1)).unwrap()).await,
+            202
+        );
+        // WARP endpoints: loopback rejected, TEST-NET accepted.
+        let mut c = cfg(1, 1);
+        c.mode = Mode::Warp;
+        c.custom_cidrs = vec![];
+        c.warp = Some(WarpConfig {
+            custom_endpoints: vec!["127.0.0.1".to_owned()],
+            ..WarpConfig::default()
+        });
+        assert_eq!(
+            post_scan(addr, &serde_json::to_string(&c).unwrap()).await,
+            400
+        );
+        c.warp.as_mut().unwrap().custom_endpoints = vec!["203.0.113.1".to_owned()];
+        assert_eq!(
+            post_scan(addr, &serde_json::to_string(&c).unwrap()).await,
+            202
+        );
+    }
+
+    #[test]
+    fn warp_scan_over_api_uses_warp_ports() {
+        // The UI's default port 443 is a TCP convention; WARP probes UDP and
+        // needs the canonical WARP port set.
+        let mut c = cfg(1, 1);
+        c.mode = Mode::Warp;
+        c.custom_cidrs = vec![];
+        let out = apply_warp_port_default(c);
+        assert_eq!(out.ports, DEFAULT_WARP_PORTS);
+        // Non-default port lists pass through untouched.
+        let mut c = cfg(1, 1);
+        c.mode = Mode::Warp;
+        c.custom_cidrs = vec![];
+        c.ports = vec![2408];
+        assert_eq!(apply_warp_port_default(c).ports, vec![2408]);
+        // CDN keeps the default port.
+        assert_eq!(apply_warp_port_default(cfg(1, 1)).ports, vec![443]);
     }
 
     #[tokio::test]
@@ -1696,7 +2049,7 @@ mod tests {
         c.custom_cidrs = vec![]; // CDN-only; WARP takes custom_endpoints
         c.ports = vec![2408];
         c.warp = Some(WarpConfig {
-            custom_endpoints: vec!["10.0.0.1".to_owned()],
+            custom_endpoints: vec!["203.0.113.1".to_owned()],
             wgconf: Some(
                 "PrivateKey = TOP-SECRET-WG-KEY\n[Peer]\nPublicKey = bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo="
                     .to_owned(),
