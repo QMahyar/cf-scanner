@@ -18,6 +18,10 @@
 - [ADR-005 — single binary, contract first](decisions/ADR-005-single-binary-contract-first.md)
 - [ADR-006 — no history, no telemetry](decisions/ADR-006-no-history-no-telemetry.md)
 - [ADR-007 — central versioning and publishing](decisions/ADR-007-central-versioning-and-publishing.md)
+- [ADR-008 — dist parity, release profile, tokio features](decisions/ADR-008-dist-parity-release-profile-and-tokio-features.md)
+- [ADR-009 — drop macOS release targets](decisions/ADR-009-drop-macos-release-targets.md)
+- [ADR-010 — API hardening](decisions/ADR-010-api-hardening.md)
+- [ADR-011 — contract boundary](decisions/ADR-011-contract-boundary.md)
 
 ## Engineering
 
