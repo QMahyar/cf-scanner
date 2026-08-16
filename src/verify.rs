@@ -95,35 +95,28 @@ impl TunnelProbe for XrayTunnelProbe {
                 // The picked port can be stolen between the ephemeral bind
                 // probe and xray's own bind; retry with a fresh port instead
                 // of failing the whole probe on that race.
-                let mut proc = None;
-                for attempt in 1..=3u32 {
-                    let socks_port =
-                        pick_ephemeral_port().context("no free port for xray inbound")?;
-                    let cfg = xray::build_config(
-                        &spec,
-                        dial_ip,
-                        &preset,
-                        custom.as_ref(),
-                        sni.as_deref(),
-                        socks_port,
-                    )?;
-                    match xray::spawn(&trial_dir, &xray_bin, &cfg).await {
-                        Ok(child) => {
-                            proc = Some(child);
-                            break;
-                        }
-                        Err(err) if attempt < 3 => {
-                            tracing::debug!(
-                                %err, ip = %dial_ip, attempt,
-                                "xray spawn failed; retrying with a fresh port"
-                            );
-                        }
-                        Err(err) => {
-                            return Err(err).context("xray spawn failed after 3 attempts");
-                        }
+                let mut proc = spawn_with_retry(dial_ip, |socks_port| {
+                    // Clones keep the retry closure self-contained (it may
+                    // run up to 3 times); the originals stay for cleanup.
+                    let spec = spec.clone();
+                    let preset = preset.clone();
+                    let custom = custom.clone();
+                    let sni = sni.clone();
+                    let trial_dir = trial_dir.clone();
+                    let xray_bin = xray_bin.clone();
+                    async move {
+                        let cfg = xray::build_config(
+                            &spec,
+                            dial_ip,
+                            &preset,
+                            custom.as_ref(),
+                            sni.as_deref(),
+                            socks_port,
+                        )?;
+                        xray::spawn(&trial_dir, &xray_bin, &cfg).await
                     }
-                }
-                let mut proc = proc.expect("the retry loop always sets proc");
+                })
+                .await?;
 
                 let started = Instant::now();
                 let outcome = ranges::get_via_socks(&probe_url, proc.socks_addr, timeout_ms).await;
@@ -237,6 +230,34 @@ fn pick_ephemeral_port() -> Result<u16> {
     Ok(listener.local_addr()?.port())
 }
 
+/// Retries a spawn that failed (usually a stolen ephemeral port), with a
+/// fresh port per attempt; the last error wins after 3 tries. Generic over
+/// the spawned value so tests can synthesize results without a real child
+/// process.
+async fn spawn_with_retry<T, Fut>(ip: Ipv4Addr, mut attempt: impl FnMut(u16) -> Fut) -> Result<T>
+where
+    Fut: Future<Output = Result<T>>,
+{
+    let mut last_err: Option<anyhow::Error> = None;
+    for attempt_no in 1..=3u32 {
+        let socks_port = pick_ephemeral_port().context("no free port for xray inbound")?;
+        match attempt(socks_port).await {
+            Ok(value) => return Ok(value),
+            Err(err) if attempt_no < 3 => {
+                tracing::debug!(
+                    %err, ip = %ip, attempt = attempt_no,
+                    "xray spawn failed; retrying with a fresh port"
+                );
+                last_err = Some(err);
+            }
+            Err(err) => return Err(err).context("xray spawn failed after 3 attempts"),
+        }
+    }
+    // Unreachable: the 3rd failure returns above. Keep the last error so the
+    // compiler never forces an `expect` into the refactor.
+    Err(last_err.unwrap_or_else(|| anyhow!("xray spawn failed after 3 attempts")))
+}
+
 /// Discovers the xray binary and fails with a hint if it is absent. Exposed
 /// for the CLI/server to pre-flight before a phase-2 scan starts (the real
 /// probe auto-downloads a checksum-verified binary when missing).
@@ -305,5 +326,76 @@ mod tests {
         // Sweeping a missing dir is a silent no-op.
         sweep_stale_trial_dirs_before(&dir.join("missing"), cutoff);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // --- spawn_with_retry (review r6) ----------------------------------------
+
+    #[tokio::test]
+    async fn spawn_retry_succeeds_on_the_first_attempt() {
+        let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen = calls.clone();
+        let out = spawn_with_retry(Ipv4Addr::LOCALHOST, move |port| {
+            let seen = seen.clone();
+            async move {
+                seen.lock().unwrap().push(port);
+                Ok(port)
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(calls.lock().unwrap().len(), 1, "no retry on success");
+        assert_eq!(
+            out,
+            calls.lock().unwrap()[0],
+            "the closure's value survives"
+        );
+    }
+
+    #[tokio::test]
+    async fn spawn_retry_succeeds_after_two_failures_with_fresh_ports() {
+        let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen = calls.clone();
+        let out = spawn_with_retry(Ipv4Addr::LOCALHOST, move |port| {
+            let seen = seen.clone();
+            async move {
+                let mut v = seen.lock().unwrap();
+                v.push(port);
+                if v.len() < 3 {
+                    Err(anyhow!("stolen ephemeral port"))
+                } else {
+                    Ok(port)
+                }
+            }
+        })
+        .await
+        .unwrap();
+        let v = calls.lock().unwrap();
+        assert_eq!(v.len(), 3, "exactly 3 closure calls before success");
+        assert!(
+            v.windows(2).all(|w| w[0] != w[1]),
+            "fresh port per attempt: {v:?}"
+        );
+        assert_eq!(out, *v.last().unwrap());
+    }
+
+    #[tokio::test]
+    async fn spawn_retry_reports_the_last_error_after_three_failures() {
+        let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen = calls.clone();
+        let err = spawn_with_retry(Ipv4Addr::LOCALHOST, move |port| {
+            let seen = seen.clone();
+            async move {
+                seen.lock().unwrap().push(port);
+                Err::<u16, _>(anyhow!("boom {port}"))
+            }
+        })
+        .await
+        .unwrap_err();
+        assert_eq!(calls.lock().unwrap().len(), 3, "no more than 3 attempts");
+        assert!(
+            err.to_string().contains("after 3 attempts"),
+            "context must name the retry limit: {err}"
+        );
+        assert!(err.chain().any(|e| e.to_string().contains("boom")));
     }
 }
