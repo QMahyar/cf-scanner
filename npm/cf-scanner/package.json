@@ -1,0 +1,32 @@
+{
+  "name": "@qmahyar/cf-scanner",
+  "version": "0.4.0",
+  "description": "Find working Cloudflare endpoints on restricted networks",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/QMahyar/cf-scanner.git"
+  },
+  "bin": {
+    "cf-scanner": "bin/cf-scanner"
+  },
+  "files": [
+    "bin/",
+    "install.js"
+  ],
+  "scripts": {
+    "postinstall": "node install.js"
+  },
+  "keywords": [
+    "cloudflare",
+    "warp",
+    "vless",
+    "xray",
+    "network",
+    "scanner",
+    "censorship"
+  ],
+  "engines": {
+    "node": ">=14"
+  }
+}
