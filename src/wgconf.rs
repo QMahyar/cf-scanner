@@ -6,7 +6,7 @@
 
 use std::collections::BTreeMap;
 
-use anyhow::{anyhow, bail, Result};
+use anyhow::{Result, anyhow, bail};
 use base64::Engine as _;
 use url::Url;
 

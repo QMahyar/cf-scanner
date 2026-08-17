@@ -114,6 +114,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: "1.85"
+          components: rustfmt, clippy
       - name: Test
         run: cargo test --locked
       - name: Clippy
