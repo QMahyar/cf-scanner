@@ -702,9 +702,9 @@
           <div class="panel">
             <h3 class="panel-title">Stopping &amp; ranges</h3>
             <div class="grid grid-2">
-              <label class="field">Stop after N found
+              <label class="field">Stop after at least N found
                 <input name="found" type="number" min="1" value="20" required aria-describedby="help-found">
-                <span class="help" id="help-found">Minimum working IPs before scan completes</span>
+                <span class="help" id="help-found">Minimum working IPs before the scan stops; in-flight probes can add a few more (up to the concurrency setting)</span>
               </label>
               <label class="field">Hard cap on probes (optional)
                 <input name="cap" type="number" min="1" placeholder="none">
@@ -1153,6 +1153,9 @@
     function finishScan(s, cancelled) {
       stopElapsed();
       stopPolling();
+      // A poll/loadResults in flight can re-apply stale progress after this
+      // point; clear it so no terminal state shows a live progress line.
+      latestProgress = null;
       const found = s && s.found != null ? s.found : results.length;
       const scanned = s && s.scanned != null ? s.scanned : scannedCount;
       if (found != null) statFound.textContent = Number(found).toLocaleString();
@@ -1201,6 +1204,7 @@
     function failScan(msg) {
       stopElapsed();
       stopPolling();
+      latestProgress = null;
       scanState = "failed";
       progressTrack.classList.remove("indeterminate");
       cancelBtn.disabled = true;
@@ -1920,6 +1924,11 @@
       sortedCache = null;
       histBuiltFor = -1;      latestProgress = null;
       scannedCount = 0;
+      // Dirty the render flags: flushRender skips the table unless a row
+      // event marked it, so a reset must mark it itself or the cleared
+      // model would leave stale rows in the DOM.
+      tableDirty = true;
+      histDirty = true;
       resetBanner();
       statsEl.hidden = true;
       progressTrack.hidden = true;
@@ -2117,8 +2126,10 @@
         const data = await resp.json();
         if (!data || !Array.isArray(data.results)) return;
         if (data.progress && typeof data.progress === "object") {
-          latestProgress = data.progress;
-          scheduleRender();
+          if (scanState === "running" || scanState === "starting") {
+            latestProgress = data.progress;
+            scheduleRender();
+          }
         }
         if (data.results.length === 0) return;
         results.length = 0;
