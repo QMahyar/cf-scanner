@@ -2,7 +2,10 @@
 //! - db-ip Lite country mmdb (embedded): the official host only ships gzipped
 //!   builds, so download + decompress + cache. The version and its SHA-256
 //!   are pinned in `data/geoip-version.txt`; a failed download or checksum
-//!   mismatch fails the build (never embed an empty db).
+//!   mismatch fails the build (never embed an empty db). Setting
+//!   `CFSCANNER_OFFLINE_BUILD=1` skips the network and embeds a small
+//!   placeholder instead — runtime country lookups then return None (see
+//!   src/geo.rs), never a hard failure.
 //! - dist builds only (`dist-bundle-xray` feature): the pinned, checksum
 //!   verified xray binary, written over the committed placeholder in
 //!   `data/bundled/` so release archives carry it next to the app binary.
@@ -31,6 +34,14 @@ fn geoip_pin() -> &'static str {
     VERSION_FILE.lines().nth(1).unwrap_or("").trim_end()
 }
 
+/// `CFSCANNER_OFFLINE_BUILD` set to any non-empty value (e.g. `1`): skip the
+/// geoip download + checksum and embed a placeholder instead.
+fn offline_build() -> bool {
+    std::env::var_os("CFSCANNER_OFFLINE_BUILD")
+        .map(|v| !v.is_empty())
+        .unwrap_or(false)
+}
+
 fn xray_version() -> &'static str {
     XRAY_VERSION_FILE.trim_end()
 }
@@ -38,6 +49,7 @@ fn xray_version() -> &'static str {
 fn main() {
     println!("cargo:rerun-if-changed=data/geoip-version.txt");
     println!("cargo:rerun-if-changed=data/xray-version.txt");
+    println!("cargo:rerun-if-env-changed=CFSCANNER_OFFLINE_BUILD");
     embed_geoip();
     bundle_xray_if_requested();
 }
@@ -45,6 +57,24 @@ fn main() {
 fn embed_geoip() {
     let out_dir = PathBuf::from(std::env::var("OUT_DIR").unwrap());
     let dest = out_dir.join("geoip.mmdb");
+    // The offline escape hatch: compile without network access. The flags
+    // must not affect normal builds — it is checked before any download or
+    // cache validation, and the placeholder is never mistaken for the db.
+    if offline_build() {
+        // cargo:warning= (not eprintln!) is what cargo shows on a successful
+        // build script run; plain stderr is swallowed unless the script fails.
+        println!(
+            "cargo:warning=CFSCANNER_OFFLINE_BUILD set: embedding placeholder geoip db; \
+             country lookups will return None"
+        );
+        // A few readable bytes, clearly not a valid mmdb (min 100 KB):
+        // geo.rs's Reader::from_source fails and degrades to None lookups.
+        if std::fs::write(&dest, b"cf-scanner offline build: no geoip db\n").is_err() {
+            eprintln!("error: could not write placeholder {}", dest.display());
+            std::process::exit(1);
+        }
+        return;
+    }
     // OUT_DIR survives between builds (unlike the OS temp dir, which is
     // shared and unpredictable); the git-tracked data/ dir stays untouched.
     let cache = out_dir.join(format!("dbip-country-lite-{}.mmdb", version()));
