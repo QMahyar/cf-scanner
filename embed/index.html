@@ -473,6 +473,19 @@
     /* ============ copy feedback ============ */
     #copy-btn.copied { color: var(--success); border-color: var(--success); }
 
+    /* Per-row config export action inside the phase-2 verdict cell */
+    td .export-btn {
+      padding: 0.15rem 0.55rem;
+      font-size: 0.72rem;
+      margin-left: 0.4rem;
+      vertical-align: middle;
+      background: var(--accent-soft);
+      color: var(--accent-strong);
+      border: 1px solid color-mix(in srgb, var(--accent) 35%, var(--border));
+    }
+    td .export-btn:hover { background: var(--accent-soft); }
+    td .export-btn:disabled { opacity: 0.6; }
+
     /* ============ toast ============ */
     .toast {
       display: flex; align-items: flex-start; gap: 0.6rem;
@@ -483,6 +496,7 @@
     }
     .toast.success { border-left: 3px solid var(--success); }
     .toast.error { border-left: 3px solid var(--danger); }
+    .toast.info { border-left: 3px solid var(--muted); }
     .toast-close {
       flex: none; align-self: flex-start; margin-left: auto; margin-right: -0.3rem;
       min-width: 1.6rem; min-height: 1.6rem; padding: 0;
@@ -924,6 +938,7 @@
     const cancelBtn = document.getElementById("cancel-btn");
     const resetBtn = document.getElementById("reset-btn");
     const copyBtn = document.getElementById("copy-btn");
+    const addFailedBtn = document.getElementById("add-failed-btn");
     const downloadBtn = document.getElementById("download-btn");
     const downloadFormat = document.getElementById("download-format");
     const themeBtn = document.getElementById("theme-btn");
@@ -1354,6 +1369,14 @@
       if (histDirty) { renderHistogram(); histDirty = false; }
       statFound.textContent = results.length.toLocaleString();
       applyProgress();
+      updateAddFailedVisibility();
+    }
+
+    // The "Add failed to exclusions" action is only useful while the
+    // current results actually contain a row that failed phase 2.
+    function updateAddFailedVisibility() {
+      const failed = results.filter(v => v.phase2 && v.phase2.passed === false).length;
+      addFailedBtn.hidden = failed === 0;
     }
 
     function buildEmptyRow() {
@@ -1904,6 +1927,31 @@
       showStatus("Idle. Results cleared.");
       flushNow();
       try { await fetch("/api/reset", { method: "POST" }); } catch { /* best effort */ }
+    });
+
+    // ---- add failed phase-2 rows to the exclusions box ----
+    addFailedBtn.addEventListener("click", () => {
+      const failed = results.filter(v => v.phase2 && v.phase2.passed === false);
+      if (failed.length === 0) return;
+      // Dedupe against the exclusions already typed in, keeping the box's
+      // line order; a failed row's IP is excluded for good as ip/32.
+      const existing = new Set(parseLines(form.elements["exclude"].value));
+      const added = [];
+      for (const v of failed) {
+        const cidr = `${v.ip}/32`;
+        if (!existing.has(cidr)) {
+          existing.add(cidr);
+          added.push(cidr);
+        }
+      }
+      if (added.length === 0) {
+        showToast("All failed IPs are already excluded", "info");
+        return;
+      }
+      const box = form.elements["exclude"];
+      const prior = box.value.trim();
+      box.value = prior ? `${prior}\n${added.join("\n")}` : added.join("\n");
+      showToast(`${added.length} failed IP${added.length === 1 ? "" : "s"} added to exclusions`, "success");
     });
 
     // ---- clipboard copy with feedback ----

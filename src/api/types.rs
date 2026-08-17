@@ -810,10 +810,7 @@ mod tests {
             probe_urls: vec!["ftp://nope".to_owned()],
             ..Phase2Config::default()
         };
-        assert_eq!(
-            valid_config_with(bad),
-            Err(ConfigError::InvalidProbeUrl)
-        );
+        assert_eq!(valid_config_with(bad), Err(ConfigError::InvalidProbeUrl));
     }
 
     #[test]
@@ -828,16 +825,20 @@ mod tests {
             valid_config_with(over),
             Err(ConfigError::TooManyProbeUrls(MAX_PHASE2_ENTRIES + 1))
         );
-        let mut long = Phase2Config::default();
-        long.probe_urls = vec![format!("https://x/{}", "a".repeat(MAX_PROBE_URL_BYTES))];
+        let long = Phase2Config {
+            probe_urls: vec![format!("https://x/{}", "a".repeat(MAX_PROBE_URL_BYTES))],
+            ..Phase2Config::default()
+        };
         assert_eq!(
             valid_config_with(long),
             Err(ConfigError::ProbeUrlTooLong(MAX_PROBE_URL_BYTES))
         );
-        let mut at_cap = Phase2Config::default();
-        at_cap.probe_urls = (0..MAX_PHASE2_ENTRIES)
-            .map(|i| format!("https://cp.cloudflare.com/{i}"))
-            .collect();
+        let at_cap = Phase2Config {
+            probe_urls: (0..MAX_PHASE2_ENTRIES)
+                .map(|i| format!("https://cp.cloudflare.com/{i}"))
+                .collect(),
+            ..Phase2Config::default()
+        };
         assert_eq!(valid_config_with(at_cap), Ok(()), "8 URLs must be accepted");
     }
 
@@ -853,30 +854,45 @@ mod tests {
 
     #[test]
     fn effective_probe_urls_prefer_the_list_then_the_legacy_url() {
-        let mut p2 = Phase2Config::default();
         assert_eq!(
-            p2.effective_probe_urls(),
+            Phase2Config::default().effective_probe_urls(),
             vec![DEFAULT_PROBE_URL.to_owned()]
         );
-        p2.probe_url = "https://example.com/one".to_owned();
+        let legacy = Phase2Config {
+            probe_url: "https://example.com/one".to_owned(),
+            ..Phase2Config::default()
+        };
         assert_eq!(
-            p2.effective_probe_urls(),
+            legacy.effective_probe_urls(),
             vec!["https://example.com/one".to_owned()]
         );
-        p2.probe_urls =
-            vec!["https://a.example/".to_owned(), "https://b.example/".to_owned()];
+        let listed = Phase2Config {
+            probe_urls: vec![
+                "https://a.example/".to_owned(),
+                "https://b.example/".to_owned(),
+            ],
+            ..Phase2Config::default()
+        };
         assert_eq!(
-            p2.effective_probe_urls(),
-            vec!["https://a.example/".to_owned(), "https://b.example/".to_owned()]
+            listed.effective_probe_urls(),
+            vec![
+                "https://a.example/".to_owned(),
+                "https://b.example/".to_owned()
+            ]
         );
     }
 
     #[test]
     fn probe_urls_round_trip_through_serde() {
-        let mut p2 = Phase2Config::default();
-        p2.probe_urls = vec!["https://a.example/".to_owned()];
+        let p2 = Phase2Config {
+            probe_urls: vec!["https://a.example/".to_owned()],
+            ..Phase2Config::default()
+        };
         let json = serde_json::to_string(&p2).unwrap();
-        assert!(json.contains("\"probe_urls\":[\"https://a.example/\"]"), "{json}");
+        assert!(
+            json.contains("\"probe_urls\":[\"https://a.example/\"]"),
+            "{json}"
+        );
         assert_eq!(serde_json::from_str::<Phase2Config>(&json).unwrap(), p2);
         // Omitted fields keep old payloads decoding: probe_urls defaults to
         // the empty list and the legacy probe_url gets the default URL.
@@ -890,7 +906,10 @@ mod tests {
     fn phase2_verdict_config_index_defaults_to_none() {
         let legacy = r#"{"passed":true,"fragment":"light","sni":"","latency_ms":42}"#;
         let v: Phase2Verdict = serde_json::from_str(legacy).unwrap();
-        assert_eq!(v.config_index, None, "omitted field must deserialize as None");
+        assert_eq!(
+            v.config_index, None,
+            "omitted field must deserialize as None"
+        );
         let json = serde_json::to_string(&Phase2Verdict {
             passed: true,
             fragment: "light".to_owned(),

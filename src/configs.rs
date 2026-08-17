@@ -1099,8 +1099,7 @@ mod tests {
     /// identity-critical field survived.
     fn assert_round_trips(original: &str, sni_override: Option<&str>) {
         let spec = parse_uri(original).unwrap();
-        let uri =
-            render_uri(&spec, DIAL_IP.parse().unwrap(), sni_override).unwrap();
+        let uri = render_uri(&spec, DIAL_IP.parse().unwrap(), sni_override).unwrap();
         let back = parse_uri(&uri).unwrap();
         assert_eq!(back.protocol, spec.protocol);
         assert_eq!(back.user_id, spec.user_id);
@@ -1146,9 +1145,12 @@ mod tests {
     #[test]
     fn render_uri_percent_encodes_hostile_passwords() {
         // ':' and '@' inside the userinfo must survive the round trip; a
-        // raw ':' would split a user:pass pair in every parser.
+        // raw ':' would split a user:pass pair in every parser, so the
+        // input side is fed percent-encoded (as real configs are).
         for password in ["p@ss:word", "p a s s#1", "päss/word?x"] {
-            let spec = parse_uri(&format!("trojan://{password}@1.2.3.4:443")).unwrap();
+            let encoded = utf8_percent_encode(password, USERINFO_ENCODE_SET);
+            let spec = parse_uri(&format!("trojan://{encoded}@1.2.3.4:443")).unwrap();
+            assert_eq!(spec.user_id, password, "parse must decode the input");
             let uri = render_uri(&spec, DIAL_IP.parse().unwrap(), None).unwrap();
             let back = parse_uri(&uri).unwrap();
             assert_eq!(back.user_id, password, "{uri}");
@@ -1188,7 +1190,10 @@ mod tests {
             Some("b.me"),
         )
         .unwrap();
-        assert!(uri.starts_with("vless://aaaaaaaa-bbbb-cccc-dddd-eeeeffff0000@203.0.113.7:2096?"), "{uri}");
+        assert!(
+            uri.starts_with("vless://aaaaaaaa-bbbb-cccc-dddd-eeeeffff0000@203.0.113.7:2096?"),
+            "{uri}"
+        );
         let back = parse_uri(&uri).unwrap();
         assert_eq!(back.user_id, "aaaaaaaa-bbbb-cccc-dddd-eeeeffff0000");
         assert_eq!(back.server, DIAL_IP);

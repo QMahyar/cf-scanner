@@ -1013,10 +1013,10 @@ mod tests {
     use std::sync::Mutex;
     use std::time::Duration;
 
-    use base64::Engine as _;
     use crate::api::types::{Mode, Phase2Config, ScanTarget, StopCondition, WarpConfig};
     use crate::probe::FakeTransport;
     use crate::ranges::BUNDLED_RANGES;
+    use base64::Engine as _;
 
     const OFFICIAL_FIXTURE: &str =
         r#"{"success":true,"result":{"ipv4_cidrs":["10.1.0.0/16"]},"errors":[]}"#;
@@ -2186,8 +2186,7 @@ mod tests {
         request(addr, &req, None).await
     }
 
-    const EXPORT_VLESS: &str =
-        "vless://aaaaaaaa-bbbb-cccc-dddd-eeeeffff0000@1.2.3.4:443?security=tls&sni=orig.example.com&fp=chrome";
+    const EXPORT_VLESS: &str = "vless://aaaaaaaa-bbbb-cccc-dddd-eeeeffff0000@1.2.3.4:443?security=tls&sni=orig.example.com&fp=chrome";
 
     #[tokio::test]
     async fn export_renders_a_ready_uri_for_a_verified_candidate() {
@@ -2206,7 +2205,10 @@ mod tests {
             uri.starts_with("vless://aaaaaaaa-bbbb-cccc-dddd-eeeeffff0000@203.0.113.7:2096?"),
             "{uri}"
         );
-        assert!(uri.contains("sni=b.me") && uri.contains("fp=chrome"), "{uri}");
+        assert!(
+            uri.contains("sni=b.me") && uri.contains("fp=chrome"),
+            "{uri}"
+        );
         // The exported URI parses and targets the candidate.
         let spec = crate::configs::parse_uri(uri).unwrap();
         assert_eq!(spec.server, "203.0.113.7");
@@ -2226,7 +2228,10 @@ mod tests {
         assert_eq!(status, 200, "{text}");
         let payload: serde_json::Value = serde_json::from_str(json_body(&text)).unwrap();
         assert!(
-            payload["uri"].as_str().unwrap().contains("sni=orig.example.com"),
+            payload["uri"]
+                .as_str()
+                .unwrap()
+                .contains("sni=orig.example.com"),
             "{payload}"
         );
     }

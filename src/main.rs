@@ -177,7 +177,12 @@ struct ScanArgs {
     phase2_probe_urls: Vec<String>,
 
     /// Single probe URL (legacy alias for --phase2-probe-urls)
-    #[arg(long, hide = true, requires = "phase2_configs", conflicts_with = "phase2_probe_urls")]
+    #[arg(
+        long,
+        hide = true,
+        requires = "phase2_configs",
+        conflicts_with = "phase2_probe_urls"
+    )]
     phase2_probe_url: Option<String>,
 
     /// Parallel xray instances for phase 2 (1-8)
@@ -453,7 +458,12 @@ async fn run(cli: Cli) -> Result<()> {
                 Ok(())
             }
         },
-        Command::ExportConfig { config, ip, port, sni } => {
+        Command::ExportConfig {
+            config,
+            ip,
+            port,
+            sni,
+        } => {
             let uri = run_export_config(&config, ip, port, sni.as_deref())?;
             println!("{uri}");
             Ok(())
@@ -581,8 +591,12 @@ fn run_export_config(
     if port == 0 {
         return Err(anyhow!("--port must be in 1..=65535"));
     }
-    let uri = cf_scanner::configs::export_config_uri(config, ip, port, sni)
-        .map_err(|e| anyhow!("export failed: {}", cf_scanner::configs::sanitize_error_text(&format!("{e:#}"))))?;
+    let uri = cf_scanner::configs::export_config_uri(config, ip, port, sni).map_err(|e| {
+        anyhow!(
+            "export failed: {}",
+            cf_scanner::configs::sanitize_error_text(&format!("{e:#}"))
+        )
+    })?;
     Ok(uri)
 }
 
@@ -1081,7 +1095,10 @@ mod tests {
             uri.starts_with("vless://aaaaaaaa-bbbb-cccc-dddd-eeeeffff0000@203.0.113.7:2096?"),
             "{uri}"
         );
-        assert!(uri.contains("sni=b.me") && uri.contains("fp=chrome"), "{uri}");
+        assert!(
+            uri.contains("sni=b.me") && uri.contains("fp=chrome"),
+            "{uri}"
+        );
     }
 
     #[test]
@@ -1094,13 +1111,8 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.to_string().contains("--port"), "{err}");
-        let err = run_export_config(
-            "not a uri",
-            "203.0.113.7".parse().unwrap(),
-            443,
-            None,
-        )
-        .unwrap_err();
+        let err =
+            run_export_config("not a uri", "203.0.113.7".parse().unwrap(), 443, None).unwrap_err();
         assert!(err.to_string().contains("export failed"), "{err}");
     }
 
