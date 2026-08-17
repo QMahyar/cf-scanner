@@ -54,6 +54,7 @@ winreg = "0.56"
 
 [dev-dependencies]
 proptest = "1"
+rcgen = "0.13"
 
 [features]
 # dist-only: build.rs bundles the checksum-verified xray binary into release
