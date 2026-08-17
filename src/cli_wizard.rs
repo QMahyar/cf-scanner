@@ -401,6 +401,7 @@ fn prompt_phase2() -> Result<Phase2Config> {
         custom_fragment,
         snis,
         probe_url,
+        probe_urls: Vec::new(),
         concurrency,
     })
 }

@@ -6,6 +6,7 @@
 use std::collections::HashMap;
 use std::convert::Infallible;
 use std::fs;
+use std::net::Ipv4Addr;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -347,6 +348,7 @@ fn router_with_dir(
         .route("/api/reset", post(reset))
         .route("/api/ranges", get(ranges))
         .route("/api/warp/register", post(warp_register))
+        .route("/api/config/export", post(export_config))
         .route("/api/profiles", get(list_profiles))
         .route(
             "/api/profiles/{name}",
@@ -713,6 +715,56 @@ async fn warp_register(
     Ok(Json(RegisterResponse { wgconf }))
 }
 
+/// `POST /api/config/export` body: one of the user's ORIGINAL config URIs as
+/// submitted to the scan, plus the verified candidate's dial endpoint. Never
+/// touches the engine — pure parse/render over the submitted URI.
+#[derive(Deserialize)]
+struct ExportConfigRequest {
+    config: String,
+    ip: String,
+    port: u16,
+    #[serde(default)]
+    sni: Option<String>,
+}
+
+#[derive(Serialize)]
+struct ExportConfigResponse {
+    uri: String,
+}
+
+/// Renders a verified candidate as a ready-to-use vless/trojan URI the user
+/// can drop straight into v2rayN/Hiddify. The candidate IP/port replace the
+/// config's original server; the id, security, SNI, fingerprint and ws
+/// settings are preserved. Failures (unparseable config, unsupported
+/// protocol, oversized SNI) answer the uniform ApiError envelope with
+/// redacted messages.
+async fn export_config(
+    JsonBody(req): JsonBody<ExportConfigRequest>,
+) -> Result<Json<ExportConfigResponse>, ApiError> {
+    let ip: Ipv4Addr = req
+        .ip
+        .parse()
+        .map_err(|_| ApiError::bad_request("ip must be an IPv4 address"))?;
+    if req.port == 0 {
+        return Err(ApiError::bad_request("port must be in 1..=65535"));
+    }
+    if req
+        .sni
+        .as_ref()
+        .is_some_and(|s| s.len() > crate::api::types::MAX_SNI_BYTES)
+    {
+        return Err(ApiError::bad_request(format!(
+            "sni must be at most {} bytes",
+            crate::api::types::MAX_SNI_BYTES
+        )));
+    }
+    let uri = crate::configs::export_config_uri(&req.config, ip, req.port, req.sni.as_deref())
+        .map_err(|err| {
+            ApiError::bad_request(crate::configs::sanitize_error_text(&format!("{err:#}")))
+        })?;
+    Ok(Json(ExportConfigResponse { uri }))
+}
+
 #[derive(Serialize)]
 struct StatusPayload {
     version: &'static str,
@@ -961,6 +1013,7 @@ mod tests {
     use std::sync::Mutex;
     use std::time::Duration;
 
+    use base64::Engine as _;
     use crate::api::types::{Mode, Phase2Config, ScanTarget, StopCondition, WarpConfig};
     use crate::probe::FakeTransport;
     use crate::ranges::BUNDLED_RANGES;
@@ -2122,5 +2175,122 @@ mod tests {
         // Configs without a warp section pass through untouched.
         let c = cfg(1, 1);
         assert_eq!(sanitize_config(c.clone()), c);
+    }
+
+    async fn post_export(addr: SocketAddr, body: &str) -> (u16, String) {
+        let req = format!(
+            "POST /api/config/export HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        request(addr, &req, None).await
+    }
+
+    const EXPORT_VLESS: &str =
+        "vless://aaaaaaaa-bbbb-cccc-dddd-eeeeffff0000@1.2.3.4:443?security=tls&sni=orig.example.com&fp=chrome";
+
+    #[tokio::test]
+    async fn export_renders_a_ready_uri_for_a_verified_candidate() {
+        let addr = serve(FakeTransport::new()).await;
+        let body = serde_json::json!({
+            "config": EXPORT_VLESS,
+            "ip": "203.0.113.7",
+            "port": 2096,
+            "sni": "b.me"
+        });
+        let (status, text) = post_export(addr, &body.to_string()).await;
+        assert_eq!(status, 200, "{text}");
+        let payload: serde_json::Value = serde_json::from_str(json_body(&text)).unwrap();
+        let uri = payload["uri"].as_str().unwrap();
+        assert!(
+            uri.starts_with("vless://aaaaaaaa-bbbb-cccc-dddd-eeeeffff0000@203.0.113.7:2096?"),
+            "{uri}"
+        );
+        assert!(uri.contains("sni=b.me") && uri.contains("fp=chrome"), "{uri}");
+        // The exported URI parses and targets the candidate.
+        let spec = crate::configs::parse_uri(uri).unwrap();
+        assert_eq!(spec.server, "203.0.113.7");
+        assert_eq!(spec.port, 2096);
+        assert_eq!(spec.tls_server_name.as_deref(), Some("b.me"));
+    }
+
+    #[tokio::test]
+    async fn export_without_sni_keeps_the_configs_own_sni() {
+        let addr = serve(FakeTransport::new()).await;
+        let body = serde_json::json!({
+            "config": EXPORT_VLESS,
+            "ip": "203.0.113.7",
+            "port": 2096
+        });
+        let (status, text) = post_export(addr, &body.to_string()).await;
+        assert_eq!(status, 200, "{text}");
+        let payload: serde_json::Value = serde_json::from_str(json_body(&text)).unwrap();
+        assert!(
+            payload["uri"].as_str().unwrap().contains("sni=orig.example.com"),
+            "{payload}"
+        );
+    }
+
+    #[tokio::test]
+    async fn export_rejects_bad_ip_port_and_oversized_sni() {
+        let addr = serve(FakeTransport::new()).await;
+        let oversized_sni = "a".repeat(crate::api::types::MAX_SNI_BYTES + 1);
+        for (body, expected) in [
+            (
+                serde_json::to_string(&serde_json::json!({
+                    "config": EXPORT_VLESS,
+                    "ip": "not-an-ip",
+                    "port": 443
+                }))
+                .unwrap(),
+                "ip must be an IPv4 address",
+            ),
+            (
+                serde_json::to_string(&serde_json::json!({
+                    "config": EXPORT_VLESS,
+                    "ip": "203.0.113.7",
+                    "port": 0
+                }))
+                .unwrap(),
+                "port must be in 1..=65535",
+            ),
+            (
+                serde_json::to_string(&serde_json::json!({
+                    "config": EXPORT_VLESS,
+                    "ip": "203.0.113.7",
+                    "port": 443,
+                    "sni": oversized_sni
+                }))
+                .unwrap(),
+                "sni must be at most",
+            ),
+        ] {
+            let (status, text) = post_export(addr, &body).await;
+            assert_eq!(status, 400, "{text}");
+            assert!(text.contains(expected), "{text}");
+        }
+    }
+
+    #[tokio::test]
+    async fn export_rejects_unsupported_configs_with_a_redacted_envelope() {
+        let addr = serve(FakeTransport::new()).await;
+        // vmess export is out of scope; the id inside the base64 must never
+        // leak into the error envelope.
+        let vmess = format!(
+            "vmess://{}",
+            base64::engine::general_purpose::STANDARD.encode(
+                r#"{"v":"2","add":"1.2.3.4","port":"443","id":"vmess-secret-id","net":"tcp","tls":"none"}"#
+            )
+        );
+        let body = serde_json::json!({"config": vmess, "ip": "203.0.113.7", "port": 443});
+        let (status, text) = post_export(addr, &body.to_string()).await;
+        assert_eq!(status, 400, "{text}");
+        assert!(text.contains("export not supported"), "{text}");
+        assert!(!text.contains("vmess-secret-id"), "{text}");
+        // Garbage configs error through the same envelope with no echo.
+        let body = serde_json::json!({"config": "http://evil.example/x?id=sec", "ip": "203.0.113.7", "port": 443});
+        let (status, text) = post_export(addr, &body.to_string()).await;
+        assert_eq!(status, 400, "{text}");
+        assert!(!text.contains("sec"), "the config must never echo: {text}");
     }
 }

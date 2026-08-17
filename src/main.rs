@@ -51,6 +51,21 @@ enum Command {
         #[command(subcommand)]
         action: WarpConfigAction,
     },
+    /// Render a verified candidate as a ready-to-use vless/trojan URI
+    ExportConfig {
+        /// Original vless:// or trojan:// config URI from the scan
+        #[arg(long)]
+        config: String,
+        /// Verified candidate IPv4 dial address
+        #[arg(long)]
+        ip: std::net::Ipv4Addr,
+        /// Verified candidate port (1-65535)
+        #[arg(long)]
+        port: u16,
+        /// SNI fronting override (defaults to the config's own SNI)
+        #[arg(long)]
+        sni: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -156,8 +171,13 @@ struct ScanArgs {
     #[arg(long, value_delimiter = ',', requires = "phase2_configs")]
     phase2_snis: Vec<String>,
 
-    /// Tiny URL fetched through the tunnel to prove connectivity
-    #[arg(long, requires = "phase2_configs")]
+    /// Probe URLs fetched through the tunnel to prove connectivity,
+    /// comma-separated (up to 8; every one must return 200 for a pass)
+    #[arg(long, value_delimiter = ',', requires = "phase2_configs")]
+    phase2_probe_urls: Vec<String>,
+
+    /// Single probe URL (legacy alias for --phase2-probe-urls)
+    #[arg(long, hide = true, requires = "phase2_configs", conflicts_with = "phase2_probe_urls")]
     phase2_probe_url: Option<String>,
 
     /// Parallel xray instances for phase 2 (1-8)
@@ -351,15 +371,17 @@ fn build_phase2(args: &ScanArgs) -> Result<Option<api::types::Phase2Config>> {
             "--phase2-fragment custom requires --phase2-custom \"length,interval\""
         ));
     }
+    let probe_urls = match &args.phase2_probe_url {
+        Some(url) => vec![url.clone()],
+        None => args.phase2_probe_urls.clone(),
+    };
     Ok(Some(api::types::Phase2Config {
         configs: args.phase2_configs.clone(),
         fragment,
         custom_fragment,
         snis: args.phase2_snis.clone(),
-        probe_url: args
-            .phase2_probe_url
-            .clone()
-            .unwrap_or_else(|| api::types::DEFAULT_PROBE_URL.to_owned()),
+        probe_url: api::types::DEFAULT_PROBE_URL.to_owned(),
+        probe_urls,
         concurrency: args.phase2_concurrency.unwrap_or(3),
     }))
 }
@@ -431,6 +453,11 @@ async fn run(cli: Cli) -> Result<()> {
                 Ok(())
             }
         },
+        Command::ExportConfig { config, ip, port, sni } => {
+            let uri = run_export_config(&config, ip, port, sni.as_deref())?;
+            println!("{uri}");
+            Ok(())
+        }
         Command::WarpConfig { action } => match action {
             WarpConfigAction::Generate {
                 out,
@@ -542,6 +569,23 @@ fn write_stdout_line(line: &str) -> std::io::Result<()> {
     out.flush()
 }
 
+/// Shared export-config logic (the CLI prints the URI, the server's
+/// /api/config/export returns it in JSON): parse the user's original config
+/// URI, point it at the verified candidate, render the ready URI.
+fn run_export_config(
+    config: &str,
+    ip: std::net::Ipv4Addr,
+    port: u16,
+    sni: Option<&str>,
+) -> Result<String> {
+    if port == 0 {
+        return Err(anyhow!("--port must be in 1..=65535"));
+    }
+    let uri = cf_scanner::configs::export_config_uri(config, ip, port, sni)
+        .map_err(|e| anyhow!("export failed: {}", cf_scanner::configs::sanitize_error_text(&format!("{e:#}"))))?;
+    Ok(uri)
+}
+
 async fn serve(port: u16) -> Result<()> {
     let controller = Arc::new(engine::ScanController::new(Arc::new(
         probe::TlsTransport::new(),
@@ -613,6 +657,7 @@ mod tests {
             phase2_fragment: None,
             phase2_custom: None,
             phase2_snis: vec![],
+            phase2_probe_urls: vec![],
             phase2_probe_url: None,
             phase2_concurrency: None,
             warp_probes: None,
@@ -955,6 +1000,108 @@ mod tests {
         let c = p2.custom_fragment.unwrap();
         assert_eq!(c.length, "100-200");
         assert_eq!(c.interval, "10-20");
+    }
+
+    #[test]
+    fn phase2_probe_urls_flag_builds_the_multi_url_list() {
+        let argv = [
+            "cf-scanner",
+            "scan",
+            "--phase2-configs",
+            "vless://a@1.2.3.4:443",
+            "--phase2-probe-urls",
+            "https://cp.cloudflare.com/,https://www.cloudflare.com/",
+        ];
+        let a = match Cli::try_parse_from(argv).unwrap().command {
+            Command::Scan { args } => *args,
+            _ => unreachable!(),
+        };
+        let p2 = build_scan_config(&a).unwrap().phase2.unwrap();
+        assert_eq!(
+            p2.probe_urls,
+            vec![
+                "https://cp.cloudflare.com/".to_owned(),
+                "https://www.cloudflare.com/".to_owned()
+            ]
+        );
+        // The legacy single-URL alias stays parseable (hidden flag, same
+        // name) and maps to a one-entry list so old scripts keep working.
+        let argv = [
+            "cf-scanner",
+            "scan",
+            "--phase2-configs",
+            "vless://a@1.2.3.4:443",
+            "--phase2-probe-url",
+            "https://example.com/check",
+        ];
+        let a = match Cli::try_parse_from(argv).unwrap().command {
+            Command::Scan { args } => *args,
+            _ => unreachable!(),
+        };
+        let p2 = build_scan_config(&a).unwrap().phase2.unwrap();
+        assert_eq!(p2.probe_urls, vec!["https://example.com/check".to_owned()]);
+        // Passing both is ambiguous and must not parse.
+        let argv = [
+            "cf-scanner",
+            "scan",
+            "--phase2-configs",
+            "vless://a@1.2.3.4:443",
+            "--phase2-probe-urls",
+            "https://a.example/",
+            "--phase2-probe-url",
+            "https://b.example/",
+        ];
+        assert!(Cli::try_parse_from(argv).is_err());
+    }
+
+    #[test]
+    fn export_config_subcommand_renders_a_ready_uri() {
+        let argv = [
+            "cf-scanner",
+            "export-config",
+            "--config",
+            "vless://aaaaaaaa-bbbb-cccc-dddd-eeeeffff0000@1.2.3.4:443?security=tls&sni=orig.example.com&fp=chrome",
+            "--ip",
+            "203.0.113.7",
+            "--port",
+            "2096",
+            "--sni",
+            "b.me",
+        ];
+        let uri = match Cli::try_parse_from(argv).unwrap().command {
+            Command::ExportConfig {
+                config,
+                ip,
+                port,
+                sni,
+            } => run_export_config(&config, ip, port, sni.as_deref()).unwrap(),
+            _ => unreachable!(),
+        };
+        assert!(
+            uri.starts_with("vless://aaaaaaaa-bbbb-cccc-dddd-eeeeffff0000@203.0.113.7:2096?"),
+            "{uri}"
+        );
+        assert!(uri.contains("sni=b.me") && uri.contains("fp=chrome"), "{uri}");
+    }
+
+    #[test]
+    fn export_config_rejects_bad_port_or_config() {
+        let err = run_export_config(
+            "vless://aaaaaaaa-bbbb-cccc-dddd-eeeeffff0000@1.2.3.4:443",
+            "203.0.113.7".parse().unwrap(),
+            0,
+            None,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("--port"), "{err}");
+        let err = run_export_config(
+            "not a uri",
+            "203.0.113.7".parse().unwrap(),
+            443,
+            None,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("export failed"), "{err}");
     }
 
     #[test]
