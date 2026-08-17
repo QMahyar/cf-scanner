@@ -43,6 +43,13 @@ cf-scanner serve     # API + UI on http://127.0.0.1:8765
 Then open <http://127.0.0.1:8765> in your browser. Prefer a different port?
 `cf-scanner serve --port 9000`.
 
+On Windows, `cf-scanner serve --tray` keeps the app running from the system
+tray instead of a terminal: the tray menu starts CDN/WARP scans, cancels
+them, opens the UI, and exits `serve` gracefully. Adding `--autostart` (with
+`--tray`) registers the app to start with Windows via a `CF-Scanner` entry
+under `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` (see
+`docs/qa-runbook.md` §5 for the manual tray/autostart checks).
+
 ### Build from Source
 
 ```sh

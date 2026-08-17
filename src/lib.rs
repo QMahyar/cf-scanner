@@ -12,6 +12,7 @@ pub mod probe;
 pub mod ranges;
 pub mod server;
 pub mod socks;
+pub mod tray;
 pub mod verify;
 pub mod warp;
 pub mod warpgen;
