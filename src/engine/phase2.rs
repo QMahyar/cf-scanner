@@ -40,6 +40,9 @@ impl ScanController {
         } else {
             p2.snis.iter().map(|s| Some(s.clone())).collect()
         };
+        // Probe-target list is fixed for the whole run: every combo dials
+        // the same URLs, so resolve the effective list exactly once.
+        let probe_urls = p2.effective_probe_urls();
         let candidates = self.store.lock().unwrap_or_else(|e| e.into_inner()).clone();
         // Phase 2 dials the candidate through xray, which takes a raw IPv4
         // address; v6 phase-1 finds stay phase-1-only for now. Rows are
@@ -82,6 +85,7 @@ impl ScanController {
             let candidates = v4_candidates.clone();
             let specs = specs.clone();
             let snis = snis.clone();
+            let probe_urls = probe_urls.clone();
             let p2 = p2.clone();
             let timeout_ms = cfg.timeout_ms;
             tasks.spawn(async move {
@@ -98,7 +102,7 @@ impl ScanController {
                     let (ci, rest) = (idx / combos_per_candidate, idx % combos_per_candidate);
                     let (si, ni) = (rest / snis.len() as u64, rest % snis.len() as u64);
                     let (ip, port) = candidates[ci as usize];
-                    let spec = &specs[si as usize];
+                    let (spec, config_idx) = &specs[si as usize];
                     let sni = &snis[ni as usize];
                     if passed
                         .lock()
@@ -115,7 +119,7 @@ impl ScanController {
                             preset: &p2.fragment,
                             custom: p2.custom_fragment.as_ref(),
                             sni: sni.as_deref(),
-                            probe_url: &p2.probe_url,
+                            probe_urls: &probe_urls,
                             timeout_ms,
                         })
                         .await
@@ -129,6 +133,7 @@ impl ScanController {
                                 sni: sni.clone().unwrap_or_default(),
                                 latency_ms: result.latency_ms,
                                 error: None,
+                                config_index: Some(*config_idx),
                             };
                             if result.passed {
                                 passed
@@ -157,6 +162,7 @@ impl ScanController {
                                 sni: sni.clone().unwrap_or_default(),
                                 latency_ms: None,
                                 error: Some(msg),
+                                config_index: Some(*config_idx),
                             };
                             if let Some(updated) =
                                 update_verdict_phase2(&store, ip, port, verdict, None)
@@ -201,11 +207,14 @@ impl ScanController {
     /// Configs entries are vless/trojan/vmess/ss URIs, http(s) subscription
     /// URLs, or local xray JSON file paths. One bad entry is skipped (and
     /// counted) so a typo'd line never sinks a good batch; only a batch
-    /// with zero usable entries aborts the phase.
-    async fn parse_phase2_configs(&self, p2: &Phase2Config) -> Result<Vec<OutboundSpec>> {
+    /// with zero usable entries aborts the phase. Each spec carries the
+    /// index of the config entry it came from, so verdicts can name the
+    /// submitted config that produced them (a subscription expands to many
+    /// specs sharing one entry index).
+    async fn parse_phase2_configs(&self, p2: &Phase2Config) -> Result<Vec<(OutboundSpec, u32)>> {
         let mut specs = Vec::new();
         let mut skipped = 0u32;
-        for entry in &p2.configs {
+        for (idx, entry) in p2.configs.iter().enumerate() {
             let entry = entry.trim();
             if entry.is_empty() {
                 continue;
@@ -245,7 +254,7 @@ impl ScanController {
                 .map(|spec| vec![spec])
             };
             match result {
-                Ok(parsed) => specs.extend(parsed),
+                Ok(parsed) => specs.extend(parsed.into_iter().map(|spec| (spec, idx as u32))),
                 Err(err) => {
                     skipped += 1;
                     tracing::warn!("phase-2 config skipped: {err:#}");
@@ -379,6 +388,9 @@ mod tests {
         attempts: std::sync::Arc<AtomicU64>,
         sni_pass: Option<&'static str>,
         always_err: std::sync::Arc<AtomicBool>,
+        /// Every URL list each probe call received (assert spells the
+        /// multi-URL plumbing through the engine).
+        url_lists: std::sync::Arc<std::sync::Mutex<Vec<Vec<String>>>>,
     }
 
     impl FakeTunnelProbe {
@@ -388,6 +400,7 @@ mod tests {
                 attempts: std::sync::Arc::new(AtomicU64::new(0)),
                 sni_pass: None,
                 always_err: std::sync::Arc::new(AtomicBool::new(false)),
+                url_lists: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
             }
         }
 
@@ -408,8 +421,13 @@ mod tests {
             let this = self.clone();
             let sni = req.sni.map(str::to_owned);
             let dial_ip = req.dial_ip;
+            let urls = req.probe_urls.to_vec();
             Box::pin(async move {
                 this.attempts.fetch_add(1, Ordering::Relaxed);
+                this.url_lists
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .push(urls);
                 if this.always_err.load(Ordering::Relaxed) {
                     return Err(anyhow!("simulated spawn failure"));
                 }
@@ -554,7 +572,51 @@ mod tests {
         let mut cfg = ok_cfg(1, None);
         cfg.phase2 = Some(p2_cfg(&["https://sub.example.com/x"], &[]));
         run_local(&c, cfg, 1).await.unwrap();
-        assert!(c.results()[0].phase2.as_ref().unwrap().passed);
+        let results = c.results();
+        let p2 = results[0].phase2.as_ref().unwrap();
+        assert!(p2.passed);
+        // A subscription-expanded spec still names its config entry.
+        assert_eq!(p2.config_index, Some(0));
+    }
+
+    #[tokio::test]
+    async fn phase2_probes_every_url_with_one_spawn_per_combo() {
+        // Multiple probe URLs ride ONE tunnel spawn per (candidate, config,
+        // preset, sni) combo: attempts stay at candidate count and every
+        // probe call carries the full URL list.
+        let t = FakeTransport::new()
+            .ok("10.0.0.1".parse().unwrap(), 443, 50)
+            .ok("10.0.0.2".parse().unwrap(), 443, 10);
+        let probe = FakeTunnelProbe::new()
+            .pass("10.0.0.1".parse().unwrap())
+            .pass("10.0.0.2".parse().unwrap());
+        let c = p2_controller(t, FakeSub(""), probe.clone());
+        let mut cfg = ok_cfg(2, None);
+        cfg.phase2 = Some(Phase2Config {
+            configs: vec![VLESS.to_owned()],
+            probe_urls: vec![
+                "https://cp.cloudflare.com/".to_owned(),
+                "https://www.cloudflare.com/".to_owned(),
+            ],
+            ..Default::default()
+        });
+        run_local(&c, cfg, 1).await.unwrap();
+        assert_eq!(
+            probe.attempts.load(Ordering::Relaxed),
+            2,
+            "one spawn per candidate, not per probe URL"
+        );
+        let want = vec![
+            "https://cp.cloudflare.com/".to_owned(),
+            "https://www.cloudflare.com/".to_owned(),
+        ];
+        let lists = probe.url_lists.lock().unwrap_or_else(|e| e.into_inner());
+        assert_eq!(lists.len(), 2);
+        assert!(lists.iter().all(|l| l == &want), "{lists:?}");
+        // The verdict names the submitted config entry that passed.
+        for v in c.results() {
+            assert_eq!(v.phase2.as_ref().unwrap().config_index, Some(0));
+        }
     }
 
     #[tokio::test]
@@ -659,6 +721,7 @@ mod tests {
                 sni: "".to_owned(),
                 latency_ms: Some(42),
                 error: None,
+                config_index: Some(0),
             }),
         }]));
         // A racing failed combo must not clobber the passing verdict.
@@ -668,6 +731,7 @@ mod tests {
             sni: "".to_owned(),
             latency_ms: None,
             error: Some("spawn failed".to_owned()),
+            config_index: None,
         };
         let updated = update_verdict_phase2(&store, "10.0.0.1".parse().unwrap(), 443, failed, None);
         assert!(updated.is_none(), "a pass must never be downgraded");

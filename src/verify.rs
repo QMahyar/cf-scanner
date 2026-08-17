@@ -40,7 +40,7 @@ pub struct ProbeRequest<'a> {
     pub preset: &'a FragmentPreset,
     pub custom: Option<&'a CustomFragment>,
     pub sni: Option<&'a str>,
-    pub probe_url: &'a str,
+    pub probe_urls: &'a [String],
     pub timeout_ms: u64,
 }
 
@@ -70,7 +70,7 @@ impl TunnelProbe for XrayTunnelProbe {
         let preset = req.preset.clone();
         let custom = req.custom.cloned();
         let sni = req.sni.map(str::to_owned);
-        let probe_url = req.probe_url.to_owned();
+        let probe_urls = req.probe_urls.to_vec();
         let ProbeRequest {
             dial_ip,
             timeout_ms,
@@ -118,25 +118,40 @@ impl TunnelProbe for XrayTunnelProbe {
                 })
                 .await?;
 
+                // One xray spawn serves the WHOLE probe list: every URL is
+                // GET through the same socks inbound (fresh SOCKS5 stream per
+                // URL, one process), so multi-URL verification costs one
+                // spawn instead of one per URL. A pass needs every URL to
+                // deliver 200; the colo comes from the first trace body that
+                // carries one.
                 let started = Instant::now();
-                let outcome = socks::get_via_socks(&probe_url, proc.socks_addr, timeout_ms).await;
+                let mut all_ok = true;
+                let mut colo = None;
+                for url in &probe_urls {
+                    match socks::get_via_socks(url, proc.socks_addr, timeout_ms).await {
+                        Ok(body) if colo.is_none() => colo = crate::geo::parse_colo(&body),
+                        Ok(_) => {}
+                        Err(err) => {
+                            tracing::debug!(%err, ip = %dial_ip, %url, "phase-2 probe did not deliver 200");
+                            all_ok = false;
+                        }
+                    }
+                }
                 let latency_ms = started.elapsed().as_millis() as u32;
                 proc.stop().await;
 
-                match outcome {
-                    Ok(body) => Ok(TunnelResult {
+                if all_ok {
+                    Ok(TunnelResult {
                         passed: true,
                         latency_ms: Some(latency_ms),
-                        colo: crate::geo::parse_colo(&body),
-                    }),
-                    Err(err) => {
-                        tracing::debug!(%err, ip = %dial_ip, "phase-2 probe did not deliver 200");
-                        Ok(TunnelResult {
-                            passed: false,
-                            latency_ms: None,
-                            colo: None,
-                        })
-                    }
+                        colo,
+                    })
+                } else {
+                    Ok(TunnelResult {
+                        passed: false,
+                        latency_ms: None,
+                        colo: None,
+                    })
                 }
             }
             .await;

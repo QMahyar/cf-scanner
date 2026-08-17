@@ -345,6 +345,7 @@
     textarea[name="custom_cidrs"],
     textarea[name="exclude_cidrs"],
     textarea[name="warp_wgconf"],
+    textarea[name="phase2_probe_urls"],
     input[name="phase2_snis"],
     input[name="phase2_packets"],
     input[name="phase2_length"],
@@ -472,6 +473,19 @@
     /* ============ copy feedback ============ */
     #copy-btn.copied { color: var(--success); border-color: var(--success); }
 
+    /* Per-row config export action inside the phase-2 verdict cell */
+    td .export-btn {
+      padding: 0.15rem 0.55rem;
+      font-size: 0.72rem;
+      margin-left: 0.4rem;
+      vertical-align: middle;
+      background: var(--accent-soft);
+      color: var(--accent-strong);
+      border: 1px solid color-mix(in srgb, var(--accent) 35%, var(--border));
+    }
+    td .export-btn:hover { background: var(--accent-soft); }
+    td .export-btn:disabled { opacity: 0.6; }
+
     /* ============ toast ============ */
     .toast {
       display: flex; align-items: flex-start; gap: 0.6rem;
@@ -482,6 +496,7 @@
     }
     .toast.success { border-left: 3px solid var(--success); }
     .toast.error { border-left: 3px solid var(--danger); }
+    .toast.info { border-left: 3px solid var(--muted); }
     .toast-close {
       flex: none; align-self: flex-start; margin-left: auto; margin-right: -0.3rem;
       min-width: 1.6rem; min-height: 1.6rem; padding: 0;
@@ -774,8 +789,9 @@
                     <input name="phase2_snis" type="text" placeholder="www.cloudflare.com" disabled aria-describedby="help-phase2-snis">
                     <span class="help" id="help-phase2-snis">Optional: override SNI for TLS handshake</span>
                   </label>
-                  <label class="field">Probe URL
-                    <input name="phase2_probe_url" type="url" value="https://cp.cloudflare.com/" disabled>
+                  <label class="field">Probe URLs (one per line; every one must return HTTP 200)
+                    <textarea name="phase2_probe_urls" rows="2" disabled aria-describedby="help-phase2-urls">https://cp.cloudflare.com/</textarea>
+                    <span class="help" id="help-phase2-urls">Each http(s) URL is fetched through the tunnel; the candidate passes only when all respond 200. Max 8.</span>
                   </label>
                 </div>
                 <div class="grid grid-3" style="margin-top: 0.9rem;">
@@ -823,6 +839,10 @@
           </button>
           <div class="grow" style="flex: 1 1 auto;"></div>
           <button id="density-btn" type="button" class="outline" aria-pressed="false">Compact view</button>
+          <button id="add-failed-btn" type="button" class="outline" hidden>
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"></path></svg>
+            Add failed to exclusions
+          </button>
           <button id="copy-btn" type="button" class="secondary" disabled>Copy</button>
           <button id="download-btn" type="button" class="secondary" disabled>Download</button>
           <select id="download-format" aria-label="Download format">
@@ -918,6 +938,7 @@
     const cancelBtn = document.getElementById("cancel-btn");
     const resetBtn = document.getElementById("reset-btn");
     const copyBtn = document.getElementById("copy-btn");
+    const addFailedBtn = document.getElementById("add-failed-btn");
     const downloadBtn = document.getElementById("download-btn");
     const downloadFormat = document.getElementById("download-format");
     const themeBtn = document.getElementById("theme-btn");
@@ -1258,7 +1279,15 @@
     }
     function addResult(v) {
       const k = rowKey(v);
-      if (seenKeys.has(k)) return false;
+      if (seenKeys.has(k)) {
+        // Re-emissions are verdict updates (phase 2 attaches to a phase-1
+        // row): merge into the stored object so the row picks up lat/colo/
+        // phase2 without growing the store or orphaning sort-cache refs.
+        const i = results.findIndex(r => rowKey(r) === k);
+        if (i >= 0) Object.assign(results[i], v);
+        tableDirty = true;
+        return false;
+      }
       seenKeys.add(k);
       results.push(v);
       tableDirty = true;
@@ -1340,6 +1369,14 @@
       if (histDirty) { renderHistogram(); histDirty = false; }
       statFound.textContent = results.length.toLocaleString();
       applyProgress();
+      updateAddFailedVisibility();
+    }
+
+    // The "Add failed to exclusions" action is only useful while the
+    // current results actually contain a row that failed phase 2.
+    function updateAddFailedVisibility() {
+      const failed = results.filter(v => v.phase2 && v.phase2.passed === false).length;
+      addFailedBtn.hidden = failed === 0;
     }
 
     function buildEmptyRow() {
@@ -1386,14 +1423,19 @@
         if (!tr) {
           tr = document.createElement("tr");
           tr.dataset.key = k;
-          tr.appendChild(cell(v.ip, "mono"));
-          tr.appendChild(cell(v.port, "mono"));
-          tr.appendChild(cell(v.latency_ms, latencyCls(v.latency_ms)));
-          tr.appendChild(lossCell(v));
-          tr.appendChild(cell(v.country));
-          tr.appendChild(cell(v.colo));
-          tr.appendChild(phase2Cell(v));
         }
+        // Cells are rebuilt on every render: re-emitted phase-2 verdicts
+        // (and their Export action) must update existing rows, not only
+        // rows created for the first emission.
+        tr.replaceChildren(
+          cell(v.ip, "mono"),
+          cell(v.port, "mono"),
+          cell(v.latency_ms, latencyCls(v.latency_ms)),
+          lossCell(v),
+          cell(v.country),
+          cell(v.colo),
+          phase2Cell(v)
+        );
         const cur = tbody.children[i];
         if (cur !== tr) tbody.insertBefore(tr, cur);
         i++;
@@ -1517,7 +1559,61 @@
         td.title = bits.join(" \u2014 ");
         td.classList.add("mono");
       }
+      if (p2.passed && canExportRow(v, p2)) {
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = "export-btn";
+        btn.textContent = "Export";
+        btn.title = "Copy a ready-to-use config URI (this IP/port, the verified SNI)";
+        btn.addEventListener("click", (e) => {
+          e.stopPropagation();
+          exportRow(btn, v, p2);
+        });
+        td.appendChild(btn);
+      }
       return td;
+    }
+
+    function canExportRow(v, p2) {
+      // Export points at the user's ORIGINAL config entry in the last
+      // submitted list; subscription/file entries cannot yield one URI for
+      // this row, so the action stays hidden for them.
+      if (p2.config_index == null || !lastCfg || !lastCfg.phase2) return false;
+      const config = lastCfg.phase2.configs[p2.config_index];
+      return !!(config && (config.startsWith("vless://") || config.startsWith("trojan://")));
+    }
+
+    async function exportRow(btn, v, p2) {
+      // The row already carries the dial endpoint and the SNI that the scan
+      // verified; only the original config URI comes from the form.
+      const config = lastCfg.phase2.configs[p2.config_index];
+      const body = { config, ip: v.ip, port: v.port, sni: p2.sni || null };
+      const res = await fetch("/api/config/export", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body)
+      });
+      const payload = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        showToast(payload.error || "Export failed", "error");
+        return;
+      }
+      try {
+        await navigator.clipboard.writeText(payload.uri);
+      } catch {
+        // Clipboard can be denied outside secure contexts; still surface
+        // the URI so the user can copy it manually.
+        prompt("Copy the exported config (Ctrl+C):", payload.uri);
+        return;
+      }
+      const prev = btn.textContent;
+      btn.disabled = true;
+      btn.innerHTML = "\u2713 Copied!";
+      setTimeout(() => {
+        btn.disabled = false;
+        btn.textContent = prev;
+      }, 1500);
+      showToast(`Exported config for ${v.ip}:${v.port} to clipboard`, "success");
     }
 
     function latencyCls(l) {
@@ -1561,7 +1657,8 @@
           fragment,
           custom_fragment,
           snis: form.elements["phase2_snis"].value.split(",").map(s => s.trim()).filter(Boolean),
-          probe_url: form.elements["phase2_probe_url"].value.trim(),
+          probe_url: "",
+          probe_urls: parseLines(form.elements["phase2_probe_urls"].value),
           concurrency: Number(form.elements["phase2_concurrency"].value)
         };
       }
@@ -1705,13 +1802,17 @@
       },
       phase2_length: customRange("Length", 1, 65535),
       phase2_interval: customRange("Interval", 1, 60000),
-      phase2_probe_url: (v) => {
-        if (!v.trim()) return null;
-        try {
-          const u = new URL(v);
-          if (u.protocol !== "http:" && u.protocol !== "https:") return "Probe URL must be http(s)";
-          return null;
-        } catch { return "Probe URL must be http(s)"; }
+      phase2_probe_urls: (v) => {
+        const urls = parseLines(v);
+        if (urls.length === 0) return null;
+        if (urls.length > 8) return "At most 8 probe URLs, one per line";
+        for (const url of urls) {
+          try {
+            const u = new URL(url);
+            if (u.protocol !== "http:" && u.protocol !== "https:") return `Probe URL "${url}" must be http(s)`;
+          } catch { return `Probe URL "${url}" must be http(s)`; }
+        }
+        return null;
       }
     };
     function setFieldError(name, msg) {
@@ -1817,8 +1918,7 @@
       results.length = 0;
       seenKeys.clear();
       sortedCache = null;
-      histBuiltFor = -1;
-      latestProgress = null;
+      histBuiltFor = -1;      latestProgress = null;
       scannedCount = 0;
       resetBanner();
       statsEl.hidden = true;
@@ -1827,6 +1927,31 @@
       showStatus("Idle. Results cleared.");
       flushNow();
       try { await fetch("/api/reset", { method: "POST" }); } catch { /* best effort */ }
+    });
+
+    // ---- add failed phase-2 rows to the exclusions box ----
+    addFailedBtn.addEventListener("click", () => {
+      const failed = results.filter(v => v.phase2 && v.phase2.passed === false);
+      if (failed.length === 0) return;
+      // Dedupe against the exclusions already typed in, keeping the box's
+      // line order; a failed row's IP is excluded for good as ip/32.
+      const existing = new Set(parseLines(form.elements["exclude"].value));
+      const added = [];
+      for (const v of failed) {
+        const cidr = `${v.ip}/32`;
+        if (!existing.has(cidr)) {
+          existing.add(cidr);
+          added.push(cidr);
+        }
+      }
+      if (added.length === 0) {
+        showToast("All failed IPs are already excluded", "info");
+        return;
+      }
+      const box = form.elements["exclude"];
+      const prior = box.value.trim();
+      box.value = prior ? `${prior}\n${added.join("\n")}` : added.join("\n");
+      showToast(`${added.length} failed IP${added.length === 1 ? "" : "s"} added to exclusions`, "success");
     });
 
     // ---- clipboard copy with feedback ----
@@ -2072,7 +2197,7 @@
         form.elements["count"].disabled = r.value !== "count";
       }));
 
-    const p2Fields = ["phase2_fragment", "phase2_packets", "phase2_length", "phase2_interval", "phase2_snis", "phase2_probe_url", "phase2_concurrency", "phase2_only"];
+    const p2Fields = ["phase2_fragment", "phase2_packets", "phase2_length", "phase2_interval", "phase2_snis", "phase2_probe_urls", "phase2_concurrency", "phase2_only"];
 
     const FRAGMENT_PRESETS = {
       Light: { packets: "tlshello", length: "100-200", interval: "10-20" },
@@ -2332,7 +2457,10 @@
       form.elements["phase2_length"].value = cf ? cf.length : "";
       form.elements["phase2_interval"].value = cf ? cf.interval : "";
       form.elements["phase2_snis"].value = p2 ? (p2.snis || []).join(",") : "";
-      form.elements["phase2_probe_url"].value = p2 ? p2.probe_url : "https://cp.cloudflare.com/";
+      form.elements["phase2_probe_urls"].value = p2
+        ? (p2.probe_urls && p2.probe_urls.length > 0 ? p2.probe_urls : (p2.probe_url ? [p2.probe_url] : []))
+          .join("\n")
+        : "https://cp.cloudflare.com/";
       form.elements["phase2_concurrency"].value = p2 ? p2.concurrency : 3;
 
       // Re-run the enable/disable handlers so the form reflects the loaded config.

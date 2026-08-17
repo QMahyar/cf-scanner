@@ -94,10 +94,31 @@ pub struct Phase2Config {
     pub custom_fragment: Option<CustomFragment>,
     /// SNI fronting variants; empty = use each config's own SNI.
     pub snis: Vec<String>,
-    /// Tiny HTTP target fetched through the tunnel to prove connectivity.
+    /// Legacy single-probe field; new clients send `probe_urls` instead.
+    #[serde(default)]
     pub probe_url: String,
+    /// Tiny HTTP targets fetched through the tunnel to prove connectivity;
+    /// every one must return 200 for a pass (max 8, each http(s)). Empty =
+    /// fall back to the legacy `probe_url`.
+    #[serde(default)]
+    pub probe_urls: Vec<String>,
     /// Parallel xray instances (1..=8).
     pub concurrency: u8,
+}
+
+impl Phase2Config {
+    /// The URLs the run actually targets: `probe_urls` when non-empty (new
+    /// clients), else the legacy single `probe_url`. Post-validation the
+    /// fallbacks are unreachable; kept so callers never dial an empty list.
+    pub fn effective_probe_urls(&self) -> Vec<String> {
+        if !self.probe_urls.is_empty() {
+            self.probe_urls.clone()
+        } else if !self.probe_url.trim().is_empty() {
+            vec![self.probe_url.clone()]
+        } else {
+            vec![DEFAULT_PROBE_URL.to_owned()]
+        }
+    }
 }
 
 impl Default for Phase2Config {
@@ -108,6 +129,7 @@ impl Default for Phase2Config {
             custom_fragment: None,
             snis: Vec::new(),
             probe_url: DEFAULT_PROBE_URL.to_owned(),
+            probe_urls: Vec::new(),
             concurrency: 3,
         }
     }
@@ -205,6 +227,10 @@ pub struct Phase2Verdict {
     /// is false (why the candidate did not verify). Absent = no detail.
     #[serde(default)]
     pub error: Option<String>,
+    /// Index into the submitted `phase2.configs` list that produced this
+    /// verdict; None when unknown/legacy.
+    #[serde(default)]
+    pub config_index: Option<u32>,
 }
 
 /// Phase-2 progress: how many of the total (candidate × config × SNI)
@@ -267,6 +293,8 @@ pub enum ConfigError {
     NoConfigs,
     #[error("probe_url must be a non-empty http(s) URL")]
     InvalidProbeUrl,
+    #[error("phase2.probe_urls must have at most 8 entries, got {0}")]
+    TooManyProbeUrls(usize),
     #[error("fragment preset Custom requires custom_fragment")]
     MissingCustomFragment,
     #[error("concurrency {0} out of range 1-1000")]
@@ -433,11 +461,28 @@ fn validate_phase2(p2: &Phase2Config) -> Result<(), ConfigError> {
     if p2.snis.iter().any(|s| s.len() > MAX_SNI_BYTES) {
         return Err(ConfigError::SniTooLong(MAX_SNI_BYTES));
     }
-    if p2.probe_url.len() > MAX_PROBE_URL_BYTES {
-        return Err(ConfigError::ProbeUrlTooLong(MAX_PROBE_URL_BYTES));
-    }
-    if !(p2.probe_url.starts_with("https://") || p2.probe_url.starts_with("http://")) {
-        return Err(ConfigError::InvalidProbeUrl);
+    // The legacy single URL stays the source of truth only when the list is
+    // absent, so a probes-driven request can never trip on a stale/blank
+    // legacy field (and legacy requests keep their exact validation).
+    if p2.probe_urls.is_empty() {
+        if p2.probe_url.len() > MAX_PROBE_URL_BYTES {
+            return Err(ConfigError::ProbeUrlTooLong(MAX_PROBE_URL_BYTES));
+        }
+        if !(p2.probe_url.starts_with("https://") || p2.probe_url.starts_with("http://")) {
+            return Err(ConfigError::InvalidProbeUrl);
+        }
+    } else {
+        if p2.probe_urls.len() > MAX_PHASE2_ENTRIES {
+            return Err(ConfigError::TooManyProbeUrls(p2.probe_urls.len()));
+        }
+        for url in &p2.probe_urls {
+            if url.len() > MAX_PROBE_URL_BYTES {
+                return Err(ConfigError::ProbeUrlTooLong(MAX_PROBE_URL_BYTES));
+            }
+            if !(url.starts_with("https://") || url.starts_with("http://")) {
+                return Err(ConfigError::InvalidProbeUrl);
+            }
+        }
     }
     if p2.fragment == FragmentPreset::Custom && p2.custom_fragment.is_none() {
         return Err(ConfigError::MissingCustomFragment);
@@ -752,6 +797,132 @@ mod tests {
             ..Default::default()
         });
         assert_eq!(c.validate(), Err(ConfigError::InvalidProbeUrl));
+    }
+
+    #[test]
+    fn probe_urls_replace_the_legacy_single_url() {
+        // A probes-driven request with a blank legacy field stays valid.
+        let mut c = valid_config();
+        c.phase2 = Some(Phase2Config {
+            configs: vec!["vless://uuid@example.com:443".to_owned()],
+            probe_urls: vec!["https://cp.cloudflare.com/".to_owned()],
+            ..Default::default()
+        });
+        assert_eq!(c.validate(), Ok(()));
+        let bad = Phase2Config {
+            probe_urls: vec!["ftp://nope".to_owned()],
+            ..Phase2Config::default()
+        };
+        assert_eq!(valid_config_with(bad), Err(ConfigError::InvalidProbeUrl));
+    }
+
+    #[test]
+    fn rejects_too_many_or_oversized_probe_urls() {
+        let over = Phase2Config {
+            probe_urls: (0..=MAX_PHASE2_ENTRIES)
+                .map(|i| format!("https://cp.cloudflare.com/{i}"))
+                .collect(),
+            ..Phase2Config::default()
+        };
+        assert_eq!(
+            valid_config_with(over),
+            Err(ConfigError::TooManyProbeUrls(MAX_PHASE2_ENTRIES + 1))
+        );
+        let long = Phase2Config {
+            probe_urls: vec![format!("https://x/{}", "a".repeat(MAX_PROBE_URL_BYTES))],
+            ..Phase2Config::default()
+        };
+        assert_eq!(
+            valid_config_with(long),
+            Err(ConfigError::ProbeUrlTooLong(MAX_PROBE_URL_BYTES))
+        );
+        let at_cap = Phase2Config {
+            probe_urls: (0..MAX_PHASE2_ENTRIES)
+                .map(|i| format!("https://cp.cloudflare.com/{i}"))
+                .collect(),
+            ..Phase2Config::default()
+        };
+        assert_eq!(valid_config_with(at_cap), Ok(()), "8 URLs must be accepted");
+    }
+
+    fn valid_config_with(p2: Phase2Config) -> Result<(), ConfigError> {
+        // Configs are checked before probe URLs, so the probe validation
+        // only runs when at least one config entry exists.
+        let mut p2 = p2;
+        p2.configs = vec!["vless://uuid@example.com:443".to_owned()];
+        let mut c = valid_config();
+        c.phase2 = Some(p2);
+        c.validate()
+    }
+
+    #[test]
+    fn effective_probe_urls_prefer_the_list_then_the_legacy_url() {
+        assert_eq!(
+            Phase2Config::default().effective_probe_urls(),
+            vec![DEFAULT_PROBE_URL.to_owned()]
+        );
+        let legacy = Phase2Config {
+            probe_url: "https://example.com/one".to_owned(),
+            ..Phase2Config::default()
+        };
+        assert_eq!(
+            legacy.effective_probe_urls(),
+            vec!["https://example.com/one".to_owned()]
+        );
+        let listed = Phase2Config {
+            probe_urls: vec![
+                "https://a.example/".to_owned(),
+                "https://b.example/".to_owned(),
+            ],
+            ..Phase2Config::default()
+        };
+        assert_eq!(
+            listed.effective_probe_urls(),
+            vec![
+                "https://a.example/".to_owned(),
+                "https://b.example/".to_owned()
+            ]
+        );
+    }
+
+    #[test]
+    fn probe_urls_round_trip_through_serde() {
+        let p2 = Phase2Config {
+            probe_urls: vec!["https://a.example/".to_owned()],
+            ..Phase2Config::default()
+        };
+        let json = serde_json::to_string(&p2).unwrap();
+        assert!(
+            json.contains("\"probe_urls\":[\"https://a.example/\"]"),
+            "{json}"
+        );
+        assert_eq!(serde_json::from_str::<Phase2Config>(&json).unwrap(), p2);
+        // Omitted fields keep old payloads decoding: probe_urls defaults to
+        // the empty list and the legacy probe_url gets the default URL.
+        let legacy = r#"{"configs":["vless://uuid@example.com:443"],"fragment":"Off","snis":[],"probe_url":"https://cp.cloudflare.com/","concurrency":3}"#;
+        let decoded: Phase2Config = serde_json::from_str(legacy).unwrap();
+        assert!(decoded.probe_urls.is_empty());
+        assert_eq!(decoded.probe_url, DEFAULT_PROBE_URL);
+    }
+
+    #[test]
+    fn phase2_verdict_config_index_defaults_to_none() {
+        let legacy = r#"{"passed":true,"fragment":"light","sni":"","latency_ms":42}"#;
+        let v: Phase2Verdict = serde_json::from_str(legacy).unwrap();
+        assert_eq!(
+            v.config_index, None,
+            "omitted field must deserialize as None"
+        );
+        let json = serde_json::to_string(&Phase2Verdict {
+            passed: true,
+            fragment: "light".to_owned(),
+            sni: "a.me".to_owned(),
+            latency_ms: Some(7),
+            error: None,
+            config_index: Some(2),
+        })
+        .unwrap();
+        assert!(json.contains("\"config_index\":2"), "{json}");
     }
 
     #[test]

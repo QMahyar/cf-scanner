@@ -5,10 +5,12 @@
 
 use std::collections::BTreeMap;
 use std::future::Future;
+use std::net::Ipv4Addr;
 use std::pin::Pin;
 
 use anyhow::{Result, anyhow, bail};
 use base64::Engine as _;
+use percent_encoding::{AsciiSet, CONTROLS, utf8_percent_encode};
 use serde::Deserialize;
 use url::Url;
 
@@ -18,6 +20,52 @@ const SUB_UA: &str = "cf-scanner/0.1.0";
 const WS: &str = "ws";
 /// Error lines longer than this are truncated (e.g. xray stderr tails).
 const MAX_ERROR_LINE_BYTES: usize = 512;
+
+/// Chars percent-encoded in a rendered URI's userinfo segment. RFC 3986
+/// allows raw unreserved + sub-delims + ':' there, but our parser (like most
+/// clients') reads a single username up to the first '@': ':' must be
+/// encoded or a "user:pass" password would split, and '@' would corrupt the
+/// host.
+const USERINFO_ENCODE_SET: &AsciiSet = &CONTROLS
+    .add(b' ')
+    .add(b'"')
+    .add(b'#')
+    .add(b'%')
+    .add(b'/')
+    .add(b':')
+    .add(b'<')
+    .add(b'>')
+    .add(b'?')
+    .add(b'[')
+    .add(b'\\')
+    .add(b']')
+    .add(b'^')
+    .add(b'`')
+    .add(b'{')
+    .add(b'|')
+    .add(b'}')
+    .add(b'@');
+
+/// Chars percent-encoded in a rendered URI's query values: '&'/'=' would
+/// split a parameter, '+' reads as a space to form-style clients, and '%'
+/// must never double-encode. '/' and '?' stay raw (the query grammar allows
+/// them); everything else reserved is encoded.
+const QUERY_VALUE_ENCODE_SET: &AsciiSet = &CONTROLS
+    .add(b' ')
+    .add(b'"')
+    .add(b'#')
+    .add(b'%')
+    .add(b'&')
+    .add(b'+')
+    .add(b'=')
+    .add(b'<')
+    .add(b'>')
+    .add(b'\\')
+    .add(b'^')
+    .add(b'`')
+    .add(b'{')
+    .add(b'|')
+    .add(b'}');
 
 /// Best-effort redaction of error text before it reaches logs, the wire, or
 /// the UI: URL-bearing lines lose their query/fragment (the usual carrier of
@@ -189,6 +237,78 @@ pub fn parse_uri(entry: &str) -> Result<OutboundSpec> {
         "ss" => parse_ss(entry),
         other => bail!("unsupported scheme '{other}'"),
     }
+}
+
+/// Renders a ready-to-use vless/trojan URI for a verified candidate: the
+/// config's id, security, SNI, fingerprint and (vless) ws settings, dialing
+/// `dial_ip`:`port`. The inverse of `parse_uri` for the fields we support;
+/// vmess/ss and trojan-over-ws exports are out of scope.
+pub fn render_uri(
+    spec: &OutboundSpec,
+    dial_ip: Ipv4Addr,
+    sni_override: Option<&str>,
+) -> Result<String> {
+    match spec.protocol {
+        Protocol::Vless => {}
+        Protocol::Trojan => {
+            if spec.ws.is_some() {
+                bail!("export not supported for this protocol: trojan-over-ws");
+            }
+        }
+        _ => bail!("export not supported for this protocol"),
+    }
+    let mut out = String::with_capacity(128);
+    out.push_str(spec.protocol.as_str());
+    out.push_str("://");
+    out.push_str(&utf8_percent_encode(&spec.user_id, USERINFO_ENCODE_SET).to_string());
+    out.push('@');
+    out.push_str(&dial_ip.to_string());
+    out.push(':');
+    out.push_str(&spec.port.to_string());
+    out.push('?');
+    let mut query = |key: &str, value: &str| {
+        out.push_str(key);
+        out.push('=');
+        out.push_str(&utf8_percent_encode(value, QUERY_VALUE_ENCODE_SET).to_string());
+        out.push('&');
+    };
+    query("security", &spec.security);
+    let sni = sni_override
+        .map(str::to_owned)
+        .or_else(|| spec.tls_server_name.clone());
+    if let Some(sni) = sni {
+        query("sni", &sni);
+    }
+    if let Some(fp) = &spec.fingerprint {
+        query("fp", fp);
+    }
+    if let Some(ws) = &spec.ws {
+        query("type", WS);
+        query("path", &ws.path);
+        if let Some(host) = &ws.host {
+            query("host", host);
+        }
+        if let Some(packet_encoding) = &ws.packet_encoding {
+            query("packetencoding", packet_encoding);
+        }
+    }
+    out.pop(); // the trailing '&' (security is always present)
+    Ok(out)
+}
+
+/// One export path shared by the CLI and the API: parse the user's original
+/// config URI, point it at the verified candidate, render the ready URI.
+/// `sni_override` (when given) wins over the config's own SNI.
+pub fn export_config_uri(
+    original_config: &str,
+    dial_ip: Ipv4Addr,
+    port: u16,
+    sni_override: Option<&str>,
+) -> Result<String> {
+    let mut spec = parse_uri(original_config)?;
+    spec.server = dial_ip.to_string();
+    spec.port = port;
+    render_uri(&spec, dial_ip, sni_override)
 }
 
 /// Parses subscription text (one URI per line; blank lines and `#` comments
@@ -969,5 +1089,128 @@ mod tests {
         let lines: Vec<&str> = both.lines().collect();
         assert_eq!(lines.len(), 2);
         assert!(lines.iter().all(|l| l.ends_with('…')));
+    }
+
+    // --- render_uri / export_config_uri (review round) ----------------------
+
+    const DIAL_IP: &str = "203.0.113.7";
+
+    /// Parses, renders with a fake dial IP, re-parses, and checks every
+    /// identity-critical field survived.
+    fn assert_round_trips(original: &str, sni_override: Option<&str>) {
+        let spec = parse_uri(original).unwrap();
+        let uri = render_uri(&spec, DIAL_IP.parse().unwrap(), sni_override).unwrap();
+        let back = parse_uri(&uri).unwrap();
+        assert_eq!(back.protocol, spec.protocol);
+        assert_eq!(back.user_id, spec.user_id);
+        assert_eq!(back.server, DIAL_IP);
+        assert_eq!(back.port, spec.port);
+        assert_eq!(back.security, spec.security);
+        assert_eq!(
+            back.tls_server_name.as_deref(),
+            sni_override.or(spec.tls_server_name.as_deref()),
+            "{uri}"
+        );
+        assert_eq!(back.fingerprint, spec.fingerprint);
+        assert_eq!(back.ws, spec.ws);
+    }
+
+    #[test]
+    fn render_uri_round_trips_vless() {
+        for uri in [
+            // Plain tls with explicit SNI + fingerprint.
+            "vless://aaaaaaaa-bbbb-cccc-dddd-eeeeffff0000@104.17.160.217:2096?security=tls&sni=edgetunnel.workers.dev&fp=chrome",
+            // Default security=none, no extras.
+            "vless://00000000-0000-0000-0000-000000000000@1.2.3.4:443",
+            // WS + Host fronting + packetencoding, as Cloudflare workers use.
+            "vless://aaaaaaaa-bbbb-cccc-dddd-eeeeffff0000@104.17.160.217:2096?security=tls&type=ws&path=/&host=front.example.com&fp=chrome&sni=front.example.com&packetencoding=xudp",
+            // An override swaps the config's own SNI.
+            "vless://aaaaaaaa-bbbb-cccc-dddd-eeeeffff0000@104.17.160.217:2096?security=tls&sni=orig.example.com",
+        ] {
+            let override_sni = uri.contains("override").then_some("b.me");
+            assert_round_trips(uri, override_sni);
+        }
+    }
+
+    #[test]
+    fn render_uri_round_trips_trojan() {
+        for uri in [
+            "trojan://secret-password@example.com:443?security=tls",
+            "trojan://aaaaaaaa-bbbb-cccc-dddd-eeeeffff0000@104.17.160.217:2096?security=tls&sni=front.example.com&fp=chrome",
+        ] {
+            assert_round_trips(uri, None);
+        }
+    }
+
+    #[test]
+    fn render_uri_percent_encodes_hostile_passwords() {
+        // ':' and '@' inside the userinfo must survive the round trip; a
+        // raw ':' would split a user:pass pair in every parser, so the
+        // input side is fed percent-encoded (as real configs are).
+        for password in ["p@ss:word", "p a s s#1", "päss/word?x"] {
+            let encoded = utf8_percent_encode(password, USERINFO_ENCODE_SET);
+            let spec = parse_uri(&format!("trojan://{encoded}@1.2.3.4:443")).unwrap();
+            assert_eq!(spec.user_id, password, "parse must decode the input");
+            let uri = render_uri(&spec, DIAL_IP.parse().unwrap(), None).unwrap();
+            let back = parse_uri(&uri).unwrap();
+            assert_eq!(back.user_id, password, "{uri}");
+            assert_eq!(back.server, DIAL_IP);
+            assert_eq!(back.protocol, Protocol::Trojan);
+        }
+    }
+
+    #[test]
+    fn render_uri_rejects_unsupported_protocols_and_trojan_ws() {
+        let vmess = parse_uri(&format!(
+            "vmess://{}",
+            base64::engine::general_purpose::STANDARD.encode(
+                r#"{"v":"2","add":"1.2.3.4","port":"443","id":"u","net":"tcp","tls":"none"}"#
+            )
+        ))
+        .unwrap();
+        let err = render_uri(&vmess, DIAL_IP.parse().unwrap(), None).unwrap_err();
+        assert!(err.to_string().contains("export not supported"), "{err}");
+        let ss = parse_uri(&format!(
+            "ss://{}@1.2.3.4:8388",
+            base64::engine::general_purpose::STANDARD.encode("aes-128-gcm:secret")
+        ))
+        .unwrap();
+        assert!(render_uri(&ss, DIAL_IP.parse().unwrap(), None).is_err());
+        let trojan_ws = parse_uri("trojan://secret@1.2.3.4:443?type=ws&path=/api").unwrap();
+        let err = render_uri(&trojan_ws, DIAL_IP.parse().unwrap(), None).unwrap_err();
+        assert!(err.to_string().contains("trojan-over-ws"), "{err}");
+    }
+
+    #[test]
+    fn export_config_uri_swaps_the_dial_endpoint() {
+        let uri = export_config_uri(
+            "vless://aaaaaaaa-bbbb-cccc-dddd-eeeeffff0000@1.2.3.4:443?security=tls&sni=orig.example.com&fp=chrome",
+            DIAL_IP.parse().unwrap(),
+            2096,
+            Some("b.me"),
+        )
+        .unwrap();
+        assert!(
+            uri.starts_with("vless://aaaaaaaa-bbbb-cccc-dddd-eeeeffff0000@203.0.113.7:2096?"),
+            "{uri}"
+        );
+        let back = parse_uri(&uri).unwrap();
+        assert_eq!(back.user_id, "aaaaaaaa-bbbb-cccc-dddd-eeeeffff0000");
+        assert_eq!(back.server, DIAL_IP);
+        assert_eq!(back.port, 2096);
+        assert_eq!(back.tls_server_name.as_deref(), Some("b.me"));
+        assert_eq!(back.fingerprint.as_deref(), Some("chrome"));
+        // The override is what the scan verified; without one the config's
+        // own SNI is preserved.
+        let uri = export_config_uri(
+            "vless://aaaaaaaa-bbbb-cccc-dddd-eeeeffff0000@1.2.3.4:443?security=tls&sni=orig.example.com",
+            DIAL_IP.parse().unwrap(),
+            443,
+            None,
+        )
+        .unwrap();
+        assert!(uri.contains("sni=orig.example.com"), "{uri}");
+        // Garbage input errors instead of rendering something unusable.
+        assert!(export_config_uri("not a uri", DIAL_IP.parse().unwrap(), 443, None).is_err());
     }
 }
