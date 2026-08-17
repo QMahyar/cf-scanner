@@ -34,7 +34,7 @@ cf-scanner serve
 
 ## How it works
 
-On `npm install`, the `postinstall` script detects your OS and architecture, then downloads the correct prebuilt archive from the GitHub release for the current version and unpacks the binary (plus its bundled xray helper) into `bin/`. npm links the `bin/cf-scanner` wrapper into `node_modules/.bin/`, which npm adds to your PATH when you install globally.
+On `npm install`, the `postinstall` script detects your OS and architecture, then downloads the correct prebuilt archive from the GitHub release for the current version and unpacks the binary (plus its bundled xray helper) into `bin/`. npm links the `bin/cf-scanner.js` wrapper (a small Node launcher that spawns the platform binary — `cf-scanner.exe` on Windows) into `node_modules/.bin/`, which npm adds to your PATH when you install globally.
 
 The npm version and the GitHub release tag can differ: `install.js` pins the download tag separately (`RELEASE_TAG`), so the wrapper can be patched without a new binary release.
 
