@@ -155,6 +155,12 @@ async fn spawn_launches_fake_xray_and_stop_kills_it() {
 /// tunnel — and every `trial-*` dir must be cleaned up afterwards. Relies on
 /// the `CF_SCANNER_DATA_DIR` override in paths.rs; the guard below keeps the
 /// test honest (it would skip loudly if the seam ever regressed).
+// The guard intentionally spans the probe: sibling tests run on separate
+// runtimes/threads and mutate the same process env, so the lock must stay
+// held while the probe re-reads CF_SCANNER_DATA_DIR. No task can be parked
+// on this std Mutex within one test's runtime, so the await-holding-lock
+// lint is a false positive here.
+#[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn tunnel_probe_lifecycle_spawns_and_cleans_trial_dirs() {
     let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
