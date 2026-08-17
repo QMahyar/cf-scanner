@@ -51,7 +51,8 @@ cargo run -- serve    # API + UI on http://127.0.0.1:8765
 ```
 
 Rust 2024 toolchain required; see `docs/development.md` for the full local
-flow.
+flow. Building needs network for the one-time GeoIP download unless
+`CFSCANNER_OFFLINE_BUILD=1` is set (see Platform Caveats → Offline builds).
 
 ## Commands
 
@@ -114,7 +115,11 @@ Design rationale lives in [docs/decisions/](docs/decisions/).
   the build** (no empty-db fallback). The validated database is cached in
   `target/**/out`, so repeat builds are offline after the first one until
   `cargo clean`. The xray bundle is only attempted for release builds, never
-  dev builds.
+  dev builds. **Fully offline**: set `CFSCANNER_OFFLINE_BUILD=1` (any
+  non-empty value) to skip the GeoIP download and checksum entirely and embed
+  a placeholder instead — the build succeeds and country lookups simply
+  return `None`. The flag never changes normal builds; unset it to embed the
+  real database again.
 
 ## Security
 
@@ -141,6 +146,18 @@ open a PR from a fork, keeping `cargo test`, clippy `-D warnings`, and
 `fmt --check` green (`docs/development.md`). Architecture decisions live in
 `docs/decisions/`; the finished-product review (2026-08-13) is in
 [docs/review/](docs/review/product-review-2026-08-13.md).
+
+## Legal notice
+
+Scanning Cloudflare's IP ranges with handshake probes may violate
+Cloudflare's Terms of Service in some jurisdictions. The optional WARP
+registration flow (`cf-scanner warp-config generate`, `src/warpgen.rs`)
+calls Cloudflare's client registration API (`v0a884`) and sends the official
+client's User-Agent (`okhttp/3.12.1`), impersonating the official app in the
+wgcf style; that may also violate the Terms of Service. This tool is
+provided for research and for use on networks you control. You are
+responsible for complying with the laws and terms that apply where you run
+it. Use at your own risk.
 
 ## License
 
