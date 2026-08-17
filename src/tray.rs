@@ -13,8 +13,19 @@ use std::sync::atomic::{AtomicBool, Ordering};
 /// always-false no-op on those platforms.
 static EXIT_REQUESTED: AtomicBool = AtomicBool::new(false);
 
+/// Name of the `HKCU\...\CurrentVersion\Run` value backing `serve --autostart`.
+pub const RUN_VALUE_NAME: &str = "CF-Scanner";
+
 pub fn exit_requested() -> bool {
     EXIT_REQUESTED.load(Ordering::Relaxed)
+}
+
+/// `HKCU\...\Run` value payload: the quoted exe path plus the `serve` flags
+/// the autostart entry must launch. Pure so the quoting/arg shape is unit
+/// testable without touching the registry.
+#[cfg(any(target_os = "windows", test))]
+fn autostart_command(exe: &std::path::Path) -> String {
+    format!("\"{}\" serve --tray", exe.display())
 }
 
 /// "Start CDN scan" menu payload: CLI defaults (quick preset, port 443).
@@ -67,7 +78,7 @@ mod imp {
     use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
     use tray_icon::{Icon, TrayIconBuilder};
 
-    use super::{cdn_payload, warp_payload};
+    use super::{RUN_VALUE_NAME, autostart_command, cdn_payload, warp_payload};
 
     /// Spawns the tray thread. The icon is created on a dedicated std thread
     /// (not tokio) that also pumps the tray window's Win32 messages; menu
@@ -163,6 +174,31 @@ mod imp {
 
     fn request_exit() {
         super::EXIT_REQUESTED.store(true, Ordering::Relaxed);
+    }
+
+    /// Registers/removes the `HKCU\...\CurrentVersion\Run` entry that starts
+    /// `serve --tray` at logon; deleting a missing value is Ok.
+    pub fn set_autostart(enabled: bool) -> Result<()> {
+        use winreg::RegKey;
+        use winreg::enums::HKEY_CURRENT_USER;
+
+        const RUN_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
+        let run_key = RegKey::predef(HKEY_CURRENT_USER)
+            .create_subkey(RUN_KEY)
+            .context("could not open HKCU Run key")?
+            .0;
+        if enabled {
+            let exe = std::env::current_exe().context("could not resolve current exe path")?;
+            run_key
+                .set_value(RUN_VALUE_NAME, &autostart_command(&exe))
+                .with_context(|| format!("could not write {RUN_VALUE_NAME} autostart value"))?;
+        } else if let Err(err) = run_key.delete_value(RUN_VALUE_NAME) {
+            if err.kind() != std::io::ErrorKind::NotFound {
+                return Err(err)
+                    .with_context(|| format!("could not remove {RUN_VALUE_NAME} autostart value"));
+            }
+        }
+        Ok(())
     }
 
     /// Opens the UI in the default browser via `cmd /c start`.
@@ -299,6 +335,18 @@ mod tests {
         assert!(warp.custom_endpoints.is_empty());
         assert_eq!(warp.probes_per_endpoint, 3);
         assert!(!warp.verify_with_wgconf);
+    }
+
+    #[test]
+    fn autostart_command_quotes_the_exe_path() {
+        assert_eq!(
+            autostart_command(std::path::Path::new(r"C:\Program Files\cf-scanner.exe")),
+            "\"C:\\Program Files\\cf-scanner.exe\" serve --tray"
+        );
+        assert_eq!(
+            autostart_command(std::path::Path::new(r"C:\cf-scanner.exe")),
+            "\"C:\\cf-scanner.exe\" serve --tray"
+        );
     }
 
     #[test]
