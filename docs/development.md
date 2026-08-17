@@ -12,7 +12,10 @@ locally here should be exercised before pushing.
 - Network access for the db-ip download: the mmdb is pinned by SHA-256 and a
   failed download or checksum mismatch **fails the build** (no empty-db
   fallback). The validated download is cached in `target/**/out`, so repeat
-  builds are offline after the first one until `cargo clean`. Tests
+  builds are offline after the first one until `cargo clean`. Fully offline
+  environments can set `CFSCANNER_OFFLINE_BUILD=1` (any non-empty value):
+  build.rs then skips the download and checksum, embeds a placeholder db,
+  and the build succeeds with country lookups returning `None`. Tests
   themselves never touch the network (probe transports are injectable).
 - cargo-dist 0.32 for release-artifact smoke tests: `cargo install cargo-dist`
   (binary `dist` / `cargo dist`). If your shell doesn't have

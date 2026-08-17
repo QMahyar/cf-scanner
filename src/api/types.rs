@@ -8,7 +8,10 @@ use serde::{Deserialize, Serialize};
 
 pub const DEFAULT_PORT: u16 = 443;
 pub const DEFAULT_WARP_PORTS: &[u16] = &[2408, 500, 854, 880, 1701, 3138, 4500];
-pub const DEFAULT_CONCURRENCY: u16 = 200;
+/// 64 not 200: that many parallel TLS handshakes from a residential IP is
+/// aggressive and risks ISP/Cloudflare rate-limiting; power users can raise
+/// it via the existing 1..=1000 range.
+pub const DEFAULT_CONCURRENCY: u16 = 64;
 pub const DEFAULT_TIMEOUT_MS: u64 = 3_000;
 pub const DEFAULT_PROBE_URL: &str = "https://cp.cloudflare.com/";
 pub const MAX_SCAN_COUNT: u32 = 100_000;

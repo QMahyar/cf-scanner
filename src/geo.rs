@@ -7,8 +7,10 @@ use std::net::IpAddr;
 
 use maxminddb::geoip2::Country;
 
-/// Build-time embedded db; build.rs guarantees the file exists (possibly
-/// empty when the download failed offline).
+/// Build-time embedded db; build.rs guarantees the file exists. Normal
+/// builds embed the real db-ip Lite mmdb; `CFSCANNER_OFFLINE_BUILD` embeds a
+/// small placeholder instead, so `Reader::from_source` below fails and every
+/// lookup degrades to `None`.
 static EMBEDDED_MMDB: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/geoip.mmdb"));
 
 pub struct Geo {
