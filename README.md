@@ -74,6 +74,7 @@ with `cargo run --`.
 | `cf-scanner wizard` | Interactive wizard over the same engine |
 | `cf-scanner warp-config generate` | Opt-in WARP registration (v0a884 API) + wgconf build |
 | `cf-scanner warp-config export` | Export the registered WARP config as text/.conf |
+| `cf-scanner export-config --config vless://… --ip 1.2.3.4 --port 443` | Re-render a vless/trojan link against a scanned endpoint (also via `POST /api/config/export` or the per-row Export button in the UI) |
 | `cf-scanner ranges refresh` | Refresh bundled Cloudflare ranges (verified HTTPS fetch) |
 | `cargo test` | Unit + integration tests |
 | `cargo clippy --all-targets -- -D warnings` | Lint |
@@ -92,7 +93,7 @@ Release artifacts are built and published **only by CI** on tag push
   (`ScanConfig`, `Verdict`, `StopCondition`, events). CLI, wizard, HTTP server,
   and frontend are thin clients. The server maps engine types → API types;
   engine types are never serialized directly.
-- **Phase 2 = Xray subprocess.** `xray run -c config.json` with a local socks
+- **Phase 2 = Xray subprocess, or not.** `xray run -c config.json` with a local socks
   inbound; fragment (DPI bypass) via a Freedom outbound + `sockopt.dialerProxy`
   chaining. The xray binary ships inside release archives (build-time
   download + `.dgst` SHA2-256 verification, feature `dist-bundle-xray`); dev
@@ -100,7 +101,10 @@ Release artifacts are built and published **only by CI** on tag push
   Plain VLESS/Trojan combos (TCP transport, TLS or no TLS, fragmentation off)
   skip the subprocess entirely: the inline verifier speaks the wire protocol
   in-process, keeping those attempts in the low milliseconds instead of the
-  ~50-200ms an xray spawn costs.
+  ~50-200ms an xray spawn costs (`Phase2Verdict.verifier` reports which path
+  verified a row). Multiple probe URLs (`--phase2-probe-urls`, one keep-alive
+  tunnel, all must return 200) and config export (re-render a vless/trojan
+  link against a scanned endpoint) round out the phase-2 surface.
 - **WARP probes.** boringtun builds a valid Init (MAC1 required, MAC2 zeros);
   a Response (92 B) or Cookie (64 B) of exact shape = open.
 - **GeoIP.** db-ip.com Lite country MMDB embedded at build time

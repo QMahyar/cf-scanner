@@ -106,6 +106,33 @@ Requires a desktop session (logged-on user with a notification area).
 Record: icon appearance, each menu item's effect, Exit shutdown, regedit
 value string, reboot result, headless-session behavior.
 
+## 6. Phase-2 export + inline verifier (manual)
+
+Requires at least one real VLESS or Trojan config (own server). Use the
+smallest scan that produces results (custom count 50-100, stop-after 1-3).
+
+- **Inline verifier (hot path).** Run a phase-2 scan with a plain vless
+  `vless://<uuid>@<host>:<port>?security=tls&sni=<host>` config, fragment
+  off. Every phase-2 row must show `verifier: "inline"` in the API
+  (`GET /api/results`) — i.e. no `xray run` in the log. Repeat with a
+  Trojan config; rows must show `verifier: "inline"` again. Then add
+  fragmentation (any preset) and re-run: rows must show `verifier: "xray"`
+  and the xray subprocess must appear.
+- **Export round trip.** In the UI, click Export on a verified row → the
+  exported link must point at the scanned IP:port with the original
+  scheme/uuid/query intact (SNI overridden to the row's SNI when one was
+  used). Same result via the CLI:
+  `cf-scanner export-config --config "vless://…" --ip <ip> --port <port>`
+  and via `POST /api/config/export` with a JSON body. Then import the
+  exported link into your client and verify it connects.
+- **Multiple probe URLs.** Add `--phase2-probe-urls` (one URL per line in
+  the UI textarea) and verify all URLs are fetched over a single tunnel:
+  one xray spawn serves every URL (inline mode: one connection). A
+  candidate must fail the whole row when any URL does not return 200.
+
+Record: `verifier` values per config type, exported-link exactness (diff
+against the original URI), connect result after import, spawn counts.
+
 ## Recording results
 
 Keep results in the issue tracker or a review notes file, including the

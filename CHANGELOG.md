@@ -3,6 +3,59 @@
 All notable changes to CF-Scanner are documented here, grouped by
 Added / Changed / Fixed / Deprecated / Removed / Security, newest on top.
 
+## [Unreleased]
+
+### Added
+- **In-process VLESS/Trojan verifier.** Phase-2 attempts whose protocol is
+  plain VLESS or Trojan (TCP transport, TLS or plain, fragmentation off)
+  are now verified in-process over rustls — no xray subprocess, no temp
+  config, no ~50-200ms spawn cost. Everything else (WS transports, VMess,
+  Shadowsocks, and every DPI-fragment preset) falls back to the xray
+  subprocess as before. `Phase2Verdict.verifier` reports which path
+  verified each row ("inline" | "xray").
+- **Config export.** Any vless/trojan link from the phase-2 config can be
+  re-rendered against a scanned endpoint: per-row Export in the UI,
+  `POST /api/config/export`, and the `cf-scanner export-config` CLI
+  subcommand. Export keeps the scheme and query params (SNI can be
+  overridden) and rewrites host/port to the verified endpoint.
+- **Multiple phase-2 probe URLs.** `--phase2-probe-urls` (UI: textarea)
+  checks every URL over one keep-alive tunnel; all must return HTTP 200
+  for the endpoint to count as working.
+- **Windows tray** (`serve --tray`): tray menu starts/cancels CDN and WARP
+  scans, opens the UI, and exits `serve` gracefully. `--autostart` (with
+  `--tray`) registers a `CF-Scanner` entry under
+  `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`.
+- **Offline builds.** `CFSCANNER_OFFLINE_BUILD=1` skips the GeoIP download
+  and embeds a placeholder database; lookups degrade to `None` instead of
+  failing the build.
+- Frontend: “Add failed to exclusions” button, per-row Export buttons,
+  probe-URLs textarea, and an exact “Stop after at least N found” label
+  (the engine stops once found ≥ N; in-flight probes may add up to the
+  concurrency setting more, all of them valid working endpoints).
+
+### Changed
+- Default probe concurrency 200 → 64 (kinder to the network and to
+  Cloudflare; still saturates typical links).
+- SOCKS5 HTTP client extracted into `src/socks.rs` and shared between
+  phase-1 probing and the inline verifier; scan planning moved into
+  `src/engine/plan.rs` (pure refactors, no behavior change).
+- README gained a legal notice (Cloudflare ToS / impersonation warning,
+  wgcf-style `okhttp/3.12.1` user agent).
+
+### Fixed
+- **Reset left stale rows in the table.** The reset handler cleared the
+  data model but never marked the table dirty, so the DOM kept showing
+  old rows while the stats read 0 (QA finding, fixed and verified).
+- Stale live-progress line could reappear after cancel when a status poll
+  in flight repainted progress over the terminal state.
+- Test doubles (`FakeTransport`/`Scripted`) are now truly `#[cfg(test)]`
+  -gated, matching their docs; merged `plans/` removed.
+
+### Performance
+- Phase-2 verification for plain vless/trojan configs drops from an xray
+  spawn (~50-200ms) to a single in-process TLS round trip, and one xray
+  spawn now serves all probe URLs instead of one per URL.
+
 ## [0.4.0] - 2026-08-16
 
 Review-driven hardening from the
