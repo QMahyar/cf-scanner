@@ -1,20 +1,19 @@
 //! Candidate ranges for CDN mode: bundled official Cloudflare space, custom
-//! CIDRs, dirty-range exclusions, and preset/count sampling plans.
-//! Pure logic here; the network fetch for `ranges refresh` is injected so
-//! tests never touch the wire.
+//! CIDRs, dirty-range exclusions, and the official-ranges HTTP fetch. Pure
+//! logic here; the network fetch for `ranges refresh` is injected so tests
+//! never touch the wire. (Scan planning over these pools lives in
+//! `crate::engine::plan`.)
 
 use std::fs;
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
-use rustls::RootCertStore;
 use serde::Deserialize;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
 
-use crate::api::types::{CdnPreset, ScanTarget};
 use crate::paths;
+use crate::socks::{http_request, send_http, tls_connector};
 
 pub const BUNDLED_RANGES: &str = include_str!("../data/cf-ranges.txt");
 pub const BUNDLED_RANGES_V6: &str = include_str!("../data/cf-ranges-v6.txt");
@@ -61,8 +60,9 @@ impl Cidr {
     }
 
     /// /24 sub-blocks this v4 range covers; prefix >= 24 clamps to 1.
-    /// v6 ranges are never decomposed this way (see `plan_preset`).
-    fn sub24_count(self) -> u64 {
+    /// v6 ranges are never decomposed this way (see `plan_preset` in
+    /// `crate::engine::plan`).
+    pub(crate) fn sub24_count(self) -> u64 {
         debug_assert!(self.addr.is_ipv4());
         if self.prefix >= 24 {
             1
@@ -137,14 +137,6 @@ pub fn parse_cidr(s: &str) -> Result<Cidr> {
         addr: masked,
         prefix,
     })
-}
-
-/// Unwraps the v4 address of a range the caller has already checked is v4.
-fn ipv4(addr: IpAddr) -> Ipv4Addr {
-    match addr {
-        IpAddr::V4(a) => a,
-        IpAddr::V6(_) => unreachable!("v6 ranges are handled separately"),
-    }
 }
 
 fn parse_lines(text: &str) -> Result<Vec<Cidr>> {
@@ -273,156 +265,6 @@ fn decompose(mut base: u128, mut len: u128, bits: u32, out: &mut Vec<Cidr>) {
         base += block;
         len -= block;
     }
-}
-
-/// How the engine walks a pool: every host, a random subset per CIDR block,
-/// or pre-rolled concrete host offsets (v6 host spaces need u128 offsets).
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum PlanItem {
-    Every { cidr: Cidr },
-    Sample { cidr: Cidr, count: u64 },
-    Hosts { cidr: Cidr, offsets: Vec<u128> },
-}
-
-/// Deterministic (seeded) splitmix64; good enough for sampling.
-pub struct SplitMix64(u64);
-
-impl SplitMix64 {
-    pub fn new(seed: u64) -> Self {
-        Self(seed)
-    }
-
-    pub fn next_u64(&mut self) -> u64 {
-        self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
-        let mut z = self.0;
-        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-        z ^ (z >> 31)
-    }
-
-    /// Uniform in [0, bound). Modulo bias (< 2^-32 for our bounds) is fine.
-    pub fn below(&mut self, bound: u64) -> u64 {
-        self.next_u64() % bound
-    }
-
-    /// Uniform in [0, bound) for u128 bounds (v6 host spaces). Two 64-bit
-    /// draws; modulo bias (< 2^-64) is negligible.
-    pub fn below_u128(&mut self, bound: u128) -> u128 {
-        let lo = self.next_u64() as u128;
-        let hi = self.next_u64() as u128;
-        ((hi << 64) | lo) % bound
-    }
-}
-
-/// Builds the walk plan for a target. Apply exclusions before planning.
-pub fn plan(pool: &CidrPool, target: &ScanTarget, rng: &mut SplitMix64) -> Vec<PlanItem> {
-    match target {
-        ScanTarget::Count(n) => plan_count(pool, *n as u64, rng),
-        ScanTarget::Preset(p) => match p {
-            CdnPreset::Quick => plan_preset(pool, 1, rng),
-            CdnPreset::Normal => plan_preset(pool, 3, rng),
-            CdnPreset::Full => pool
-                .ranges
-                .iter()
-                .map(|c| {
-                    if c.addr.is_ipv6() {
-                        // Enumerating the v6 space is infeasible (2^96+ hosts
-                        // per bundled range); Full samples one per range.
-                        PlanItem::Sample { cidr: *c, count: 1 }
-                    } else {
-                        PlanItem::Every { cidr: *c }
-                    }
-                })
-                .collect(),
-        },
-    }
-}
-
-/// 1 (Quick) or 3 (Normal) random hosts per /24, network/broadcast excluded.
-/// v6 ranges have no /24 notion; they yield `per` random hosts from the
-/// whole block.
-fn plan_preset(pool: &CidrPool, per: u64, _rng: &mut SplitMix64) -> Vec<PlanItem> {
-    let mut items = Vec::new();
-    for &cidr in &pool.ranges {
-        if cidr.addr.is_ipv6() {
-            items.push(PlanItem::Sample {
-                cidr,
-                count: per.min(cidr.host_count().min(u64::MAX as u128) as u64),
-            });
-            continue;
-        }
-        if cidr.prefix >= 24 {
-            items.push(PlanItem::Sample {
-                cidr,
-                count: per.min(cidr.host_count().min(u64::MAX as u128) as u64),
-            });
-            continue;
-        }
-        // A coarse custom CIDR (e.g. /0) would decompose into 2^24 plan
-        // items: the same OOM the count path guards against. Beyond the cap
-        // the whole block is sampled directly instead — one item, same
-        // per-block semantics.
-        if cidr.sub24_count() > MAX_PRESET_BLOCKS {
-            items.push(PlanItem::Sample {
-                cidr,
-                count: per.min(cidr.host_count().min(u64::MAX as u128) as u64),
-            });
-            continue;
-        }
-        let base = u32::from(ipv4(cidr.addr)) as u64;
-        for i in 0..cidr.sub24_count() {
-            let sub = Cidr {
-                addr: IpAddr::V4(Ipv4Addr::from((base + (i << 8)) as u32)),
-                prefix: 24,
-            };
-            items.push(PlanItem::Sample {
-                cidr: sub,
-                count: per,
-            });
-        }
-    }
-    items
-}
-
-/// Plan items a preset run may materialize (one per /24 block); beyond this
-/// the block is sampled whole instead of being decomposed.
-const MAX_PRESET_BLOCKS: u64 = 1 << 16;
-
-/// `n` distinct random offsets spread across the whole pool.
-fn plan_count(pool: &CidrPool, n: u64, rng: &mut SplitMix64) -> Vec<PlanItem> {
-    let total = pool.host_count();
-    if n as u128 >= total {
-        return pool
-            .ranges
-            .iter()
-            .map(|c| PlanItem::Every { cidr: *c })
-            .collect();
-    }
-    let mut seen = std::collections::HashSet::with_capacity(n as usize * 2);
-    while seen.len() < n as usize {
-        seen.insert(rng.below_u128(total));
-    }
-    let mut pick: Vec<u128> = seen.into_iter().collect();
-    pick.sort_unstable();
-    let mut items = Vec::new();
-    let mut offset = 0u128;
-    let mut i = 0usize;
-    for &cidr in &pool.ranges {
-        let end = offset + cidr.host_count();
-        let mut in_range: Vec<u128> = Vec::new();
-        while i < pick.len() && pick[i] < end {
-            in_range.push(pick[i] - offset);
-            i += 1;
-        }
-        if !in_range.is_empty() {
-            items.push(PlanItem::Hosts {
-                cidr,
-                offsets: in_range,
-            });
-        }
-        offset = end;
-    }
-    items
 }
 
 /// Bundled ranges, overridden by a refreshed copy in the data dir when
@@ -799,176 +641,11 @@ async fn fetch_one(url: &str, extra_headers: &str) -> Result<(String, u16, Vec<S
     Ok((url.to_owned(), status, headers, body))
 }
 
-fn http_request(host: &str, path: &str, extra_headers: &str) -> String {
-    format!("GET {path} HTTP/1.1\r\nHost: {host}\r\n{extra_headers}\r\nConnection: close\r\n\r\n")
-}
-
-/// Sends `request` over the stream and parses the reply: status line,
-/// headers, and body (chunked transfer decoding applied). The body is capped
-/// at [`MAX_BODY_BYTES`] so untrusted responses can't exhaust memory.
-const MAX_BODY_BYTES: usize = 64 * 1024 * 1024;
-
-async fn send_http<S>(stream: S, request: &str) -> Result<(u16, Vec<String>, Vec<u8>)>
-where
-    S: AsyncRead + AsyncWrite + Unpin,
-{
-    let (rd, mut wr) = tokio::io::split(stream);
-    wr.write_all(request.as_bytes()).await?;
-
-    let bytes: Vec<u8> = {
-        let mut buf = Vec::new();
-        rd.take(MAX_BODY_BYTES as u64 + 64 * 1024)
-            .read_to_end(&mut buf)
-            .await?;
-        buf
-    };
-    let split = bytes
-        .windows(4)
-        .position(|w| w == b"\r\n\r\n")
-        .context("malformed HTTP response")?;
-    let (head, body) = bytes.split_at(split);
-    let head = String::from_utf8_lossy(head);
-    let mut lines = head.lines();
-    let status_line = lines.next().context("empty HTTP response")?;
-    let status = status_line
-        .split_whitespace()
-        .nth(1)
-        .and_then(|s| s.parse().ok())
-        .context("malformed status line")?;
-    let headers: Vec<String> = lines.map(str::to_owned).collect();
-    let body = body[4..].to_vec();
-    let body = if headers.iter().any(|h| {
-        h.to_ascii_lowercase()
-            .starts_with("transfer-encoding: chunked")
-    }) {
-        decode_chunked(&body)?
-    } else {
-        body
-    };
-    Ok((status, headers, body))
-}
-
-/// Minimal HTTP/1.1 chunked decoder: `size\r\n data \r\n ... 0\r\n\r\n`.
-fn decode_chunked(mut input: &[u8]) -> Result<Vec<u8>> {
-    let mut out = Vec::new();
-    loop {
-        let line_end = input
-            .windows(2)
-            .position(|w| w == b"\r\n")
-            .context("truncated chunk size line")?;
-        let size_str = std::str::from_utf8(&input[..line_end])
-            .context("chunk size line not utf-8")?
-            .split(';')
-            .next()
-            .unwrap_or("");
-        let size = usize::from_str_radix(size_str.trim(), 16).context("malformed chunk size")?;
-        input = &input[line_end + 2..];
-        if size == 0 {
-            return Ok(out);
-        }
-        if size > MAX_BODY_BYTES - out.len() {
-            bail!("chunked body exceeds the {} cap", MAX_BODY_BYTES);
-        }
-        if input.len() < size + 2 {
-            bail!("truncated chunk data");
-        }
-        out.extend_from_slice(&input[..size]);
-        input = &input[size + 2..];
-    }
-}
-
-fn tls_connector() -> tokio_rustls::TlsConnector {
-    let mut roots = RootCertStore::empty();
-    roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-    let config = rustls::ClientConfig::builder()
-        .with_root_certificates(roots)
-        .with_no_client_auth();
-    tokio_rustls::TlsConnector::from(std::sync::Arc::new(config))
-}
-
-/// Phase-2 tunnel probe: SOCKS5 (no-auth) CONNECT to `url`'s host through the
-/// socks inbound, then the same TLS+HTTP GET leg as a direct fetch. `Err`
-/// means the tunnel did not deliver a 200.
-pub async fn get_via_socks(url: &str, socks: SocketAddr, timeout_ms: u64) -> Result<Vec<u8>> {
-    tokio::time::timeout(
-        Duration::from_millis(timeout_ms),
-        get_via_socks_inner(url, socks),
-    )
-    .await
-    .context("tunnel probe timed out")?
-}
-
-async fn get_via_socks_inner(url: &str, socks: SocketAddr) -> Result<Vec<u8>> {
-    let parsed = url::Url::parse(url).context("bad probe URL")?;
-    let use_tls = parsed.scheme() == "https";
-    let host = parsed
-        .host_str()
-        .ok_or_else(|| anyhow!("probe URL has no host"))?
-        .to_owned();
-    let port = parsed.port_or_known_default().unwrap_or(80);
-    let path = if parsed.path().is_empty() {
-        "/".to_owned()
-    } else {
-        parsed.path().to_owned()
-    };
-
-    let mut stream = TcpStream::connect(socks).await?;
-    socks5_connect(&mut stream, &host, port).await?;
-    let request = http_request(&host, &path, "Accept: */*");
-    let (status, _, body) = if use_tls {
-        let server_name =
-            rustls::pki_types::ServerName::try_from(host).context("invalid hostname")?;
-        let tls = tls_connector().connect(server_name, stream).await?;
-        send_http(tls, &request).await?
-    } else {
-        send_http(stream, &request).await?
-    };
-    if status != 200 {
-        bail!("tunnel probe got HTTP {status}");
-    }
-    Ok(body)
-}
-
-/// RFC 1928 no-auth handshake with a domain-based CONNECT.
-async fn socks5_connect(stream: &mut TcpStream, host: &str, port: u16) -> Result<()> {
-    stream.write_all(&[0x05, 0x01, 0x00]).await?;
-    let mut method = [0u8; 2];
-    stream.read_exact(&mut method).await?;
-    if method != [0x05, 0x00] {
-        bail!("socks server refused no-auth: {method:02x?}");
-    }
-    let host = host.as_bytes();
-    if host.len() > 255 {
-        bail!("socks host too long");
-    }
-    let mut req = vec![0x05, 0x01, 0x00, 0x03, host.len() as u8];
-    req.extend_from_slice(host);
-    req.extend_from_slice(&port.to_be_bytes());
-    stream.write_all(&req).await?;
-
-    let mut head = [0u8; 4];
-    stream.read_exact(&mut head).await?;
-    if head[0] != 0x05 || head[1] != 0x00 {
-        bail!("socks CONNECT failed: {head:02x?}");
-    }
-    let addr_len = match head[3] {
-        0x01 => 4 + 2,
-        0x03 => {
-            let mut len = [0u8; 1];
-            stream.read_exact(&mut len).await?;
-            len[0] as usize + 2
-        }
-        0x04 => 16 + 2,
-        other => bail!("socks reply has unknown addr type {other}"),
-    };
-    let mut rest = vec![0u8; addr_len];
-    stream.read_exact(&mut rest).await?;
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::api::types::{CdnPreset, ScanTarget};
+    use crate::engine::{PlanItem, SplitMix64, plan};
     use crate::paths::test_env::{DATA_DIR_LOCK, IsolatedDataDir};
 
     #[test]
@@ -1859,166 +1536,5 @@ mod tests {
     async fn refresh_v6_rejects_non_v6_entries() {
         let http = FakeHttp("2606:4700::/32\n1.2.3.4/24\n");
         assert!(refresh_v6_to_disk(&http).await.is_err());
-    }
-
-    /// Plays a minimal no-auth socks server that answers CONNECT and serves
-    /// one `200 OK` body — enough to prove the client's wire format.
-    async fn fake_socks_server() -> SocketAddr {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        tokio::spawn(async move {
-            let (mut sock, _) = listener.accept().await.unwrap();
-            let mut greeting = [0u8; 3];
-            sock.read_exact(&mut greeting).await.unwrap();
-            sock.write_all(&[0x05, 0x00]).await.unwrap();
-            let mut req = Vec::new();
-            loop {
-                let mut byte = [0u8; 1];
-                sock.read_exact(&mut byte).await.unwrap();
-                req.push(byte[0]);
-                if req.len() >= 5 && req[3] == 0x03 && req.len() >= 5 + req[4] as usize + 2 {
-                    break;
-                }
-            }
-            // VER REP RSV ATYP BND.ADDR BND.PORT (127.0.0.1:0)
-            sock.write_all(&[0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0])
-                .await
-                .unwrap();
-            let mut http = Vec::new();
-            while !http.ends_with(b"\r\n\r\n") {
-                let mut byte = [0u8; 1];
-                sock.read_exact(&mut byte).await.unwrap();
-                http.push(byte[0]);
-            }
-            sock.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
-                .await
-                .unwrap();
-        });
-        addr
-    }
-
-    #[tokio::test]
-    async fn tunnel_probe_gets_http_through_fake_socks() {
-        let socks = fake_socks_server().await;
-        let body = get_via_socks("http://example.test/check", socks, 5_000)
-            .await
-            .unwrap();
-        assert_eq!(body, b"ok");
-    }
-
-    #[tokio::test]
-    async fn tunnel_probe_times_out_when_socks_never_answers() {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let socks = listener.local_addr().unwrap();
-        tokio::spawn(async move {
-            // Accept the greeting and then stay silent: the client must give up.
-            if let Ok((mut sock, _)) = listener.accept().await {
-                let mut buf = [0u8; 3];
-                let _ = sock.read_exact(&mut buf).await;
-                let _ = tokio::time::sleep(Duration::from_secs(5)).await;
-            }
-        });
-        let err = get_via_socks("http://example.test/", socks, 50)
-            .await
-            .unwrap_err();
-        assert!(err.to_string().contains("timed out"), "{err}");
-    }
-
-    // --- decode_chunked bounds (review r6) -----------------------------------
-
-    /// Chunk-encodes `data` (one or two chunks) the way real chunked
-    /// responses do: `size\r\n data \r\n ... 0\r\n\r\n`.
-    fn encode_chunked(data: &[u8]) -> Vec<u8> {
-        if data.is_empty() {
-            return b"0\r\n\r\n".to_vec();
-        }
-        let mut out = Vec::new();
-        for chunk in [&data[..data.len() / 2], &data[data.len() / 2..]] {
-            if chunk.is_empty() {
-                continue;
-            }
-            out.extend_from_slice(format!("{:x}\r\n", chunk.len()).as_bytes());
-            out.extend_from_slice(chunk);
-            out.extend_from_slice(b"\r\n");
-        }
-        out.extend_from_slice(b"0\r\n\r\n");
-        out
-    }
-
-    #[test]
-    fn decode_chunked_empty_input_and_terminal_chunk() {
-        // Empty input has no CRLF-terminated size line: the decoder must
-        // reject it, not loop or panic (matches its actual semantics).
-        assert!(decode_chunked(b"").is_err());
-        // A lone terminal chunk decodes to nothing.
-        assert_eq!(decode_chunked(b"0\r\n").unwrap(), b"");
-        assert_eq!(decode_chunked(b"0\r\n\r\n").unwrap(), b"");
-    }
-
-    #[test]
-    fn decode_chunked_single_chunk_and_concatenated_chunks() {
-        assert_eq!(
-            decode_chunked(b"5\r\nhello\r\n0\r\n\r\n").unwrap(),
-            b"hello"
-        );
-        let body = b"5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n";
-        assert_eq!(decode_chunked(body).unwrap(), b"hello world");
-        // Chunk-size extensions (`;ext`) and uneven chunk lengths are legal.
-        assert_eq!(
-            decode_chunked(b"5;ext=1\r\nhello\r\n0\r\n").unwrap(),
-            b"hello"
-        );
-        assert_eq!(
-            decode_chunked(b"1\r\na\r\n2\r\nbc\r\n0\r\n").unwrap(),
-            b"abc"
-        );
-    }
-
-    #[test]
-    fn decode_chunked_rejects_huge_sizes_without_allocating() {
-        // 0xffffffff overflows the 64 MiB cap on the FIRST chunk: the size
-        // check runs before any buffer growth.
-        assert!(decode_chunked(b"ffffffff\r\n").is_err());
-        // A huge size mid-stream is rejected after the earlier chunks decode.
-        assert!(decode_chunked(b"1\r\na\r\nffffffff\r\n").is_err());
-        // A size that would cross the cap only when accumulated is rejected
-        // by the same check (the first chunk decodes, then the cap binds).
-        assert!(
-            decode_chunked(&format!("1\r\na\r\n{:x}\r\n", MAX_BODY_BYTES).into_bytes()).is_err()
-        );
-    }
-
-    #[test]
-    fn decode_chunked_rejects_truncated_and_malformed_streams() {
-        assert!(decode_chunked(b"5\r\nhel").is_err()); // body shorter than size
-        assert!(decode_chunked(b"5\r\nhello\r").is_err()); // missing trailing CRLF
-        assert!(decode_chunked(b"5\r\nhello\r\n0\r").is_err()); // truncated terminal
-        assert!(decode_chunked(b"zz\r\n").is_err()); // non-hex chunk size
-        assert!(decode_chunked(b"5z\r\n").is_err()); // hex digit followed by garbage
-        assert!(decode_chunked(b"10\r\n0123456789").is_err()); // declared 16, got 10
-        assert!(decode_chunked(&[0xff, 0xff, b'\r', b'\n']).is_err()); // non-UTF-8 size
-    }
-
-    #[test]
-    fn decode_chunked_ignores_bytes_after_the_terminal_chunk() {
-        // The decoder returns as soon as the 0-size line parses: HTTP
-        // trailer lines (`X-foo: bar`) and the final CRLF are never read.
-        assert_eq!(
-            decode_chunked(b"5\r\nhello\r\n0\r\nX-Trail: yes\r\n\r\n").unwrap(),
-            b"hello"
-        );
-    }
-
-    proptest::proptest! {
-        #[test]
-        fn decode_chunked_round_trips_arbitrary_payloads(data in proptest::collection::vec(proptest::prelude::any::<u8>(), 0..512)) {
-            let encoded = encode_chunked(&data);
-            assert_eq!(decode_chunked(&encoded).unwrap(), data);
-        }
-
-        #[test]
-        fn decode_chunked_never_panics_on_arbitrary_bytes(data in proptest::collection::vec(proptest::prelude::any::<u8>(), 0..512)) {
-            let _ = decode_chunked(&data);
-        }
     }
 }

@@ -15,7 +15,7 @@ use anyhow::{Context as _, Result, anyhow};
 use crate::api::types::{CustomFragment, FragmentPreset};
 use crate::configs::OutboundSpec;
 use crate::paths;
-use crate::ranges;
+use crate::socks;
 use crate::xray;
 
 /// Outcome of one tunnel attempt. `passed: false` means the tunnel came up
@@ -119,7 +119,7 @@ impl TunnelProbe for XrayTunnelProbe {
                 .await?;
 
                 let started = Instant::now();
-                let outcome = ranges::get_via_socks(&probe_url, proc.socks_addr, timeout_ms).await;
+                let outcome = socks::get_via_socks(&probe_url, proc.socks_addr, timeout_ms).await;
                 let latency_ms = started.elapsed().as_millis() as u32;
                 proc.stop().await;
 

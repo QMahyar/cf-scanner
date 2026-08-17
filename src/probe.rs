@@ -5,8 +5,9 @@
 //! certificates (anycast SNI fronting rarely matches the IP SAN), so the
 //! verifier is bypassed on purpose; real configuration validation is what
 //! phase-2 (Task 11) exists for.
-//! FakeTransport is only reachable from engine tests (cfg(test)); the public
-//! transport items are the lib's API, so no dead-code flag is needed.
+//! `FakeTransport` (and its `Scripted` scripting type) exist only for tests
+//! and are `#[cfg(test)]`-gated, so the public transport items stay the
+//! lib's API surface.
 
 use std::future::Future;
 use std::net::IpAddr;
@@ -163,6 +164,7 @@ impl ServerCertVerifier for NoVerify {
 
 /// A scripted outcome plus an optional artificial delay so tests can
 /// exercise cancellation while a probe is in flight.
+#[cfg(test)]
 #[derive(Clone)]
 struct Scripted {
     /// Falls back to the last sequence entry once the queue is drained.
@@ -174,16 +176,19 @@ struct Scripted {
 /// Scripted transport for engine tests: each (ip, port) maps to a scripted
 /// outcome. Latencies are returned verbatim so stop-condition math is
 /// observable.
+#[cfg(test)]
 pub struct FakeTransport {
     script: std::sync::Mutex<std::collections::HashMap<(IpAddr, u16), Scripted>>,
 }
 
+#[cfg(test)]
 impl Default for FakeTransport {
     fn default() -> Self {
         Self::new()
     }
 }
 
+#[cfg(test)]
 impl FakeTransport {
     pub fn new() -> Self {
         Self {
@@ -250,6 +255,7 @@ impl FakeTransport {
     }
 }
 
+#[cfg(test)]
 impl Transport for FakeTransport {
     fn probe(
         &self,

@@ -20,8 +20,9 @@ use super::{
 use crate::api::types::{
     ScanConfig, ScanEvent, ScanProgress, ScanSummary, ScanTarget, Verdict, WarpConfig,
 };
+use crate::engine::plan::{SplitMix64, plan};
 use crate::probe::Transport;
-use crate::ranges::{self, SplitMix64};
+use crate::ranges;
 
 /// One WARP probe unit: a concrete (endpoint, port) group.
 #[derive(Clone)]
@@ -222,7 +223,7 @@ impl ScanController {
                 .filter_map(|c| ranges::parse_cidr(c).ok())
                 .collect::<Vec<_>>();
             let pool = crate::warp::bundled_pool().excluding(&excluded);
-            let plan = ranges::plan(&pool, &cfg.target, &mut SplitMix64::new(seed));
+            let plan = plan(&pool, &cfg.target, &mut SplitMix64::new(seed));
             for item in &plan {
                 for host in plan_hosts_iter(item, &mut SplitMix64::new(seed)) {
                     match host {
