@@ -5,7 +5,7 @@ use std::sync::Arc;
 use anyhow::{Result, anyhow};
 use cf_scanner::api;
 use cf_scanner::api::types::{CdnPreset, Mode, ScanConfig, ScanEvent, ScanTarget, StopCondition};
-use cf_scanner::{cli_wizard, engine, paths, probe, ranges, server, warpgen};
+use cf_scanner::{cli_wizard, engine, paths, probe, ranges, server, tray, warpgen};
 use clap::{Parser, Subcommand, ValueEnum};
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::filter::LevelFilter;
@@ -33,6 +33,12 @@ enum Command {
         /// Port to bind (default 8765)
         #[arg(long, default_value_t = 8765)]
         port: u16,
+        /// Keep serving from the Windows system tray; its menu drives the API
+        #[arg(long)]
+        tray: bool,
+        /// Register `serve --tray` to start with Windows (requires --tray)
+        #[arg(long, requires = "tray")]
+        autostart: bool,
     },
     /// One-shot scan; prints newline-delimited JSON to stdout
     Scan {
@@ -401,7 +407,11 @@ fn env_filter(verbose: bool, rust_log: Option<&str>) -> EnvFilter {
 
 async fn run(cli: Cli) -> Result<()> {
     match cli.command {
-        Command::Serve { port } => serve(port).await,
+        Command::Serve {
+            port,
+            tray,
+            autostart,
+        } => serve(port, tray, autostart).await,
         Command::Scan { args } => run_scan(*args).await,
         Command::Wizard => {
             let controller = Arc::new(engine::ScanController::new(Arc::new(
@@ -542,7 +552,16 @@ fn write_stdout_line(line: &str) -> std::io::Result<()> {
     out.flush()
 }
 
-async fn serve(port: u16) -> Result<()> {
+async fn serve(port: u16, tray_enabled: bool, autostart: bool) -> Result<()> {
+    if autostart {
+        tray::set_autostart(true)?;
+        if cfg!(target_os = "windows") {
+            eprintln!(
+                "autostart registered: HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run\\{}",
+                tray::RUN_VALUE_NAME
+            );
+        }
+    }
     let controller = Arc::new(engine::ScanController::new(Arc::new(
         probe::TlsTransport::new(),
     )));
@@ -554,8 +573,15 @@ async fn serve(port: u16) -> Result<()> {
     // Unconditional stderr print: the user must see where the server is even
     // without --verbose (info-level logs are hidden by default).
     eprintln!("CF-Scanner running at {url}");
+    if tray_enabled {
+        // --tray never auto-opens the browser: the tray menu's "Open UI" is
+        // the way in, so spawning can fail silently without hurting serve.
+        if let Err(err) = tray::spawn(url.clone(), false) {
+            tracing::warn!("could not start system tray: {err:#}");
+        }
+    }
     axum::serve(listener, server::router(controller.clone()))
-        .with_graceful_shutdown(shutdown_signal(controller))
+        .with_graceful_shutdown(shutdown_signal(controller, tray_enabled))
         .await?;
     Ok(())
 }
@@ -576,18 +602,44 @@ fn serve_url(addr: std::net::SocketAddr) -> String {
     format!("http://{addr}")
 }
 
-/// Ctrl+C: cancel any in-flight scan (probes drain on the next stop check),
-/// then let axum finish in-flight requests. The runtime drop after `serve`
-/// returns reaps xray children via their Drop::start_kill.
-async fn shutdown_signal(controller: Arc<engine::ScanController>) {
-    if let Err(err) = tokio::signal::ctrl_c().await {
+/// Ctrl+C (and the tray's Exit item, with --tray): cancel any in-flight scan
+/// (probes drain on the next stop check), then let axum finish in-flight
+/// requests. The runtime drop after `serve` returns reaps xray children via
+/// their Drop::start_kill.
+async fn shutdown_signal(controller: Arc<engine::ScanController>, tray_enabled: bool) {
+    if tray_enabled {
+        tokio::select! {
+            ctrl_c = tokio::signal::ctrl_c() => {
+                if let Err(err) = ctrl_c {
+                    // A broken Ctrl+C hook must not hang shutdown; serve's
+                    // graceful shutdown proceeds immediately.
+                    tracing::error!("could not listen for Ctrl+C: {err}");
+                }
+            }
+            _ = tray_exit_requested() => {
+                tracing::info!("tray Exit requested");
+            }
+        }
+    } else if let Err(err) = tokio::signal::ctrl_c().await {
         // A broken Ctrl+C hook must not hang shutdown; serve's graceful
         // shutdown proceeds immediately.
         tracing::error!("could not listen for Ctrl+C: {err}");
-        return;
     }
     tracing::info!("shutting down; cancelling any active scan");
     controller.cancel();
+}
+
+/// Completes once the tray thread requests shutdown via its Exit menu item.
+/// The tray never shares state with the server, so this only reads the shared
+/// flag; when no tray is running the flag stays false forever.
+async fn tray_exit_requested() {
+    let mut ticker = tokio::time::interval(std::time::Duration::from_millis(100));
+    loop {
+        ticker.tick().await;
+        if tray::exit_requested() {
+            return;
+        }
+    }
 }
 
 #[cfg(test)]
@@ -990,6 +1042,32 @@ mod tests {
         };
         let err = build_scan_config(&a).unwrap_err();
         assert!(err.to_string().contains("--warp-probes"), "{err:#}");
+    }
+
+    #[test]
+    fn serve_tray_flags_parse_and_autostart_requires_tray() {
+        let cli = Cli::try_parse_from(["cf-scanner", "serve", "--tray"]).unwrap();
+        match cli.command {
+            Command::Serve {
+                port,
+                tray,
+                autostart,
+            } => {
+                assert_eq!(port, 8765);
+                assert!(tray);
+                assert!(!autostart);
+            }
+            _ => panic!("expected serve"),
+        }
+        let cli = Cli::try_parse_from(["cf-scanner", "serve", "--tray", "--autostart"]).unwrap();
+        match cli.command {
+            Command::Serve { autostart, .. } => assert!(autostart),
+            _ => panic!("expected serve"),
+        }
+        assert!(
+            Cli::try_parse_from(["cf-scanner", "serve", "--autostart"]).is_err(),
+            "--autostart without --tray must be rejected"
+        );
     }
 
     #[test]

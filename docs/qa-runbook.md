@@ -80,6 +80,32 @@ Expected outcomes:
 Record: subnet counts before/after (15 IPv4 + v6 list), `last_updated`,
 verification failures if any.
 
+## 5. Tray / autostart (Windows, manual)
+
+Requires a desktop session (logged-on user with a notification area).
+
+- `cf-scanner serve --tray` → the CF-Scanner icon appears in the notification
+  area (orange circle) and the server keeps running; the terminal is not
+  required afterwards.
+- Menu items: "Open UI" opens the browser at the served URL; "Start CDN scan"
+  starts a quick-preset CDN scan and "Start WARP scan" a 40-endpoint WARP
+  scan (both visible/controllable in the UI); "Cancel" stops the running
+  scan.
+- "Exit" shuts `serve` down gracefully: the server stops, no tray icon
+  remains, the process exits. (Ctrl+C still works the same with `--tray`.)
+- `cf-scanner serve --tray --autostart` prints the registry location and
+  writes `HKCU\Software\Microsoft\Windows\CurrentVersion\Run\CF-Scanner`;
+  verify in `regedit` (a `REG_SZ` of `"<exe>" serve --tray`). Reboot → the
+  app starts in the tray with the UI ready.
+- Cleanup check: deleting the `CF-Scanner` Run value (manual, registry
+  editor) must leave the server unaffected, and `serve --tray` must still
+  warn-and-continue when started in a headless session.
+- Non-Windows: `serve --tray` prints "tray not supported on this platform;
+  serving without it" and keeps serving normally.
+
+Record: icon appearance, each menu item's effect, Exit shutdown, regedit
+value string, reboot result, headless-session behavior.
+
 ## Recording results
 
 Keep results in the issue tracker or a review notes file, including the

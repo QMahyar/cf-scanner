@@ -29,7 +29,7 @@ flate2 = "1"
 maxminddb = "0.30"
 percent-encoding = "2.3.2"
 rand_core = { version = "0.6.4", features = ["getrandom"] }
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "blocking"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
@@ -44,6 +44,13 @@ tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 url = "2.5.8"
 webpki-roots = "0.26"
 zip = { version = "7.2.0", default-features = false, features = ["deflate"] }
+
+# Windows system tray + HKCU autostart; absent from non-Windows builds so the
+# tray stub never drags GTK/appindicator into Linux/macOS builds. default-features
+# off: tray-icon's defaults (libxdo/gtk) are Linux-only extras we never need.
+[target.'cfg(windows)'.dependencies]
+tray-icon = { version = "0.24", default-features = false }
+winreg = "0.56"
 
 [dev-dependencies]
 proptest = "1"
