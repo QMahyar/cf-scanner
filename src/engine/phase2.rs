@@ -134,6 +134,7 @@ impl ScanController {
                                 latency_ms: result.latency_ms,
                                 error: None,
                                 config_index: Some(*config_idx),
+                                verifier: result.verifier.map(str::to_owned),
                             };
                             if result.passed {
                                 passed
@@ -163,6 +164,7 @@ impl ScanController {
                                 latency_ms: None,
                                 error: Some(msg),
                                 config_index: Some(*config_idx),
+                                verifier: None,
                             };
                             if let Some(updated) =
                                 update_verdict_phase2(&store, ip, port, verdict, None)
@@ -437,6 +439,7 @@ mod tests {
                             passed: false,
                             latency_ms: None,
                             colo: None,
+                            verifier: None,
                         });
                     }
                 }
@@ -449,6 +452,7 @@ mod tests {
                     passed,
                     latency_ms: passed.then_some(7),
                     colo: None,
+                    verifier: None,
                 })
             })
         }
@@ -722,6 +726,7 @@ mod tests {
                 latency_ms: Some(42),
                 error: None,
                 config_index: Some(0),
+                verifier: Some("xray".to_owned()),
             }),
         }]));
         // A racing failed combo must not clobber the passing verdict.
@@ -732,6 +737,7 @@ mod tests {
             latency_ms: None,
             error: Some("spawn failed".to_owned()),
             config_index: None,
+            verifier: None,
         };
         let updated = update_verdict_phase2(&store, "10.0.0.1".parse().unwrap(), 443, failed, None);
         assert!(updated.is_none(), "a pass must never be downgraded");

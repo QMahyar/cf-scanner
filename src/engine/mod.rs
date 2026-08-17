@@ -26,7 +26,7 @@ use crate::configs::{RealSubFetch, SubFetch};
 use crate::geo::Geo;
 use crate::probe::Transport;
 use crate::ranges;
-use crate::verify::{TunnelProbe, XrayTunnelProbe};
+use crate::verify::{HybridTunnelProbe, TunnelProbe, XrayTunnelProbe};
 
 /// Progress events: every 50 probes up to 10k totals, then every 500, so a
 /// Full scan's event stream stays bounded.
@@ -73,7 +73,7 @@ impl ScanController {
             transport,
             warp_transport,
             sub_fetch: Arc::new(RealSubFetch),
-            tunnel_probe: Arc::new(XrayTunnelProbe),
+            tunnel_probe: Arc::new(HybridTunnelProbe::new(Arc::new(XrayTunnelProbe))),
             geo: Arc::new(Geo::embedded()),
             events,
             store: Arc::new(Mutex::new(Vec::new())),

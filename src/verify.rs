@@ -1,8 +1,12 @@
 //! Phase-2 tunnel verifier (Task 11): one real attempt per
-//! (candidate IP, config, fragment preset, SNI) combo — spawn xray dialing
-//! the candidate, prove connectivity with a tiny HTTP GET through the socks
-//! inbound, tear down. The probe itself is injectable so engine tests never
-//! spawn subprocesses.
+//! (candidate IP, config, fragment preset, SNI) combo — dial the candidate,
+//! prove connectivity with a tiny HTTP GET through the tunnel, tear down.
+//! The probe itself is injectable so engine tests never spawn subprocesses.
+//! Combo routing is hybrid: vless/trojan over plain tcp/tls with the
+//! fragment preset Off verify IN-PROCESS (`InlineTunnelProbe`, no subprocess
+//! and no ~50-200ms spawn); everything else — vmess, shadowsocks, ws
+//! transports, and every DPI-fragmentation preset — spawns xray, which can
+//! fragment the TLS ClientHello in ways stock rustls cannot.
 
 use std::future::Future;
 use std::net::{Ipv4Addr, SocketAddr};
@@ -12,8 +16,11 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result, anyhow};
 
+use std::sync::Arc;
+
 use crate::api::types::{CustomFragment, FragmentPreset};
-use crate::configs::OutboundSpec;
+use crate::configs::{OutboundSpec, Protocol};
+use crate::inline_verify::InlineTunnelProbe;
 use crate::paths;
 use crate::socks;
 use crate::xray;
@@ -29,6 +36,10 @@ pub struct TunnelResult {
     pub latency_ms: Option<u32>,
     /// Cloudflare colo code from the trace body, when present.
     pub colo: Option<String>,
+    /// Which verifier produced the result: `Some("inline")` (in-process
+    /// vless/trojan) or `Some("xray")` (subprocess). Test fakes leave it
+    /// `None`.
+    pub verifier: Option<&'static str>,
 }
 
 /// Everything one tunnel attempt needs (kept as a single argument so the
@@ -145,12 +156,14 @@ impl TunnelProbe for XrayTunnelProbe {
                         passed: true,
                         latency_ms: Some(latency_ms),
                         colo,
+                        verifier: Some("xray"),
                     })
                 } else {
                     Ok(TunnelResult {
                         passed: false,
                         latency_ms: None,
                         colo: None,
+                        verifier: Some("xray"),
                     })
                 }
             }
@@ -279,6 +292,60 @@ where
 pub fn require_xray_binary() -> Result<PathBuf> {
     xray::find_binary()
         .ok_or_else(|| anyhow!("xray binary not found; it will be downloaded at phase 2"))
+}
+
+/// Routes every attempt to whichever verifier can handle it: the in-process
+/// vless/trojan speaker when the combo needs no fragmentation, the xray
+/// subprocess otherwise. The engine's default tunnel probe.
+pub struct HybridTunnelProbe {
+    inline: InlineTunnelProbe,
+    xray: Arc<dyn TunnelProbe>,
+}
+
+impl HybridTunnelProbe {
+    pub fn new(xray: Arc<dyn TunnelProbe>) -> Self {
+        Self {
+            inline: InlineTunnelProbe::new(),
+            xray,
+        }
+    }
+
+    /// xray keeps everything the inline verifier cannot do: vmess/ss and ws
+    /// transports (differing wire formats), fragment presets (stock rustls
+    /// cannot fragment a TLS ClientHello), and vless configs whose id is not
+    /// a parseable UUID.
+    pub fn supports_inline(
+        spec: &OutboundSpec,
+        preset: &FragmentPreset,
+        custom: Option<&CustomFragment>,
+    ) -> bool {
+        if *preset != FragmentPreset::Off || custom.is_some() || spec.ws.is_some() {
+            return false;
+        }
+        if !(spec.security.eq_ignore_ascii_case("tls")
+            || spec.security.eq_ignore_ascii_case("none"))
+        {
+            return false;
+        }
+        match spec.protocol {
+            Protocol::Vless => crate::inline_verify::parse_uuid(&spec.user_id).is_some(),
+            Protocol::Trojan => true,
+            _ => false,
+        }
+    }
+}
+
+impl TunnelProbe for HybridTunnelProbe {
+    fn probe(
+        &self,
+        req: ProbeRequest<'_>,
+    ) -> Pin<Box<dyn Future<Output = Result<TunnelResult>> + Send + '_>> {
+        if Self::supports_inline(req.spec, req.preset, req.custom) {
+            self.inline.probe(req)
+        } else {
+            self.xray.probe(req)
+        }
+    }
 }
 
 #[cfg(test)]

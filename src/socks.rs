@@ -19,6 +19,14 @@ pub(crate) fn http_request(host: &str, path: &str, extra_headers: &str) -> Strin
 /// at [`MAX_BODY_BYTES`] so untrusted responses can't exhaust memory.
 const MAX_BODY_BYTES: usize = 64 * 1024 * 1024;
 
+/// Same shape as [`http_request`] but without `Connection: close`, so one
+/// tunneled connection can serve several probe URLs (the inline verifier's
+/// keep-alive multi-URL loop). `http_request` itself stays close-delimited
+/// for the socks path, whose reader drains to EOF.
+pub(crate) fn http_request_keepalive(host: &str, path: &str, extra_headers: &str) -> String {
+    format!("GET {path} HTTP/1.1\r\nHost: {host}\r\n{extra_headers}\r\n\r\n")
+}
+
 pub(crate) async fn send_http<S>(stream: S, request: &str) -> Result<(u16, Vec<String>, Vec<u8>)>
 where
     S: AsyncRead + AsyncWrite + Unpin,
@@ -60,7 +68,7 @@ where
 }
 
 /// Minimal HTTP/1.1 chunked decoder: `size\r\n data \r\n ... 0\r\n\r\n`.
-fn decode_chunked(mut input: &[u8]) -> Result<Vec<u8>> {
+pub(crate) fn decode_chunked(mut input: &[u8]) -> Result<Vec<u8>> {
     let mut out = Vec::new();
     loop {
         let line_end = input

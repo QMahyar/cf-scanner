@@ -5,8 +5,8 @@ IPs/endpoints on ISP-restricted networks.
 
 - **CDN/proxy mode** — phase 1: TCP+TLS handshake scan of official Cloudflare
   IPv4 ranges; phase 2 (optional): verify candidates against a real proxy
-  config (VLESS/Trojan/VMess/SS via an embedded Xray subprocess with
-  DPI-bypass fragmentation + SNI variants).
+  config (VLESS/Trojan verified in-process, VMess/SS via an embedded Xray
+  subprocess — with DPI-bypass fragmentation + SNI variants).
 - **WARP mode** — UDP endpoint discovery over Cloudflare WARP pools using a
   real WireGuard handshake probe (boringtun); optional verification with your
   own WireGuard/AmneziaWG config; opt-in config registration via Cloudflare's
@@ -97,6 +97,10 @@ Release artifacts are built and published **only by CI** on tag push
   chaining. The xray binary ships inside release archives (build-time
   download + `.dgst` SHA2-256 verification, feature `dist-bundle-xray`); dev
   builds fall back to a cached download in the data dir.
+  Plain VLESS/Trojan combos (TCP transport, TLS or no TLS, fragmentation off)
+  skip the subprocess entirely: the inline verifier speaks the wire protocol
+  in-process, keeping those attempts in the low milliseconds instead of the
+  ~50-200ms an xray spawn costs.
 - **WARP probes.** boringtun builds a valid Init (MAC1 required, MAC2 zeros);
   a Response (92 B) or Cookie (64 B) of exact shape = open.
 - **GeoIP.** db-ip.com Lite country MMDB embedded at build time
