@@ -1,6 +1,6 @@
 # Spec: CF-Scanner
 
-Status: APPROVED (v0.1.0 baseline; deltas tracked in CHANGELOG/ADRs/review report)
+Status: APPROVED (v0.4.0 baseline; deltas tracked in CHANGELOG/ADRs/review report)
 Date: 2026-08-12
 Source of truth: `docs/intent/cf-scanner.md` (confirmed user intent + verified
 technical corrections)
@@ -36,7 +36,7 @@ copy/save working IPs one-per-line — all in one binary, no external services.
 - `axum` (HTTP API), `tower-http` (static files), SSE via axum streams
 - TLS probing: `tokio-rustls` + `rustls` (no OpenSSL)
 - `serde` / `serde_json` (API + configs)
-- Xray phase 2: spawn official `xray` binary subprocess, local socks/http
+- Xray phase 2: spawn official `xray` binary subprocess, local socks
   inbound; fragment via freedom outbound + `sockopt.dialerProxy`
 - WARP probe: `boringtun` (0.7.x) for WireGuard Init/parse; `reqwest` for the
   Cloudflare client API (`api.cloudflareclient.com/v0a884`) registration
@@ -45,7 +45,8 @@ copy/save working IPs one-per-line — all in one binary, no external services.
 - Logging: `tracing` + `tracing-subscriber`; `anyhow` (errors)
 - Frontend: one embedded HTML file, vanilla JS + native EventSource, custom
   design system (0.3.0) — see docs/review/product-review-2026-08-13.md
-- Configuration: `config` crate or hand-rolled TOML/JSON in platform data dir
+- Configuration: hand-rolled JSON in the platform data dir (`profiles.json`,
+  `identity.json`, refreshed ranges); no config crate, no TOML
 
 ## 3. Commands
 
@@ -59,8 +60,8 @@ Scan (one-shot):  cargo run -- scan --mode cdn --preset quick --target 20
                   cargo run -- scan --mode warp --ports 2408,500
 Refresh ranges:   cargo run -- ranges refresh
 Install dist:     cargo install cargo-dist   (Arch: pacman -S cargo-dist)
-Release dry-run:  dist plan --artifacts=all --tag=v0.3.0
-Release:          dist build --artifacts=all --tag=v0.3.0 && dist host ... (CI)
+Release dry-run:  dist plan --artifacts=all --tag=v0.4.0
+Release:          dist build --artifacts=all --tag=v0.4.0 && dist host ... (CI)
 ```
 
 ## 4. Project Structure
@@ -197,7 +198,8 @@ pub struct Verdict {
       copy with ports / raw IPs (one per line, no trailing whitespace); save
 - [ ] GeoIP: country via embedded mmdb offline; datacenter colo via
       /cdn-cgi/trace in phase 2
-- [ ] `dist plan` passes for 5-target matrix; PR CI runs test+clippy+fmt
+- [ ] `dist plan` passes for the 3-target matrix (linux x86_64/aarch64 +
+      windows x86_64); PR CI runs test+clippy+fmt
 - [ ] README documents Termux musl caveat + xray glibc note + SmartScreen note
 
 ## 9. Decisions (confirmed 2026-08-12)

@@ -4,7 +4,7 @@
 
 - [intent/cf-scanner.md](intent/cf-scanner.md) — confirmed user intent +
   verified research corrections (original intent record)
-- [spec.md](spec.md) — the approved spec (v0.1.0 baseline; deltas tracked in
+- [spec.md](spec.md) — the approved spec (v0.4.0 baseline; deltas tracked in
   CHANGELOG/ADRs/review report)
 - [review/product-review-2026-08-13.md](review/product-review-2026-08-13.md) —
   finished-product review (implementation contract for the `review/*` branches)

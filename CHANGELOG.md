@@ -110,7 +110,7 @@ Changes merged by the `review/*` branches land here.
 - Test fixtures no longer carry real credentials (UUIDs/private keys
   replaced with inert zeroed values).
 
-## [0.4.0] - 2026-08-16
+## [0.3.0] - 2026-08-13
 
 ### Added
 - `GET /api/status` endpoint returning server version and scan state.
@@ -232,7 +232,7 @@ Changes merged by the `review/*` branches land here.
 - `custom_cidrs` now REPLACE the bundled ranges (was: merged in addition);
   exclusions still apply to custom ranges.
 
-[Unreleased]: https://github.com/QMahyar/cf-scanner/compare/v0.3.0...HEAD
+[0.4.0]: https://github.com/QMahyar/cf-scanner/releases/tag/v0.4.0
 [0.3.0]: https://github.com/QMahyar/cf-scanner/releases/tag/v0.3.0
 [0.2.0]: https://github.com/QMahyar/cf-scanner/releases/tag/v0.2.0
 [0.1.0]: https://github.com/QMahyar/cf-scanner/releases/tag/v0.1.0

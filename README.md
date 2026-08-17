@@ -79,7 +79,7 @@ Release artifacts are built and published **only by CI** on tag push
 
 ## Architecture
 
-- **One engine, one contract.** `ScanController` in `src/engine.rs` owns all
+- **One engine, one contract.** `ScanController` in `src/engine/` owns all
   scanning state; the API contract lives once in `src/api/types.rs`
   (`ScanConfig`, `Verdict`, `StopCondition`, events). CLI, wizard, HTTP server,
   and frontend are thin clients. The server maps engine types → API types;

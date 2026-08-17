@@ -1,4 +1,5 @@
 # Downloaded binaries (installed at npm install time)
 bin/cf-scanner
 bin/cf-scanner.exe
-bin/_cf-scanner-dl.*
+bin/bundled/
+bin/_cf-scanner-dl*

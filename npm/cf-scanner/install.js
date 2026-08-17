@@ -17,11 +17,6 @@ const fs = require("fs");
 const https = require("https");
 const http = require("http");
 const path = require("path");
-const { createGunzip } = require("zlib");
-const { pipeline } = require("stream");
-const { promisify } = require("util");
-
-const pipelineAsync = promisify(pipeline);
 
 // ---------------------------------------------------------------------------
 // Config
@@ -63,11 +58,13 @@ function getTargetTriple() {
 }
 
 function getDownloadUrl(target) {
-  // dist produces: cf-scanner-{version}-{target}.tar.gz (Linux)
-  //                cf-scanner-{version}-{target}.zip   (Windows)
+  // dist (cargo-dist 0.32, per dist-workspace.toml) names archives
+  // `cf-scanner-{target}.{ext}` — the version lives only in the release
+  // tag. Unix = .tar.xz (contents nested under a `cf-scanner-{target}/`
+  // folder), Windows = .zip (flat).
   const isWindows = process.platform === "win32";
-  const ext = isWindows ? "zip" : "tar.gz";
-  const filename = `cf-scanner-${VERSION}-${target}.${ext}`;
+  const ext = isWindows ? "zip" : "tar.xz";
+  const filename = `cf-scanner-${target}.${ext}`;
   return `https://github.com/${REPO}/releases/download/v${VERSION}/${filename}`;
 }
 
@@ -96,12 +93,12 @@ function download(url) {
   });
 }
 
-async function extractTarGz(buffer, destDir) {
+function extractTarXz(buffer, destDir) {
   // Write to temp file, extract with tar
-  const tmpFile = path.join(destDir, "_cf-scanner-dl.tar.gz");
+  const tmpFile = path.join(destDir, "_cf-scanner-dl.tar.xz");
   fs.writeFileSync(tmpFile, buffer);
   try {
-    execSync(`tar -xzf "${tmpFile}" -C "${destDir}"`, { stdio: "ignore" });
+    execSync(`tar -xJf "${tmpFile}" -C "${destDir}"`, { stdio: "ignore" });
   } finally {
     fs.unlinkSync(tmpFile);
   }
@@ -118,6 +115,23 @@ function extractZip(buffer, destDir) {
     );
   } finally {
     fs.unlinkSync(tmpFile);
+  }
+}
+
+// Move the binary (and its bundled xray sibling) out of the scratch dir
+// into bin/. dist tar archives nest everything under a `cf-scanner-{target}/`
+/// folder while zip archives are flat; find_bundled() (src/xray.rs) expects
+/// the xray binary next to the app binary under `bundled/`.
+function relocateExtracted(scratchDir, binDir, target) {
+  const nested =
+    process.platform === "win32"
+      ? scratchDir
+      : path.join(scratchDir, `cf-scanner-${target}`);
+  fs.renameSync(path.join(nested, BINARY_NAME), path.join(binDir, BINARY_NAME));
+  const bundled = path.join(nested, "bundled");
+  if (fs.existsSync(bundled)) {
+    fs.rmSync(path.join(binDir, "bundled"), { recursive: true, force: true });
+    fs.renameSync(bundled, path.join(binDir, "bundled"));
   }
 }
 
@@ -143,12 +157,20 @@ async function main() {
   try {
     const buffer = await download(url);
 
-    // Extract archive
+    // Extract into a scratch dir, then move the binary (+ bundled xray)
+    // into bin/ so the archive's nesting never leaks into the package.
     const isWindows = process.platform === "win32";
-    if (isWindows) {
-      extractZip(buffer, binDir);
-    } else {
-      await extractTarGz(buffer, binDir);
+    const scratchDir = path.join(binDir, "_cf-scanner-dl-extract");
+    fs.mkdirSync(scratchDir, { recursive: true });
+    try {
+      if (isWindows) {
+        extractZip(buffer, scratchDir);
+      } else {
+        extractTarXz(buffer, scratchDir);
+      }
+      relocateExtracted(scratchDir, binDir, target);
+    } finally {
+      fs.rmSync(scratchDir, { recursive: true, force: true });
     }
 
     // Ensure the binary is executable (Linux/macOS)

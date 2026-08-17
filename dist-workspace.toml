@@ -11,7 +11,10 @@ ci = "github"
 installers = ["msi", "powershell", "shell"]
 # wix/main.wxs carries a hand-added xray.exe component (self-contained MSI);
 # stop dist from regenerating/syncing it.
-allow-dirty = ["msi"]
+# The GitHub workflow carries hand-added hardening (release tag-gate, artifact
+# attestations, concurrency guard, gate parity); dist would regenerate it
+# plain, so allow the CI file to stay dirty too.
+allow-dirty = ["msi", "ci"]
 # Target platforms to build apps for (Rust target-triple syntax)
 # macOS targets dropped: unsigned binaries + bundled xray trip Gatekeeper
 # quarantine; see docs/decisions/ADR-009.md. Restore once signing exists.

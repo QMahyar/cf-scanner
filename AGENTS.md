@@ -33,7 +33,7 @@ cargo test                # unit + integration tests
 cargo clippy --all-targets -- -D warnings
 cargo fmt --check
 cargo audit               # dependency vulnerability scan (cargo install cargo-audit)
-dist plan --artifacts=all --tag=v0.3.0   # release dry-run (dist, formerly cargo-dist)
+dist plan --artifacts=all --tag=v0.4.0   # release dry-run (dist, formerly cargo-dist)
 # local packaging smoke test, then restore the tracked 0-byte placeholders:
 dist build --artifacts=local --target=<host-target>
 git restore data/bundled/xray data/bundled/xray.exe
