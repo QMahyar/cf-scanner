@@ -29,13 +29,16 @@ run so two Release workflows cannot race `gh release create`);
 
 1. **Bump the version** in `Cargo.toml` (the git tag is the source of truth;
    the tag, `Cargo.toml`, and the changelog must never disagree).
-2. **Cut the changelog:** rename `## [Unreleased]` to
+2. **Bump the npm wrapper** if binaries changed: `npm/cf-scanner/package.json`
+   `version` (patch bump) + `RELEASE_TAG` in `install.js` must match the tag
+   being released (see "npm package" below).
+3. **Cut the changelog:** rename `## [Unreleased]` to
    `## [x.y.z] - YYYY-MM-DD`. Entries are written with their change, so the
    cut is a header move, not a rewrite. Do not add new `[Unreleased]`
    entries after the cut.
-3. **Run the local gates:** `cargo test`, `cargo clippy --all-targets -- -D
+4. **Run the local gates:** `cargo test`, `cargo clippy --all-targets -- -D
    warnings`, `cargo fmt --check`, `cargo audit`.
-4. **Commit the release commit** on `main`; the tag points at it.
+5. **Commit the release commit** on `main`; the tag points at it.
 
 ## Pre-flight checklist (before tagging)
 
@@ -70,6 +73,9 @@ gate        → the release workflow's own job: test + clippy + fmt + audit
   host        → artifact attestations, then uploads artifacts to the GitHub
                 Release (vX.Y.Z)
   announce    → release notes from the changelog
+  npm-publish → after host: publishes `@qmahyar/cf-scanner` from
+                `npm/cf-scanner/` (wrapper downloads the binary from the
+                just-created Release; requires the `NPM_TOKEN` secret)
 ```
 
 The push of `main` and every PR trigger the `Checks` workflow: test +
@@ -85,19 +91,36 @@ Tag pushes and PRs additionally run the Release workflow in "plan" mode.
 wrapper: its `postinstall` fetches `cf-scanner-<target>.<ext>` (tar.xz on
 Unix, zip on Windows — dist archive names carry no version, only the release
 tag does) from the GitHub Release pinned by `RELEASE_TAG` in `install.js`.
-Publish it after each release:
+
+**Publishing is automatic** — the Release workflow's `npm-publish` job runs
+after `host` creates the GitHub Release (the install script downloads from
+it). It requires the `NPM_TOKEN` repository secret: an npm **automation
+token** (create at npmjs.com → Access Tokens; automation tokens bypass the
+interactive OTP that npm 2FA demands on publish), set via
+`gh secret set NPM_TOKEN`. Without the secret the job fails with
+`Input required: token` — that is the signal to add it, not to publish by
+hand. There is nothing to run locally; the only action is in the release
+commit, before tagging:
 
 1. **Bump `npm/cf-scanner/package.json` `version`** (patch bump is fine) and
-   set `RELEASE_TAG` in `install.js` to the released tag. They can differ:
-   `RELEASE_TAG` must match the GitHub release the binary is downloaded
-   from, the npm `version` only matters for registry bookkeeping.
-2. **Publish** once the GitHub Release exists (the install script downloads
-   from it): `npm publish` from `npm/cf-scanner/` (requires npm login with
-   publish rights for the `qmahyar` scope). Note npm refuses to republish a
-   version that was already published, so always bump.
-3. **Smoke-test**: `npm pack` and install the tarball on the three supported
-   platforms (linux x64/arm64, win32 x64). macOS is unsupported for the
-   same reason as the release matrix (ADR-009).
+   set `RELEASE_TAG` in `install.js` to the tag you are about to push. They
+   can differ: `RELEASE_TAG` must match the GitHub release the binary is
+   downloaded from, the npm `version` only matters for registry bookkeeping.
+2. **The job verifies the alignment**: a `grep` step fails the job unless
+   `RELEASE_TAG` equals the released tag — a wrapper pointing at the wrong
+   release must not be published.
+3. **Smoke-test after the release**: `npm i -g @qmahyar/cf-scanner` on the
+   three supported platforms (linux x64/arm64, win32 x64). macOS is
+   unsupported for the same reason as the release matrix (ADR-009).
+
+Known npm quirks:
+- npm refuses to republish a version that was already published — always
+  bump. If a broken version escaped (e.g. 0.4.0 published with the wrong
+  filename), unpublish is blocked for 24h (and the last version can never be
+  removed), so the fix is a PATCH bump — same as a broken binary release.
+- npm 2FA: interactive `npm publish` needs a one-time password; the CI
+  automation token bypasses it. Never publish manually except as a
+  documented emergency (automation token is publish-capable too).
 
 ## Post-publish verification
 
@@ -109,6 +132,9 @@ Publish it after each release:
    inside next to `cf-scanner`.
 4. Provenance: `gh attestation verify <artifact> --owner QMahyar` succeeds
    (the `host` job attests every published artifact).
+5. npm: `npm view @qmahyar/cf-scanner version` shows the bumped version, and
+   `npm i -g @qmahyar/cf-scanner` on at least one platform downloads and
+   runs (`cf-scanner serve` starts the API on 127.0.0.1:8765).
 
 ## Fixing a broken release
 
@@ -147,6 +173,13 @@ release exists, never rewrite it — cut a new PATCH.
   write` (both added in the 0.4.0 review cycle). The block is regenerated by
   `dist init`, so re-check it after any regeneration.
 - **WiX is CI-only** — MSI builds fail on dev boxes without WiX. Expected.
+- **`npm-publish` needs the `NPM_TOKEN` secret** — an npm automation token
+  (2FA bypass). Missing secret = the job fails with "Input required: token";
+  set it via `gh secret set NPM_TOKEN`, then re-run the failed job (or
+  re-push the tag per the fix flow).
+- **Broken npm versions cannot be removed immediately** — the last published
+  version is unpublishable, and any version is locked for 24h after
+  publish. Fix = PATCH bump, never delete (same as binary releases).
 
 ## Rollback plan
 

@@ -39,7 +39,7 @@ dist build --artifacts=local --target=<host-target>
 git restore data/bundled/xray data/bundled/xray.exe
 ```
 
-Release flow (tag → CI → GitHub Release) is in `docs/release-process.md` — never publish artifacts manually.
+Release flow (tag → CI → GitHub Release → npm publish, all automatic) is in `docs/release-process.md` — never publish artifacts or the npm package manually.
 
 ## Architecture
 
