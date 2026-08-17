@@ -23,7 +23,12 @@ const path = require("path");
 // ---------------------------------------------------------------------------
 
 const REPO = "QMahyar/cf-scanner";
+// npm package version (display only) and the GitHub release tag the binary
+// is downloaded from. These CAN differ: the wrapper is republishable (bug
+// fixes like this one) without a new binary release. Bump RELEASE_TAG with
+// every new binary release; bump version with every npm publish.
 const VERSION = require("./package.json").version;
+const RELEASE_TAG = "v0.4.0";
 
 /** Maps (os, arch) → dist target triple. */
 const TARGETS = {
@@ -65,7 +70,7 @@ function getDownloadUrl(target) {
   const isWindows = process.platform === "win32";
   const ext = isWindows ? "zip" : "tar.xz";
   const filename = `cf-scanner-${target}.${ext}`;
-  return `https://github.com/${REPO}/releases/download/v${VERSION}/${filename}`;
+  return `https://github.com/${REPO}/releases/download/${RELEASE_TAG}/${filename}`;
 }
 
 function download(url) {
@@ -186,7 +191,7 @@ async function main() {
     console.error(`  ${err.message}`);
     console.error("");
     console.error("You can install cf-scanner manually from:");
-    console.error(`  https://github.com/${REPO}/releases/tag/v${VERSION}`);
+    console.error(`  https://github.com/${REPO}/releases/tag/${RELEASE_TAG}`);
     console.error("");
     console.error("Or set CF_SCANNER_SKIP_INSTALL=1 to skip binary download.");
     process.exit(1);

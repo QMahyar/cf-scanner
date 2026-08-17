@@ -296,9 +296,7 @@ fn parse_vmess(entry: &str) -> Result<OutboundSpec> {
     let security = get("tls").unwrap_or("none").to_owned();
     reject_unsupported_security(&security)?;
     let alter_id: u16 = get("aid").and_then(|a| a.parse().ok()).unwrap_or(0);
-    let vmess_security = get("scy")
-        .filter(|s| !s.is_empty())
-        .map(str::to_owned);
+    let vmess_security = get("scy").filter(|s| !s.is_empty()).map(str::to_owned);
     let ws = match get("net") {
         Some(WS) => Some(WsSettings {
             path: get("path").unwrap_or("/").to_owned(),
@@ -413,11 +411,7 @@ pub fn parse_xray_json(text: &str) -> Result<OutboundSpec> {
         };
         let vmess_meta = match protocol {
             Protocol::Vmess => {
-                let user = out
-                    .settings
-                    .vnext
-                    .first()
-                    .and_then(|v| v.users.first());
+                let user = out.settings.vnext.first().and_then(|v| v.users.first());
                 (
                     user.and_then(|u| u.alter_id).unwrap_or(0),
                     user.and_then(|u| u.security.as_ref())

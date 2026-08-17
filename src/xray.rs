@@ -304,14 +304,20 @@ fn config_secrets(config_json: &Value) -> Vec<String> {
         return secrets;
     };
     for outbound in outbounds {
-        if let Some(users) = outbound.pointer("/settings/vnext/0/users").and_then(Value::as_array) {
+        if let Some(users) = outbound
+            .pointer("/settings/vnext/0/users")
+            .and_then(Value::as_array)
+        {
             for user in users {
                 if let Some(id) = user["id"].as_str() {
                     secrets.push(id.to_owned());
                 }
             }
         }
-        if let Some(servers) = outbound.pointer("/settings/servers").and_then(Value::as_array) {
+        if let Some(servers) = outbound
+            .pointer("/settings/servers")
+            .and_then(Value::as_array)
+        {
             for server in servers {
                 if let Some(password) = server["password"].as_str() {
                     secrets.push(password.to_owned());
@@ -319,10 +325,16 @@ fn config_secrets(config_json: &Value) -> Vec<String> {
             }
         }
         let stream = &outbound["streamSettings"];
-        if let Some(name) = stream.pointer("/tlsSettings/serverName").and_then(Value::as_str) {
+        if let Some(name) = stream
+            .pointer("/tlsSettings/serverName")
+            .and_then(Value::as_str)
+        {
             secrets.push(name.to_owned());
         }
-        if let Some(host) = stream.pointer("/wsSettings/headers/Host").and_then(Value::as_str) {
+        if let Some(host) = stream
+            .pointer("/wsSettings/headers/Host")
+            .and_then(Value::as_str)
+        {
             secrets.push(host.to_owned());
         }
     }
@@ -546,7 +558,10 @@ pub async fn download_binary(fetch: &impl BinaryFetch) -> Result<PathBuf> {
         // binary concurrently must not extract into the same file.
         let tmp = install_dest.with_file_name(format!(
             "{}.tmp-{}-{:08x}",
-            install_dest.file_name().unwrap_or_default().to_string_lossy(),
+            install_dest
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy(),
             std::process::id(),
             random_u32()
         ));
@@ -800,7 +815,8 @@ mod tests {
         // Custom preset with no values: no fragment outbound exists, so the
         // proxy must not carry a dialerProxy naming a missing tag (xray
         // would refuse the whole config).
-        let cfg = build_config(&spec(), dial(), &FragmentPreset::Custom, None, None, 28007).unwrap();
+        let cfg =
+            build_config(&spec(), dial(), &FragmentPreset::Custom, None, None, 28007).unwrap();
         let outbounds = cfg["outbounds"].as_array().unwrap();
         assert_eq!(outbounds.len(), 1);
         assert!(outbounds[0]["streamSettings"].get("sockopt").is_none());
@@ -809,9 +825,15 @@ mod tests {
             length: "1-2".to_owned(),
             interval: "3-4".to_owned(),
         };
-        let cfg =
-            build_config(&spec(), dial(), &FragmentPreset::Custom, Some(&custom), None, 28008)
-                .unwrap();
+        let cfg = build_config(
+            &spec(),
+            dial(),
+            &FragmentPreset::Custom,
+            Some(&custom),
+            None,
+            28008,
+        )
+        .unwrap();
         let outbounds = cfg["outbounds"].as_array().unwrap();
         assert_eq!(outbounds.len(), 2);
         assert_eq!(
@@ -822,8 +844,8 @@ mod tests {
 
     #[test]
     fn stderr_lines_mask_config_secrets() {
-        let mut cfg = build_config(&spec(), dial(), &FragmentPreset::Light, None, None, 28009)
-            .unwrap();
+        let mut cfg =
+            build_config(&spec(), dial(), &FragmentPreset::Light, None, None, 28009).unwrap();
         let mut s = spec();
         s.protocol = Protocol::Shadowsocks;
         s.user_id = "shadowsocks-password".to_owned();
@@ -842,7 +864,10 @@ mod tests {
             "failed to dial aaaaaaaa-bbbb-cccc-dddd-eeeeffff0000 via shadowsocks-password at front.example.com",
             &secrets,
         );
-        assert!(!masked.contains("aaaaaaaa-bbbb-cccc-dddd-eeeeffff0000"), "{masked}");
+        assert!(
+            !masked.contains("aaaaaaaa-bbbb-cccc-dddd-eeeeffff0000"),
+            "{masked}"
+        );
         assert!(!masked.contains("shadowsocks-password"), "{masked}");
         assert!(!masked.contains("front.example.com"), "{masked}");
         assert_eq!(masked.matches("***").count(), 3, "{masked}");
@@ -850,10 +875,8 @@ mod tests {
 
     #[test]
     fn bundled_placeholder_files_are_not_valid() {
-        let dir = std::env::temp_dir().join(format!(
-            "cf-scanner-bundled-test-{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("cf-scanner-bundled-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("bundled")).unwrap();
         let bundled = dir.join("bundled").join(exe_name());

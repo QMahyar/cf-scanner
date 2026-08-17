@@ -212,11 +212,7 @@ impl ScanController {
         } else {
             ctx.found.load(Ordering::Relaxed)
         };
-        Ok(self.finish(
-            started,
-            ctx.scanned.load(Ordering::Relaxed),
-            found,
-        ))
+        Ok(self.finish(started, ctx.scanned.load(Ordering::Relaxed), found))
     }
 }
 

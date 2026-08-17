@@ -770,10 +770,7 @@ mod tests {
                             let rx = park_rx.lock().unwrap_or_else(|e| e.into_inner());
                             let _ = rx.recv();
                         }
-                        events_c
-                            .lock()
-                            .unwrap_or_else(|e| e.into_inner())
-                            .push(e);
+                        events_c.lock().unwrap_or_else(|e| e.into_inner()).push(e);
                     })
                     .await
                     .unwrap();

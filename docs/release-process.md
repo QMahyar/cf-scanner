@@ -84,16 +84,17 @@ Tag pushes and PRs additionally run the Release workflow in "plan" mode.
 `@qmahyar/cf-scanner` (in `npm/cf-scanner/`) is a thin binary-download
 wrapper: its `postinstall` fetches `cf-scanner-<target>.<ext>` (tar.xz on
 Unix, zip on Windows — dist archive names carry no version, only the release
-tag does) from the GitHub Release for the matching tag. Publish it after each
-release:
+tag does) from the GitHub Release pinned by `RELEASE_TAG` in `install.js`.
+Publish it after each release:
 
-1. **Bump `npm/cf-scanner/package.json` `version`** to the released version.
-   The tag, `Cargo.toml`, and the npm version must never disagree — the
-   release tag is built from the npm version, so a mismatch 404s at
-   install time.
+1. **Bump `npm/cf-scanner/package.json` `version`** (patch bump is fine) and
+   set `RELEASE_TAG` in `install.js` to the released tag. They can differ:
+   `RELEASE_TAG` must match the GitHub release the binary is downloaded
+   from, the npm `version` only matters for registry bookkeeping.
 2. **Publish** once the GitHub Release exists (the install script downloads
    from it): `npm publish` from `npm/cf-scanner/` (requires npm login with
-   publish rights for the `qmahyar` scope).
+   publish rights for the `qmahyar` scope). Note npm refuses to republish a
+   version that was already published, so always bump.
 3. **Smoke-test**: `npm pack` and install the tarball on the three supported
    platforms (linux x64/arm64, win32 x64). macOS is unsupported for the
    same reason as the release matrix (ADR-009).

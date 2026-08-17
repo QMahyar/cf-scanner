@@ -328,7 +328,11 @@ fn write_private_replace(dest: &Path, text: &str) -> Result<()> {
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| "out".to_owned());
-    let tmp = dest.with_file_name(format!("{name}.tmp-{}-{:08x}", std::process::id(), random_u32()));
+    let tmp = dest.with_file_name(format!(
+        "{name}.tmp-{}-{:08x}",
+        std::process::id(),
+        random_u32()
+    ));
     write_private(&tmp, text)?;
     match fs::rename(&tmp, dest) {
         Ok(()) => Ok(()),

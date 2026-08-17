@@ -277,10 +277,7 @@ mod tests {
         unsafe { std::env::set_var("CF_SCANNER_DATA_DIR", &dir) };
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        let key_b64 = base64::Engine::encode(
-            &base64::engine::general_purpose::STANDARD,
-            [7u8; 32],
-        );
+        let key_b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, [7u8; 32]);
         let identity = format!(
             r#"{{"id":"t","token":"t","private_key":"{}","client_id":"c","account_type":"free","license":null,"created_at":0,"peer_public_key":"{key_b64}"}}"#,
             base64::Engine::encode(&base64::engine::general_purpose::STANDARD, [1u8; 32])

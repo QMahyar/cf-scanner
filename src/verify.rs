@@ -293,10 +293,8 @@ mod tests {
 
     #[test]
     fn trial_dir_guard_removes_the_dir_on_drop() {
-        let dir = std::env::temp_dir().join(format!(
-            "cf-scanner-verify-guard-{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("cf-scanner-verify-guard-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         {

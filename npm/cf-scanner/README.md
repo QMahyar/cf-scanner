@@ -36,6 +36,8 @@ cf-scanner serve
 
 On `npm install`, the `postinstall` script detects your OS and architecture, then downloads the correct prebuilt archive from the GitHub release for the current version and unpacks the binary (plus its bundled xray helper) into `bin/`. npm links the `bin/cf-scanner` wrapper into `node_modules/.bin/`, which npm adds to your PATH when you install globally.
 
+The npm version and the GitHub release tag can differ: `install.js` pins the download tag separately (`RELEASE_TAG`), so the wrapper can be patched without a new binary release.
+
 ## Manual Installation
 
 If the automatic download fails, you can install manually from the [Releases page](https://github.com/QMahyar/cf-scanner/releases).
