@@ -11,7 +11,8 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use base64::Engine as _;
 use cf_scanner::configs::{Protocol, WsSettings, parse_uri};
-use cf_scanner::ranges::{Cidr, CidrPool, SplitMix64, parse_cidr};
+use cf_scanner::engine::SplitMix64;
+use cf_scanner::ranges::{Cidr, CidrPool, parse_cidr};
 use cf_scanner::wgconf::{
     AmneziaParams, WgConfig, WgPeer, parse_wg_entry, parse_wgconf, render_wgconf,
 };

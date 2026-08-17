@@ -4,7 +4,10 @@
 
 mod cdn;
 mod phase2;
+mod plan;
 mod warp;
+
+pub use plan::{PlanItem, SplitMix64, plan};
 
 use std::collections::HashSet;
 use std::net::IpAddr;
@@ -22,7 +25,7 @@ use crate::api::types::{
 use crate::configs::{RealSubFetch, SubFetch};
 use crate::geo::Geo;
 use crate::probe::Transport;
-use crate::ranges::{self, PlanItem, SplitMix64};
+use crate::ranges;
 use crate::verify::{TunnelProbe, XrayTunnelProbe};
 
 /// Progress events: every 50 probes up to 10k totals, then every 500, so a

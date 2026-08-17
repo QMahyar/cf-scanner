@@ -16,7 +16,8 @@ use super::{
     progress_cadence,
 };
 use crate::api::types::{ScanConfig, ScanEvent, ScanProgress, ScanSummary, Verdict};
-use crate::ranges::{self, SplitMix64};
+use crate::engine::plan::{SplitMix64, plan};
+use crate::ranges;
 
 /// One phase-1 probe unit: a concrete (host, port) pair from the plan.
 #[derive(Clone)]
@@ -62,7 +63,7 @@ impl ScanController {
             return Ok(self.finish(started, 0, self.phase2_passed()));
         }
         self.clear_store();
-        let plan = ranges::plan(&pool, &cfg.target, &mut SplitMix64::new(seed));
+        let plan = plan(&pool, &cfg.target, &mut SplitMix64::new(seed));
         let total = plan_probe_count(&plan, &cfg.ports);
         let cadence = progress_cadence(total);
         self.emit(ScanEvent::Progress(ScanProgress {
