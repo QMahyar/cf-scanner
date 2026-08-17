@@ -121,7 +121,7 @@ jobs:
       - name: Format
         run: cargo fmt --check
       - name: Install cargo-audit
-        run: cargo install cargo-audit --locked
+        run: cargo install cargo-audit@0.22.1 --locked
       - name: Audit dependencies
         run: cargo audit
 

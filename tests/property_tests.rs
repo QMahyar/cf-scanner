@@ -10,10 +10,10 @@ use std::collections::HashSet;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use base64::Engine as _;
-use cf_scanner::configs::{Protocol, WsSettings, parse_uri};
-use cf_scanner::ranges::{Cidr, CidrPool, SplitMix64, parse_cidr};
+use cf_scanner::configs::{parse_uri, Protocol, WsSettings};
+use cf_scanner::ranges::{parse_cidr, Cidr, CidrPool, SplitMix64};
 use cf_scanner::wgconf::{
-    AmneziaParams, WgConfig, WgPeer, parse_wg_entry, parse_wgconf, render_wgconf,
+    parse_wg_entry, parse_wgconf, render_wgconf, AmneziaParams, WgConfig, WgPeer,
 };
 use proptest::prelude::*;
 
@@ -67,7 +67,7 @@ fn aligned_v4_sub(outer: &Cidr, prefix: u8, rng: &mut SplitMix64) -> Cidr {
 fn v4_exclusion_split_matches_brute_force_reference() {
     let mut rng = SplitMix64::new(0xC1D);
     for round in 0..64 {
-        let base = (10 << 24) | (rng.below(1 << 16) as u32) << 8;
+        let base = (10 << 24) | ((rng.below(1 << 16) as u32) << 8);
         let outer = Cidr {
             addr: IpAddr::V4(Ipv4Addr::from(base)),
             prefix: 24,

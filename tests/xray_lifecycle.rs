@@ -64,7 +64,7 @@ exec env CF_SCANNER_FAKE_PORT="$port" "{child}" --exact fake_xray_child --nocapt
         marker = marker.display(),
         child = child_bin.display(),
     );
-    std::fs::write(bin_path, script)?;
+    std::fs::write(bin_path, &script)?;
     let mut perm = std::fs::metadata(bin_path)?.permissions();
     use std::os::unix::fs::PermissionsExt as _;
     perm.set_mode(0o755);
@@ -189,6 +189,8 @@ async fn tunnel_probe_lifecycle_spawns_and_cleans_trial_dirs() {
         fingerprint: None,
         ws: None,
         tag: None,
+        alter_id: 0,
+        vmess_security: None,
     };
     let req = ProbeRequest {
         spec: &spec,
