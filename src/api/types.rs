@@ -231,6 +231,10 @@ pub struct Phase2Verdict {
     /// verdict; None when unknown/legacy.
     #[serde(default)]
     pub config_index: Option<u32>,
+    /// Which verifier produced the verdict: "inline" (in-process vless/trojan)
+    /// or "xray" (subprocess). Absent for legacy payloads.
+    #[serde(default)]
+    pub verifier: Option<String>,
 }
 
 /// Phase-2 progress: how many of the total (candidate × config × SNI)
@@ -920,6 +924,7 @@ mod tests {
             latency_ms: Some(7),
             error: None,
             config_index: Some(2),
+            verifier: Some("inline".to_owned()),
         })
         .unwrap();
         assert!(json.contains("\"config_index\":2"), "{json}");

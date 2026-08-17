@@ -64,20 +64,26 @@ pub struct TlsTransport {
 
 impl TlsTransport {
     pub fn new() -> Self {
-        // Explicit ring provider: no process-level install needed in tests
-        // or when other rustls consumers install a different provider.
-        let config = ClientConfig::builder_with_provider(ring::default_provider().into())
-            .with_safe_default_protocol_versions()
-            .expect("ring supports the default protocol versions")
-            .dangerous()
-            .with_custom_certificate_verifier(Arc::new(NoVerify))
-            .with_no_client_auth();
         Self {
-            connector: TlsConnector::from(Arc::new(config)),
+            connector: TlsConnector::from(Arc::new(no_verify_client_config())),
             server_name: ServerName::try_from(PROBE_SNI.to_owned())
                 .expect("static SNI is a valid hostname"),
         }
     }
+}
+
+/// Client TLS config with certificate verification disabled. Shared by the
+/// phase-1 transport and the inline phase-2 verifier: both dial anycast
+/// fronting IPs whose certificate SANs never match the probed name.
+/// Explicit ring provider: no process-level install needed in tests or when
+/// other rustls consumers install a different provider.
+pub(crate) fn no_verify_client_config() -> ClientConfig {
+    ClientConfig::builder_with_provider(ring::default_provider().into())
+        .with_safe_default_protocol_versions()
+        .expect("ring supports the default protocol versions")
+        .dangerous()
+        .with_custom_certificate_verifier(Arc::new(NoVerify))
+        .with_no_client_auth()
 }
 
 impl Default for TlsTransport {
