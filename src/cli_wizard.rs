@@ -5,8 +5,8 @@
 use std::sync::Arc;
 
 use crate::api::types::{
-    CdnPreset, FragmentPreset, Mode, Phase2Config, ScanConfig, ScanEvent, ScanTarget,
-    StopCondition, WarpConfig,
+    CdnPreset, DEFAULT_CONCURRENCY, FragmentPreset, Mode, Phase2Config, ScanConfig, ScanEvent,
+    ScanTarget, StopCondition, WarpConfig,
 };
 use crate::engine::ScanController;
 use crate::warp;
@@ -61,7 +61,7 @@ fn prompt_warp() -> Result<ScanConfig> {
     let concurrency: u16 = Input::new()
         .with_prompt("Parallel probes (1-1000)")
         .validate_with(|n: &u16| (1..=1000).contains(n).then_some(()).ok_or("must be 1-1000"))
-        .default(200)
+        .default(DEFAULT_CONCURRENCY)
         .interact()?;
     let timeout_ms: u64 = Input::new()
         .with_prompt("Probe timeout in ms (100-30000)")
@@ -295,7 +295,7 @@ fn prompt_config() -> Result<ScanConfig> {
     let concurrency: u16 = Input::new()
         .with_prompt("Parallel probes (1-1000)")
         .validate_with(|n: &u16| (1..=1000).contains(n).then_some(()).ok_or("must be 1-1000"))
-        .default(200)
+        .default(DEFAULT_CONCURRENCY)
         .interact()?;
     let timeout_ms: u64 = Input::new()
         .with_prompt("Probe timeout in ms (100-30000)")

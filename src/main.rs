@@ -4,7 +4,9 @@ use std::sync::Arc;
 
 use anyhow::{Result, anyhow};
 use cf_scanner::api;
-use cf_scanner::api::types::{CdnPreset, Mode, ScanConfig, ScanEvent, ScanTarget, StopCondition};
+use cf_scanner::api::types::{
+    CdnPreset, DEFAULT_CONCURRENCY, Mode, ScanConfig, ScanEvent, ScanTarget, StopCondition,
+};
 use cf_scanner::{cli_wizard, engine, paths, probe, ranges, server, warpgen};
 use clap::{Parser, Subcommand, ValueEnum};
 use tracing_subscriber::EnvFilter;
@@ -116,7 +118,7 @@ struct ScanArgs {
     ports: Option<Vec<u16>>,
 
     /// Parallel probes (1-1000)
-    #[arg(long, default_value_t = 200)]
+    #[arg(long, default_value_t = DEFAULT_CONCURRENCY)]
     concurrency: u16,
 
     /// Per-probe timeout in ms (100-30000)
@@ -593,7 +595,7 @@ async fn shutdown_signal(controller: Arc<engine::ScanController>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use api::types::DEFAULT_PORT;
+    use api::types::{DEFAULT_CONCURRENCY, DEFAULT_PORT};
 
     fn args() -> ScanArgs {
         ScanArgs {
@@ -603,7 +605,7 @@ mod tests {
             target: 20,
             cap: None,
             ports: None,
-            concurrency: 200,
+            concurrency: DEFAULT_CONCURRENCY,
             timeout_ms: 3000,
             exclude: vec![],
             custom_cidrs: vec![],

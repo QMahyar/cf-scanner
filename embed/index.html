@@ -642,7 +642,7 @@
                 <span class="help" id="help-ports">e.g., 443,8443 — valid range 1&ndash;65535</span>
               </label>
               <label class="field">Concurrency (1&ndash;1000)
-                <input name="concurrency" type="number" min="1" max="1000" value="200" required aria-describedby="help-concurrency">
+                <input name="concurrency" type="number" min="1" max="1000" value="64" required aria-describedby="help-concurrency">
                 <span class="help" id="help-concurrency">Higher = faster but more resource usage</span>
               </label>
               <label class="field">Probe timeout (ms)
@@ -2304,7 +2304,7 @@
     function applyConfig(cfg) {
       const userPorts = form.elements["ports"].value;
       form.elements["mode"].value = cfg.mode === "Warp" ? "Warp" : "Cdn";
-      form.elements["concurrency"].value = cfg.concurrency ?? 200;
+      form.elements["concurrency"].value = cfg.concurrency ?? 64;
       form.elements["timeout_ms"].value = cfg.timeout_ms ?? 3000;
       form.elements["include_v6"].checked = !!(cfg.include_v6);
       form.elements["found"].value = (cfg.stop && cfg.stop.found) || 20;
