@@ -29,13 +29,12 @@ use tokio_stream::Stream;
 use tokio_stream::StreamExt as _;
 use tokio_stream::wrappers::BroadcastStream;
 
-use crate::api::types::{
-    DEFAULT_PORT, DEFAULT_WARP_PORTS, Mode, ScanConfig, ScanEvent, ScanSummary, Verdict,
-};
+use crate::api::types::{DEFAULT_PORT, Mode, ScanConfig, ScanEvent, ScanSummary, Verdict};
 use crate::engine::ScanController;
 use crate::paths;
 use crate::ranges::{self, CidrPool, HttpGet};
 use crate::warpgen;
+use crate::xray;
 
 const EMBEDDED_INDEX: &str = include_str!("../embed/index.html");
 const DEFAULT_RANGES_REFRESH_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
@@ -80,12 +79,17 @@ async fn persist_profiles(dir: &std::path::Path, profiles: &HashMap<String, Scan
         }
         if fs::write(&path, json).is_ok() {
             // Profiles can hold sensitive scan configs: keep the file
-            // user-only where the filesystem supports permissions.
+            // user-only where the filesystem supports permissions (mirrors
+            // warpgen::write_private).
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt as _;
                 let _ = fs::set_permissions(&path, fs::Permissions::from_mode(0o600));
             }
+            // TODO(windows): profiles.json is created with the default ACL,
+            // so other local users can read scan configs. Restrict to the
+            // current user (SetNamedSecurityInfo / DACL) when the file is
+            // created; needs windows-sys, deferred to avoid a new dependency.
         }
     })
     .await;
@@ -341,6 +345,8 @@ fn router_with_dir(
     Router::new()
         .route("/", get(index))
         .route("/api/status", get(status_handler))
+        .route("/api/xray/status", get(xray_status))
+        .route("/api/xray/download", post(xray_download))
         .route("/api/scan", post(start_scan))
         .route("/api/events", get(events))
         .route("/api/results", get(results))
@@ -357,6 +363,7 @@ fn router_with_dir(
         .with_state(state)
         .fallback(fallback)
         .method_not_allowed_fallback(method_not_allowed)
+        .layer(middleware::from_fn(security_headers))
         .layer(middleware::from_fn(localhost_only))
 }
 
@@ -386,6 +393,25 @@ fn debug_fallback(_uri: Uri) -> Response {
     ApiError::not_found("not found").into_response()
 }
 
+/// Directives every HTML response must carry; the single inline script and
+/// styles need 'unsafe-inline' (the UI is one self-contained file, no external
+/// resources), everything else stays locked down.
+const SECURITY_CSP: &str = "default-src 'self'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'; script-src-attr 'none'";
+
+/// Adds the security headers every response should carry, leaving any header
+/// the handler already set untouched (the HTML handlers set their own CSP).
+async fn security_headers(request: Request, next: Next) -> Response {
+    let mut response = next.run(request).await;
+    let headers = response.headers_mut();
+    headers
+        .entry("referrer-policy")
+        .or_insert(axum::http::HeaderValue::from_static("no-referrer"));
+    headers
+        .entry("x-content-type-options")
+        .or_insert(axum::http::HeaderValue::from_static("nosniff"));
+    response
+}
+
 /// Dev-only: read `embed/index.html` from the working directory (the release
 /// binary embeds it via include_str!; a debug build run from the repo root
 /// finds it on disk).
@@ -398,13 +424,9 @@ fn serve_index_file() -> Response {
                 header::CONTENT_TYPE,
                 "text/html; charset=utf-8".parse().unwrap(),
             );
-            headers.insert(
-                "content-security-policy",
-                "default-src 'self'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'"
-                    .parse()
-                    .unwrap(),
-            );
+            headers.insert("content-security-policy", SECURITY_CSP.parse().unwrap());
             headers.insert("x-content-type-options", "nosniff".parse().unwrap());
+            headers.insert("referrer-policy", "no-referrer".parse().unwrap());
             (headers, bytes).into_response()
         }
         Err(err) => {
@@ -429,7 +451,7 @@ async fn start_scan(
     JsonBody(cfg): JsonBody<ScanConfig>,
 ) -> Result<StatusCode, ApiError> {
     cfg.validate().map_err(ApiError::bad_request)?;
-    let cfg = apply_warp_port_default(cfg);
+    reject_default_warp_ports(&cfg).map_err(ApiError::bad_request)?;
     reject_non_routable(&cfg).map_err(ApiError::bad_request)?;
     if let Some(phase2) = &cfg.phase2 {
         if let Some(local) = phase2.configs.iter().find(|c| !c.contains("://")) {
@@ -476,13 +498,17 @@ async fn start_scan(
     Ok(StatusCode::ACCEPTED)
 }
 
-/// The UI's default port 443 is meaningless for WARP (UDP); substitute the
-/// canonical WARP ports so API-driven WARP scans probe the right ones.
-fn apply_warp_port_default(mut cfg: ScanConfig) -> ScanConfig {
+/// API guard (the CLI documents its own WARP default): silently rewriting
+/// `ports: [443]` into the WARP set would break the contract — the caller
+/// sent port X and got Y without being told. Reject the CDN default instead
+/// and surface the requirement for explicit UDP ports in the error message.
+fn reject_default_warp_ports(cfg: &ScanConfig) -> Result<(), String> {
     if cfg.mode == Mode::Warp && cfg.ports.as_slice() == [DEFAULT_PORT] {
-        cfg.ports = DEFAULT_WARP_PORTS.to_vec();
+        return Err(format!(
+            "warp scans need explicit UDP ports; the CDN default {DEFAULT_PORT} is not valid (pass e.g. 2408,500)"
+        ));
     }
-    cfg
+    Ok(())
 }
 
 /// API-only guard against self-scanning non-routable custom input (the CLI
@@ -758,6 +784,9 @@ async fn export_config(
             crate::api::types::MAX_SNI_BYTES
         )));
     }
+    if let Some(sni) = &req.sni {
+        crate::api::types::validate_sni(sni).map_err(ApiError::bad_request)?;
+    }
     let uri = crate::configs::export_config_uri(&req.config, ip, req.port, req.sni.as_deref())
         .map_err(|err| {
             ApiError::bad_request(crate::configs::sanitize_error_text(&format!("{err:#}")))
@@ -776,6 +805,49 @@ async fn status_handler(State(state): State<Arc<AppState>>) -> Json<StatusPayloa
         version: env!("CARGO_PKG_VERSION"),
         is_running: state.controller.is_running(),
     })
+}
+
+#[derive(Serialize)]
+struct XrayStatusPayload {
+    found: bool,
+    path: Option<String>,
+    data_dir: String,
+    version: &'static str,
+}
+
+async fn xray_status() -> Json<XrayStatusPayload> {
+    let found = xray::find_binary();
+    let data_dir = paths::data_dir()
+        .map(|p| p.display().to_string())
+        .unwrap_or_default();
+    Json(XrayStatusPayload {
+        found: found.is_some(),
+        path: found.map(|p| p.display().to_string()),
+        data_dir,
+        version: xray::VERSION.trim(),
+    })
+}
+
+#[derive(Serialize)]
+struct XrayDownloadResponse {
+    success: bool,
+    path: Option<String>,
+    error: Option<String>,
+}
+
+async fn xray_download() -> Json<XrayDownloadResponse> {
+    match xray::ensure_binary(&xray::RealFetch).await {
+        Ok(path) => Json(XrayDownloadResponse {
+            success: true,
+            path: Some(path.display().to_string()),
+            error: None,
+        }),
+        Err(err) => Json(XrayDownloadResponse {
+            success: false,
+            path: None,
+            error: Some(format!("{err:#}")),
+        }),
+    }
 }
 
 #[derive(Serialize)]
@@ -910,13 +982,9 @@ fn validate_profile_name(name: &str) -> Result<(), String> {
 
 async fn index() -> impl IntoResponse {
     let mut headers = axum::http::HeaderMap::new();
-    headers.insert(
-        "content-security-policy",
-        "default-src 'self'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'"
-            .parse()
-            .unwrap(),
-    );
+    headers.insert("content-security-policy", SECURITY_CSP.parse().unwrap());
     headers.insert("x-content-type-options", "nosniff".parse().unwrap());
+    headers.insert("referrer-policy", "no-referrer".parse().unwrap());
     (headers, Html(EMBEDDED_INDEX))
 }
 
@@ -1013,6 +1081,7 @@ mod tests {
     use std::sync::Mutex;
     use std::time::Duration;
 
+    use crate::api::types::{DEFAULT_WARP_PORTS, MAX_STOP_VALUE};
     use crate::api::types::{Mode, Phase2Config, ScanTarget, StopCondition, WarpConfig};
     use crate::probe::FakeTransport;
     use crate::ranges::BUNDLED_RANGES;
@@ -1181,12 +1250,18 @@ mod tests {
     }
 
     async fn post_scan(addr: SocketAddr, body: &str) -> u16 {
+        post_scan_full(addr, body).await.0
+    }
+
+    /// POST /api/scan returning the status AND the raw response text, so
+    /// tests can assert on the error envelope's message.
+    async fn post_scan_full(addr: SocketAddr, body: &str) -> (u16, String) {
         let req = format!(
             "POST /api/scan HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
             body.len(),
             body
         );
-        request(addr, &req, None).await.0
+        request(addr, &req, None).await
     }
 
     async fn get_profiles(addr: SocketAddr) -> (u16, String) {
@@ -1249,6 +1324,69 @@ mod tests {
         .await;
         assert_eq!(status, 200);
         assert!(body.contains("CF-Scanner"));
+    }
+
+    #[tokio::test]
+    async fn index_carries_hardened_security_headers() {
+        let addr = serve(FakeTransport::new()).await;
+        let (status, text) = request(
+            addr,
+            "GET / HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n",
+            None,
+        )
+        .await;
+        assert_eq!(status, 200);
+        let headers = text.split_once("\r\n\r\n").map(|(h, _)| h).unwrap_or("");
+        let lower = headers.to_ascii_lowercase();
+        assert!(
+            lower.contains("referrer-policy: no-referrer"),
+            "missing Referrer-Policy: {headers}"
+        );
+        assert!(
+            lower.contains("x-content-type-options: nosniff"),
+            "missing nosniff: {headers}"
+        );
+        let csp = headers
+            .lines()
+            .find(|l| {
+                l.to_ascii_lowercase()
+                    .starts_with("content-security-policy")
+            })
+            .expect("CSP header present");
+        for directive in [
+            "form-action 'self'",
+            "script-src-attr 'none'",
+            "base-uri 'self'",
+            "object-src 'none'",
+            "script-src 'unsafe-inline'",
+            "style-src 'unsafe-inline'",
+        ] {
+            assert!(csp.contains(directive), "CSP missing {directive}: {csp}");
+        }
+    }
+
+    #[tokio::test]
+    async fn api_responses_carry_security_headers() {
+        // "ideally all responses": the middleware adds the safe defaults to
+        // API payloads and SSE too, not just the HTML page.
+        let addr = serve(FakeTransport::new()).await;
+        let (status, text) = request(
+            addr,
+            "GET /api/status HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n",
+            None,
+        )
+        .await;
+        assert_eq!(status, 200);
+        let headers = text.split_once("\r\n\r\n").map(|(h, _)| h).unwrap_or("");
+        let lower = headers.to_ascii_lowercase();
+        assert!(
+            lower.contains("referrer-policy: no-referrer"),
+            "missing Referrer-Policy: {headers}"
+        );
+        assert!(
+            lower.contains("x-content-type-options: nosniff"),
+            "missing nosniff: {headers}"
+        );
     }
 
     #[tokio::test]
@@ -2039,6 +2177,7 @@ mod tests {
         let mut c = cfg(1, 1);
         c.mode = Mode::Warp;
         c.custom_cidrs = vec![];
+        c.ports = vec![2408]; // WARP needs explicit ports (no defaulting)
         c.warp = Some(WarpConfig {
             custom_endpoints: vec!["127.0.0.1".to_owned()],
             ..WarpConfig::default()
@@ -2054,23 +2193,68 @@ mod tests {
         );
     }
 
-    #[test]
-    fn warp_scan_over_api_uses_warp_ports() {
-        // The UI's default port 443 is a TCP convention; WARP probes UDP and
-        // needs the canonical WARP port set.
+    #[tokio::test]
+    async fn scan_rejects_stop_values_above_the_frontend_cap() {
+        let addr = serve(FakeTransport::new()).await;
+        let mut c = cfg(1, 1);
+        c.stop = StopCondition {
+            found: MAX_STOP_VALUE + 1,
+            cap: None,
+        };
+        assert_eq!(
+            post_scan(addr, &serde_json::to_string(&c).unwrap()).await,
+            400,
+            "found above the frontend cap must be rejected"
+        );
+        c.stop = StopCondition {
+            found: 1,
+            cap: Some(0),
+        };
+        assert_eq!(
+            post_scan(addr, &serde_json::to_string(&c).unwrap()).await,
+            400,
+            "cap 0 must be rejected"
+        );
+        c.stop = StopCondition {
+            found: 1,
+            cap: Some(MAX_STOP_VALUE),
+        };
+        assert_eq!(
+            post_scan(addr, &serde_json::to_string(&c).unwrap()).await,
+            202,
+            "cap at the frontend limit must be accepted"
+        );
+    }
+
+    #[tokio::test]
+    async fn warp_scan_with_cdn_default_port_is_rejected_not_substituted() {
+        // The review found the server silently rewrote ports [443] into
+        // DEFAULT_WARP_PORTS; the contract now rejects it with a clear error.
+        let addr = serve(FakeTransport::new()).await;
         let mut c = cfg(1, 1);
         c.mode = Mode::Warp;
         c.custom_cidrs = vec![];
-        let out = apply_warp_port_default(c);
-        assert_eq!(out.ports, DEFAULT_WARP_PORTS);
-        // Non-default port lists pass through untouched.
-        let mut c = cfg(1, 1);
-        c.mode = Mode::Warp;
-        c.custom_cidrs = vec![];
-        c.ports = vec![2408];
-        assert_eq!(apply_warp_port_default(c).ports, vec![2408]);
-        // CDN keeps the default port.
-        assert_eq!(apply_warp_port_default(cfg(1, 1)).ports, vec![443]);
+        c.warp = Some(WarpConfig {
+            custom_endpoints: vec!["203.0.113.1".to_owned()],
+            ..Default::default()
+        });
+        let (status, text) = post_scan_full(addr, &serde_json::to_string(&c).unwrap()).await;
+        assert_eq!(status, 400, "{text}");
+        assert!(text.contains("explicit UDP ports"), "{text}");
+        // A real WARP port list passes (the scan itself runs in the
+        // background against real UDP timeouts; only the accept matters).
+        c.ports = DEFAULT_WARP_PORTS.to_vec();
+        assert_eq!(
+            post_scan(addr, &serde_json::to_string(&c).unwrap()).await,
+            202
+        );
+        // CDN keeps accepting the default port (fresh server: the WARP run
+        // above is still probing real endpoints).
+        let cdn = serve(FakeTransport::new()).await;
+        assert_eq!(
+            post_scan(cdn, &serde_json::to_string(&cfg(1, 1)).unwrap()).await,
+            202
+        );
     }
 
     #[tokio::test]
@@ -2273,6 +2457,33 @@ mod tests {
             let (status, text) = post_export(addr, &body).await;
             assert_eq!(status, 400, "{text}");
             assert!(text.contains(expected), "{text}");
+        }
+    }
+
+    #[tokio::test]
+    async fn export_rejects_malformed_sni() {
+        let addr = serve(FakeTransport::new()).await;
+        for bad in ["bad_sni", "-bad", "bad-", "a..b", "has space"] {
+            let body = serde_json::json!({
+                "config": EXPORT_VLESS,
+                "ip": "203.0.113.7",
+                "port": 443,
+                "sni": bad
+            });
+            let (status, text) = post_export(addr, &body.to_string()).await;
+            assert_eq!(status, 400, "{bad}: {text}");
+            assert!(text.contains("invalid SNI"), "{bad}: {text}");
+        }
+        // Raw IPs and valid hostnames stay accepted.
+        for good in ["1.2.3.4", "2606:4700::1111", "front.example.com"] {
+            let body = serde_json::json!({
+                "config": EXPORT_VLESS,
+                "ip": "203.0.113.7",
+                "port": 443,
+                "sni": good
+            });
+            let (status, text) = post_export(addr, &body.to_string()).await;
+            assert_eq!(status, 200, "{good}: {text}");
         }
     }
 

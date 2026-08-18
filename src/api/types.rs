@@ -27,6 +27,14 @@ pub const MAX_CONFIG_ENTRY_BYTES: usize = 8 * 1024;
 pub const MAX_SNI_BYTES: usize = 256;
 pub const MAX_PROBE_URL_BYTES: usize = 2 * 1024;
 pub const MAX_WGCONF_BYTES: usize = 64 * 1024;
+/// Upper bound for `stop.found`/`stop.cap`, matching the frontend's field
+/// validators (embed/index.html `intRange(1, 100000000, ...)`); keeps the API
+/// contract and its UI honest about the same limits.
+pub const MAX_STOP_VALUE: u32 = 100_000_000;
+/// Per-label length cap for SNI hostnames (RFC 1035: labels max 63 chars).
+pub const MAX_SNI_LABEL_CHARS: usize = 63;
+/// Total hostname length cap for SNI (RFC 1035: FQDN max 253 chars).
+pub const MAX_SNI_HOSTNAME_CHARS: usize = 253;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Mode {
@@ -339,6 +347,16 @@ pub enum ConfigError {
     WarpCidrsNotAllowed,
     #[error("custom fragment {0} must be an integer or a range like 100-200, got {1:?}")]
     InvalidFragment(&'static str, String),
+    #[error("invalid SNI {0:?}: {1}")]
+    InvalidSni(String, String),
+    #[error("stop.found out of range 1-100000000, got {0}")]
+    InvalidFoundUpper(u32),
+    #[error("stop.cap out of range 1-100000000, got {0}")]
+    InvalidCap(u32),
+    #[error(
+        "custom fragment {0} range out of bounds (length 1-65535, interval 1-60000), got {1:?}"
+    )]
+    InvalidFragmentRange(&'static str, String),
 }
 
 impl ScanConfig {
@@ -357,6 +375,19 @@ impl ScanConfig {
         }
         if self.stop.found == 0 {
             return Err(ConfigError::InvalidFound(0));
+        }
+        // The frontend caps both stop fields at MAX_STOP_VALUE; the server
+        // enforces the same bound so an agent cannot request a stop condition
+        // the UI never offers (contract parity).
+        if self.stop.found > MAX_STOP_VALUE {
+            return Err(ConfigError::InvalidFoundUpper(self.stop.found));
+        }
+        if let Some(cap) = self.stop.cap {
+            // cap 0 would stop before the first probe: the engine compares
+            // scanned >= cap, which holds trivially.
+            if cap == 0 || cap > MAX_STOP_VALUE {
+                return Err(ConfigError::InvalidCap(cap));
+            }
         }
         if self.exclude.len() > MAX_CIDRS {
             return Err(ConfigError::TooManyExcludes(self.exclude.len()));
@@ -465,6 +496,14 @@ fn validate_phase2(p2: &Phase2Config) -> Result<(), ConfigError> {
     if p2.snis.iter().any(|s| s.len() > MAX_SNI_BYTES) {
         return Err(ConfigError::SniTooLong(MAX_SNI_BYTES));
     }
+    // SNI is embedded into generated xray configs and TLS hellos verbatim:
+    // restrict it to well-formed hostnames or raw IPs so a crafted value
+    // cannot smuggle arbitrary text into a config file. An entry in a
+    // non-empty list is always used as an override, so "" is invalid too
+    // ("empty" only means an empty list, i.e. each config's own SNI).
+    for sni in &p2.snis {
+        validate_sni(sni)?;
+    }
     // The legacy single URL stays the source of truth only when the list is
     // absent, so a probes-driven request can never trip on a stale/blank
     // legacy field (and legacy requests keep their exact validation).
@@ -502,32 +541,40 @@ fn validate_phase2(p2: &Phase2Config) -> Result<(), ConfigError> {
 
 /// Fragment values are xray Int32Range strings: an integer or a `lo-hi`
 /// range. `packets` additionally accepts the special `tlshello` value the
-/// presets hardcode.
+/// presets hardcode. `length`/`interval` also carry numeric bounds mirroring
+/// the frontend's `customRange` validators (1-65535 / 1-60000, lo <= hi).
 fn validate_fragment(f: &CustomFragment) -> Result<(), ConfigError> {
-    validate_fragment_field("packets", &f.packets, true)?;
-    validate_fragment_field("length", &f.length, false)?;
-    validate_fragment_field("interval", &f.interval, false)
+    validate_fragment_field("packets", &f.packets, true, None)?;
+    validate_fragment_field("length", &f.length, false, Some((1, 65_535)))?;
+    validate_fragment_field("interval", &f.interval, false, Some((1, 60_000)))
 }
 
 fn validate_fragment_field(
     field: &'static str,
     value: &str,
     allow_tlshello: bool,
+    bounds: Option<(u64, u64)>,
 ) -> Result<(), ConfigError> {
     if allow_tlshello && value == "tlshello" {
         return Ok(());
     }
     let mut parts = value.split('-');
-    let ok = match (parts.next(), parts.next(), parts.next()) {
-        (Some(lo), None, None) => is_ascii_digits(lo),
-        (Some(lo), Some(hi), None) => is_ascii_digits(lo) && is_ascii_digits(hi),
-        _ => false,
+    let (lo, hi): (&str, Option<&str>) = match (parts.next(), parts.next(), parts.next()) {
+        (Some(lo), None, None) => (lo, None),
+        (Some(lo), Some(hi), None) => (lo, Some(hi)),
+        _ => return Err(ConfigError::InvalidFragment(field, value.to_owned())),
     };
-    if ok {
-        Ok(())
-    } else {
-        Err(ConfigError::InvalidFragment(field, value.to_owned()))
+    if !is_ascii_digits(lo) || hi.is_some_and(|h| !is_ascii_digits(h)) {
+        return Err(ConfigError::InvalidFragment(field, value.to_owned()));
     }
+    if let Some((min, max)) = bounds {
+        let lo: u64 = lo.parse().unwrap_or(0);
+        let hi: u64 = hi.map(|h| h.parse().unwrap_or(0)).unwrap_or(lo);
+        if lo < min || hi > max || lo > hi {
+            return Err(ConfigError::InvalidFragmentRange(field, value.to_owned()));
+        }
+    }
+    Ok(())
 }
 
 fn is_ascii_digits(s: &str) -> bool {
@@ -549,6 +596,40 @@ fn validate_cidr(s: &str) -> Result<(), ConfigError> {
         ));
     }
     Ok(())
+}
+
+/// Validates an SNI value: a raw IP (v4/v6) or a hostname with RFC 1035
+/// label rules (letters/digits/hyphens, no empty labels, no leading/trailing
+/// hyphen, max 63 chars per label and 253 total). Shared by `phase2.snis`
+/// and `POST /api/config/export`, the two places user SNI reaches the wire.
+pub fn validate_sni(s: &str) -> Result<(), ConfigError> {
+    if s.parse::<IpAddr>().is_ok() {
+        return Ok(());
+    }
+    if s.len() > MAX_SNI_HOSTNAME_CHARS {
+        return Err(ConfigError::InvalidSni(
+            s.to_owned(),
+            format!("hostname exceeds {MAX_SNI_HOSTNAME_CHARS} characters"),
+        ));
+    }
+    let well_formed = !s.is_empty()
+        && s.split('.').all(|label| {
+            !label.is_empty()
+                && label.len() <= MAX_SNI_LABEL_CHARS
+                && !label.starts_with('-')
+                && !label.ends_with('-')
+                && label
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+        });
+    if well_formed {
+        Ok(())
+    } else {
+        Err(ConfigError::InvalidSni(
+            s.to_owned(),
+            "must be a hostname (a-z A-Z 0-9 - per label) or an IP address".to_owned(),
+        ))
+    }
 }
 
 /// Parses `ip` or `ip:port` endpoint entries. IPv4 only by design: WARP
@@ -1225,6 +1306,161 @@ mod tests {
             });
             assert_eq!(c.validate(), Ok(()), "{packets}/{length}/{interval}");
         }
+    }
+
+    #[test]
+    fn rejects_out_of_bounds_custom_fragment_ranges() {
+        for (field, bad) in [
+            ("length", "0"),
+            ("length", "0-100"),
+            ("length", "100-0"),
+            ("length", "65536"),
+            ("length", "1-70000"),
+            ("length", "200-100"),
+            ("interval", "0-10"),
+            ("interval", "1-60001"),
+            ("interval", "50000-100"),
+        ] {
+            let mut c = valid_config();
+            c.phase2 = Some(Phase2Config {
+                configs: vec!["vless://uuid@example.com:443".to_owned()],
+                fragment: FragmentPreset::Custom,
+                custom_fragment: Some(CustomFragment {
+                    packets: "tlshello".to_owned(),
+                    length: "100-200".to_owned(),
+                    interval: "10-20".to_owned(),
+                }),
+                ..Default::default()
+            });
+            let cf = c.phase2.as_mut().unwrap().custom_fragment.as_mut().unwrap();
+            match field {
+                "length" => cf.length = bad.to_owned(),
+                "interval" => cf.interval = bad.to_owned(),
+                _ => unreachable!(),
+            }
+            assert!(
+                matches!(c.validate(), Err(ConfigError::InvalidFragmentRange(f, _)) if f == field),
+                "expected {bad:?} in {field} to be rejected"
+            );
+        }
+        // Bounds edges are accepted.
+        let mut c = valid_config();
+        c.phase2 = Some(Phase2Config {
+            configs: vec!["vless://uuid@example.com:443".to_owned()],
+            fragment: FragmentPreset::Custom,
+            custom_fragment: Some(CustomFragment {
+                packets: "tlshello".to_owned(),
+                length: "1-65535".to_owned(),
+                interval: "1-60000".to_owned(),
+            }),
+            ..Default::default()
+        });
+        assert_eq!(c.validate(), Ok(()));
+    }
+
+    #[test]
+    fn rejects_stop_values_above_the_frontend_cap() {
+        // The frontend's validators cap found/cap at 100_000_000; the server
+        // must not accept more (contract parity, review finding).
+        let mut c = valid_config();
+        c.stop.found = MAX_STOP_VALUE + 1;
+        assert_eq!(
+            c.validate(),
+            Err(ConfigError::InvalidFoundUpper(MAX_STOP_VALUE + 1))
+        );
+        let mut c = valid_config();
+        c.stop = StopCondition {
+            found: 1,
+            cap: Some(0),
+        };
+        assert_eq!(c.validate(), Err(ConfigError::InvalidCap(0)));
+        let mut c = valid_config();
+        c.stop = StopCondition {
+            found: 1,
+            cap: Some(MAX_STOP_VALUE + 1),
+        };
+        assert_eq!(
+            c.validate(),
+            Err(ConfigError::InvalidCap(MAX_STOP_VALUE + 1))
+        );
+        // Edges are accepted.
+        let mut c = valid_config();
+        c.stop = StopCondition {
+            found: MAX_STOP_VALUE,
+            cap: Some(MAX_STOP_VALUE),
+        };
+        assert_eq!(c.validate(), Ok(()));
+    }
+
+    fn phase2_with_snis(snis: Vec<String>) -> ScanConfig {
+        let mut c = valid_config();
+        c.phase2 = Some(Phase2Config {
+            configs: vec!["vless://uuid@example.com:443".to_owned()],
+            snis,
+            ..Default::default()
+        });
+        c
+    }
+
+    #[test]
+    fn accepts_valid_snis() {
+        let max_label = "x".repeat(MAX_SNI_LABEL_CHARS);
+        for good in [
+            "www.cloudflare.com",
+            "a",
+            "a-b.c-d.e",
+            "1.2.3.4",
+            "2606:4700::1111",
+            max_label.as_str(),
+        ] {
+            assert_eq!(validate_sni(good), Ok(()), "expected {good:?} to pass");
+        }
+        let max_host = format!(
+            "{}.{}.{}.{}",
+            "a".repeat(MAX_SNI_LABEL_CHARS),
+            "a".repeat(MAX_SNI_LABEL_CHARS),
+            "a".repeat(MAX_SNI_LABEL_CHARS),
+            "a".repeat(MAX_SNI_HOSTNAME_CHARS - 3 * MAX_SNI_LABEL_CHARS - 3)
+        );
+        assert_eq!(max_host.len(), MAX_SNI_HOSTNAME_CHARS);
+        assert_eq!(validate_sni(&max_host), Ok(()));
+        let c = phase2_with_snis(vec!["www.cloudflare.com".to_owned(), "1.2.3.4".to_owned()]);
+        assert_eq!(c.validate(), Ok(()));
+    }
+
+    #[test]
+    fn rejects_invalid_snis() {
+        let too_long = "a".repeat(MAX_SNI_HOSTNAME_CHARS + 1);
+        let long_label = format!("{}.a", "a".repeat(MAX_SNI_LABEL_CHARS + 1));
+        for bad in [
+            "",
+            "bad_sni",
+            "sni with space",
+            "-leading",
+            "trailing-",
+            "a.-b",
+            "a.b-",
+            "a..b",
+            ".a",
+            "a.",
+            "ünïcode.example",
+            too_long.as_str(),
+            long_label.as_str(),
+            "a,b",
+        ] {
+            assert!(
+                matches!(validate_sni(bad), Err(ConfigError::InvalidSni(_, _))),
+                "expected {bad:?} to be rejected"
+            );
+        }
+        // A non-empty snis list must not smuggle "" (it becomes an override).
+        let c = phase2_with_snis(vec!["".to_owned()]);
+        assert!(matches!(c.validate(), Err(ConfigError::InvalidSni(_, _))));
+        let c = phase2_with_snis(vec!["ok.example".to_owned(), "nope_sni".to_owned()]);
+        assert!(matches!(c.validate(), Err(ConfigError::InvalidSni(_, _))));
+        // An empty list stays the "use each config's own SNI" sentinel.
+        let c = phase2_with_snis(vec![]);
+        assert_eq!(c.validate(), Ok(()));
     }
 
     #[test]

@@ -128,7 +128,7 @@
     h1, h2, h3, p { margin: 0; }
     h1 { font-size: 1.25rem; line-height: 1.2; }
     h2 { font-size: 1.1rem; line-height: 1.25; }
-    h3 { font-size: 0.85rem; line-height: 1.3; }
+    h3 { font-size: 1.05rem; line-height: 1.3; }
     a { color: var(--accent-strong); }
     .muted { color: var(--muted); }
     .mono { font-family: "Cascadia Code", "JetBrains Mono", Consolas, ui-monospace, monospace; }
@@ -160,13 +160,13 @@
       width: 34px; height: 34px; border-radius: 9px; flex: none;
       background: linear-gradient(135deg, var(--accent), var(--accent-strong));
       color: var(--accent-contrast);
-      box-shadow: 0 2px 10px rgba(34, 211, 238, 0.25);
+      box-shadow: 0 2px 10px color-mix(in srgb, var(--accent) 25%, transparent);
     }
     .appbar h1 { font-size: 1.25rem; }
     .appbar-sub { font-size: 0.78rem; color: var(--muted); }
     .appbar-spacer { flex: 1 1 auto; }
     .version-pill {
-      font-size: 0.72rem; font-weight: 600; letter-spacing: 0.04em;
+      font-size: 0.72rem; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase;
       color: var(--muted); background: var(--surface-2);
       border: 1px solid var(--border); border-radius: 999px; padding: 0.22rem 0.6rem;
     }
@@ -186,11 +186,11 @@
     .card-body { padding: 1.25rem; }
 
     /* ============ status banner ============ */
-    .status-card[data-state="running"] { border-color: var(--border); border-color: color-mix(in srgb, var(--accent) 45%, var(--border)); }
-    .status-card[data-state="done"] { border-color: var(--border); border-color: color-mix(in srgb, var(--success) 45%, var(--border)); }
-    .status-card[data-state="error"] { border-color: var(--border); border-color: color-mix(in srgb, var(--danger) 45%, var(--border)); }
-    .status-card[data-state="cancelled"] { border-color: var(--border); border-color: color-mix(in srgb, var(--warning) 45%, var(--border)); }
-    .status-card[data-state="reconnecting"] { border-color: var(--border); border-color: color-mix(in srgb, var(--warning) 45%, var(--border)); }
+    .status-card[data-state="running"] { border-color: color-mix(in srgb, var(--accent) 45%, var(--border)); }
+    .status-card[data-state="done"] { border-color: color-mix(in srgb, var(--success) 45%, var(--border)); }
+    .status-card[data-state="error"] { border-color: color-mix(in srgb, var(--danger) 45%, var(--border)); }
+    .status-card[data-state="cancelled"] { border-color: color-mix(in srgb, var(--warning) 45%, var(--border)); }
+    .status-card[data-state="reconnecting"] { border-color: color-mix(in srgb, var(--warning) 45%, var(--border)); }
     .status-row { display: flex; align-items: center; gap: 0.7rem; }
     .status-dot {
       width: 9px; height: 9px; border-radius: 50%; flex: none;
@@ -235,7 +235,7 @@
       background: var(--surface-2); border: 1px solid var(--border);
       border-radius: var(--radius-sm); padding: 0.5rem 0.75rem;
     }
-    .stat-label { display: block; font-size: 0.7rem; font-weight: 600; letter-spacing: 0.07em; text-transform: uppercase; color: var(--muted); }
+    .stat-label { display: block; font-size: 0.72rem; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); }
     .stat-value {
       display: block; font-size: 1.5rem; font-weight: 700;
       font-variant-numeric: tabular-nums slashed-zero; margin-top: 0.15rem;
@@ -252,7 +252,7 @@
     }
     .panel:first-of-type { border-top: 0; }
     .panel-title {
-      font-size: 0.72rem; font-weight: 700; letter-spacing: 0.09em; text-transform: uppercase;
+      font-size: 0.72rem; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase;
       color: var(--muted); margin-bottom: 0.75rem;
     }
     .grid { display: grid; gap: 1rem; }
@@ -307,7 +307,7 @@
     .seg label:hover .seg-item { color: var(--text); }
     .seg input:checked + .seg-item {
       background: var(--accent); color: var(--accent-contrast);
-      box-shadow: 0 2px 8px rgba(34, 211, 238, 0.25);
+      box-shadow: 0 2px 8px color-mix(in srgb, var(--accent) 25%, transparent);
     }
     .seg input:focus-visible + .seg-item { outline: 2px solid var(--focus, var(--accent)); outline-offset: 2px; }
     .seg input:disabled + .seg-item { opacity: 0.45; cursor: not-allowed; }
@@ -386,16 +386,16 @@
     button:disabled { opacity: 0.45; cursor: not-allowed; transform: none; }
     button.primary {
       background: var(--accent); border-color: transparent; color: var(--accent-contrast);
-      box-shadow: 0 2px 10px rgba(34, 211, 238, 0.28);
+      box-shadow: 0 2px 10px color-mix(in srgb, var(--accent) 28%, transparent);
     }
     button.primary:hover { background: var(--accent-strong); }
     [data-theme="light"] button.primary:hover { background: color-mix(in srgb, var(--accent) 85%, #fff); }
     button.primary:disabled { box-shadow: none; }
-    button.secondary { background: var(--accent-soft); border-color: var(--border); border-color: color-mix(in srgb, var(--accent) 35%, var(--border)); color: var(--accent-strong); }
+    button.secondary { background: var(--accent-soft); border-color: color-mix(in srgb, var(--accent) 35%, var(--border)); color: var(--accent-strong); }
     button.secondary:hover { background: var(--accent-soft); background: color-mix(in srgb, var(--accent-soft) 70%, var(--accent) 12%); }
     button.outline { background: transparent; }
     button.outline:hover { background: var(--surface-2); }
-    button.danger { background: var(--danger-soft); border-color: var(--border); border-color: color-mix(in srgb, var(--danger) 40%, var(--border)); color: var(--danger); }
+    button.danger { background: var(--danger-soft); border-color: color-mix(in srgb, var(--danger) 40%, var(--border)); color: var(--danger); }
     button.danger:hover { background: var(--danger-soft); background: color-mix(in srgb, var(--danger-soft) 70%, var(--danger) 14%); }
     .btn-lg { padding: 0.62rem 1.4rem; font-size: 0.95rem; }
     #start-btn { min-width: 11rem; }
@@ -434,7 +434,7 @@
     thead th {
       position: sticky; top: 0; z-index: 2;
       background: var(--surface-2); color: var(--muted);
-      text-align: left; font-weight: 600; font-size: 0.75rem; letter-spacing: 0.06em; text-transform: uppercase;
+      text-align: left; font-weight: 600; font-size: 0.72rem; letter-spacing: 0.08em; text-transform: uppercase;
       padding: 0.6rem 0.85rem; border-bottom: 1px solid var(--border);
       white-space: nowrap;
     }
@@ -562,22 +562,30 @@
 
     .best-block { margin-top: 1rem; }
     .best-head { display: flex; align-items: baseline; gap: 0.6rem; flex-wrap: wrap; margin-bottom: 0.5rem; }
-    .best-head h3 { font-size: 0.92rem; }
-    .best-list { display: grid; gap: 0.35rem; }
+    .best-list { display: grid; gap: 0.4rem; }
     .best-row {
-      display: flex; align-items: center; gap: 0.6rem;
-      background: var(--surface-2); border: 1px solid var(--border);
-      border-radius: var(--radius-sm); padding: 0.4rem 0.7rem;
+      display: flex; align-items: center; gap: 0.65rem;
+      background: var(--surface-2);
+      background: color-mix(in srgb, var(--surface-2) 55%, transparent);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-md); padding: 0.5rem 0.75rem;
     }
-    .best-rank { width: 1.6rem; flex: none; color: var(--muted); font-weight: 700; font-size: 0.8rem; text-align: right; font-variant-numeric: tabular-nums; }
-    .best-ip { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .best-meta { color: var(--muted); font-size: 0.8rem; }
+    .best-row:hover { border-color: color-mix(in srgb, var(--accent) 45%, var(--border)); }
+    .best-rank {
+      flex: none; display: inline-flex; align-items: center; justify-content: center;
+      width: 1.45rem; height: 1.45rem;
+      background: var(--accent-soft); color: var(--accent-strong);
+      border-radius: 999px; font-weight: 700; font-size: 0.72rem;
+      font-variant-numeric: tabular-nums;
+    }
+    .best-ip { flex: 1 1 auto; min-width: 0; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .best-meta { flex: 0 1 auto; min-width: 0; color: var(--muted); font-size: 0.78rem; }
     .best-row .copy-row-btn {
-      margin-left: auto; padding: 0.2rem 0.6rem; font-size: 0.75rem;
+      margin-left: auto; flex: none; padding: 0.25rem 0.7rem; font-size: 0.75rem;
       background: var(--accent-soft); color: var(--accent-strong);
       border: 1px solid color-mix(in srgb, var(--accent) 35%, var(--border));
     }
-    .best-row .copy-row-btn:hover { background: var(--accent-soft); }
+    .best-row .copy-row-btn:hover { background: var(--accent-soft); border-color: color-mix(in srgb, var(--accent) 60%, var(--border)); }
     .best-row .copy-row-btn.copied { color: var(--success); border-color: var(--success); background: var(--success-soft); }
 
     .copy-n { display: inline-flex; align-items: center; gap: 0.35rem; font-size: 0.8rem; color: var(--muted); }
@@ -592,8 +600,6 @@
       pointer-events: none;
     }
 
-    @keyframes pulse-btn { 0% { box-shadow: 0 0 0 0 var(--accent-soft); } 70% { box-shadow: 0 0 0 10px transparent; } 100% { box-shadow: 0 0 0 0 transparent; } }
-    .pulse { animation: pulse-btn 0.9s ease-out 2; }
     @keyframes flash-field { 0%, 100% { box-shadow: none; } 30% { box-shadow: 0 0 0 3px var(--warning); border-color: var(--warning) !important; } }
     .flash { animation: flash-field 1.1s ease-out; }
 
@@ -629,19 +635,97 @@
       .seg-item { font-size: 0.8rem; padding: 0.5rem 0.4rem; }
       .card-body { padding: 1rem; }
       .wrap { padding: 0 0.9rem; }
-      .seg-item { min-height: 44px; }
-      button { min-height: 44px; padding: 0.6rem 1rem; }
-      input, select, textarea { min-height: 44px; padding: 0.65rem 0.75rem; }
+      button { padding: 0.6rem 1rem; }
+      input, select, textarea { padding: 0.65rem 0.75rem; }
       .scroll-hint:not([data-empty]) { display: block; }
       table { min-width: 560px; }
-      .appbar a[aria-label="GitHub"] { width: 44px; height: 44px; }
-      th.sortable { padding-top: 0.75rem; padding-bottom: 0.75rem; }
       thead th:first-child,
       tbody td:first-child { position: sticky; left: 0; }
       thead th:first-child { z-index: 3; }
       tbody td:first-child { z-index: 1; background: var(--surface); }
       tbody tr:nth-child(even) td:first-child { background: var(--surface-2); }
       tbody tr:hover td:first-child { background: var(--accent-soft); }
+    }
+
+    /* Mobile cards: pure-CSS reshape of the virtualized table. The DOM is
+       unchanged (visible window + two height spacers), so virtualization
+       math and zebra parity still hold; only how each tr/td paints changes. */
+    @media (max-width: 640px) {
+      .table-wrap.cards table { min-width: 0; table-layout: auto; }
+      .table-wrap.cards thead { display: none; }
+      .table-wrap.cards tbody { display: block; }
+      .table-wrap.cards tbody tr {
+        display: flex; flex-wrap: wrap; align-items: center;
+        column-gap: 0.4rem; row-gap: 0.25rem;
+        padding: 0.5rem 0.65rem; margin-bottom: 0.5rem;
+        border: 1px solid var(--border); border-radius: var(--radius-sm);
+        background: var(--surface-2);
+        background: color-mix(in srgb, var(--surface-2) 55%, transparent);
+      }
+      .table-wrap.cards tbody tr:nth-child(even) { background: color-mix(in srgb, var(--surface-3) 45%, transparent); }
+      .table-wrap.cards tbody tr:hover { border-color: color-mix(in srgb, var(--accent) 45%, var(--border)); }
+      .table-wrap.cards tbody tr:not([data-key]) { margin: 0; padding: 0; border: none; background: none; }
+      .table-wrap.cards tbody td {
+        display: inline-block; flex: none; min-width: 0;
+        padding: 0; border-bottom: none; background: transparent;
+        white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+      }
+      #results-section[data-density="compact"] .table-wrap.cards tbody td { padding: 0; }
+      .table-wrap.cards tbody td:first-child { position: static; z-index: auto; background: transparent; }
+      .table-wrap.cards tbody tr:nth-child(even) td:first-child { background: transparent; }
+      .table-wrap.cards tbody tr:hover td:first-child { background: transparent; }
+      /* line 1: IP:port + latency/loss pills */
+      .table-wrap.cards tbody td:nth-child(1) { flex: 1 1 auto; min-width: 3rem; font-weight: 600; }
+      .table-wrap.cards tbody td:nth-child(2) { margin-left: -0.4rem; }
+      .table-wrap.cards tbody td:nth-child(2)::before { content: ":"; }
+      .table-wrap.cards tbody td:nth-child(3),
+      .table-wrap.cards tbody td:nth-child(4) {
+        display: inline-flex; align-items: center; gap: 0.25rem;
+        padding: 0.12rem 0.55rem; border-radius: 999px; font-size: 0.78rem;
+      }
+      #results-section[data-density="compact"] .table-wrap.cards tbody td:nth-child(3),
+      #results-section[data-density="compact"] .table-wrap.cards tbody td:nth-child(4),
+      #results-section[data-density="compact"] .table-wrap.cards tbody td.v-ok,
+      #results-section[data-density="compact"] .table-wrap.cards tbody td.v-bad { padding: 0.12rem 0.55rem; }
+      .table-wrap.cards tbody td:nth-child(3)::before,
+      .table-wrap.cards tbody td:nth-child(4)::before {
+        content: attr(data-label); font-size: 0.6rem; font-weight: 700;
+        text-transform: uppercase; letter-spacing: 0.05em; opacity: 0.75;
+      }
+      .table-wrap.cards tbody td:nth-child(3)::after { content: " ms"; }
+      .table-wrap.cards tbody td.lat-good { background: var(--success-soft); color: var(--success); }
+      .table-wrap.cards tbody td.lat-ok { background: var(--accent-soft); color: var(--accent-strong); }
+      .table-wrap.cards tbody td.lat-warn { background: color-mix(in srgb, var(--warning) 15%, transparent); color: var(--warning); }
+      .table-wrap.cards tbody td.lat-bad { background: var(--danger-soft); color: var(--danger); }
+      .table-wrap.cards tbody td:nth-child(4):not(.lat-bad) { background: var(--success-soft); color: var(--success); }
+      /* line 2: country · colo · p2 ms, then the phase-2 tag pill. Items wrap
+         inside themselves so every card is exactly two flex lines tall. */
+      .table-wrap.cards tbody td:nth-child(5),
+      .table-wrap.cards tbody td:nth-child(6),
+      .table-wrap.cards tbody td:nth-child(7) {
+        display: inline-block; flex: 0 1 auto; min-width: 0;
+        white-space: normal; color: var(--muted); font-size: 0.78rem;
+      }
+      .table-wrap.cards tbody td:nth-child(5)::before { content: attr(data-label) " "; }
+      .table-wrap.cards tbody td:nth-child(6)::before { content: "\00b7 " attr(data-label) " "; }
+      .table-wrap.cards tbody td:nth-child(7)::before { content: "\00b7 " attr(data-label) " "; }
+      .table-wrap.cards tbody td.v-ok,
+      .table-wrap.cards tbody td.v-bad { display: inline-block; flex: none; padding: 0.15rem 0.6rem; }
+      .table-wrap.cards tbody td.v-ok { max-width: 100%; }
+      /* empty state stays centered in cards mode */
+      .table-wrap.cards #empty-row { display: flex; justify-content: center; margin: 0; padding: 0; border: none; background: none; }
+      .table-wrap.cards #empty-row td { display: flex; flex-direction: column; align-items: center; text-align: center; padding: 2.2rem 1rem; }
+    }
+
+    /* Touch devices: 44px tap targets; table cells and compact density stay compact. */
+    @media (pointer: coarse) {
+      button, .seg-item, .check, .radio, details.panel-details > summary,
+      input:not([type="checkbox"]):not([type="radio"]), select, textarea, th.sortable {
+        min-height: 44px;
+      }
+      td .export-btn, .toast-close { min-height: initial; }
+      #results-section[data-density="compact"] th { min-height: initial; }
+      .appbar a[aria-label="GitHub"] { min-width: 44px; min-height: 44px; }
     }
 
     @media (prefers-reduced-motion: reduce) {
@@ -664,6 +748,24 @@
       th.sortable:focus-visible { outline: 2px solid Highlight; outline-offset: -2px; }
       input:focus-visible, select:focus-visible, textarea:focus-visible { outline: 2px solid Highlight; }
     }
+    /* ---- wizard steps ---- */
+    .wiz-steps { display: flex; gap: 0.4rem; margin-bottom: 1rem; flex-wrap: wrap; }
+    .wiz-step-btn { flex: 1 1 0; min-width: 6.5rem; padding: 0.45rem 0.6rem; border: 1px solid var(--border); background: transparent; color: var(--muted); border-radius: 0.5rem; font-size: 0.8rem; font-weight: 600; cursor: pointer; }
+    .wiz-step-btn.active { border-color: var(--accent); color: var(--accent-strong); background: var(--accent-soft); }
+    .wiz-step { display: none; }
+    .wiz-step.active { display: block; }
+    .wiz-foot { display: flex; gap: 0.5rem; margin-top: 1rem; }
+    /* ---- xray status ---- */
+    .xray-status { margin-top: 0.75rem; padding: 0.6rem 0.8rem; border-radius: 0.5rem; border: 1px solid var(--border); background: var(--card); font-size: 0.82rem; }
+    .xray-status.warn { border-color: #f59e0b; background: rgba(245,158,11,0.08); }
+    .xray-status.ok { border-color: #22c55e; background: rgba(34,197,94,0.08); }
+    .xray-status-inner { display: flex; align-items: center; gap: 0.6rem; flex-wrap: wrap; }
+    .xray-status-icon { font-weight: 700; font-size: 1rem; }
+    .xray-status.warn .xray-status-icon { color: #f59e0b; }
+    .xray-status.ok .xray-status-icon { color: #22c55e; }
+    .xray-status-text { flex: 1; min-width: 0; }
+    .xray-status-text strong { display: block; }
+    .xray-status-text span { color: var(--muted); font-size: 0.78rem; }
   </style>
 </head>
 <body>
@@ -713,6 +815,12 @@
       </div>
       <div class="card-body">
         <form id="scan-form" tabindex="-1">
+          <div class="wiz-steps" role="tablist" aria-label="Scan steps">
+            <button type="button" class="wiz-step-btn active" data-go="1" aria-selected="true">1 &middot; Targets</button>
+            <button type="button" class="wiz-step-btn" data-go="2" aria-selected="false">2 &middot; Settings</button>
+            <button type="button" class="wiz-step-btn" data-go="3" aria-selected="false">3 &middot; Verify</button>
+          </div>
+          <div class="wiz-step active" data-step="1">
           <div class="seg" role="radiogroup" aria-label="Scan mode">
             <label>
               <input type="radio" name="mode" value="Cdn" checked>
@@ -740,41 +848,6 @@
           <div id="ranges-info" aria-live="polite" style="font-size:0.8rem; color: var(--muted); margin-top: 0.3rem;"></div>
 
           <details class="panel-details" open>
-            <summary>Connection</summary>
-            <div class="details-body">
-              <div class="panel">
-                <div class="grid grid-3">
-                  <div class="field">
-                    <label for="ports">Ports (comma-separated)</label>
-                    <input id="ports" name="ports" type="text" value="443" required aria-describedby="help-ports">
-                    <span class="help" id="help-ports">e.g., 443,8443 — valid range 1&ndash;65535</span>
-                  </div>
-                  <div class="field">
-                    <label for="concurrency">Concurrency (1&ndash;1000)</label>
-                    <input id="concurrency" name="concurrency" type="number" min="1" max="1000" value="64" required aria-describedby="help-concurrency">
-                    <span class="help" id="help-concurrency">Higher = faster but more resource usage</span>
-                  </div>
-                  <div class="field">
-                    <label for="timeout_ms">Probe timeout (ms)</label>
-                    <input id="timeout_ms" name="timeout_ms" type="number" min="100" max="30000" value="3000" required aria-describedby="help-timeout">
-                    <span class="help" id="help-timeout">Per-probe timeout</span>
-                  </div>
-                </div>
-                <div class="inline-row">
-                  <label class="check" id="include-v6-label">
-                    <input type="checkbox" name="include_v6">
-                    <span>Include IPv6 candidates (default: IPv4 only)</span>
-                  </label>
-                  <label class="check" id="warp-probes-label" hidden>
-                    <span>Probes per endpoint (1&ndash;10, drives loss %)</span>
-                    <input name="warp_probes" type="number" min="1" max="10" value="3">
-                  </label>
-                </div>
-              </div>
-            </div>
-          </details>
-
-          <details class="panel-details" open>
             <summary>Target</summary>
             <div class="details-body">
               <div class="panel">
@@ -800,6 +873,46 @@
               </div>
             </div>
           </details>
+          <div class="wiz-foot">
+            <button type="button" class="secondary wiz-next">Next</button>
+          </div>
+        </div>
+
+        <div class="wiz-step" data-step="2">
+          <details class="panel-details" open>
+            <summary>Connection</summary>
+            <div class="details-body">
+              <div class="panel">
+                <div class="grid grid-3">
+                  <div class="field">
+                    <label for="ports">Ports (comma-separated)</label>
+                    <input id="ports" name="ports" type="text" value="443" required aria-describedby="help-ports">
+                    <span class="help" id="help-ports">e.g., 443,8443 — valid range 1&ndash;65535</span>
+                  </div>
+                  <div class="field">
+                    <label for="concurrency">Concurrency (1&ndash;1000)</label>
+                    <input id="concurrency" name="concurrency" type="number" min="1" max="1000" value="64" required aria-describedby="help-concurrency">
+                    <span class="help" id="help-concurrency">Higher = faster, but uses more CPU and bandwidth</span>
+                  </div>
+                  <div class="field">
+                    <label for="timeout_ms">Probe timeout (ms)</label>
+                    <input id="timeout_ms" name="timeout_ms" type="number" min="100" max="30000" value="3000" required aria-describedby="help-timeout">
+                    <span class="help" id="help-timeout">How long to wait for each probe</span>
+                  </div>
+                </div>
+                <div class="inline-row">
+                  <label class="check" id="include-v6-label">
+                    <input type="checkbox" name="include_v6">
+                    <span>Include IPv6 candidates (default: IPv4 only)</span>
+                  </label>
+                  <label class="check" id="warp-probes-label" hidden>
+                    <span>Probes per endpoint (1&ndash;10); higher = more accurate loss %</span>
+                    <input name="warp_probes" type="number" min="1" max="10" value="3">
+                  </label>
+                </div>
+              </div>
+            </div>
+          </details>
 
           <details class="panel-details" id="ranges-details">
             <summary>Stopping &amp; ranges</summary>
@@ -809,7 +922,7 @@
                   <div class="field">
                     <label for="found">Stop after at least N found</label>
                     <input id="found" name="found" type="number" min="1" value="20" required aria-describedby="help-found">
-                    <span class="help" id="help-found">Minimum working IPs before the scan stops; in-flight probes can add a few more (up to the concurrency setting)</span>
+                    <span class="help" id="help-found">Stops once at least this many work. Probes already in flight can add a few more.</span>
                   </div>
                   <div class="field">
                     <label for="cap">Hard cap on probes (optional)</label>
@@ -818,7 +931,7 @@
                 </div>
                 <div class="grid grid-2 sub-section">
                   <div class="field">
-                    <label for="custom_cidrs">Custom CIDRs (optional, replaces bundled; one per line)</label>
+                    <label for="custom_cidrs">Custom CIDRs (optional; one per line; replaces the built-in list)</label>
                     <textarea id="custom_cidrs" name="custom_cidrs" rows="3" placeholder="10.0.0.0/24" aria-describedby="help-cidrs"></textarea>
                     <span class="help" id="help-cidrs">One CIDR per line, e.g., 103.28.248.0/22</span>
                   </div>
@@ -837,13 +950,13 @@
             <div class="details-body">
               <div class="panel">
                 <div class="field">
-                  <label for="warp_endpoints">Custom endpoints (ip or ip:port, one per line; empty = bundled pools)</label>
+                  <label for="warp_endpoints">Custom endpoints (ip or ip:port, one per line; empty = built-in list)</label>
                   <textarea id="warp_endpoints" name="warp_endpoints" rows="3" placeholder="162.159.192.5&#10;188.114.99.7:2408" aria-describedby="help-warp-endpoints"></textarea>
                   <span class="help" id="help-warp-endpoints">One ip or ip:port per line</span>
                 </div>
                 <div class="grid grid-2 sub-section">
                   <div class="field">
-                    <label for="warp_wgconf">Verify with your own wgconf (real keypair handshake)</label>
+                    <label for="warp_wgconf">Verify with your own wgconf (real WireGuard handshake)</label>
                     <textarea id="warp_wgconf" name="warp_wgconf" rows="3" placeholder="[Interface]&#10;PrivateKey = ..." disabled aria-describedby="help-wgconf"></textarea>
                     <span class="help" id="help-wgconf">Paste a wgconf above first.</span>
                   </div>
@@ -871,14 +984,20 @@
               </div>
             </div>
           </details>
+          <div class="wiz-foot">
+            <button type="button" class="wiz-back">Back</button>
+            <button type="button" class="secondary wiz-next">Next</button>
+          </div>
+        </div>
 
+        <div class="wiz-step" data-step="3">
           <details id="phase2-details" class="panel-details">
             <summary>Phase 2 &mdash; verify candidates through xray</summary>
             <div class="details-body">
               <div class="panel">
                 <h3 class="panel-title">Verification</h3>
                 <div class="field">
-                  <label for="phase2_configs">Configs (URIs, subscription URLs, or xray JSON paths; one per line)</label>
+                  <label for="phase2_configs">Configs (URIs, subscription links, or xray JSON file paths; one per line)</label>
                   <textarea id="phase2_configs" name="phase2_configs" rows="3" placeholder="vless://uuid@host:443?encryption=none" aria-describedby="help-phase2-configs"></textarea>
                   <span class="help" id="help-phase2-configs">Enter configs above to enable Phase 2 verification options.</span>
                 </div>
@@ -899,20 +1018,20 @@
                     </select>
                   </div>
                   <div class="field">
-                    <label for="phase2_concurrency">Parallel instances (1&ndash;8)</label>
+                    <label for="phase2_concurrency">Parallel checks (1&ndash;8)</label>
                     <input id="phase2_concurrency" name="phase2_concurrency" type="number" min="1" max="8" value="3" disabled>
                   </div>
                 </div>
                 <div class="grid grid-2">
                   <div class="field">
-                    <label for="phase2_snis">SNI variants (comma-separated; empty = config&rsquo;s own)</label>
+                    <label for="phase2_snis">SNI variants (comma-separated; empty = keep the config&rsquo;s own)</label>
                     <input id="phase2_snis" name="phase2_snis" type="text" placeholder="www.cloudflare.com" disabled aria-describedby="help-phase2-snis">
-                    <span class="help" id="help-phase2-snis">Optional: override SNI for TLS handshake</span>
+                    <span class="help" id="help-phase2-snis">Optional: override the SNI used for the connection</span>
                   </div>
                   <div class="field">
                     <label for="phase2_probe_urls">Probe URLs (one per line; every one must return HTTP 200)</label>
                     <textarea id="phase2_probe_urls" name="phase2_probe_urls" rows="2" disabled aria-describedby="help-phase2-urls">https://cp.cloudflare.com/</textarea>
-                    <span class="help" id="help-phase2-urls">Each http(s) URL is fetched through the tunnel; the candidate passes only when all respond 200. Max 8.</span>
+                    <span class="help" id="help-phase2-urls">Each URL is fetched through the tested endpoint; a candidate passes only when every URL responds 200. Max 8.</span>
                   </div>
                 </div>
                 <div class="grid grid-3 sub-section">
@@ -936,7 +1055,21 @@
             </div>
           </details>
 
+          <div id="xray-status" class="xray-status" hidden>
+            <div class="xray-status-inner">
+              <span class="xray-status-icon"></span>
+              <div class="xray-status-text">
+                <strong id="xray-status-title"></strong>
+                <span id="xray-status-detail"></span>
+              </div>
+              <button id="xray-download-btn" type="button" class="secondary" style="display:none">
+                Download xray
+              </button>
+            </div>
+          </div>
+
           <div class="actions">
+            <button type="button" class="wiz-back">Back</button>
             <button id="start-btn" type="submit" class="primary btn-lg">
               <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5.5v13l11-6.5z"></path></svg>
               Start scan <kbd style="font-size:0.7em;opacity:0.6;margin-left:0.3rem">Ctrl+Enter</kbd>
@@ -948,6 +1081,7 @@
             <span class="grow"></span>
             <span class="help kbd-help"><kbd>R</kbd> rerun &middot; <kbd>G</kbd> results &middot; <kbd>Ctrl+Shift+C</kbd> copy top N</span>
           </div>
+        </div>
         </form>
       </div>
     </section>
@@ -973,7 +1107,7 @@
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"></path></svg>
             Exclude failed
           </button>
-          <label class="copy-n" title="Copy only the top N sorted results; empty copies all">
+          <label class="copy-n" title="Copy the top N results; leave empty to copy all">
             <span>Top</span>
             <input id="copy-count" type="number" min="1" value="10" aria-label="Copy top N">
           </label>
@@ -1026,8 +1160,8 @@
         <div id="hist-summary" class="hist-summary" hidden></div>
         <div id="latency-hist" class="hist" role="img" hidden></div>
         <div id="results-live" role="status" aria-live="polite" class="sr-only"></div>
-        <p class="scroll-hint" id="scroll-hint">The table scrolls sideways on narrow screens &mdash; the IP column stays pinned.</p>
-        <div class="table-wrap">
+        <p class="scroll-hint" id="scroll-hint">On narrow screens results render as cards &mdash; every field stays visible.</p>
+        <div class="table-wrap cards">
           <table>
             <caption class="sr-only">Scan results</caption>
             <thead>
@@ -1065,23 +1199,35 @@
       set(k, v) { try { localStorage.setItem(k, v); } catch { /* blocked */ } }
     };
 
-    const results = [];
-    const keyToIndex = new Map();
+    // Single reactive model: one state machine, one results array. Every
+    // results[] mutation MUST go through touchResults()/restructureResults()
+    // so render caches key off versions instead of row counts.
+    const model = {
+      state: {
+        scan: "idle",            // idle | starting | running | cancelled | done | failed
+        gen: 0,                  // generation guard: invalidates in-flight async captures
+        localCancel: false,
+        confirmWipe: true,
+        reconnectLost: false,
+        progress: null,          // latestProgress
+        scannedCount: 0
+      },
+      version: 0,                // bumped on every results[] mutation
+      structure: 0,              // bumped only when rows merge/clear/replace (not appends)
+      results: [],
+      keyToIndex: new Map(),
+      setState(patch) { Object.assign(this.state, patch); },
+      begin() { this.state.gen++; },
+      touchResults() { this.version++; },
+      restructureResults() { this.version++; this.structure++; }
+    };
     let sortKey = "latency_ms";
     let sortAsc = true;
     let lastCfg = null;
-    let scanState = "idle"; // idle | starting | running | cancelled | done | failed
-    let localCancel = false;
-    let confirmWipe = true;
-    let reconnectLost = false;
-    let latestProgress = null;
     let lastProgressAnnounce = 0;
-    let scannedCount = 0;
     let scanStartMs = 0;
     let elapsedTimer = null;
     let lastTitleUpdate = 0;
-    let scanGeneration = 0;
-    let runGen = 0;
 
     const form = document.getElementById("scan-form");
     const tbody = document.getElementById("results-body");
@@ -1224,6 +1370,18 @@
       const next = document.getElementById("results-section").dataset.density !== "compact";
       store.set("ui-density", next ? "compact" : "normal");
       applyDensity(next);
+      rowHeight = 0;  // row height depends on density; remeasure + rebuild
+      tableDirty = true;
+      flushNow();
+    });
+
+    // Desktop table ↔ mobile cards switch changes the row height; drop the
+    // measurement so the next build probes a card (or table) row.
+    matchMedia("(max-width: 640px)").addEventListener("change", () => {
+      rowHeight = 0;
+      winKey = "";
+      tableDirty = true;
+      flushNow();
     });
 
     // ---- live status banner ----
@@ -1237,7 +1395,7 @@
     function tickElapsed() {
       const secs = Math.floor((Date.now() - scanStartMs) / 1000);
       statElapsed.textContent = fmtTime(secs);
-      statRate.textContent = secs > 0 ? Math.round(scannedCount / secs).toLocaleString() + "/s" : "\u2014";
+      statRate.textContent = secs > 0 ? Math.round(model.state.scannedCount / secs).toLocaleString() + "/s" : "\u2014";
     }
     function setVersion(v) {
       const pill = document.querySelector(".version-pill");
@@ -1247,11 +1405,10 @@
     }
     function showErrorCard(msg) {
       errorCard.textContent = msg;
-      errorCard.hidden = false;
+      errorCard.hidden = !msg;
     }
     function hideErrorCard() {
-      errorCard.hidden = true;
-      errorCard.textContent = "";
+      showErrorCard("");
     }
     // #scan-status is role=status; only ever called on state transitions.
     function showStatus(text, state) {
@@ -1262,9 +1419,8 @@
     function resetBanner() {
       stopElapsed();
       stopPolling();
-      scanState = "idle";
-      localCancel = false;
-      reconnectLost = false;
+      model.begin();
+      model.setState({ scan: "idle", localCancel: false, reconnectLost: false });
       statScanned.textContent = "0";
       statFound.textContent = "0";
       statElapsed.textContent = "0:00";
@@ -1292,34 +1448,29 @@
       appbarStart.textContent = running ? "Scanning\u2026" : "Start";
     }
     function updateStrip() {
-      if (scanState === "running" || scanState === "starting") {
-        const p = latestProgress;
+      if (model.state.scan === "running" || model.state.scan === "starting") {
+        const p = model.state.progress;
         const total = p && p.total != null ? p.total : null;
-        const scanned = p && p.scanned != null ? p.scanned : scannedCount;
+        const scanned = p && p.scanned != null ? p.scanned : model.state.scannedCount;
         let t;
         if (total) t = `${scanned.toLocaleString()} / ${total.toLocaleString()}`;
         else t = `${scanned.toLocaleString()} checked`;
-        stripStatus.textContent = t + " \u00b7 " + Number(results.length).toLocaleString() + " found";
+        stripStatus.textContent = t + " \u00b7 " + Number(model.results.length).toLocaleString() + " found";
         scanStrip.hidden = false;
       } else {
         scanStrip.hidden = true;
       }
     }
     function beginRun() {
-      runGen = ++scanGeneration;
-      scanState = "running";
-      localCancel = false;
-      reconnectLost = false;
-      results.length = 0;
-      keyToIndex.clear();
-      sortedCache = null;
-      histBuiltFor = -1;
+      model.begin();
+      model.setState({ scan: "running", localCancel: false, reconnectLost: false, progress: null, scannedCount: 0 });
+      model.results.length = 0;
+      model.keyToIndex.clear();
+      model.restructureResults();
       tableDirty = true;
       histDirty = true;
-      latestProgress = null;
       lastTitleUpdate = 0;
       p2Progress.textContent = "";
-      scannedCount = 0;
       statsEl.hidden = false;
       progressTrack.hidden = false;
       progressTrack.classList.remove("indeterminate");
@@ -1348,22 +1499,25 @@
       updateStrip();
       syncAppbarStart();
       scheduleRender();
+      if (!es) connectEvents();
     }
     // Terminal states: bar never fills to 100% for cancelled runs.
     function finishScan(s, cancelled) {
+      if (model.state.scan === "done" || model.state.scan === "cancelled" || model.state.scan === "failed") return;
+      model.begin();
       stopElapsed();
       stopPolling();
       // A poll/loadResults in flight can re-apply stale progress after this
       // point; clear it so no terminal state shows a live progress line.
-      const lastP = latestProgress;
-      latestProgress = null;
-      const found = s && s.found != null ? s.found : results.length;
-      const scanned = s && s.scanned != null ? s.scanned : scannedCount;
+      const lastP = model.state.progress;
+      model.setState({ progress: null });
+      const found = s && s.found != null ? s.found : model.results.length;
+      const scanned = s && s.scanned != null ? s.scanned : model.state.scannedCount;
       if (found != null) statFound.textContent = Number(found).toLocaleString();
       if (s && s.duration_ms != null) statElapsed.textContent = fmtTime(Math.round(s.duration_ms / 1000));
       progressTrack.classList.remove("indeterminate");
       if (cancelled) {
-        scanState = "cancelled";
+        model.setState({ scan: "cancelled" });
         const total = lastP && lastP.total != null ? lastP.total : null;
         const pct = total && total > 0 ? Math.min(100, Math.round((scanned / total) * 100)) : null;
         if (pct != null) {
@@ -1372,11 +1526,11 @@
         } else {
           progressTrack.removeAttribute("aria-valuenow");
         }
-        const msg = `Cancelled \u2014 ${Number(found).toLocaleString()} working retained`;
+        const msg = `Cancelled \u2014 ${Number(found).toLocaleString()} working endpoints kept`;
         showStatus(msg, "cancelled");
         document.title = "Cancelled \u2014 CF-Scanner";
       } else {
-        scanState = "done";
+        model.setState({ scan: "done" });
         progressFill.style.width = "100%";
         progressTrack.setAttribute("aria-valuenow", "100");
         const dur = s && s.duration_ms != null ? Math.round(s.duration_ms / 1000) : 0;
@@ -1396,23 +1550,25 @@
       const live = document.getElementById("results-live");
       if (live) {
         live.textContent = cancelled
-          ? `Scan cancelled. ${found} results retained.`
+          ? `Scan cancelled. ${found} working results kept.`
           : `Scan complete. ${Number(scanned).toLocaleString()} scanned, ${found} found.`;
       }
       flushNow();
       statFound.textContent = Number(found).toLocaleString();
+      if (s && s.scanned != null) statScanned.textContent = Number(s.scanned).toLocaleString();
       scanStrip.hidden = true;
-      if (!cancelled && results.length > 0) {
+      if (!cancelled && model.results.length > 0) {
         renderBest();
         postScanPush();
       }
       syncAppbarStart();
     }
     function failScan(msg) {
+      if (model.state.scan === "done" || model.state.scan === "cancelled" || model.state.scan === "failed") return;
+      model.begin();
       stopElapsed();
       stopPolling();
-      latestProgress = null;
-      scanState = "failed";
+      model.setState({ progress: null, scan: "failed" });
       progressTrack.classList.remove("indeterminate");
       cancelBtn.disabled = true;
       resetBtn.disabled = false;
@@ -1444,16 +1600,16 @@
         retryBtn.hidden = true;
         // Re-run whatever the FORM currently holds (edits after a failure
         // are honored), re-validated, without a wipe confirmation dialog.
-        confirmWipe = false;
+        model.setState({ confirmWipe: false });
         form.requestSubmit();
-        confirmWipe = true;
+        model.setState({ confirmWipe: true });
       };
     }
     function hideRetry() {
       if (retryBtn) retryBtn.hidden = true;
     }
     async function startScan(cfg) {
-      scanState = "starting";
+      model.setState({ scan: "starting" });
       startBtn.disabled = true;
       resetBtn.disabled = true;
       hideErrorCard();
@@ -1465,7 +1621,7 @@
         });
         if (!resp.ok) {
           const msg = await apiErrorMessage(resp, "HTTP " + resp.status);
-          scanState = "idle";
+          model.setState({ scan: "idle" });
           startBtn.disabled = false;
           startBtn.innerHTML = START_LABEL_HTML;
           startBtn.classList.remove("is-running");
@@ -1475,10 +1631,17 @@
           if (resp.status === 409) startPolling();
           return;
         }
-        store.set("last-cfg", JSON.stringify(cfg));
-        if (scanState === "starting") beginRun();
+        const saved = JSON.parse(JSON.stringify(cfg));
+        // wgconf is a WireGuard PrivateKey; strip it and the verify flag
+        // that requires it so the key never lands in localStorage.
+        if (saved.warp) {
+          saved.warp.wgconf = null;
+          saved.warp.verify_with_wgconf = false;
+        }
+        store.set("last-cfg", JSON.stringify(saved));
+        if (model.state.scan === "starting") beginRun();
       } catch (err) {
-        scanState = "idle";
+        model.setState({ scan: "idle" });
         startBtn.disabled = false;
         startBtn.innerHTML = START_LABEL_HTML;
         startBtn.classList.remove("is-running");
@@ -1495,28 +1658,42 @@
     let tableDirty = false;
     let histDirty = false;
 
+    // ---- virtualized results table ----
+    const tableWrap = tbody.closest(".table-wrap") || document.querySelector(".table-wrap");
+    const WIN_VIEW = 35;         // minimum rendered window span
+    const WIN_OVERSCAN = 15;     // rows kept rendered above/below the viewport
+    let rowHeight = 0;           // measured px per row; 0 until first measurement
+    let winFirst = 0;            // last built window [first, last) over filtered rows
+    let winLast = 0;
+    let winLen = 0;              // filtered row count at the last build
+    let winKey = "";             // content identity (version|structure|sort|filter)
+    let scrollRaf = null;
+
     function rowKey(v) {
       return v.ip + "|" + v.port;
     }
     function addResult(v) {
       const k = rowKey(v);
-      const i = keyToIndex.get(k);
+      const i = model.keyToIndex.get(k);
       if (i !== undefined) {
         // Re-emissions are verdict updates (phase 2 attaches to a phase-1
         // row): merge into the stored object so the row picks up lat/colo/
         // phase2 without growing the store or orphaning sort-cache refs.
-        Object.assign(results[i], v);
+        Object.assign(model.results[i], v);
+        model.restructureResults();
         tableDirty = true;
+        histDirty = true;
         return false;
       }
-      keyToIndex.set(k, results.length);
-      results.push(v);
+      model.keyToIndex.set(k, model.results.length);
+      model.results.push(v);
+      model.touchResults();
       tableDirty = true;
       histDirty = true;
       return true;
     }
 
-    let sortedCache = null, cacheLen = 0, cacheKey = null, cacheAsc = true;
+    let sortedCache = null, cacheLen = 0, cacheKey = null, cacheAsc = true, cacheVer = -1, cacheStruct = -1;
     function ipv6Groups(ip) {
       const s = ip.replace(/^\[|\]$/g, "").split("%")[0];
       const halves = s.split("::");
@@ -1554,20 +1731,25 @@
       return sortAsc ? av - bv : bv - av;
     }
     function sortedResults() {
-      if (sortedCache && cacheLen === results.length && cacheKey === sortKey && cacheAsc === sortAsc) {
+      // Version-gated: any mutation (append, merge, replace, clear) bumps
+      // model.version, so a stale cache can never win. The incremental
+      // splice additionally requires an unchanged structure (appends only)
+      // — a merge can reorder existing rows, so it must re-sort fully.
+      if (sortedCache && cacheVer === model.version && cacheKey === sortKey && cacheAsc === sortAsc) {
         return sortedCache;
       }
-      if (sortedCache && cacheKey === sortKey && cacheAsc === sortAsc) {
-        for (let i = cacheLen; i < results.length; i++) {
-          const r = results[i];
+      if (sortedCache && cacheStruct === model.structure && cacheKey === sortKey && cacheAsc === sortAsc) {
+        for (let i = cacheLen; i < model.results.length; i++) {
+          const r = model.results[i];
           let lo = 0, hi = sortedCache.length;
           while (lo < hi) { const mid = (lo + hi) >> 1; compareRows(sortedCache[mid], r) <= 0 ? lo = mid + 1 : hi = mid; }
           sortedCache.splice(lo, 0, r);
         }
       } else {
-        sortedCache = results.slice().sort(compareRows);
+        sortedCache = model.results.slice().sort(compareRows);
       }
-      cacheLen = results.length; cacheKey = sortKey; cacheAsc = sortAsc;
+      cacheLen = model.results.length; cacheKey = sortKey; cacheAsc = sortAsc;
+      cacheVer = model.version; cacheStruct = model.structure;
       return sortedCache;
     }
 
@@ -1585,8 +1767,9 @@
       flushQueued = false;
       flushTimer = null;
       if (tableDirty) { renderTable(); tableDirty = false; }
+      else if (model.results.length === 0) { ensureEmptyRow(); }
       if (histDirty) { renderHistogram(); histDirty = false; }
-      statFound.textContent = results.length.toLocaleString();
+      statFound.textContent = model.results.length.toLocaleString();
       applyProgress();
       updateAddFailedVisibility();
       updateStrip();
@@ -1595,21 +1778,30 @@
     }
 
     let filterQuery = "";
+    let filteredCache = null;
     function filteredRows() {
       if (!filterQuery) return sortedResults();
-      return sortedResults().filter(v =>
+      // Memoized per (version, sort, query): scroll-time window rebuilds hit the
+      // cache instead of re-filtering the whole sorted list every frame.
+      if (filteredCache && filteredCache.ver === model.version && filteredCache.q === filterQuery
+        && filteredCache.sortKey === sortKey && filteredCache.sortAsc === sortAsc) {
+        return filteredCache.rows;
+      }
+      const rows = sortedResults().filter(v =>
         v.ip.toLowerCase().includes(filterQuery) ||
         String(v.port).includes(filterQuery) ||
         (v.country || "").toLowerCase().includes(filterQuery) ||
         (v.colo || "").toLowerCase().includes(filterQuery));
+      filteredCache = { ver: model.version, q: filterQuery, sortKey, sortAsc, rows };
+      return rows;
     }
 
     // The "Add failed to exclusions" action is only useful while the
     // current results actually contain a row that failed phase 2.
     function updateAddFailedVisibility() {
-      const failed = results.filter(v => v.phase2 && v.phase2.passed === false).length;
+      const failed = model.results.filter(v => v.phase2 && v.phase2.passed === false).length;
       addFailedBtn.hidden = failed === 0;
-      const exportable = results.some(v => canExportRow(v, v.phase2));
+      const exportable = model.results.some(v => canExportRow(v, v.phase2));
       copyUrisBtn.hidden = !exportable;
       copyUrisBtn.disabled = !exportable;
     }
@@ -1641,10 +1833,32 @@
       btn.textContent = doneLabel;
       setTimeout(() => { btn.disabled = false; btn.textContent = prev; }, 1500);
     }
+    function clipboardWrite(text) {
+      // One path for every copy: async API first, hidden-textarea fallback
+      // when the API is unavailable or denied; resolves to whether the
+      // clipboard actually received the text.
+      const fallback = () => {
+        const ta = document.createElement("textarea");
+        ta.value = text;
+        ta.setAttribute("readonly", "");
+        ta.style.position = "fixed";
+        ta.style.top = "-1000px";
+        ta.style.left = "-1000px";
+        document.body.appendChild(ta);
+        try {
+          ta.select();
+          return document.execCommand("copy");
+        } catch { return false; } finally { ta.remove(); }
+      };
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        return navigator.clipboard.writeText(text).then(() => true, () => fallback());
+      }
+      return Promise.resolve(fallback());
+    }
     function renderBest() {
       const rows = bestRows();
-      if (rows.length === 0 || scanState !== "done") { hideBest(); return; }
-      const lats = results.map(v => v.latency_ms).filter(l => l != null).sort((a, b) => a - b);
+      if (rows.length === 0 || model.state.scan !== "done") { hideBest(); return; }
+      const lats = model.results.map(v => v.latency_ms).filter(l => l != null).sort((a, b) => a - b);
       const min = lats[0];
       const med = percentile(lats, 0.5);
       const p95 = percentile(lats, 0.95);
@@ -1670,11 +1884,10 @@
         btn.textContent = "Copy";
         btn.setAttribute("aria-label", `Copy ${v.ip}:${v.port}`);
         btn.addEventListener("click", async () => {
-          try {
-            await navigator.clipboard.writeText(copyRowText(v));
+          if (await clipboardWrite(copyRowText(v))) {
             copyFeedback(btn, "\u2713 Copied");
             showToast(`Copied ${v.ip}:${v.port}`, "success");
-          } catch {
+          } else {
             prompt("Copy the endpoint (Ctrl+C):", copyRowText(v));
           }
         });
@@ -1694,28 +1907,28 @@
       const rows = bestRows();
       if (rows.length === 0) return;
       const text = rows.map(copyRowText).join("\n");
-      try {
-        await navigator.clipboard.writeText(text);
+      if (await clipboardWrite(text)) {
         copyFeedback(bestCopyBtn, "\u2713 Copied!");
         showToast(`Copied best ${rows.length} endpoint${rows.length === 1 ? "" : "s"}`, "success");
-      } catch {
+      } else {
         prompt("Copy the best endpoints (Ctrl+C):", text);
       }
     });
     function postScanPush() {
       const smooth = !matchMedia("(prefers-reduced-motion: reduce)").matches;
       document.getElementById("results-section").scrollIntoView({ behavior: smooth ? "smooth" : "auto", block: "start" });
-      copyBtn.classList.add("pulse");
-      setTimeout(() => copyBtn.classList.remove("pulse"), 2000);
     }
 
+    function ensureEmptyRow() {
+      tbody.replaceChildren(buildEmptyRow());
+    }
     function buildEmptyRow() {
       const tr = document.createElement("tr");
       tr.id = "empty-row";
       const td = document.createElement("td");
       td.colSpan = 8;
-      const running = scanState === "running" || scanState === "starting";
-      const isPostScan = scanState === "done" || scanState === "cancelled" || scanState === "failed";
+      const running = model.state.scan === "running" || model.state.scan === "starting";
+      const isPostScan = model.state.scan === "done" || model.state.scan === "cancelled" || model.state.scan === "failed";
       const copy = running
         ? "Scanning \u2014 working endpoints will appear here."
         : (isPostScan
@@ -1759,76 +1972,128 @@
       return tr;
     }
 
-    // Signature of a row's displayable fields; unchanged rows skip a full
-    // DOM rebuild on every 100ms flush.
-    function rowSignature(v) {
-      const p2 = v.phase2;
-      return v.ip + "|" + v.port + "|" + (v.latency_ms ?? "") + "|" + (v.loss_pct ?? "")
-        + "|" + (v.country ?? "") + "|" + (v.colo ?? "")
-        + "|" + (p2 ? (p2.passed ? "1" : "0") + "|" + (p2.latency_ms ?? "") + "|" + (p2.fragment ?? "") + "|" + (p2.sni ?? "") + "|" + (p2.error ?? "") + "|" + (p2.config_index ?? "") : "");
+    // Virtualized window: only rows near the scroll viewport exist in the
+    // DOM; two visibility-hidden spacer rows hold the table's total height.
+    // The top spacer count tracks the window start's parity so the CSS
+    // even-row stripe lands on the same global rows as a full render.
+    function spacerRow(px) {
+      const tr = document.createElement("tr");
+      tr.style.visibility = "hidden";
+      const td = document.createElement("td");
+      td.style.height = Math.max(0, Math.round(px)) + "px";
+      td.style.padding = "0";
+      tr.appendChild(td);
+      return tr;
     }
-
-    // Keyed row reconciliation: reuses rows by ip:port, only creates/removes diffs.
+    function windowBounds(n, sc, vh, rh) {
+      const first = Math.max(0, Math.floor((sc - WIN_OVERSCAN * rh) / rh));
+      const last = Math.min(n, Math.max(first + WIN_VIEW, Math.ceil((sc + vh + WIN_OVERSCAN * rh) / rh)));
+      return [first, last];
+    }
+    function captureRowFocus() {
+      const ae = document.activeElement;
+      if (!ae || !tbody.contains(ae)) return null;
+      const tr = ae.closest("tr");
+      return tr && tr.dataset.key ? tr.dataset.key : null;
+    }
+    function restoreRowFocus(key) {
+      if (!key) return;
+      const tr = tbody.querySelector('tr[data-key="' + CSS.escape(key) + '"]');
+      const btn = tr && tr.querySelector("button");
+      if (btn) btn.focus();
+    }
+    function buildRow(v, k) {
+      const tr = document.createElement("tr");
+      tr.dataset.key = k;
+      tr.replaceChildren(
+        cell(v.ip, "mono", "IP"),
+        cell(v.port, "mono", "Port"),
+        cell(v.latency_ms, latencyCls(v.latency_ms), "Latency"),
+        lossCell(v),
+        cell(v.country, null, "Country"),
+        cell(v.colo, null, "Colo"),
+        cell(v.phase2 && v.phase2.latency_ms != null ? v.phase2.latency_ms : null, latencyCls(v.phase2 && v.phase2.latency_ms), "P2 ms"),
+        phase2Cell(v)
+      );
+      return tr;
+    }
     function renderTable() {
+      const key = model.version + "|" + model.structure + "|" + sortKey + "|" + sortAsc + "|" + filterQuery;
+      const vh = tableWrap.clientHeight || 300;
+      const sc = tableWrap.scrollTop;
+      if (key === winKey && rowHeight > 0) {
+        const [first, last] = windowBounds(winLen, sc, vh, rowHeight);
+        if (first === winFirst && last === winLast) return;  // nothing moved
+      }
       const rows = filteredRows();
-      const keyed = new Map();
-      for (const tr of Array.from(tbody.children)) {
-        if (tr.dataset.key) keyed.set(tr.dataset.key, tr);
-      }
-      const keep = new Set();
-      for (const v of rows) keep.add(rowKey(v));
-      for (const [k, tr] of keyed) {
-        if (!keep.has(k)) tr.remove();
-      }
-      let i = 0;
-      for (const v of rows) {
-        const k = rowKey(v);
-        let tr = keyed.get(k);
-        if (!tr) {
-          tr = document.createElement("tr");
-          tr.dataset.key = k;
-        }
-        const sig = rowSignature(v);
-        if (tr._sig !== sig) {
-          const hadFocus = tr.contains(document.activeElement);
-          tr._sig = sig;
-          tr.replaceChildren(
-            cell(v.ip, "mono"),
-            cell(v.port, "mono"),
-            cell(v.latency_ms, latencyCls(v.latency_ms)),
-            lossCell(v),
-            cell(v.country),
-            cell(v.colo),
-            cell(v.phase2 && v.phase2.latency_ms != null ? v.phase2.latency_ms : null, latencyCls(v.phase2 && v.phase2.latency_ms)),
-            phase2Cell(v)
-          );
-          if (hadFocus) {
-            const nb = tr.querySelector("button");
-            if (nb) nb.focus();
-          }
-        }
-        const cur = tbody.children[i];
-        if (cur !== tr) tbody.insertBefore(tr, cur);
-        i++;
-      }
-      const empty = tbody.querySelector("#empty-row");
       if (rows.length === 0) {
-        if (!empty) tbody.appendChild(buildEmptyRow());
-      } else if (empty) {
-        empty.remove();
+        // Always rebuild: the empty-row text depends on the scan state
+        // (running vs post-scan), so a stale row would lie about it.
+        tbody.replaceChildren(buildEmptyRow());
+        if (sc !== 0) tableWrap.scrollTop = 0;
+        winFirst = 0; winLast = 0; winLen = 0; winKey = key;
+        countEl.textContent = "";
+        scrollHint.toggleAttribute("data-empty", true);
+        return;
       }
-      countEl.textContent = rows.length > 0
-        ? (filterQuery ? `(${rows.length}/${results.length})` : `(${rows.length})`)
-        : "";
-      scrollHint.toggleAttribute("data-empty", rows.length === 0);
+      scrollHint.toggleAttribute("data-empty", false);
+      countEl.textContent = filterQuery ? `(${rows.length}/${model.results.length})` : `(${rows.length})`;
+      const focusedKey = captureRowFocus();
+      if (rowHeight <= 0) {
+        // First measurement: probe a real row (height varies with density).
+        const probe = buildRow(rows[0], rowKey(rows[0]));
+        tbody.replaceChildren(probe);
+        rowHeight = probe.getBoundingClientRect().height || 32;
+      }
+      const rh = rowHeight;
+      const [first, last] = windowBounds(rows.length, sc, vh, rh);
+      winFirst = first; winLast = last; winLen = rows.length; winKey = key;
+      const frag = document.createDocumentFragment();
+      const topPx = first * rh;
+      const topSpacers = first % 2 === 0 ? 2 : 1;
+      for (let s = 0; s < topSpacers; s++) {
+        frag.appendChild(spacerRow(s === topSpacers - 1 ? topPx : 0));
+      }
+      for (let i = first; i < last; i++) {
+        const v = rows[i];
+        const tr = buildRow(v, rowKey(v));
+        if (last === rows.length && i === last - 1) {
+          // The trailing spacer is the tbody's last child, so strip the
+          // list's final border manually (CSS targets tr:last-child).
+          for (const td of tr.children) td.style.borderBottom = "none";
+        }
+        frag.appendChild(tr);
+      }
+      frag.appendChild(spacerRow((rows.length - last) * rh));
+      tbody.replaceChildren(frag);
+      const firstReal = tbody.querySelector("tr[data-key]");
+      if (firstReal) {
+        const m = firstReal.getBoundingClientRect().height;
+        if (m > 0 && Math.abs(m - rh) > 0.5) {  // stale height (zoom/theme); redo once
+          rowHeight = m;
+          winKey = "";  // invalidate so the corrected pass rebuilds fully
+          renderTable();
+          return;
+        }
+      }
+      restoreRowFocus(focusedKey);
     }
+    function onTableScrollResize() {
+      if (scrollRaf) return;
+      scrollRaf = requestAnimationFrame(() => {
+        scrollRaf = null;
+        if (model.results.length > 0) renderTable();
+      });
+    }
+    tableWrap.addEventListener("scroll", onTableScrollResize, { passive: true });
+    window.addEventListener("resize", onTableScrollResize);
 
     function applyProgress() {
-      const p = latestProgress;
+      const p = model.state.progress;
       if (!p) return;
       const total = p.total != null ? p.total : null;
       const scanned = p.scanned != null ? p.scanned : 0;
-      scannedCount = scanned;
+      model.setState({ scannedCount: scanned });
       statScanned.textContent = scanned.toLocaleString();
       const pct = total && total > 0 ? Math.min(100, Math.round((scanned / total) * 100)) : null;
       if (pct != null) {
@@ -1881,12 +2146,20 @@
       return sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * p))];
     }
     function renderHistogram() {
-      if (results.length === histBuiltFor) return;
-      histBuiltFor = results.length;
-      const lats = results.map(v => v.latency_ms).filter(l => l != null);
+      // Version-gated like sortedResults: merges change latency values
+      // without changing the row count, so a length check would go stale.
+      if (model.version === histBuiltFor) return;
+      histBuiltFor = model.version;
+      const lats = model.results.map(v => v.latency_ms).filter(l => l != null);
       if (lats.length === 0) { histEl.hidden = true; histSummary.hidden = true; return; }
       const sortedLats = lats.slice().sort((a, b) => a - b);
-      const cumulative = HIST_BUCKETS.map(b => lats.filter(l => l <= b.max).length);
+      // One moving pointer over the sorted array counts every bucket in O(n):
+      // the boundaries are cumulative, so the same index keeps advancing.
+      let hi = 0;
+      const cumulative = HIST_BUCKETS.map(b => {
+        while (hi < sortedLats.length && sortedLats[hi] <= b.max) hi++;
+        return hi;
+      });
       let prev = 0;
       const counts = cumulative.map(c => { const n = c - prev; prev = c; return n; });
       const peak = Math.max(...counts, 1);
@@ -1912,9 +2185,10 @@
       histSummary.hidden = false;
     }
 
-    function cell(value, cls) {
+    function cell(value, cls, label) {
       const td = document.createElement("td");
       if (cls) td.className = cls;
+      if (label) td.dataset.label = label;
       if (value == null) {
         td.textContent = "\u2014";
         td.className = (td.className ? td.className + " " : "") + "muted";
@@ -1927,15 +2201,16 @@
     }
 
     function lossCell(v) {
-      if (v.loss_pct == null) return cell(null, "muted");
+      if (v.loss_pct == null) return cell(null, "muted", "Loss");
       const cls = v.loss_pct > 0 ? "lat-bad mono" : "mono";
-      return cell(v.loss_pct > 0 ? v.loss_pct.toFixed(1) + "%" : "0%", cls);
+      return cell(v.loss_pct > 0 ? v.loss_pct.toFixed(1) + "%" : "0%", cls, "Loss");
     }
 
     function phase2Cell(v) {
       const p2 = v.phase2;
-      if (!p2) return cell(null, "muted");
+      if (!p2) return cell(null, "muted", "Phase 2");
       const td = document.createElement("td");
+      td.dataset.label = "Phase 2";
       if (p2.passed) {
         td.textContent = "\u2713 " + p2.fragment + (p2.sni ? " " + p2.sni : "");
         td.className = "v-ok";
@@ -1970,7 +2245,7 @@
       // Export points at the user's ORIGINAL config entry in the last
       // submitted list; subscription/file entries cannot yield one URI for
       // this row, so the action stays hidden for them.
-      if (p2.config_index == null || !lastCfg || !lastCfg.phase2) return false;
+      if (!p2 || p2.config_index == null || !lastCfg || !lastCfg.phase2) return false;
       const config = lastCfg.phase2.configs[p2.config_index];
       return !!(config && (config.startsWith("vless://") || config.startsWith("trojan://")));
     }
@@ -1990,9 +2265,7 @@
         showToast(payload.error || "Export failed", "error");
         return;
       }
-      try {
-        await navigator.clipboard.writeText(payload.uri);
-      } catch {
+      if (!(await clipboardWrite(payload.uri))) {
         // Clipboard can be denied outside secure contexts; still surface
         // the URI so the user can copy it manually.
         prompt("Copy the exported config (Ctrl+C):", payload.uri);
@@ -2045,13 +2318,14 @@
           }
           custom_fragment = { packets, length, interval };
         }
+        const probeUrls = parseLines(form.elements["phase2_probe_urls"].value);
         phase2 = {
           configs: p2configs,
           fragment,
           custom_fragment,
           snis: form.elements["phase2_snis"].value.split(",").map(s => s.trim()).filter(Boolean),
           probe_url: "",
-          probe_urls: parseLines(form.elements["phase2_probe_urls"].value),
+          probe_urls: probeUrls.length > 0 ? probeUrls : ["https://cp.cloudflare.com/"],
           concurrency: Number(form.elements["phase2_concurrency"].value)
         };
       }
@@ -2176,7 +2450,7 @@
       found: intRange(1, 100000000, "Stop-after must be at least 1"),
       cap: (v) => v.trim() === "" ? null : intRange(1, 100000000, "Cap must be at least 1")(v),
       warp_probes: (v, f) => f.elements["mode"].value !== "Warp" ? null : intRange(1, 10, "Probes per endpoint must be 1\u201310")(v),
-      phase2_concurrency: (v, f) => f.elements["phase2_concurrency"].disabled ? null : intRange(1, 8, "Parallel instances must be 1\u20138")(v),
+      phase2_concurrency: (v, f) => f.elements["phase2_concurrency"].disabled ? null : intRange(1, 8, "Parallel checks must be 1\u20138")(v),
       custom_cidrs: cidrList("custom CIDR"),
       exclude: cidrList("excluded CIDR"),
       warp_endpoints: (v, f) => f.elements["mode"].value === "Warp" ? endpointList(v) : null,
@@ -2245,6 +2519,107 @@
       });
     });
 
+    // ---- wizard steps (linear flow: Targets → Settings → Verify) ----
+    const WIZ_STEP_FIELDS = {
+      1: ["count", "custom_cidrs", "exclude"],
+      2: ["ports", "concurrency", "timeout_ms", "found", "cap", "warp_probes", "warp_endpoints"],
+      3: ["phase2_concurrency", "phase2_snis", "phase2_packets", "phase2_length", "phase2_interval", "phase2_probe_urls"]
+    };
+    const wizStepEls = Array.from(document.querySelectorAll(".wiz-step"));
+    const wizBtnEls = Array.from(document.querySelectorAll(".wiz-step-btn"));
+    let wizCurrent = 1;
+    function goToStep(n) {
+      wizCurrent = n;
+      wizStepEls.forEach((el, i) => el.classList.toggle("active", i + 1 === n));
+      wizBtnEls.forEach((b, i) => {
+        const on = i + 1 === n;
+        b.classList.toggle("active", on);
+        b.setAttribute("aria-selected", String(on));
+      });
+    }
+    function validateStep(n) {
+      let firstBad = null;
+      for (const name of WIZ_STEP_FIELDS[n]) {
+        const el = form.elements[name];
+        if (!el || el.disabled) continue;
+        const msg = VALIDATORS[name](el.value, form);
+        setFieldError(name, msg);
+        if (msg && !firstBad) firstBad = el;
+      }
+      return firstBad;
+    }
+    function nextStep() {
+      const bad = validateStep(wizCurrent);
+      if (bad) { bad.focus(); showStatus("Fix the highlighted fields to continue."); return; }
+      if (wizCurrent < 3) goToStep(wizCurrent + 1);
+      else form.requestSubmit();
+    }
+    document.querySelectorAll(".wiz-next").forEach(b => b.addEventListener("click", nextStep));
+    document.querySelectorAll(".wiz-back").forEach(b => b.addEventListener("click", () => {
+      if (wizCurrent > 1) goToStep(wizCurrent - 1);
+    }));
+    wizBtnEls.forEach(b => b.addEventListener("click", () => {
+      const target = Number(b.dataset.go);
+      if (target >= wizCurrent) return; // forward only through Next (validated)
+      goToStep(target);
+    }));
+
+    // ---- xray binary status (check on load, offer download if missing) ----
+    (async function checkXray() {
+      try {
+        const resp = await fetch("/api/xray/status");
+        const data = await resp.json();
+        const el = document.getElementById("xray-status");
+        const title = document.getElementById("xray-status-title");
+        const detail = document.getElementById("xray-status-detail");
+        const btn = document.getElementById("xray-download-btn");
+        const icon = el.querySelector(".xray-status-icon");
+        if (data.found) {
+          el.hidden = false;
+          el.classList.add("ok");
+          icon.textContent = "\u2713";
+          title.textContent = "xray binary ready";
+          detail.textContent = "v" + data.version + " \u00b7 " + (data.path || "");
+          btn.style.display = "none";
+        } else {
+          el.hidden = false;
+          el.classList.add("warn");
+          icon.textContent = "\u26a0";
+          title.textContent = "xray binary not found";
+          detail.textContent = "Place xray in " + data.data_dir + " or download it below.";
+          btn.style.display = "";
+          btn.onclick = async () => {
+            btn.disabled = true;
+            btn.textContent = "Downloading\u2026";
+            try {
+              const dl = await fetch("/api/xray/download", { method: "POST" });
+              const res = await dl.json();
+              if (res.success) {
+                el.classList.add("ok");
+                el.classList.remove("warn");
+                icon.textContent = "\u2713";
+                title.textContent = "xray binary ready";
+                detail.textContent = "v" + data.version + " \u00b7 " + (res.path || "");
+                btn.style.display = "none";
+              } else {
+                title.textContent = "Download failed";
+                detail.textContent = res.error || "Unknown error. Try downloading manually.";
+                btn.textContent = "Retry";
+                btn.disabled = false;
+              }
+            } catch (e) {
+              title.textContent = "Download failed";
+              detail.textContent = e.message || "Network error. Try downloading manually.";
+              btn.textContent = "Retry";
+              btn.disabled = false;
+            }
+          };
+        }
+      } catch (e) {
+        // API not available — silently ignore
+      }
+    })();
+
     // ---- API error body parsing: {"error","message"} ----
     async function apiErrorMessage(resp, fallback) {
       try {
@@ -2272,14 +2647,14 @@
         th.closest("tr").querySelectorAll("th").forEach(t => t.removeAttribute("aria-sort"));
         th.setAttribute("aria-sort", sortAsc ? "ascending" : "descending");
         th.setAttribute("aria-label", `Sort by ${label} ${sortAsc ? "ascending" : "descending"}`);
-        sortedCache = null;
+        tableWrap.scrollTop = 0;  // new order: start from the top
         tableDirty = true;
         flushNow();
         const live = document.getElementById("results-live");
         if (live) {
           const caret = th.querySelector('.caret');
           const label = caret ? th.textContent.replace(caret.textContent, '').trim() : th.textContent.trim();
-          live.textContent = `Sorted by ${label} ${sortAsc ? "ascending" : "descending"}, ${results.length} results`;
+          live.textContent = `Sorted by ${label} ${sortAsc ? "ascending" : "descending"}, ${model.results.length} results`;
         }
       });
       th.addEventListener("keydown", (e) => {
@@ -2292,6 +2667,7 @@
 
     filterInput.addEventListener("input", () => {
       filterQuery = filterInput.value.trim().toLowerCase();
+      tableWrap.scrollTop = 0;  // a new filter view starts at the top
       tableDirty = true;
       flushNow();
     });
@@ -2299,8 +2675,8 @@
     // ---- scan actions ----
     form.addEventListener("submit", (e) => {
       e.preventDefault();
-      if (scanState === "starting" || scanState === "running") return;
-      if (confirmWipe && results.length > 0 && !confirm(`Start a new scan? This clears the current ${Number(results.length).toLocaleString()} result${results.length === 1 ? "" : "s"}.`)) return;
+      if (model.state.scan === "starting" || model.state.scan === "running") return;
+      if (model.state.confirmWipe && model.results.length > 0 && !confirm(`Start a new scan? This clears the current ${Number(model.results.length).toLocaleString()} result${model.results.length === 1 ? "" : "s"}.`)) return;
       const bad = validateForm();
       if (bad) { bad.focus(); showStatus("Fix the highlighted fields to start."); return; }
       let cfg;
@@ -2310,23 +2686,25 @@
     });
 
     cancelBtn.addEventListener("click", async () => {
-      if (scanState !== "running" && scanState !== "starting") return;
-      localCancel = true;
+      if (model.state.scan !== "running" && model.state.scan !== "starting") return;
+      model.setState({ localCancel: true });
       showStatus("Cancelling\u2026", "running");
       try { await fetch("/api/cancel", { method: "POST" }); } catch { /* poller reconciles */ }
     });
 
     resetBtn.addEventListener("click", async () => {
-      if (scanState === "running" || scanState === "starting") return;
-      if (results.length > 0 && !confirm(`Clear all ${results.length} results?`)) return;
-      results.length = 0;
-      keyToIndex.clear();
+      if (model.state.scan === "running" || model.state.scan === "starting") return;
+      model.begin();
+      if (model.results.length > 0 && !confirm(`Clear all ${model.results.length} results?`)) return;
+      model.results.length = 0;
+      model.keyToIndex.clear();
+      model.restructureResults();
       filterInput.value = "";
       filterQuery = "";
+      const live = document.getElementById("results-live");
+      if (live) live.textContent = "";
       hideBest();
-      sortedCache = null;
-      histBuiltFor = -1;      latestProgress = null;
-      scannedCount = 0;
+      model.setState({ progress: null, scannedCount: 0 });
       // Dirty the render flags: flushRender skips the table unless a row
       // event marked it, so a reset must mark it itself or the cleared
       // model would leave stale rows in the DOM.
@@ -2343,14 +2721,14 @@
 
     // ---- add failed phase-2 rows to the exclusions box ----
     addFailedBtn.addEventListener("click", () => {
-      const failed = results.filter(v => v.phase2 && v.phase2.passed === false);
+      const failed = model.results.filter(v => v.phase2 && v.phase2.passed === false);
       if (failed.length === 0) return;
       // Dedupe against the exclusions already typed in, keeping the box's
-      // line order; a failed row's IP is excluded for good as ip/32.
+      // line order; a failed row's IP is excluded for good as ip/32 (ip/128 for IPv6).
       const existing = new Set(parseLines(form.elements["exclude"].value));
       const added = [];
       for (const v of failed) {
-        const cidr = `${v.ip}/32`;
+        const cidr = v.ip.includes(":") ? `${v.ip}/128` : `${v.ip}/32`;
         if (!existing.has(cidr)) {
           existing.add(cidr);
           added.push(cidr);
@@ -2379,14 +2757,14 @@
       check: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg>'
     };
     let copyTimeout = null;
+    // exports follow the active filter; empty copy-count copies all filtered rows
     copyBtn.addEventListener("click", async () => {
       const rows = filteredRows();
       const n = parseInt(copyCount.value, 10);
       const pick = Number.isInteger(n) && n > 0 ? rows.slice(0, n) : rows;
       if (pick.length === 0) return;
       const text = pick.map(copyRowText).join("\n");
-      try {
-        await navigator.clipboard.writeText(text);
+      if (await clipboardWrite(text)) {
         if (copyTimeout) clearTimeout(copyTimeout);
         copyBtn.innerHTML = COPY_ICONS.check + " Copied!";
         copyBtn.classList.add("copied");
@@ -2397,7 +2775,7 @@
         }, 1500);
         const label = pick.length < rows.length ? ` top ${pick.length} from ${rows.length}` : "";
         showToast(`Copied ${pick.length} endpoint${pick.length === 1 ? "" : "s"}${label}`, "success");
-      } catch {
+      } else {
         if (copyTimeout) clearTimeout(copyTimeout);
         copyBtn.textContent = "Copy failed \u2014 press Ctrl+C";
         copyTimeout = setTimeout(() => {
@@ -2435,10 +2813,9 @@
           return;
         }
         const text = uris.join("\n");
-        try {
-          await navigator.clipboard.writeText(text);
+        if (await clipboardWrite(text)) {
           showToast(`Copied ${uris.length} config URI${uris.length === 1 ? "" : "s"} to clipboard`, "success");
-        } catch {
+        } else {
           prompt("Copy the exported configs (Ctrl+C):", text);
         }
       } catch (err) {
@@ -2489,9 +2866,9 @@
       }
       let blob;
       if (fmt === "json") {
-        blob = new Blob([JSON.stringify(results, null, 2)], { type: "application/json" });
+        blob = new Blob([JSON.stringify(model.results, null, 2)], { type: "application/json" });
       } else if (fmt === "csv") {
-        blob = new Blob([toCsv(results)], { type: "text/csv" });
+        blob = new Blob([toCsv(model.results)], { type: "text/csv" });
       } else {
         blob = new Blob([toTxt(rows)], { type: "text/plain" });
       }
@@ -2540,57 +2917,67 @@
       .catch(() => { /* ranges endpoint unavailable; nothing to show */ });
 
     // ---- SSE with reconnect recovery ----
-    const es = new EventSource("/api/events");
-    es.addEventListener("progress", (e) => {
-      let p = null;
-      try { p = JSON.parse(e.data); } catch { return; }
-      if (!p || typeof p !== "object") return;
-      latestProgress = p;
-      scheduleRender();
-    });
-    es.addEventListener("phase2-progress", (e) => {
-      let p = null;
-      try { p = JSON.parse(e.data); } catch { return; }
-      if (!p || typeof p !== "object") return;
-      p2Progress.textContent = "Phase 2: " + p.done + "/" + p.total + " verified";
-    });
-    es.addEventListener("result", (e) => {
-      let v = null;
-      try { v = JSON.parse(e.data); } catch { return; }
-      if (!v || typeof v !== "object" || typeof v.ip !== "string") return;
-      if (addResult(v)) scheduleRender();
-    });
-    es.addEventListener("finished", (e) => {
-      let s = null;
-      try { s = JSON.parse(e.data); } catch { /* keep null */ }
-      p2Progress.textContent = "";
-      finishScan(s, localCancel || !!(s && s.cancelled === true));
-    });
-    es.addEventListener("failed", (e) => {
-      p2Progress.textContent = "";
-      let msg = "Scan failed";
-      try {
-        const d = JSON.parse(e.data);
-        if (typeof d === "string" && d) msg = d;
-        else if (d && typeof d.message === "string" && d.message) msg = d.message;
-        else if (d && typeof d.error === "string" && d.error) msg = d.error;
-      } catch { /* keep default */ }
-      failScan(msg);
-    });
-    es.onopen = () => {
-      if (reconnectLost && (scanState === "running" || scanState === "starting")) {
-        reconnectLost = false;
-        showStatus("Scanning\u2026", "running");
-      }
-    };
-    es.onerror = () => {
-      if (scanState !== "running" && scanState !== "starting") return;
-      if (!reconnectLost) {
-        reconnectLost = true;
-        showStatus("Connection lost \u2014 reconnecting\u2026", "reconnecting");
-      }
-      startPolling();
-    };
+    // The client owns the connection lifecycle: a closed EventSource never
+    // auto-reconnects, which would otherwise replay the terminal event forever.
+    let es = null;
+    function connectEvents() {
+      es = new EventSource("/api/events");
+      es.addEventListener("progress", (e) => {
+        let p = null;
+        try { p = JSON.parse(e.data); } catch { return; }
+        if (!p || typeof p !== "object") return;
+        model.setState({ progress: p });
+        scheduleRender();
+      });
+      es.addEventListener("phase2-progress", (e) => {
+        let p = null;
+        try { p = JSON.parse(e.data); } catch { return; }
+        if (!p || typeof p !== "object") return;
+        p2Progress.textContent = "Phase 2: " + p.done + "/" + p.total + " verified";
+      });
+      es.addEventListener("result", (e) => {
+        let v = null;
+        try { v = JSON.parse(e.data); } catch { return; }
+        if (!v || typeof v !== "object" || typeof v.ip !== "string") return;
+        if (addResult(v)) scheduleRender();
+      });
+      es.addEventListener("finished", (e) => {
+        let s = null;
+        try { s = JSON.parse(e.data); } catch { /* keep null */ }
+        p2Progress.textContent = "";
+        finishScan(s, model.state.localCancel || !!(s && s.cancelled === true));
+        es.close();
+        es = null;
+      });
+      es.addEventListener("failed", (e) => {
+        p2Progress.textContent = "";
+        let msg = "Scan failed";
+        try {
+          const d = JSON.parse(e.data);
+          if (typeof d === "string" && d) msg = d;
+          else if (d && typeof d.message === "string" && d.message) msg = d.message;
+          else if (d && typeof d.error === "string" && d.error) msg = d.error;
+        } catch { /* keep default */ }
+        failScan(msg);
+        es.close();
+        es = null;
+      });
+      es.onopen = () => {
+        if (model.state.reconnectLost && (model.state.scan === "running" || model.state.scan === "starting")) {
+          model.setState({ reconnectLost: false });
+          showStatus("Scanning\u2026", "running");
+        }
+      };
+      es.onerror = () => {
+        if (model.state.scan !== "running" && model.state.scan !== "starting") return;
+        if (!model.state.reconnectLost) {
+          model.setState({ reconnectLost: true });
+          showStatus("Connection lost \u2014 reconnecting\u2026", "reconnecting");
+        }
+        startPolling();
+      };
+    }
+    connectEvents();
 
     // ---- /api/status + /api/results polling (reconciles a stuck banner) ----
     let pollTimer = null;
@@ -2610,65 +2997,55 @@
       pollTimer = setTimeout(() => { pollTimer = null; void pollState(); }, pollDelay);
     }
     async function loadResults() {
-      const gen = runGen;
+      const gen = model.state.gen;
       try {
         const resp = await fetch("/api/results");
         if (!resp.ok) return;
         const data = await resp.json();
         if (!data || !Array.isArray(data.results)) return;
-        if (gen !== runGen) return;
+        if (gen !== model.state.gen) return;
+        if (model.state.scan !== "running" && model.state.scan !== "starting") return;
         if (data.progress && typeof data.progress === "object") {
-          if (scanState === "running" || scanState === "starting") {
-            latestProgress = data.progress;
-            scheduleRender();
-          }
+          model.setState({ progress: data.progress });
+          scheduleRender();
         }
-        if (data.results.length === 0) return;
-        results.length = 0;
-        keyToIndex.clear();
+        model.results.length = 0;
+        model.keyToIndex.clear();
+        model.restructureResults();
+        histDirty = true;
+        tableDirty = true;
         data.results.forEach(v => {
           if (v && typeof v === "object" && typeof v.ip === "string") addResult(v);
         });
         flushNow();
-        statFound.textContent = results.length.toLocaleString();
+        statFound.textContent = model.results.length.toLocaleString();
       } catch { /* best effort */ }
     }
     async function reconcileTerminal() {
-      const gen = runGen;
+      const gen = model.state.gen;
       let data = null;
       try {
         const resp = await fetch("/api/results");
         if (resp.ok) data = await resp.json();
       } catch { /* fall through */ }
-      if (gen !== runGen) return;
+      if (gen !== model.state.gen) return;
       if (data && Array.isArray(data.results)) {
-        results.length = 0;
-        keyToIndex.clear();
+        model.results.length = 0;
+        model.keyToIndex.clear();
+        model.restructureResults();
+        histDirty = true;
+        tableDirty = true;
         data.results.forEach(v => {
           if (v && typeof v === "object" && typeof v.ip === "string") addResult(v);
         });
-        statFound.textContent = results.length.toLocaleString();
+        statFound.textContent = model.results.length.toLocaleString();
         flushNow();
       }
       if (data && data.summary) {
-        finishScan(data.summary, localCancel || data.summary.cancelled === true);
+        finishScan(data.summary, model.state.localCancel || data.summary.cancelled === true);
         return;
       }
-      stopElapsed();
-      stopPolling();
-      scanState = "failed";
-      cancelBtn.disabled = true;
-      resetBtn.disabled = false;
-      startBtn.disabled = false;
-      startBtn.innerHTML = START_LABEL_HTML;
-      startBtn.classList.remove("is-running");
-      progressText.textContent = "";
-      progressText.hidden = true;
-      showStatus("Scan ended \u2014 live updates were lost; results below may be partial.", "error");
-      document.title = "Scan ended \u2014 CF-Scanner";
-      showRetry();
-      scanStrip.hidden = true;
-      syncAppbarStart();
+      failScan("Scan ended \u2014 live updates were lost; results below may be partial.");
     }
     async function pollState() {
       if (pollBusy) return;
@@ -2680,15 +3057,15 @@
         const data = await resp.json();
         if (!data || typeof data !== "object") return;
         if (data.is_running === true) {
-          if (scanState !== "running" && scanState !== "starting") {
+          if (model.state.scan !== "running" && model.state.scan !== "starting") {
             beginRun();
             loadResults();
-          } else if (reconnectLost) {
-            reconnectLost = false;
+          } else if (model.state.reconnectLost) {
+            model.setState({ reconnectLost: false });
             showStatus("Scanning\u2026", "running");
             loadResults();
           }
-        } else if (scanState === "running") {
+        } else if (model.state.scan === "running") {
           await reconcileTerminal();
         }
       } catch {
@@ -2738,6 +3115,7 @@
     form.elements["phase2_configs"].addEventListener("input", (e) => {
       const on = (e.target.value.trim() !== "");
       p2Fields.forEach(n => form.elements[n].disabled = !on);
+      if (!on) form.elements["phase2_only"].checked = false;
     });
 
     // mode segmented control: CDN / WARP
@@ -2757,21 +3135,23 @@
       if (warpMode) {
         form.elements["target-radio"].value = "count";
         form.elements["count"].disabled = false;
+        // Server rejects the CDN default for warp scans; prefill a valid UDP
+        // port only while the field still holds that untouched default.
+        if (form.elements["ports"].value === "443") form.elements["ports"].value = "2408";
       }
       form.elements["ports"].placeholder = warpMode ? "2408" : "443";
       document.body.classList.toggle("mode-warp", warpMode);
       modeSummary.textContent = warpMode
-        ? "UDP endpoint discovery with WireGuard probes \u2014 no phase 2."
-        : "TCP/TLS scan of Cloudflare ranges \u2014 optional xray verification (phase 2).";
+        ? "Finds WARP UDP endpoints with WireGuard probes \u2014 no phase 2."
+        : "Searches Cloudflare ranges over TCP/TLS \u2014 optional xray verification (phase 2).";
       syncWarpVerify();
     }
-    form.querySelectorAll('input[name="mode"]').forEach(r => r.addEventListener("change", onModeChange));
-    onModeChange({ target: form.querySelector('input[name="mode"]:checked') });
-
     const verifyBox = form.elements["warp_verify"];
     const wgconfField = form.elements["warp_wgconf"];
     const wgconfFileBtn = document.getElementById("wgconf-file-btn");
     const wgconfFile = document.getElementById("wgconf-file");
+    form.querySelectorAll('input[name="mode"]').forEach(r => r.addEventListener("change", onModeChange));
+    onModeChange({ target: form.querySelector('input[name="mode"]:checked') });
 
     function syncWarpVerify() {
       const warpMode = form.elements["mode"].value === "Warp";
@@ -2974,6 +3354,11 @@
       // A loaded profile never clobbers user-configured ports; the mode
       // change dispatched above may rewrite them, so restore after.
       form.elements["ports"].value = userPorts;
+      // If the restored value is still the CDN default, warp mode would
+      // 400 on start (server rejects CDN ports for warp) — prefill UDP.
+      if (form.elements["mode"].value === "Warp" && form.elements["ports"].value === "443") {
+        form.elements["ports"].value = "2408";
+      }
     }
 
     document.getElementById("profile-save-btn").addEventListener("click", async () => {
@@ -3027,7 +3412,7 @@
         filterInput.focus();
         return;
       }
-      if ((e.key === "r" || e.key === "R") && (scanState === "idle" || scanState === "done" || scanState === "failed" || scanState === "cancelled")) {
+      if ((e.key === "r" || e.key === "R") && (model.state.scan === "idle" || model.state.scan === "done" || model.state.scan === "failed" || model.state.scan === "cancelled")) {
         e.preventDefault();
         form.requestSubmit();
       }
@@ -3042,7 +3427,14 @@
       }
     })();
     refreshProfiles();
-    appbarStart.addEventListener("click", () => startBtn.click());
+    appbarStart.addEventListener("click", () => {
+      for (let n = 1; n <= 2; n++) {
+        const bad = validateStep(n);
+        if (bad) { goToStep(n); bad.focus(); showStatus("Fix the highlighted fields to continue."); return; }
+      }
+      goToStep(3);
+      startBtn.click();
+    });
     syncAppbarStart();
 
     // /api/status is the sole version authority and tells us if a scan is live.
@@ -3066,15 +3458,18 @@
       .then(r => r.ok ? r.json() : null)
       .then(data => {
         if (!data) return;
-        if (scanRunningAtLoad || scanState === "running" || scanState === "starting") return;
+        if (scanRunningAtLoad || model.state.scan === "running" || model.state.scan === "starting") return;
         if (Array.isArray(data.results) && data.results.length > 0) {
-          results.length = 0;
-          keyToIndex.clear();
+          model.results.length = 0;
+          model.keyToIndex.clear();
+          model.restructureResults();
+          histDirty = true;
+          tableDirty = true;
           data.results.forEach(v => {
             if (v && typeof v === "object" && typeof v.ip === "string") addResult(v);
           });
           flushNow();
-          statFound.textContent = results.length.toLocaleString();
+          statFound.textContent = model.results.length.toLocaleString();
         }
         if (data.summary) {
           statsEl.hidden = false;

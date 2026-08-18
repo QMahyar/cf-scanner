@@ -21,7 +21,7 @@ use crate::configs::{OutboundSpec, Protocol, WsSettings, sanitize_error_text};
 use crate::paths;
 use crate::ranges;
 
-const VERSION: &str = include_str!("../data/xray-version.txt");
+pub const VERSION: &str = include_str!("../data/xray-version.txt");
 const RELEASE_BASE: &str = "https://github.com/XTLS/Xray-core/releases/download";
 const READY_TIMEOUT: Duration = Duration::from_secs(10);
 
