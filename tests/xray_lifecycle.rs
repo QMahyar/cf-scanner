@@ -204,7 +204,7 @@ async fn tunnel_probe_lifecycle_spawns_and_cleans_trial_dirs() {
         preset: &FragmentPreset::Off,
         custom: None,
         sni: None,
-        probe_url: "http://127.0.0.1:1/",
+        probe_urls: &["http://127.0.0.1:1/".to_owned()],
         timeout_ms: 2_000,
     };
     let result = XrayTunnelProbe.probe(req).await;
