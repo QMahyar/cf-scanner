@@ -430,7 +430,7 @@ async fn read_response_marker(
                 Ok(Box::new(PrefixedReader::new(peek.to_vec(), stream)))
             }
         }
-        _ => bail!("inline probe cannot read a marker for {:?}", protocol),
+        _ => bail!("inline probe cannot read a marker for {protocol:?}"),
     }
 }
 
@@ -497,7 +497,7 @@ async fn read_http_response<S: AsyncRead + Unpin + ?Sized>(
     let mut byte = [0u8; 1];
     while !head.ends_with(b"\r\n\r\n") {
         if head.len() >= MAX_HEADER_BYTES {
-            bail!("response headers exceed the {} cap", MAX_HEADER_BYTES);
+            bail!("response headers exceed the {MAX_HEADER_BYTES} cap");
         }
         stream
             .read_exact(&mut byte)
@@ -548,7 +548,7 @@ async fn read_http_body<S: AsyncRead + Unpin + ?Sized>(
                 break;
             }
             if size > MAX_BODY_BYTES.saturating_sub(raw.len()) {
-                bail!("chunked body exceeds the {} cap", MAX_BODY_BYTES);
+                bail!("chunked body exceeds the {MAX_BODY_BYTES} cap");
             }
             raw.extend_from_slice(format!("{size:x}\r\n").as_bytes());
             let mut data = vec![0u8; size];
@@ -575,7 +575,7 @@ async fn read_http_body<S: AsyncRead + Unpin + ?Sized>(
             .and_then(|s| s.trim().parse().ok())
             .context("malformed content-length")?;
         if n > MAX_BODY_BYTES {
-            bail!("response body exceeds the {} cap", MAX_BODY_BYTES);
+            bail!("response body exceeds the {MAX_BODY_BYTES} cap");
         }
         let mut body = vec![0u8; n];
         stream

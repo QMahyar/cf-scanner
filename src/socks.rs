@@ -99,7 +99,7 @@ pub(crate) fn decode_chunked(mut input: &[u8]) -> Result<Vec<u8>> {
             return Ok(out);
         }
         if size > MAX_BODY_BYTES - out.len() {
-            bail!("chunked body exceeds the {} cap", MAX_BODY_BYTES);
+            bail!("chunked body exceeds the {MAX_BODY_BYTES} cap");
         }
         if input.len() < size + 2 {
             bail!("truncated chunk data");
@@ -324,9 +324,7 @@ mod tests {
         assert!(decode_chunked(b"1\r\na\r\nffffffff\r\n").is_err());
         // A size that would cross the cap only when accumulated is rejected
         // by the same check (the first chunk decodes, then the cap binds).
-        assert!(
-            decode_chunked(&format!("1\r\na\r\n{:x}\r\n", MAX_BODY_BYTES).into_bytes()).is_err()
-        );
+        assert!(decode_chunked(&format!("1\r\na\r\n{MAX_BODY_BYTES:x}\r\n").into_bytes()).is_err());
     }
 
     #[test]

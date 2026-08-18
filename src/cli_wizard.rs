@@ -21,8 +21,7 @@ fn prompt_warp() -> Result<ScanConfig> {
     let all_pools = warp::bundled_pool().host_count();
     let count: u32 = Input::new()
         .with_prompt(format!(
-            "Candidate endpoints (1-{all_pools}; {} = all pools)",
-            all_pools
+            "Candidate endpoints (1-{all_pools}; {all_pools} = all pools)"
         ))
         .validate_with(|n: &u32| (*n >= 1).then_some(()).ok_or("must be >= 1"))
         .default(all_pools as u32)

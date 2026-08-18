@@ -1290,8 +1290,7 @@ mod tests {
 
     async fn delete_profile(addr: SocketAddr, name: &str) -> (u16, String) {
         let req = format!(
-            "DELETE /api/profiles/{} HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
-            name
+            "DELETE /api/profiles/{name} HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
         );
         request(addr, &req, None).await
     }
