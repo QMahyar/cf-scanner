@@ -80,6 +80,23 @@
       --chevron: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 16 16'><path d='M4 6l4 4 4-4' fill='none' stroke='%235b6b84' stroke-width='1.7' stroke-linecap='round' stroke-linejoin='round'/></svg>");
     }
 
+    /* WARP mode swaps the accent to warm orange so the two modes read differently. */
+    body.mode-warp {
+      --accent: #fb923c;
+      --accent-strong: #fdba74;
+      --accent-soft: rgba(251, 146, 60, 0.14);
+      --accent-contrast: #231003;
+      --focus: #f0872f;
+      --chevron: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 16 16'><path d='M4 6l4 4 4-4' fill='none' stroke='%2394a3b8' stroke-width='1.7' stroke-linecap='round' stroke-linejoin='round'/></svg>");
+    }
+    [data-theme="light"] body.mode-warp {
+      --accent: #f97316;
+      --accent-strong: #c2410c;
+      --accent-soft: rgba(249, 115, 22, 0.12);
+      --accent-contrast: #fff7ed;
+      --focus: #ea580c;
+    }
+
     /* ============ base ============ */
     * { box-sizing: border-box; }
     html { color-scheme: dark; scroll-padding-top: 56px; }
@@ -220,8 +237,9 @@
     }
     .stat-label { display: block; font-size: 0.7rem; font-weight: 600; letter-spacing: 0.07em; text-transform: uppercase; color: var(--muted); }
     .stat-value {
-      display: block; font-size: 1.12rem; font-weight: 600;
-      font-variant-numeric: tabular-nums slashed-zero; margin-top: 0.1rem;
+      display: block; font-size: 1.5rem; font-weight: 700;
+      font-variant-numeric: tabular-nums slashed-zero; margin-top: 0.15rem;
+      letter-spacing: -0.01em;
     }
     .stat-value.accent { color: var(--accent-strong); }
     .stat-value.ok { color: var(--success); }
@@ -239,7 +257,7 @@
     }
     .grid { display: grid; gap: 1rem; }
     .grid-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-    .grid-3 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .grid-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
     .grid-4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
 
     .field { display: flex; flex-direction: column; gap: 0.35rem; min-width: 0; }
@@ -291,7 +309,7 @@
       background: var(--accent); color: var(--accent-contrast);
       box-shadow: 0 2px 8px rgba(34, 211, 238, 0.25);
     }
-    .seg input:focus-visible + .seg-item { outline: 2px solid var(--accent); outline-offset: 2px; }
+    .seg input:focus-visible + .seg-item { outline: 2px solid var(--focus, var(--accent)); outline-offset: 2px; }
     .seg input:disabled + .seg-item { opacity: 0.45; cursor: not-allowed; }
 
     .radio-row { display: flex; gap: 1.4rem; margin-bottom: 0.75rem; flex-wrap: wrap; }
@@ -364,7 +382,7 @@
     }
     button:hover { background: var(--surface-3); background: color-mix(in srgb, var(--surface-3) 80%, var(--accent) 8%); }
     button:active { transform: translateY(1px); }
-    button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+    button:focus-visible { outline: 2px solid var(--focus, var(--accent)); outline-offset: 2px; }
     button:disabled { opacity: 0.45; cursor: not-allowed; transform: none; }
     button.primary {
       background: var(--accent); border-color: transparent; color: var(--accent-contrast);
@@ -383,22 +401,32 @@
     #start-btn { min-width: 11rem; }
     #start-btn.is-running svg, #start-btn.is-running kbd { display: none; }
 
-    .actions { display: flex; gap: 0.7rem; margin-top: 1.25rem; flex-wrap: wrap; }
-    .actions .spacer-grow { flex: 1 1 auto; }
+    .actions {
+      position: sticky; bottom: 0; z-index: 5;
+      display: flex; align-items: center; gap: 0.7rem; flex-wrap: wrap;
+      background: var(--surface);
+      border-top: 1px solid var(--border);
+      margin: 1.25rem -1.25rem -1.25rem;
+      padding: 0.9rem 1.25rem 0.85rem;
+    }
+    .actions .kbd-help { margin: 0; align-self: center; font-size: 0.72rem; }
 
     /* ============ results ============ */
     .toolbar { display: flex; align-items: center; gap: 0.55rem; flex-wrap: wrap; }
     .toolbar .grow { flex: 1 1 auto; }
     .toolbar select { width: auto; padding: 0.42rem 1.9rem 0.42rem 0.65rem; }
 
-    .hist { display: flex; align-items: flex-end; gap: 3px; height: 2.6rem; margin: 0.8rem 0 1rem; }
+    .hist { display: flex; align-items: flex-end; gap: 3px; height: 2.6rem; margin: 0.8rem 0 0.35rem; }
     .hist-bar {
-      flex: 1 1 0; min-height: 3px; border-radius: 3px 3px 0 0;
+      flex: none; min-height: 3px; border-radius: 3px 3px 0 0;
       background: var(--accent);
       background: linear-gradient(180deg, var(--accent), color-mix(in srgb, var(--accent) 45%, transparent));
       transition: filter 0.15s; cursor: default;
     }
     .hist-bar:hover { filter: brightness(1.25); }
+    .hist-bar[data-band="good"] { background: linear-gradient(180deg, var(--success), color-mix(in srgb, var(--success) 45%, transparent)); }
+    .hist-bar[data-band="warn"] { background: linear-gradient(180deg, var(--warning), color-mix(in srgb, var(--warning) 45%, transparent)); }
+    .hist-summary { font-size: 0.75rem; color: var(--muted); font-variant-numeric: tabular-nums; margin: 0.35rem 0 0.8rem; }
 
     .scroll-hint { display: none; font-size: 0.72rem; color: var(--muted); margin: 0 0 0.55rem; }
     .table-wrap { max-height: min(62vh, 620px); overflow: auto; border: 1px solid var(--border); border-radius: var(--radius-md); }
@@ -419,13 +447,14 @@
       white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
     }
     tbody tr:last-child td { border-bottom: none; }
-    tbody tr { content-visibility: auto; contain-intrinsic-size: auto 34px; }
     tbody tr:nth-child(even) td { background: var(--surface-2); background: color-mix(in srgb, var(--surface-2) 55%, transparent); }
     tbody tr:hover td { background: var(--accent-soft); }
     td.mono, .stat-value, .mono { font-variant-numeric: tabular-nums slashed-zero; }
     td.mono { font-family: "Cascadia Code", "JetBrains Mono", Consolas, ui-monospace, monospace; font-size: 0.84rem; }
     td.lat-good { color: var(--success); }
-    td.lat-bad { color: var(--warning); }
+    td.lat-ok { color: var(--accent-strong); }
+    td.lat-warn { color: var(--warning); }
+    td.lat-bad { color: var(--danger); }
     td.v-ok {
       color: var(--success); background: var(--success-soft);
       border-radius: 999px; padding: 0.15rem 0.6rem; display: inline-block;
@@ -436,13 +465,14 @@
       border-radius: 999px; padding: 0.15rem 0.6rem; display: inline-block;
       font-size: 0.78rem; font-weight: 600;
     }
-    thead th:nth-child(1) { width: 26%; }
-    thead th:nth-child(2) { width: 9%; }
-    thead th:nth-child(3) { width: 13%; }
-    thead th:nth-child(4) { width: 10%; }
-    thead th:nth-child(5) { width: 12%; }
-    thead th:nth-child(6) { width: 10%; }
-    thead th:nth-child(7) { width: 20%; }
+    thead th:nth-child(1) { width: 22%; }
+    thead th:nth-child(2) { width: 7%; }
+    thead th:nth-child(3) { width: 10%; }
+    thead th:nth-child(4) { width: 8%; }
+    thead th:nth-child(5) { width: 9%; }
+    thead th:nth-child(6) { width: 8%; }
+    thead th:nth-child(7) { width: 9%; }
+    thead th:nth-child(8) { width: 27%; }
     #results-section[data-density="compact"] td,
     #results-section[data-density="compact"] th { padding: 0.28rem 0.55rem; font-size: 0.79rem; }
 
@@ -453,19 +483,11 @@
     thead th:nth-child(2),
     thead th:nth-child(3),
     thead th:nth-child(4),
+    thead th:nth-child(7),
     tbody td:nth-child(2),
     tbody td:nth-child(3),
-    tbody td:nth-child(4) { text-align: right; }
-
-    /* ============ profiles ============ */
-    #profile-list { list-style: none; margin: 0.9rem 0 0; padding: 0; }
-    .profile-row {
-      display: flex; align-items: center; gap: 0.5rem;
-      padding: 0.5rem 0.4rem; border-bottom: 1px solid var(--border);
-    }
-    .profile-row:last-child { border-bottom: none; }
-    .profile-row span { flex: 1 1 auto; font-size: 0.88rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .profile-row button { width: auto; padding: 0.3rem 0.7rem; font-size: 0.8rem; }
+    tbody td:nth-child(4),
+    tbody td:nth-child(7) { text-align: right; }
 
     /* ============ footer ============ */
     footer { padding: 1.5rem 0 2.5rem; font-size: 0.8rem; }
@@ -509,7 +531,89 @@
     @keyframes toast-out { from { opacity: 1; transform: translateY(0); } to { opacity: 0; transform: translateY(8px); } }
     .toast.leaving { animation: toast-out 0.2s ease-in forwards; pointer-events: none; }
 
+    /* ============ layout & misc additions ============ */
+    .grow { flex: 1 1 auto; }
+    .card-head { min-width: 0; }
+    .main-grid { display: grid; grid-template-columns: minmax(0, 1fr); gap: 0 1.5rem; align-items: start; }
+    .results-card { min-width: 0; }
+    .toolbar input[type="search"] { width: 11rem; }
+    .warn-text { color: var(--warning); }
+
+    .scan-strip {
+      position: sticky; top: 48px; z-index: 19;
+      display: flex; align-items: center; gap: 0.6rem;
+      background: var(--bg);
+      background: color-mix(in srgb, var(--bg) 85%, transparent);
+      -webkit-backdrop-filter: blur(12px);
+      backdrop-filter: blur(12px);
+      border-bottom: 1px solid var(--border);
+      padding: 0.45rem 1.25rem;
+      font-size: 0.82rem; font-weight: 600;
+    }
+    @supports not ((-webkit-backdrop-filter: blur(1px)) or (backdrop-filter: blur(1px))) {
+      .scan-strip { background: var(--bg); }
+    }
+    .scan-strip .status-dot { background: var(--accent); animation: pulse 1.6s ease-in-out infinite; }
+
+    .profile-compact { display: flex; align-items: center; gap: 0.45rem; flex-wrap: wrap; }
+    .profile-compact input[type="text"] { width: 11rem; padding: 0.4rem 0.6rem; font-size: 0.82rem; }
+    .profile-compact select { width: auto; padding: 0.42rem 1.9rem 0.42rem 0.65rem; font-size: 0.82rem; }
+    .profile-compact button { padding: 0.42rem 0.75rem; font-size: 0.82rem; }
+
+    .best-block { margin-top: 1rem; }
+    .best-head { display: flex; align-items: baseline; gap: 0.6rem; flex-wrap: wrap; margin-bottom: 0.5rem; }
+    .best-head h3 { font-size: 0.92rem; }
+    .best-list { display: grid; gap: 0.35rem; }
+    .best-row {
+      display: flex; align-items: center; gap: 0.6rem;
+      background: var(--surface-2); border: 1px solid var(--border);
+      border-radius: var(--radius-sm); padding: 0.4rem 0.7rem;
+    }
+    .best-rank { width: 1.6rem; flex: none; color: var(--muted); font-weight: 700; font-size: 0.8rem; text-align: right; font-variant-numeric: tabular-nums; }
+    .best-ip { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .best-meta { color: var(--muted); font-size: 0.8rem; }
+    .best-row .copy-row-btn {
+      margin-left: auto; padding: 0.2rem 0.6rem; font-size: 0.75rem;
+      background: var(--accent-soft); color: var(--accent-strong);
+      border: 1px solid color-mix(in srgb, var(--accent) 35%, var(--border));
+    }
+    .best-row .copy-row-btn:hover { background: var(--accent-soft); }
+    .best-row .copy-row-btn.copied { color: var(--success); border-color: var(--success); background: var(--success-soft); }
+
+    .copy-n { display: inline-flex; align-items: center; gap: 0.35rem; font-size: 0.8rem; color: var(--muted); }
+    .copy-n input { width: 5ch; padding: 0.42rem 0.5rem; font-size: 0.82rem; }
+
+    .sub-section { margin-top: 1rem; padding-top: 1rem; border-top: 1px solid var(--border); }
+    .status-row #retry-btn { margin-left: 0.6rem; padding: 0.3rem 0.7rem; font-size: 0.8rem; }
+
+    #toast-container {
+      position: fixed; bottom: 1.25rem; right: 1.25rem; z-index: 100;
+      display: flex; flex-direction: column-reverse; gap: 0.5rem;
+      pointer-events: none;
+    }
+
+    @keyframes pulse-btn { 0% { box-shadow: 0 0 0 0 var(--accent-soft); } 70% { box-shadow: 0 0 0 10px transparent; } 100% { box-shadow: 0 0 0 0 transparent; } }
+    .pulse { animation: pulse-btn 0.9s ease-out 2; }
+    @keyframes flash-field { 0%, 100% { box-shadow: none; } 30% { box-shadow: 0 0 0 3px var(--warning); border-color: var(--warning) !important; } }
+    .flash { animation: flash-field 1.1s ease-out; }
+
     /* ============ responsive ============ */
+    @media (min-width: 1100px) {
+      .wrap { max-width: 1440px; }
+      .main-grid { grid-template-columns: minmax(360px, 460px) minmax(0, 1fr); }
+      .config-card { position: sticky; top: 56px; max-height: calc(100vh - 64px); overflow-y: auto; }
+      .scan-strip { display: none; }
+      .appbar #appbar-start { display: none; }
+    }
+    @media (max-width: 1099px) {
+      .appbar #appbar-start { display: inline-flex; }
+    }
+    @media (max-width: 700px) {
+      thead th:nth-child(6),
+      thead th:nth-child(7),
+      tbody td:nth-child(6),
+      tbody td:nth-child(7) { display: none; }
+    }
     @media (max-width: 768px) { .grid-4 { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
     @media (max-width: 768px) { input, select, textarea { font-size: 16px; } }
     @media (max-width: 480px) {
@@ -517,7 +621,7 @@
       .appbar-sub { display: none; }
       .version-pill { display: none; }
     }
-    @media (max-width: 420px) {
+    @media (max-width: 480px) {
       .seg-item { white-space: normal; text-align: center; line-height: 1.25; }
     }
     @media (max-width: 640px) {
@@ -543,9 +647,12 @@
     @media (prefers-reduced-motion: reduce) {
       .status-dot { animation: none !important; }
       .progress.indeterminate .progress-fill { animation: none !important; width: 32%; }
+      .progress-fill { transition: none !important; }
       .hist-bar { transition: none !important; }
       .toast { animation: none !important; }
       .seg-item { transition: none !important; }
+      .pulse, .flash { animation: none !important; }
+      .scan-strip .status-dot { animation: none !important; }
     }
     @media (forced-colors: active) {
       .status-dot { forced-color-adjust: auto; }
@@ -574,58 +681,38 @@
         <div class="appbar-sub">Find working Cloudflare endpoints on restricted networks</div>
       </div>
       <div class="appbar-spacer"></div>
+      <button id="appbar-start" type="button" class="primary">Start</button>
       <span class="version-pill" title="CF-Scanner version">v&ndash;</span>
       <a href="https://github.com/QMahyar/cf-scanner" target="_blank" rel="noopener" class="outline" aria-label="GitHub" style="display:inline-flex;align-items:center;justify-content:center;width:36px;height:36px;border-radius:var(--radius-sm);padding:0;text-decoration:none;">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0024 12c0-6.63-5.37-12-12-12z"/></svg>
       </a>
-      <button id="theme-btn" type="button" class="outline" aria-pressed="false"></button>
+      <button id="theme-btn" type="button" class="outline"></button>
+    </div>
+    <div id="scan-strip" class="scan-strip" hidden>
+      <span class="status-dot" aria-hidden="true"></span>
+      <span id="strip-status" role="status" aria-live="polite"></span>
     </div>
   </header>
 
-  <main class="wrap">
-
-    <!-- live scan status -->
-    <section class="card status-card spacer" data-state="">
-      <div class="card-body">
-        <div class="status-row">
-          <span class="status-dot" aria-hidden="true"></span>
-          <span id="scan-status" role="status" aria-live="polite">Idle &mdash; configure and start a scan.</span><span id="p2-progress"></span>
-        </div>
-        <div id="scan-error" class="error-note" role="alert" hidden></div>
-        <div class="progress" id="progress-track" role="progressbar" aria-label="Scan progress" aria-valuemin="0" aria-valuemax="100" hidden>
-          <div class="progress-fill" id="progress-fill"></div>
-        </div>
-        <div id="progress-text" class="muted" role="status" style="font-size:0.8rem;margin-top:0.4rem" hidden></div>
-        <div class="stats" id="stats" hidden>
-          <div class="stat">
-            <span class="stat-label">Scanned</span>
-            <span class="stat-value mono" id="stat-scanned">0</span>
-          </div>
-          <div class="stat">
-            <span class="stat-label">Working</span>
-            <span class="stat-value mono ok" id="stat-found">0</span>
-          </div>
-          <div class="stat">
-            <span class="stat-label">Elapsed</span>
-            <span class="stat-value mono" id="stat-elapsed">0:00</span>
-          </div>
-          <div class="stat">
-            <span class="stat-label">Rate</span>
-            <span class="stat-value mono" id="stat-rate">&mdash;</span>
-          </div>
-        </div>
-        <div id="ranges-info" aria-live="polite"></div>
-      </div>
-    </section>
+  <main class="wrap main-grid">
 
     <!-- scan configuration -->
-    <section class="card spacer">
+    <section class="card config-card spacer">
       <div class="card-head">
         <h2>Scan configuration</h2>
         <p>Localhost only &mdash; nothing leaves this machine.</p>
+        <div class="grow"></div>
+        <div class="profile-compact">
+          <input id="profile-name" type="text" placeholder="Profile name" autocomplete="off" aria-label="Profile name">
+          <button id="profile-save-btn" type="button" class="secondary">Save</button>
+          <select id="profile-select" aria-label="Load a saved profile" title="Load a saved profile">
+            <option value="">Load&hellip;</option>
+          </select>
+          <button id="profile-del-btn" type="button" class="outline" disabled title="Delete the selected profile">Delete</button>
+        </div>
       </div>
       <div class="card-body">
-        <form id="scan-form">
+        <form id="scan-form" tabindex="-1">
           <div class="seg" role="radiogroup" aria-label="Scan mode">
             <label>
               <input type="radio" name="mode" value="Cdn" checked>
@@ -649,164 +736,201 @@
             </label>
           </div>
 
-          <div class="panel">
-            <h3 class="panel-title">Connection</h3>
-            <div class="grid grid-3">
-              <label class="field">Ports (comma-separated)
-                <input name="ports" type="text" value="443" required aria-describedby="help-ports">
-                <span class="help" id="help-ports">e.g., 443,8443 — valid range 1&ndash;65535</span>
-              </label>
-              <label class="field">Concurrency (1&ndash;1000)
-                <input name="concurrency" type="number" min="1" max="1000" value="64" required aria-describedby="help-concurrency">
-                <span class="help" id="help-concurrency">Higher = faster but more resource usage</span>
-              </label>
-              <label class="field">Probe timeout (ms)
-                <input name="timeout_ms" type="number" min="100" max="30000" value="3000" required aria-describedby="help-timeout">
-                <span class="help" id="help-timeout">Per-probe timeout in milliseconds</span>
-              </label>
-            </div>
-            <div class="inline-row">
-              <label class="check" id="include-v6-label">
-                <input type="checkbox" name="include_v6">
-                <span>Include IPv6 candidates (default: IPv4 only)</span>
-              </label>
-              <label class="check" id="warp-probes-label" hidden>
-                <span>Probes per endpoint (1&ndash;10, drives loss %)</span>
-                <input name="warp_probes" type="number" min="1" max="10" value="3">
-              </label>
-            </div>
-          </div>
+          <p id="mode-summary" class="help" style="margin: 0.6rem 0 0;"></p>
+          <div id="ranges-info" aria-live="polite" style="font-size:0.8rem; color: var(--muted); margin-top: 0.3rem;"></div>
 
-          <div class="panel">
-            <h3 class="panel-title">Target</h3>
-            <div class="radio-row">
-              <label class="radio"><input type="radio" name="target-radio" value="preset" checked> Preset</label>
-              <label class="radio"><input type="radio" name="target-radio" value="count"> Custom count</label>
-            </div>
-            <div class="grid grid-2">
-              <div class="field" id="preset-row">
-                <label for="preset">Preset</label>
-                <select name="preset" id="preset">
-                  <option value="Quick" selected>Quick &mdash; 1 IP per /24 (~4K probes)</option>
-                  <option value="Normal">Normal &mdash; 3 IPs per /24 (~12K probes)</option>
-                  <option value="Full">Full &mdash; every IP (~1.5M probes)</option>
-                </select>
-              </div>
-              <label class="field">Candidate count
-                <input name="count" type="number" min="1" max="100000" value="350" disabled aria-describedby="help-count">
-                <span class="help" id="help-count">Select 'Custom count' above.</span>
-              </label>
-            </div>
-          </div>
-
-          <div class="panel">
-            <h3 class="panel-title">Stopping &amp; ranges</h3>
-            <div class="grid grid-2">
-              <label class="field">Stop after at least N found
-                <input name="found" type="number" min="1" value="20" required aria-describedby="help-found">
-                <span class="help" id="help-found">Minimum working IPs before the scan stops; in-flight probes can add a few more (up to the concurrency setting)</span>
-              </label>
-              <label class="field">Hard cap on probes (optional)
-                <input name="cap" type="number" min="1" placeholder="none">
-              </label>
-            </div>
-            <div class="grid grid-2" style="margin-top: 0.9rem;">
-              <label class="field">Custom CIDRs (optional, replaces bundled; one per line)
-                <textarea name="custom_cidrs" rows="3" placeholder="10.0.0.0/24" aria-describedby="help-cidrs"></textarea>
-                <span class="help" id="help-cidrs">One CIDR per line, e.g., 103.28.248.0/22</span>
-              </label>
-              <label class="field">Excluded CIDRs (optional, one per line)
-                <textarea name="exclude" rows="3" placeholder="141.101.64.0/18" aria-describedby="help-exclude"></textarea>
-                <span class="help" id="help-exclude">One CIDR per line to skip during scan</span>
-              </label>
-            </div>
-          </div>
-
-          <div class="panel" id="warp-endpoints-row" hidden>
-            <h3 class="panel-title">WARP endpoints &amp; verification</h3>
-            <label class="field">Custom endpoints (ip or ip:port, one per line; empty = bundled pools)
-              <textarea name="warp_endpoints" rows="3" placeholder="162.159.192.5&#10;188.114.99.7:2408" aria-describedby="help-warp-endpoints"></textarea>
-              <span class="help" id="help-warp-endpoints">One ip or ip:port per line</span>
-            </label>
-            <div class="grid grid-2" style="margin-top: 0.9rem;">
-              <label class="field">Verify with your own wgconf (real keypair handshake)
-                <textarea name="warp_wgconf" rows="3" placeholder="[Interface]&#10;PrivateKey = ..." disabled aria-describedby="help-wgconf"></textarea>
-              </label>
-              <div class="field">
-                <span>wgconf file</span>
-                <button id="wgconf-file-btn" type="button" class="outline" disabled>Load wgconf from file</button>
-                <input id="wgconf-file" type="file" accept=".conf,.txt,text/plain" hidden>
-                <label class="check">
-                  <input type="checkbox" name="warp_verify" disabled>
-                  <span>Verify discovered endpoints with the config above</span>
-                </label>
-                <span class="help" id="help-wgconf">Paste a wgconf above first.</span>
+          <details class="panel-details" open>
+            <summary>Connection</summary>
+            <div class="details-body">
+              <div class="panel">
+                <div class="grid grid-3">
+                  <div class="field">
+                    <label for="ports">Ports (comma-separated)</label>
+                    <input id="ports" name="ports" type="text" value="443" required aria-describedby="help-ports">
+                    <span class="help" id="help-ports">e.g., 443,8443 — valid range 1&ndash;65535</span>
+                  </div>
+                  <div class="field">
+                    <label for="concurrency">Concurrency (1&ndash;1000)</label>
+                    <input id="concurrency" name="concurrency" type="number" min="1" max="1000" value="64" required aria-describedby="help-concurrency">
+                    <span class="help" id="help-concurrency">Higher = faster but more resource usage</span>
+                  </div>
+                  <div class="field">
+                    <label for="timeout_ms">Probe timeout (ms)</label>
+                    <input id="timeout_ms" name="timeout_ms" type="number" min="100" max="30000" value="3000" required aria-describedby="help-timeout">
+                    <span class="help" id="help-timeout">Per-probe timeout</span>
+                  </div>
+                </div>
+                <div class="inline-row">
+                  <label class="check" id="include-v6-label">
+                    <input type="checkbox" name="include_v6">
+                    <span>Include IPv6 candidates (default: IPv4 only)</span>
+                  </label>
+                  <label class="check" id="warp-probes-label" hidden>
+                    <span>Probes per endpoint (1&ndash;10, drives loss %)</span>
+                    <input name="warp_probes" type="number" min="1" max="10" value="3">
+                  </label>
+                </div>
               </div>
             </div>
-            <div style="margin-top: 1rem; padding-top: 1rem; border-top: 1px solid var(--border);">
-              <h4 class="panel-title">Generate WARP config (optional)</h4>
-              <div class="inline-row">
-                <label class="field" style="flex: 1 1 280px; max-width: 420px;">
-                  <span>WARP+ license key (optional)</span>
-                  <input id="warp-license" type="text" placeholder="Paste a WARP+ license key, or leave empty" autocomplete="off">
-                </label>
-                <button id="warp-gen-btn" type="button" class="secondary" style="margin-top: 1.15rem;">Generate WARP config</button>
+          </details>
+
+          <details class="panel-details" open>
+            <summary>Target</summary>
+            <div class="details-body">
+              <div class="panel">
+                <div class="radio-row" role="radiogroup" aria-label="Target source">
+                  <label class="radio"><input type="radio" name="target-radio" value="preset" checked> Preset</label>
+                  <label class="radio"><input type="radio" name="target-radio" value="count"> Custom count</label>
+                </div>
+                <div class="grid grid-2">
+                  <div class="field" id="preset-row">
+                    <label for="preset">Preset</label>
+                    <select name="preset" id="preset">
+                      <option value="Quick" selected>Quick &mdash; 1 IP per /24 (~4K probes)</option>
+                      <option value="Normal">Normal &mdash; 3 IPs per /24 (~12K probes)</option>
+                      <option value="Full">Full &mdash; every IP (~1.5M probes)</option>
+                    </select>
+                  </div>
+                  <div class="field">
+                    <label for="count">Candidate count</label>
+                    <input id="count" name="count" type="number" min="1" max="100000" value="350" disabled aria-describedby="help-count">
+                    <span class="help" id="help-count">Select 'Custom count' above.</span>
+                  </div>
+                </div>
               </div>
-              <p class="help" id="help-warp-gen">Registers a fresh endpoint key with Cloudflare and loads the resulting wgconf above. The private key never leaves this machine.</p>
             </div>
-          </div>
+          </details>
+
+          <details class="panel-details" id="ranges-details">
+            <summary>Stopping &amp; ranges</summary>
+            <div class="details-body">
+              <div class="panel">
+                <div class="grid grid-2">
+                  <div class="field">
+                    <label for="found">Stop after at least N found</label>
+                    <input id="found" name="found" type="number" min="1" value="20" required aria-describedby="help-found">
+                    <span class="help" id="help-found">Minimum working IPs before the scan stops; in-flight probes can add a few more (up to the concurrency setting)</span>
+                  </div>
+                  <div class="field">
+                    <label for="cap">Hard cap on probes (optional)</label>
+                    <input id="cap" name="cap" type="number" min="1" placeholder="no cap">
+                  </div>
+                </div>
+                <div class="grid grid-2 sub-section">
+                  <div class="field">
+                    <label for="custom_cidrs">Custom CIDRs (optional, replaces bundled; one per line)</label>
+                    <textarea id="custom_cidrs" name="custom_cidrs" rows="3" placeholder="10.0.0.0/24" aria-describedby="help-cidrs"></textarea>
+                    <span class="help" id="help-cidrs">One CIDR per line, e.g., 103.28.248.0/22</span>
+                  </div>
+                  <div class="field">
+                    <label for="exclude">Excluded CIDRs (optional, one per line)</label>
+                    <textarea id="exclude" name="exclude" rows="3" placeholder="141.101.64.0/18" aria-describedby="help-exclude"></textarea>
+                    <span class="help" id="help-exclude">One CIDR per line to skip during scan</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </details>
+
+          <details class="panel-details" id="warp-endpoints-row" hidden>
+            <summary>WARP endpoints &amp; verification</summary>
+            <div class="details-body">
+              <div class="panel">
+                <div class="field">
+                  <label for="warp_endpoints">Custom endpoints (ip or ip:port, one per line; empty = bundled pools)</label>
+                  <textarea id="warp_endpoints" name="warp_endpoints" rows="3" placeholder="162.159.192.5&#10;188.114.99.7:2408" aria-describedby="help-warp-endpoints"></textarea>
+                  <span class="help" id="help-warp-endpoints">One ip or ip:port per line</span>
+                </div>
+                <div class="grid grid-2 sub-section">
+                  <div class="field">
+                    <label for="warp_wgconf">Verify with your own wgconf (real keypair handshake)</label>
+                    <textarea id="warp_wgconf" name="warp_wgconf" rows="3" placeholder="[Interface]&#10;PrivateKey = ..." disabled aria-describedby="help-wgconf"></textarea>
+                    <span class="help" id="help-wgconf">Paste a wgconf above first.</span>
+                  </div>
+                  <div class="field">
+                    <span>wgconf file</span>
+                    <button id="wgconf-file-btn" type="button" class="outline" disabled>Load wgconf from file</button>
+                    <input id="wgconf-file" type="file" accept=".conf,.txt,text/plain" hidden>
+                    <label class="check">
+                      <input type="checkbox" name="warp_verify" disabled>
+                      <span>Verify discovered endpoints with the config above</span>
+                    </label>
+                  </div>
+                </div>
+                <div class="sub-section">
+                  <h4 class="panel-title">Generate WARP config (optional)</h4>
+                  <div class="inline-row">
+                    <div class="field" style="flex: 1 1 280px; max-width: 420px;">
+                      <label for="warp-license">WARP+ license key (optional)</label>
+                      <input id="warp-license" type="text" placeholder="Paste a WARP+ license key, or leave empty" autocomplete="off">
+                    </div>
+                    <button id="warp-gen-btn" type="button" class="secondary" style="margin-top: 1.15rem;">Generate WARP config</button>
+                  </div>
+                  <p class="help" id="help-warp-gen">Registers a fresh endpoint key with Cloudflare and loads the resulting wgconf above. The private key never leaves this machine.</p>
+                </div>
+              </div>
+            </div>
+          </details>
 
           <details id="phase2-details" class="panel-details">
             <summary>Phase 2 &mdash; verify candidates through xray</summary>
             <div class="details-body">
               <div class="panel">
                 <h3 class="panel-title">Verification</h3>
-                <label class="field">Configs (URIs, subscription URLs, or xray JSON paths; one per line)
-                  <textarea name="phase2_configs" rows="3" placeholder="vless://uuid@host:443?encryption=none" aria-describedby="help-phase2-configs"></textarea>
+                <div class="field">
+                  <label for="phase2_configs">Configs (URIs, subscription URLs, or xray JSON paths; one per line)</label>
+                  <textarea id="phase2_configs" name="phase2_configs" rows="3" placeholder="vless://uuid@host:443?encryption=none" aria-describedby="help-phase2-configs"></textarea>
                   <span class="help" id="help-phase2-configs">Enter configs above to enable Phase 2 verification options.</span>
-                </label>
+                </div>
                 <label class="check" style="margin-top: 0.7rem;">
                   <input type="checkbox" name="phase2_only" disabled aria-describedby="help-phase2-only">
-                  Verify the last scan's results only (skip phase 1)
-                  <span class="help" id="help-phase2-only">Runs xray verification against the candidates already found.</span>
+                  <span>Verify the last scan's results only (skip phase 1)</span>
                 </label>
-                <div class="grid grid-2" style="margin-top: 0.9rem;">
-                  <label class="field">Fragment preset
-                    <select name="phase2_fragment" disabled>
+                <span class="help" id="help-phase2-only">Runs xray verification against the candidates already found.</span>
+                <div class="grid grid-2 sub-section">
+                  <div class="field">
+                    <label for="phase2_fragment">Fragment preset</label>
+                    <select id="phase2_fragment" name="phase2_fragment" disabled>
                       <option value="Off" selected>Off</option>
                       <option value="Light">Light (100-200 / 10-20)</option>
                       <option value="Medium">Medium (50-200 / 10-40)</option>
                       <option value="Heavy">Heavy (10-300 / 5-50)</option>
                       <option value="Custom">Custom</option>
                     </select>
-                  </label>
-                  <label class="field">Parallel instances (1&ndash;8)
-                    <input name="phase2_concurrency" type="number" min="1" max="8" value="3" disabled>
-                  </label>
+                  </div>
+                  <div class="field">
+                    <label for="phase2_concurrency">Parallel instances (1&ndash;8)</label>
+                    <input id="phase2_concurrency" name="phase2_concurrency" type="number" min="1" max="8" value="3" disabled>
+                  </div>
                 </div>
                 <div class="grid grid-2">
-                  <label class="field">SNI variants (comma-separated; empty = config&rsquo;s own)
-                    <input name="phase2_snis" type="text" placeholder="www.cloudflare.com" disabled aria-describedby="help-phase2-snis">
+                  <div class="field">
+                    <label for="phase2_snis">SNI variants (comma-separated; empty = config&rsquo;s own)</label>
+                    <input id="phase2_snis" name="phase2_snis" type="text" placeholder="www.cloudflare.com" disabled aria-describedby="help-phase2-snis">
                     <span class="help" id="help-phase2-snis">Optional: override SNI for TLS handshake</span>
-                  </label>
-                  <label class="field">Probe URLs (one per line; every one must return HTTP 200)
-                    <textarea name="phase2_probe_urls" rows="2" disabled aria-describedby="help-phase2-urls">https://cp.cloudflare.com/</textarea>
+                  </div>
+                  <div class="field">
+                    <label for="phase2_probe_urls">Probe URLs (one per line; every one must return HTTP 200)</label>
+                    <textarea id="phase2_probe_urls" name="phase2_probe_urls" rows="2" disabled aria-describedby="help-phase2-urls">https://cp.cloudflare.com/</textarea>
                     <span class="help" id="help-phase2-urls">Each http(s) URL is fetched through the tunnel; the candidate passes only when all respond 200. Max 8.</span>
-                  </label>
+                  </div>
                 </div>
-                <div class="grid grid-3" style="margin-top: 0.9rem;">
-                  <label class="field">Packets (custom preset)
-                    <input name="phase2_packets" type="text" value="tlshello" disabled aria-describedby="help-phase2-packets">
+                <div class="grid grid-3 sub-section">
+                  <div class="field">
+                    <label for="phase2_packets">Packets (custom preset)</label>
+                    <input id="phase2_packets" name="phase2_packets" type="text" value="tlshello" disabled aria-describedby="help-phase2-packets">
                     <span class="help" id="help-phase2-packets">Packet type for fragment (e.g., tlshello)</span>
-                  </label>
-                  <label class="field">Length in bytes (custom preset, &ldquo;min-max&rdquo;)
-                    <input name="phase2_length" type="text" placeholder="100-200" disabled aria-describedby="help-phase2-length">
+                  </div>
+                  <div class="field">
+                    <label for="phase2_length">Length in bytes (custom preset, &ldquo;min-max&rdquo;)</label>
+                    <input id="phase2_length" name="phase2_length" type="text" placeholder="100-200" disabled aria-describedby="help-phase2-length">
                     <span class="help" id="help-phase2-length">Fragment length range, e.g., 100&ndash;200</span>
-                  </label>
-                  <label class="field">Interval in ms (custom preset, &ldquo;min-max&rdquo;)
-                    <input name="phase2_interval" type="text" placeholder="10-20" disabled aria-describedby="help-phase2-interval">
+                  </div>
+                  <div class="field">
+                    <label for="phase2_interval">Interval in ms (custom preset, &ldquo;min-max&rdquo;)</label>
+                    <input id="phase2_interval" name="phase2_interval" type="text" placeholder="10-20" disabled aria-describedby="help-phase2-interval">
                     <span class="help" id="help-phase2-interval">Fragment interval range, e.g., 10&ndash;20</span>
-                  </label>
+                  </div>
                 </div>
               </div>
             </div>
@@ -821,38 +945,85 @@
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"></path></svg>
               Cancel
             </button>
+            <span class="grow"></span>
+            <span class="help kbd-help"><kbd>R</kbd> rerun &middot; <kbd>G</kbd> results &middot; <kbd>Ctrl+Shift+C</kbd> copy top N</span>
           </div>
         </form>
       </div>
     </section>
 
     <!-- results -->
-    <section class="card spacer" id="results-section" data-density="normal">
+    <section class="card status-card results-card spacer" id="results-section" data-density="normal">
       <div class="card-head">
-        <h2>Results <span id="result-count" class="muted"></span></h2>
-        <p>Last scan only &mdash; in memory, cleared by reset.</p>
-        <div class="grow" style="flex: 1 1 auto;"></div>
+        <h2 class="sr-only">Results <span id="result-count" class="muted"></span></h2>
+        <div class="status-row">
+          <span class="status-dot" aria-hidden="true"></span>
+          <span id="scan-status" role="status" aria-live="polite">Idle &mdash; configure and start a scan.</span>
+          <span id="p2-progress" role="status" aria-live="polite"></span>
+        </div>
+        <div class="grow"></div>
         <div class="toolbar">
+          <input id="filter-input" type="search" placeholder="Filter results&hellip;" aria-label="Filter results" title="Filter by IP, port, country, or colo">
           <button id="reset-btn" type="button" class="outline">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M8 6V4h8v2m-9 0v14a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2V6"></path></svg>
-            Reset results
+            Reset
           </button>
-          <div class="grow" style="flex: 1 1 auto;"></div>
-          <button id="density-btn" type="button" class="outline" aria-pressed="false">Compact view</button>
+          <button id="density-btn" type="button" class="outline" aria-pressed="false">Compact</button>
           <button id="add-failed-btn" type="button" class="outline" hidden>
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"></path></svg>
-            Add failed to exclusions
+            Exclude failed
           </button>
+          <label class="copy-n" title="Copy only the top N sorted results; empty copies all">
+            <span>Top</span>
+            <input id="copy-count" type="number" min="1" value="10" aria-label="Copy top N">
+          </label>
           <button id="copy-btn" type="button" class="secondary" disabled>Copy</button>
+          <button id="copy-uris-btn" type="button" class="secondary" disabled hidden>Copy URIs</button>
           <button id="download-btn" type="button" class="secondary" disabled>Download</button>
           <select id="download-format" aria-label="Download format">
             <option value="txt">TXT</option>
             <option value="csv">CSV</option>
             <option value="json">JSON</option>
+            <option value="uri">URIs</option>
           </select>
         </div>
       </div>
       <div class="card-body">
+        <div id="scan-error" class="error-note" role="alert" hidden></div>
+        <div class="progress" id="progress-track" role="progressbar" aria-label="Scan progress" aria-valuemin="0" aria-valuemax="100" hidden>
+          <div class="progress-fill" id="progress-fill"></div>
+        </div>
+        <div id="progress-text" class="muted" role="status" style="font-size:0.8rem;margin-top:0.4rem" hidden></div>
+        <div class="stats" id="stats" hidden>
+          <div class="stat">
+            <span class="stat-label">Scanned</span>
+            <span class="stat-value mono" id="stat-scanned">0</span>
+          </div>
+          <div class="stat">
+            <span class="stat-label">Working</span>
+            <span class="stat-value mono ok" id="stat-found">0</span>
+          </div>
+          <div class="stat">
+            <span class="stat-label">Elapsed</span>
+            <span class="stat-value mono" id="stat-elapsed">0:00</span>
+          </div>
+          <div class="stat">
+            <span class="stat-label">Rate</span>
+            <span class="stat-value mono" id="stat-rate">&mdash;</span>
+          </div>
+        </div>
+
+        <section id="best-block" class="best-block" hidden aria-label="Best endpoints">
+          <div class="best-head">
+            <h3>Best endpoints</h3>
+            <span class="hist-summary" id="best-summary"></span>
+            <div class="grow"></div>
+            <button id="best-copy-btn" type="button" class="secondary">Copy</button>
+          </div>
+          <div class="best-list" id="best-list"></div>
+        </section>
+
+        <div id="hist-summary" class="hist-summary" hidden></div>
         <div id="latency-hist" class="hist" role="img" hidden></div>
         <div id="results-live" role="status" aria-live="polite" class="sr-only"></div>
         <p class="scroll-hint" id="scroll-hint">The table scrolls sideways on narrow screens &mdash; the IP column stays pinned.</p>
@@ -867,30 +1038,13 @@
                 <th class="sortable" data-key="loss_pct" scope="col">Loss <span class="caret"></span></th>
                 <th class="sortable" data-key="country" scope="col">Country <span class="caret"></span></th>
                 <th class="sortable" data-key="colo" scope="col">Colo <span class="caret"></span></th>
+                <th class="sortable" data-key="phase2_latency_ms" scope="col">P2 ms <span class="caret"></span></th>
                 <th scope="col">Phase 2</th>
               </tr>
             </thead>
             <tbody id="results-body"></tbody>
           </table>
         </div>
-      </div>
-    </section>
-
-    <!-- profiles -->
-    <section class="card spacer">
-      <div class="card-head">
-        <h2>Profiles</h2>
-        <p>Named scan configs, held in memory by the server for this session only.</p>
-      </div>
-      <div class="card-body">
-        <div class="inline-row">
-          <label class="field" style="flex: 1 1 260px; max-width: 380px;">
-            <span>Profile name</span>
-            <input id="profile-name" type="text" placeholder="home-vless" autocomplete="off">
-          </label>
-          <button id="profile-save-btn" type="button" class="secondary" style="margin-top: 1.25rem;">Save current form</button>
-        </div>
-        <ul id="profile-list"></ul>
       </div>
     </section>
 
@@ -901,7 +1055,7 @@
     </footer>
   </main>
 
-  <div id="toast-container" aria-live="polite" aria-atomic="true" style="position:fixed;bottom:1.25rem;right:1.25rem;z-index:100;display:flex;flex-direction:column-reverse;gap:0.5rem;pointer-events:none;"></div>
+  <div id="toast-container" aria-live="polite" aria-atomic="true"></div>
 
   <script>
     "use strict";
@@ -912,14 +1066,16 @@
     };
 
     const results = [];
-    const seenKeys = new Set();
+    const keyToIndex = new Map();
     let sortKey = "latency_ms";
     let sortAsc = true;
     let lastCfg = null;
     let scanState = "idle"; // idle | starting | running | cancelled | done | failed
     let localCancel = false;
+    let confirmWipe = true;
     let reconnectLost = false;
     let latestProgress = null;
+    let lastProgressAnnounce = 0;
     let scannedCount = 0;
     let scanStartMs = 0;
     let elapsedTimer = null;
@@ -954,12 +1110,30 @@
     const statElapsed = document.getElementById("stat-elapsed");
     const statRate = document.getElementById("stat-rate");
     const START_LABEL_HTML = startBtn.innerHTML;
+    const appbarStart = document.getElementById("appbar-start");
+    const filterInput = document.getElementById("filter-input");
+    const copyCount = document.getElementById("copy-count");
+    const copyUrisBtn = document.getElementById("copy-uris-btn");
+    const bestBlock = document.getElementById("best-block");
+    const bestList = document.getElementById("best-list");
+    const bestSummary = document.getElementById("best-summary");
+    const bestCopyBtn = document.getElementById("best-copy-btn");
+    const histSummary = document.getElementById("hist-summary");
+    const modeSummary = document.getElementById("mode-summary");
+    const scanStrip = document.getElementById("scan-strip");
+    const stripStatus = document.getElementById("strip-status");
+    const profileSelect = document.getElementById("profile-select");
+    const profileDelBtn = document.getElementById("profile-del-btn");
 
     // ---- toast notifications ----
     function dismissToast(t) {
       if (t.dataset.dismissed) return;
       t.dataset.dismissed = "1";
       if (t._timer) { clearTimeout(t._timer); t._timer = null; }
+      if (matchMedia("(prefers-reduced-motion: reduce)").matches) {
+        t.remove();
+        return;
+      }
       t.classList.add("leaving");
       t.addEventListener("animationend", () => t.remove(), { once: true });
     }
@@ -1026,7 +1200,7 @@
       document.documentElement.dataset.theme = resolved;
       document.documentElement.dataset.themePref = pref;
       themeBtn.innerHTML = THEME_ICONS[pref] + THEME_LABELS[pref];
-      themeBtn.setAttribute("aria-pressed", String(resolved === "dark"));
+      themeBtn.setAttribute("aria-label", "Theme: " + THEME_LABELS[pref]);
     }
     applyTheme(getThemePref());
     themeBtn.addEventListener("click", () => {
@@ -1108,6 +1282,28 @@
       resetBtn.disabled = false;
       lastTitleUpdate = 0;
       document.title = "CF-Scanner";
+      scanStrip.hidden = true;
+      hideBest();
+      syncAppbarStart();
+    }
+    function syncAppbarStart() {
+      const running = startBtn.disabled;
+      appbarStart.disabled = running;
+      appbarStart.textContent = running ? "Scanning\u2026" : "Start";
+    }
+    function updateStrip() {
+      if (scanState === "running" || scanState === "starting") {
+        const p = latestProgress;
+        const total = p && p.total != null ? p.total : null;
+        const scanned = p && p.scanned != null ? p.scanned : scannedCount;
+        let t;
+        if (total) t = `${scanned.toLocaleString()} / ${total.toLocaleString()}`;
+        else t = `${scanned.toLocaleString()} checked`;
+        stripStatus.textContent = t + " \u00b7 " + Number(results.length).toLocaleString() + " found";
+        scanStrip.hidden = false;
+      } else {
+        scanStrip.hidden = true;
+      }
     }
     function beginRun() {
       runGen = ++scanGeneration;
@@ -1115,7 +1311,7 @@
       localCancel = false;
       reconnectLost = false;
       results.length = 0;
-      seenKeys.clear();
+      keyToIndex.clear();
       sortedCache = null;
       histBuiltFor = -1;
       tableDirty = true;
@@ -1137,6 +1333,7 @@
       progressText.textContent = "";
       progressText.hidden = true;
       scanStartMs = Date.now();
+      if (elapsedTimer) { clearInterval(elapsedTimer); }
       elapsedTimer = setInterval(tickElapsed, 500);
       cancelBtn.disabled = false;
       resetBtn.disabled = true;
@@ -1145,8 +1342,11 @@
       startBtn.classList.add("is-running");
       hideErrorCard();
       hideRetry();
+      hideBest();
       showStatus("Scanning\u2026", "running");
       document.title = "Scanning\u2026 \u2014 CF-Scanner";
+      updateStrip();
+      syncAppbarStart();
       scheduleRender();
     }
     // Terminal states: bar never fills to 100% for cancelled runs.
@@ -1155,6 +1355,7 @@
       stopPolling();
       // A poll/loadResults in flight can re-apply stale progress after this
       // point; clear it so no terminal state shows a live progress line.
+      const lastP = latestProgress;
       latestProgress = null;
       const found = s && s.found != null ? s.found : results.length;
       const scanned = s && s.scanned != null ? s.scanned : scannedCount;
@@ -1163,7 +1364,7 @@
       progressTrack.classList.remove("indeterminate");
       if (cancelled) {
         scanState = "cancelled";
-        const total = latestProgress && latestProgress.total != null ? latestProgress.total : null;
+        const total = lastP && lastP.total != null ? lastP.total : null;
         const pct = total && total > 0 ? Math.min(100, Math.round((scanned / total) * 100)) : null;
         if (pct != null) {
           progressFill.style.width = pct + "%";
@@ -1171,15 +1372,15 @@
         } else {
           progressTrack.removeAttribute("aria-valuenow");
         }
-        const msg = `Cancelled \u2014 ${found} working retained`;
+        const msg = `Cancelled \u2014 ${Number(found).toLocaleString()} working retained`;
         showStatus(msg, "cancelled");
         document.title = "Cancelled \u2014 CF-Scanner";
       } else {
         scanState = "done";
         progressFill.style.width = "100%";
         progressTrack.setAttribute("aria-valuenow", "100");
-        const dur = s && s.duration_ms != null ? (s.duration_ms / 1000).toFixed(1) : "0.0";
-        const msg = `Done: ${Number(scanned).toLocaleString()} scanned, ${found} found in ${dur}s`;
+        const dur = s && s.duration_ms != null ? Math.round(s.duration_ms / 1000) : 0;
+        const msg = `Done: ${Number(scanned).toLocaleString()} scanned, ${Number(found).toLocaleString()} found in ${fmtTime(dur)}`;
         showStatus(msg, "done");
         document.title = "Done \u2014 CF-Scanner";
       }
@@ -1200,6 +1401,12 @@
       }
       flushNow();
       statFound.textContent = Number(found).toLocaleString();
+      scanStrip.hidden = true;
+      if (!cancelled && results.length > 0) {
+        renderBest();
+        postScanPush();
+      }
+      syncAppbarStart();
     }
     function failScan(msg) {
       stopElapsed();
@@ -1219,21 +1426,28 @@
       progressText.hidden = true;
       showRetry();
       flushNow();
+      scanStrip.hidden = true;
+      syncAppbarStart();
     }
     let retryBtn = null;
     function showRetry() {
-      if (!lastCfg) return;
       if (!retryBtn) {
         retryBtn = document.createElement("button");
         retryBtn.id = "retry-btn";
         retryBtn.type = "button";
         retryBtn.className = "secondary";
-        retryBtn.style.marginTop = "0.7rem";
         retryBtn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M8 16H3v5"/></svg> Retry';
-        statusCard.querySelector(".card-body").appendChild(retryBtn);
+        statusCard.querySelector(".card-head .status-row").appendChild(retryBtn);
       }
       retryBtn.hidden = false;
-      retryBtn.onclick = () => { retryBtn.hidden = true; startScan(lastCfg); };
+      retryBtn.onclick = () => {
+        retryBtn.hidden = true;
+        // Re-run whatever the FORM currently holds (edits after a failure
+        // are honored), re-validated, without a wipe confirmation dialog.
+        confirmWipe = false;
+        form.requestSubmit();
+        confirmWipe = true;
+      };
     }
     function hideRetry() {
       if (retryBtn) retryBtn.hidden = true;
@@ -1254,19 +1468,22 @@
           scanState = "idle";
           startBtn.disabled = false;
           startBtn.innerHTML = START_LABEL_HTML;
-      startBtn.classList.remove("is-running");
+          startBtn.classList.remove("is-running");
           resetBtn.disabled = false;
+          syncAppbarStart();
           showErrorCard(msg);
           if (resp.status === 409) startPolling();
           return;
         }
+        store.set("last-cfg", JSON.stringify(cfg));
         if (scanState === "starting") beginRun();
       } catch (err) {
         scanState = "idle";
         startBtn.disabled = false;
         startBtn.innerHTML = START_LABEL_HTML;
-      startBtn.classList.remove("is-running");
+        startBtn.classList.remove("is-running");
         resetBtn.disabled = false;
+        syncAppbarStart();
         showErrorCard("Server unreachable: " + err);
       }
     }
@@ -1283,16 +1500,16 @@
     }
     function addResult(v) {
       const k = rowKey(v);
-      if (seenKeys.has(k)) {
+      const i = keyToIndex.get(k);
+      if (i !== undefined) {
         // Re-emissions are verdict updates (phase 2 attaches to a phase-1
         // row): merge into the stored object so the row picks up lat/colo/
         // phase2 without growing the store or orphaning sort-cache refs.
-        const i = results.findIndex(r => rowKey(r) === k);
-        if (i >= 0) Object.assign(results[i], v);
+        Object.assign(results[i], v);
         tableDirty = true;
         return false;
       }
-      seenKeys.add(k);
+      keyToIndex.set(k, results.length);
       results.push(v);
       tableDirty = true;
       histDirty = true;
@@ -1325,11 +1542,9 @@
       return 0;
     }
     function compareRows(a, b) {
-      if (sortKey === null) {
-        return (a.latency_ms ?? Infinity) - (b.latency_ms ?? Infinity);
-      }
       if (sortKey === "ip") return sortAsc ? cmpIp(a.ip, b.ip) : cmpIp(b.ip, a.ip);
-      const av = a[sortKey], bv = b[sortKey];
+      const av = sortKey === "phase2_latency_ms" ? (a.phase2 ? a.phase2.latency_ms : null) : a[sortKey];
+      const bv = sortKey === "phase2_latency_ms" ? (b.phase2 ? b.phase2.latency_ms : null) : b[sortKey];
       const aNull = av == null, bNull = bv == null;
       if (aNull || bNull) {
         if (aNull === bNull) return 0;
@@ -1374,6 +1589,19 @@
       statFound.textContent = results.length.toLocaleString();
       applyProgress();
       updateAddFailedVisibility();
+      updateStrip();
+      const fr = filteredRows();
+      copyBtn.disabled = downloadBtn.disabled = fr.length === 0;
+    }
+
+    let filterQuery = "";
+    function filteredRows() {
+      if (!filterQuery) return sortedResults();
+      return sortedResults().filter(v =>
+        v.ip.toLowerCase().includes(filterQuery) ||
+        String(v.port).includes(filterQuery) ||
+        (v.country || "").toLowerCase().includes(filterQuery) ||
+        (v.colo || "").toLowerCase().includes(filterQuery));
     }
 
     // The "Add failed to exclusions" action is only useful while the
@@ -1381,36 +1609,168 @@
     function updateAddFailedVisibility() {
       const failed = results.filter(v => v.phase2 && v.phase2.passed === false).length;
       addFailedBtn.hidden = failed === 0;
+      const exportable = results.some(v => canExportRow(v, v.phase2));
+      copyUrisBtn.hidden = !exportable;
+      copyUrisBtn.disabled = !exportable;
+    }
+
+    // ---- best-endpoints block (post-scan decision support) ----
+    const BEST_MAX = 5;
+    function bestRows() {
+      const rows = filteredRows();
+      const verified = rows.filter(v => v.phase2 && v.phase2.passed);
+      if (verified.length > 0) {
+        return verified
+          .slice()
+          .sort((a, b) => (a.phase2.latency_ms ?? Infinity) - (b.phase2.latency_ms ?? Infinity))
+          .slice(0, BEST_MAX);
+      }
+      return rows.slice(0, BEST_MAX);
+    }
+    function copyRowText(v) {
+      const ip = v.ip.includes(":") ? `[${v.ip}]` : v.ip;
+      return `${ip}:${v.port}`;
+    }
+    function bestLatency(v) {
+      if (v.phase2 && v.phase2.passed && v.phase2.latency_ms != null) return v.phase2.latency_ms;
+      return v.latency_ms;
+    }
+    function copyFeedback(btn, doneLabel) {
+      btn.disabled = true;
+      const prev = btn.textContent;
+      btn.textContent = doneLabel;
+      setTimeout(() => { btn.disabled = false; btn.textContent = prev; }, 1500);
+    }
+    function renderBest() {
+      const rows = bestRows();
+      if (rows.length === 0 || scanState !== "done") { hideBest(); return; }
+      const lats = results.map(v => v.latency_ms).filter(l => l != null).sort((a, b) => a - b);
+      const min = lats[0];
+      const med = percentile(lats, 0.5);
+      const p95 = percentile(lats, 0.95);
+      bestSummary.textContent = lats.length > 0
+        ? `min ${min} \u00b7 median ${med} \u00b7 p95 ${p95} ms`
+        : "";
+      const frag = document.createDocumentFragment();
+      rows.forEach((v, i) => {
+        const row = document.createElement("div");
+        row.className = "best-row";
+        const rank = document.createElement("span");
+        rank.className = "best-rank";
+        rank.textContent = String(i + 1);
+        const ip = document.createElement("span");
+        ip.className = "best-ip mono";
+        ip.textContent = copyRowText(v);
+        const meta = document.createElement("span");
+        meta.className = "best-meta mono";
+        meta.textContent = (v.phase2 && v.phase2.passed ? "p2 " : "p1 ") + bestLatency(v) + "ms \u00b7 " + (v.country || "\u2014") + " \u00b7 " + (v.colo || "\u2014");
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = "copy-row-btn";
+        btn.textContent = "Copy";
+        btn.setAttribute("aria-label", `Copy ${v.ip}:${v.port}`);
+        btn.addEventListener("click", async () => {
+          try {
+            await navigator.clipboard.writeText(copyRowText(v));
+            copyFeedback(btn, "\u2713 Copied");
+            showToast(`Copied ${v.ip}:${v.port}`, "success");
+          } catch {
+            prompt("Copy the endpoint (Ctrl+C):", copyRowText(v));
+          }
+        });
+        row.appendChild(rank);
+        row.appendChild(ip);
+        row.appendChild(meta);
+        row.appendChild(btn);
+        frag.appendChild(row);
+      });
+      bestList.replaceChildren(frag);
+      bestBlock.hidden = false;
+    }
+    function hideBest() {
+      bestBlock.hidden = true;
+    }
+    bestCopyBtn.addEventListener("click", async () => {
+      const rows = bestRows();
+      if (rows.length === 0) return;
+      const text = rows.map(copyRowText).join("\n");
+      try {
+        await navigator.clipboard.writeText(text);
+        copyFeedback(bestCopyBtn, "\u2713 Copied!");
+        showToast(`Copied best ${rows.length} endpoint${rows.length === 1 ? "" : "s"}`, "success");
+      } catch {
+        prompt("Copy the best endpoints (Ctrl+C):", text);
+      }
+    });
+    function postScanPush() {
+      const smooth = !matchMedia("(prefers-reduced-motion: reduce)").matches;
+      document.getElementById("results-section").scrollIntoView({ behavior: smooth ? "smooth" : "auto", block: "start" });
+      copyBtn.classList.add("pulse");
+      setTimeout(() => copyBtn.classList.remove("pulse"), 2000);
     }
 
     function buildEmptyRow() {
       const tr = document.createElement("tr");
       tr.id = "empty-row";
       const td = document.createElement("td");
-      td.colSpan = 7;
-      td.style.textAlign = "center";
-      td.style.padding = "2.5rem 1rem";
+      td.colSpan = 8;
+      const running = scanState === "running" || scanState === "starting";
       const isPostScan = scanState === "done" || scanState === "cancelled" || scanState === "failed";
-      const copy = isPostScan
-        ? "No working endpoints found \u2014 try wider ports or different ranges."
-        : "Results will appear here once you start a scan.";
-      td.innerHTML = `
-        <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="var(--muted)" stroke-width="1.5" stroke-linecap="round" style="margin-bottom:0.75rem">
-          <circle cx="12" cy="12" r="9"/>
-          <circle cx="12" cy="12" r="3"/>
-          <path d="M12 3v2M12 19v2M3 12h2M19 12h2"/>
-        </svg>
-        <div class="empty-title" style="margin-bottom:0.3rem">${isPostScan ? "No results" : "No scan results yet"}</div>
-        <div class="muted" style="font-size:0.85rem;margin-bottom:0.8rem">${copy}</div>
-        <button class="secondary" onclick="document.getElementById('scan-form').scrollIntoView({behavior:'smooth',block:'start'})">Configure a scan</button>
-      `;
+      const copy = running
+        ? "Scanning \u2014 working endpoints will appear here."
+        : (isPostScan
+            ? "No working endpoints found \u2014 try wider ports or different ranges."
+            : "Results will appear here once you start a scan.");
+      const icon = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+      icon.setAttribute("width", "32");
+      icon.setAttribute("height", "32");
+      icon.setAttribute("viewBox", "0 0 24 24");
+      icon.setAttribute("fill", "none");
+      icon.setAttribute("stroke", "var(--muted)");
+      icon.setAttribute("stroke-width", "1.5");
+      icon.setAttribute("stroke-linecap", "round");
+      icon.style.marginBottom = "0.75rem";
+      icon.innerHTML = '<circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="3"/><path d="M12 3v2M12 19v2M3 12h2M19 12h2"/>';
+      const title = document.createElement("div");
+      title.className = "empty-title";
+      title.style.marginBottom = "0.3rem";
+      title.textContent = running ? "Scanning\u2026" : (isPostScan ? "No results" : "No scan results yet");
+      const sub = document.createElement("div");
+      sub.className = "muted";
+      sub.style.fontSize = "0.85rem";
+      sub.style.marginBottom = "0.8rem";
+      sub.textContent = copy;
+      td.appendChild(icon);
+      td.appendChild(title);
+      td.appendChild(sub);
+      if (!running) {
+        const cta = document.createElement("button");
+        cta.id = "empty-cta";
+        cta.type = "button";
+        cta.className = "secondary";
+        cta.textContent = "Configure a scan";
+        cta.addEventListener("click", () => {
+          const smooth = !matchMedia("(prefers-reduced-motion: reduce)").matches;
+          document.getElementById("scan-form").scrollIntoView({ behavior: smooth ? "smooth" : "auto", block: "start" });
+        });
+        td.appendChild(cta);
+      }
       tr.appendChild(td);
       return tr;
     }
 
+    // Signature of a row's displayable fields; unchanged rows skip a full
+    // DOM rebuild on every 100ms flush.
+    function rowSignature(v) {
+      const p2 = v.phase2;
+      return v.ip + "|" + v.port + "|" + (v.latency_ms ?? "") + "|" + (v.loss_pct ?? "")
+        + "|" + (v.country ?? "") + "|" + (v.colo ?? "")
+        + "|" + (p2 ? (p2.passed ? "1" : "0") + "|" + (p2.latency_ms ?? "") + "|" + (p2.fragment ?? "") + "|" + (p2.sni ?? "") + "|" + (p2.error ?? "") + "|" + (p2.config_index ?? "") : "");
+    }
+
     // Keyed row reconciliation: reuses rows by ip:port, only creates/removes diffs.
     function renderTable() {
-      const rows = sortedResults();
+      const rows = filteredRows();
       const keyed = new Map();
       for (const tr of Array.from(tbody.children)) {
         if (tr.dataset.key) keyed.set(tr.dataset.key, tr);
@@ -1428,18 +1788,25 @@
           tr = document.createElement("tr");
           tr.dataset.key = k;
         }
-        // Cells are rebuilt on every render: re-emitted phase-2 verdicts
-        // (and their Export action) must update existing rows, not only
-        // rows created for the first emission.
-        tr.replaceChildren(
-          cell(v.ip, "mono"),
-          cell(v.port, "mono"),
-          cell(v.latency_ms, latencyCls(v.latency_ms)),
-          lossCell(v),
-          cell(v.country),
-          cell(v.colo),
-          phase2Cell(v)
-        );
+        const sig = rowSignature(v);
+        if (tr._sig !== sig) {
+          const hadFocus = tr.contains(document.activeElement);
+          tr._sig = sig;
+          tr.replaceChildren(
+            cell(v.ip, "mono"),
+            cell(v.port, "mono"),
+            cell(v.latency_ms, latencyCls(v.latency_ms)),
+            lossCell(v),
+            cell(v.country),
+            cell(v.colo),
+            cell(v.phase2 && v.phase2.latency_ms != null ? v.phase2.latency_ms : null, latencyCls(v.phase2 && v.phase2.latency_ms)),
+            phase2Cell(v)
+          );
+          if (hadFocus) {
+            const nb = tr.querySelector("button");
+            if (nb) nb.focus();
+          }
+        }
         const cur = tbody.children[i];
         if (cur !== tr) tbody.insertBefore(tr, cur);
         i++;
@@ -1450,8 +1817,9 @@
       } else if (empty) {
         empty.remove();
       }
-      countEl.textContent = rows.length > 0 ? `(${rows.length})` : "";
-      copyBtn.disabled = downloadBtn.disabled = rows.length === 0;
+      countEl.textContent = rows.length > 0
+        ? (filterQuery ? `(${rows.length}/${results.length})` : `(${rows.length})`)
+        : "";
       scrollHint.toggleAttribute("data-empty", rows.length === 0);
     }
 
@@ -1487,10 +1855,13 @@
       } else {
         text = `${scanned.toLocaleString()} checked`;
       }
-      progressText.textContent = text;
+      const now = Date.now();
+      if (now - lastProgressAnnounce >= 1000) {
+        progressText.textContent = text;
+        lastProgressAnnounce = now;
+      }
       progressText.hidden = false;
       const pctTitle = pct != null ? pct : null;
-      const now = Date.now();
       if (now - lastTitleUpdate >= 1000) {
         lastTitleUpdate = now;
         document.title = pctTitle !== null ? `Scanning ${pctTitle}% \u2014 CF-Scanner` : `Scanning\u2026 \u2014 CF-Scanner`;
@@ -1498,33 +1869,47 @@
     }
 
     const HIST_BUCKETS = [
-      { label: "0-50ms", max: 50 },
-      { label: "50-100ms", max: 100 },
-      { label: "100-200ms", max: 200 },
-      { label: "200-400ms", max: 400 },
-      { label: "400-800ms", max: 800 },
-      { label: "800ms+", max: Infinity }
+      { label: "0-50ms", max: 50, width: 8, band: "good" },
+      { label: "50-100ms", max: 100, width: 8, band: "good" },
+      { label: "100-200ms", max: 200, width: 14, band: "accent" },
+      { label: "200-400ms", max: 400, width: 22, band: "accent" },
+      { label: "400-800ms", max: 800, width: 24, band: "warn" },
+      { label: "800ms+", max: Infinity, width: 24, band: "warn" }
     ];
+    function percentile(sorted, p) {
+      if (sorted.length === 0) return null;
+      return sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * p))];
+    }
     function renderHistogram() {
       if (results.length === histBuiltFor) return;
       histBuiltFor = results.length;
       const lats = results.map(v => v.latency_ms).filter(l => l != null);
-      if (lats.length === 0) { histEl.hidden = true; return; }
+      if (lats.length === 0) { histEl.hidden = true; histSummary.hidden = true; return; }
+      const sortedLats = lats.slice().sort((a, b) => a - b);
       const cumulative = HIST_BUCKETS.map(b => lats.filter(l => l <= b.max).length);
       let prev = 0;
       const counts = cumulative.map(c => { const n = c - prev; prev = c; return n; });
       const peak = Math.max(...counts, 1);
       histEl.replaceChildren();
       counts.forEach((n, i) => {
+        const b = HIST_BUCKETS[i];
         const bar = document.createElement("div");
         bar.className = "hist-bar";
+        bar.dataset.band = b.band;
+        bar.style.width = b.width + "%";
         bar.style.height = Math.max(4, Math.round((n / peak) * 100)) + "%";
-        bar.title = `${HIST_BUCKETS[i].label}: ${n}`;
+        const pct = Math.round((n / lats.length) * 100);
+        bar.title = `${b.label}: ${n} (${pct}%)`;
         histEl.appendChild(bar);
       });
       histEl.setAttribute("aria-label",
         "Latency histogram: " + counts.map((n, i) => `${HIST_BUCKETS[i].label} ${n}`).join(", "));
       histEl.hidden = false;
+      const min = sortedLats[0];
+      const med = percentile(sortedLats, 0.5);
+      const p95 = percentile(sortedLats, 0.95);
+      histSummary.textContent = `${lats.length} results \u2014 min ${min}ms \u00b7 median ${med}ms \u00b7 p95 ${p95}ms`;
+      histSummary.hidden = false;
     }
 
     function cell(value, cls) {
@@ -1534,7 +1919,9 @@
         td.textContent = "\u2014";
         td.className = (td.className ? td.className + " " : "") + "muted";
       } else {
-        td.textContent = String(value);
+        const s = String(value);
+        td.textContent = s;
+        if (s.length > 24) td.title = s;
       }
       return td;
     }
@@ -1568,6 +1955,7 @@
         btn.type = "button";
         btn.className = "export-btn";
         btn.textContent = "Export";
+        btn.setAttribute("aria-label", `Export config for ${v.ip}:${v.port}`);
         btn.title = "Copy a ready-to-use config URI (this IP/port, the verified SNI)";
         btn.addEventListener("click", (e) => {
           e.stopPropagation();
@@ -1622,9 +2010,10 @@
 
     function latencyCls(l) {
       if (l == null) return "muted";
-      if (l < 150) return "lat-good mono";
-      if (l >= 800) return "lat-bad mono";
-      return "mono";
+      if (l < 100) return "lat-good mono";
+      if (l < 250) return "lat-ok mono";
+      if (l < 800) return "lat-warn mono";
+      return "lat-bad mono";
     }
 
     function parseLines(text) {
@@ -1871,6 +2260,9 @@
     // ---- sortable headers ----
     document.querySelectorAll("th.sortable").forEach(th => {
       th.setAttribute("tabindex", "0");
+      th.setAttribute("role", "button");
+      const label = th.textContent.replace(/\u25B4|\u25BE/g, "").trim();
+      th.setAttribute("aria-label", "Sort by " + label);
       th.addEventListener("click", () => {
         const key = th.dataset.key;
         if (sortKey === key) sortAsc = !sortAsc;
@@ -1879,6 +2271,7 @@
         th.querySelector(".caret").textContent = sortAsc ? "\u25B4" : "\u25BE";
         th.closest("tr").querySelectorAll("th").forEach(t => t.removeAttribute("aria-sort"));
         th.setAttribute("aria-sort", sortAsc ? "ascending" : "descending");
+        th.setAttribute("aria-label", `Sort by ${label} ${sortAsc ? "ascending" : "descending"}`);
         sortedCache = null;
         tableDirty = true;
         flushNow();
@@ -1897,10 +2290,17 @@
       });
     });
 
+    filterInput.addEventListener("input", () => {
+      filterQuery = filterInput.value.trim().toLowerCase();
+      tableDirty = true;
+      flushNow();
+    });
+
     // ---- scan actions ----
     form.addEventListener("submit", (e) => {
       e.preventDefault();
       if (scanState === "starting" || scanState === "running") return;
+      if (confirmWipe && results.length > 0 && !confirm(`Start a new scan? This clears the current ${Number(results.length).toLocaleString()} result${results.length === 1 ? "" : "s"}.`)) return;
       const bad = validateForm();
       if (bad) { bad.focus(); showStatus("Fix the highlighted fields to start."); return; }
       let cfg;
@@ -1920,7 +2320,10 @@
       if (scanState === "running" || scanState === "starting") return;
       if (results.length > 0 && !confirm(`Clear all ${results.length} results?`)) return;
       results.length = 0;
-      seenKeys.clear();
+      keyToIndex.clear();
+      filterInput.value = "";
+      filterQuery = "";
+      hideBest();
       sortedCache = null;
       histBuiltFor = -1;      latestProgress = null;
       scannedCount = 0;
@@ -1961,6 +2364,13 @@
       const prior = box.value.trim();
       box.value = prior ? `${prior}\n${added.join("\n")}` : added.join("\n");
       showToast(`${added.length} failed IP${added.length === 1 ? "" : "s"} added to exclusions`, "success");
+      const d = box.closest("details");
+      if (d) d.open = true;
+      const smooth = !matchMedia("(prefers-reduced-motion: reduce)").matches;
+      box.scrollIntoView({ behavior: smooth ? "smooth" : "auto", block: "center" });
+      box.classList.remove("flash");
+      void box.offsetWidth;
+      box.classList.add("flash");
     });
 
     // ---- clipboard copy with feedback ----
@@ -1970,10 +2380,11 @@
     };
     let copyTimeout = null;
     copyBtn.addEventListener("click", async () => {
-      const text = sortedResults().map(v => {
-        const ip = v.ip.includes(":") ? `[${v.ip}]` : v.ip;
-        return `${ip}:${v.port}`;
-      }).join("\n");
+      const rows = filteredRows();
+      const n = parseInt(copyCount.value, 10);
+      const pick = Number.isInteger(n) && n > 0 ? rows.slice(0, n) : rows;
+      if (pick.length === 0) return;
+      const text = pick.map(copyRowText).join("\n");
       try {
         await navigator.clipboard.writeText(text);
         if (copyTimeout) clearTimeout(copyTimeout);
@@ -1984,7 +2395,8 @@
           copyBtn.classList.remove("copied");
           copyTimeout = null;
         }, 1500);
-        showToast("Copied to clipboard", "success");
+        const label = pick.length < rows.length ? ` top ${pick.length} from ${rows.length}` : "";
+        showToast(`Copied ${pick.length} endpoint${pick.length === 1 ? "" : "s"}${label}`, "success");
       } catch {
         if (copyTimeout) clearTimeout(copyTimeout);
         copyBtn.textContent = "Copy failed \u2014 press Ctrl+C";
@@ -1996,30 +2408,96 @@
       }
     });
 
+    // ---- bulk export: copy all verified config URIs ----
+    async function exportUris(rows) {
+      const uris = [];
+      for (const v of rows) {
+        const p2 = v.phase2;
+        const config = lastCfg.phase2.configs[p2.config_index];
+        const res = await fetch("/api/config/export", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ config, ip: v.ip, port: v.port, sni: p2.sni || null })
+        });
+        const payload = await res.json().catch(() => ({}));
+        if (res.ok && payload.uri) uris.push(payload.uri);
+      }
+      return uris;
+    }
+    copyUrisBtn.addEventListener("click", async () => {
+      const rows = filteredRows().filter(v => canExportRow(v, v.phase2)).slice(0, 100);
+      if (rows.length === 0) return;
+      copyUrisBtn.disabled = true;
+      try {
+        const uris = await exportUris(rows);
+        if (uris.length === 0) {
+          showToast("No config URIs could be exported", "error");
+          return;
+        }
+        const text = uris.join("\n");
+        try {
+          await navigator.clipboard.writeText(text);
+          showToast(`Copied ${uris.length} config URI${uris.length === 1 ? "" : "s"} to clipboard`, "success");
+        } catch {
+          prompt("Copy the exported configs (Ctrl+C):", text);
+        }
+      } catch (err) {
+        showToast("Export failed: " + err, "error");
+      } finally {
+        copyUrisBtn.disabled = false;
+      }
+    });
+
     // ---- unified download ----
     function toTxt(rows) {
-      return rows.map(v => {
-        const ip = v.ip.includes(":") ? `[${v.ip}]` : v.ip;
-        return `${ip}:${v.port} ${v.latency_ms ?? "?"}ms`;
-      }).join("\n") + "\n";
+      return rows.map(copyRowText).join("\n") + "\n";
     }
 
-    downloadBtn.addEventListener("click", () => {
+    function saveBlob(blob, filename) {
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(blob);
+      a.download = filename;
+      a.click();
+      URL.revokeObjectURL(a.href);
+    }
+
+    downloadBtn.addEventListener("click", async () => {
       const fmt = downloadFormat.value;
+      const rows = filteredRows();
+      if (fmt === "uri") {
+        const exportable = rows.filter(v => canExportRow(v, v.phase2)).slice(0, 100);
+        if (exportable.length === 0) {
+          showToast("No exportable config URIs in the current results", "error");
+          return;
+        }
+        downloadBtn.disabled = true;
+        try {
+          const uris = await exportUris(exportable);
+          if (uris.length === 0) {
+            showToast("No config URIs could be exported", "error");
+            return;
+          }
+          const name = timestampFilename("txt").replace(/\.txt$/, "") + "-uris.txt";
+          saveBlob(new Blob([uris.join("\n") + "\n"], { type: "text/plain" }), name);
+          showToast("Downloaded " + name, "success");
+        } catch (err) {
+          showToast("Export failed: " + err, "error");
+        } finally {
+          downloadBtn.disabled = false;
+        }
+        return;
+      }
       let blob;
       if (fmt === "json") {
         blob = new Blob([JSON.stringify(results, null, 2)], { type: "application/json" });
       } else if (fmt === "csv") {
         blob = new Blob([toCsv(results)], { type: "text/csv" });
       } else {
-        blob = new Blob([toTxt(results)], { type: "text/plain" });
+        blob = new Blob([toTxt(rows)], { type: "text/plain" });
       }
-      const a = document.createElement("a");
-      a.href = URL.createObjectURL(blob);
-      a.download = timestampFilename(fmt);
-      a.click();
-      URL.revokeObjectURL(a.href);
-      showToast("Downloaded " + a.download, "success");
+      const name = timestampFilename(fmt);
+      saveBlob(blob, name);
+      showToast("Downloaded " + name, "success");
     });
 
     function csvField(v) {
@@ -2051,7 +2529,11 @@
           + " hosts";
         if (data.last_updated) {
           const when = new Date(data.last_updated);
-          if (!isNaN(when)) text += ` \u2014 updated ${when.toLocaleString()}`;
+          if (!isNaN(when)) {
+            text += ` \u2014 updated ${when.toLocaleString()}`;
+            const ageDays = (Date.now() - when.getTime()) / 86400000;
+            if (ageDays > 30) text += " \u2014 may be outdated";
+          }
         }
         el.textContent = text;
       })
@@ -2113,18 +2595,28 @@
     // ---- /api/status + /api/results polling (reconciles a stuck banner) ----
     let pollTimer = null;
     let pollBusy = false;
+    let pollActive = false;
+    let pollDelay = 2000;
+    const POLL_MAX_DELAY = 30000;
     function startPolling() {
-      if (!pollTimer) pollTimer = setInterval(pollState, 2000);
+      pollActive = true;
+      if (!pollTimer) schedulePoll();
     }
     function stopPolling() {
-      if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+      pollActive = false;
+      if (pollTimer) { clearTimeout(pollTimer); pollTimer = null; }
+    }
+    function schedulePoll() {
+      pollTimer = setTimeout(() => { pollTimer = null; void pollState(); }, pollDelay);
     }
     async function loadResults() {
+      const gen = runGen;
       try {
         const resp = await fetch("/api/results");
         if (!resp.ok) return;
         const data = await resp.json();
         if (!data || !Array.isArray(data.results)) return;
+        if (gen !== runGen) return;
         if (data.progress && typeof data.progress === "object") {
           if (scanState === "running" || scanState === "starting") {
             latestProgress = data.progress;
@@ -2133,7 +2625,7 @@
         }
         if (data.results.length === 0) return;
         results.length = 0;
-        seenKeys.clear();
+        keyToIndex.clear();
         data.results.forEach(v => {
           if (v && typeof v === "object" && typeof v.ip === "string") addResult(v);
         });
@@ -2151,7 +2643,7 @@
       if (gen !== runGen) return;
       if (data && Array.isArray(data.results)) {
         results.length = 0;
-        seenKeys.clear();
+        keyToIndex.clear();
         data.results.forEach(v => {
           if (v && typeof v === "object" && typeof v.ip === "string") addResult(v);
         });
@@ -2175,13 +2667,16 @@
       showStatus("Scan ended \u2014 live updates were lost; results below may be partial.", "error");
       document.title = "Scan ended \u2014 CF-Scanner";
       showRetry();
+      scanStrip.hidden = true;
+      syncAppbarStart();
     }
     async function pollState() {
       if (pollBusy) return;
       pollBusy = true;
       try {
         const resp = await fetch("/api/status");
-        if (!resp.ok) return;
+        if (!resp.ok) { pollDelay = Math.min(POLL_MAX_DELAY, pollDelay * 2); return; }
+        pollDelay = 2000;
         const data = await resp.json();
         if (!data || typeof data !== "object") return;
         if (data.is_running === true) {
@@ -2196,8 +2691,11 @@
         } else if (scanState === "running") {
           await reconcileTerminal();
         }
-      } catch { /* keep polling */ } finally {
+      } catch {
+        pollDelay = Math.min(POLL_MAX_DELAY, pollDelay * 2);
+      } finally {
         pollBusy = false;
+        if (pollActive && !pollTimer) schedulePoll();
       }
     }
 
@@ -2259,15 +2757,16 @@
       if (warpMode) {
         form.elements["target-radio"].value = "count";
         form.elements["count"].disabled = false;
-        if (form.elements["ports"].value === "443") form.elements["ports"].value = "2408";
-      } else {
-        if (form.elements["ports"].value === "2408" && !form.elements["ports"].value.includes(",")) {
-          form.elements["ports"].value = "443";
-        }
       }
+      form.elements["ports"].placeholder = warpMode ? "2408" : "443";
+      document.body.classList.toggle("mode-warp", warpMode);
+      modeSummary.textContent = warpMode
+        ? "UDP endpoint discovery with WireGuard probes \u2014 no phase 2."
+        : "TCP/TLS scan of Cloudflare ranges \u2014 optional xray verification (phase 2).";
       syncWarpVerify();
     }
     form.querySelectorAll('input[name="mode"]').forEach(r => r.addEventListener("change", onModeChange));
+    onModeChange({ target: form.querySelector('input[name="mode"]:checked') });
 
     const verifyBox = form.elements["warp_verify"];
     const wgconfField = form.elements["warp_wgconf"];
@@ -2295,6 +2794,7 @@
         wgconfField.value = String(reader.result || "");
         if (wgconfField.value.trim()) verifyBox.checked = true;
         syncWarpVerify();
+        showToast("wgconf loaded: " + file.name, "success");
       };
       reader.onerror = () => showStatus("Could not read the wgconf file.");
       reader.readAsText(file);
@@ -2354,62 +2854,47 @@
       }
     });
 
-    const profileList = document.getElementById("profile-list");
     const profileName = document.getElementById("profile-name");
     let profileNames = new Set();
 
-    function profileRow(text) {
-      const li = document.createElement("li");
-      li.className = "profile-row";
-      const span = document.createElement("span");
-      span.textContent = text;
-      li.appendChild(span);
-      return li;
-    }
-
     async function refreshProfiles() {
-      profileList.replaceChildren();
+      const cur = profileSelect.value;
+      profileSelect.replaceChildren(new Option("Load\u2026", ""));
       let profiles;
       try {
         const resp = await fetch("/api/profiles");
         if (!resp.ok) {
-          profileList.appendChild(profileRow("Profiles unavailable (server build without profile support)."));
+          profileSelect.appendChild(new Option("Profiles unavailable", ""));
+          profileDelBtn.disabled = true;
           return;
         }
         const data = await resp.json();
-        profiles = Array.isArray(data) ? data
-          : (data && Array.isArray(data.profiles) ? data.profiles : []);
+        profiles = Array.isArray(data) ? data : (data && Array.isArray(data.profiles) ? data.profiles : []);
       } catch {
-        profileList.appendChild(profileRow("Profiles unavailable (server build without profile support)."));
+        profileSelect.appendChild(new Option("Profiles unavailable", ""));
+        profileDelBtn.disabled = true;
         return;
       }
       profileNames = new Set();
       for (const p of profiles) {
         if (!p || typeof p.name !== "string" || !p.name) continue;
         profileNames.add(p.name);
+        profileSelect.appendChild(new Option(p.name, p.name));
       }
-      if (profiles.length === 0) {
-        profileList.appendChild(profileRow("No profiles saved yet."));
-        return;
-      }
-      for (const p of profiles) {
-        if (!p || typeof p.name !== "string" || !p.name) continue;
-        const load = document.createElement("button");
-        load.type = "button";
-        load.className = "outline";
-        load.textContent = "Load";
-        load.addEventListener("click", () => loadProfile(p.name));
-        const del = document.createElement("button");
-        del.type = "button";
-        del.className = "secondary";
-        del.textContent = "Delete";
-        del.addEventListener("click", () => deleteProfile(p.name));
-        const li = profileRow(p.name);
-        li.appendChild(load);
-        li.appendChild(del);
-        profileList.appendChild(li);
-      }
+      if (cur && profileNames.has(cur)) profileSelect.value = cur;
+      profileDelBtn.disabled = profileSelect.value === "";
     }
+
+    profileSelect.addEventListener("change", () => {
+      const name = profileSelect.value;
+      profileDelBtn.disabled = !name;
+      if (name) loadProfile(name);
+    });
+
+    profileDelBtn.addEventListener("click", () => {
+      const name = profileSelect.value;
+      if (name) deleteProfile(name);
+    });
 
     async function loadProfile(name) {
       try {
@@ -2418,7 +2903,9 @@
         const p = await resp.json();
         if (!p || !p.config) { showStatus(`Profile "${name}" has no config.`); return; }
         applyConfig(p.config);
+        profileName.value = name;
         showStatus(`Loaded profile "${name}".`);
+        showToast(`Profile "${name}" loaded`, "success");
       } catch (err) {
         showStatus(`Profile load failed: ${err}`);
       }
@@ -2431,6 +2918,7 @@
         if (!resp.ok && resp.status !== 404) { showStatus(`Profile delete failed: ${resp.status}`); return; }
         showStatus(`Profile "${name}" deleted.`);
         showToast(`Profile "${name}" deleted`, "success");
+        if (profileName.value === name) profileName.value = "";
         refreshProfiles();
       } catch (err) {
         showStatus(`Profile delete failed: ${err}`);
@@ -2515,12 +3003,33 @@
     });
 
     document.addEventListener("keydown", (e) => {
+      const t = e.target;
+      const typing = t.matches("input, textarea, select") || t.isContentEditable;
       if ((e.ctrlKey || e.metaKey) && e.key === "Enter") {
         e.preventDefault();
-        document.getElementById("start-btn").click();
+        startBtn.click();
+        return;
       }
-      if (e.key === "Escape" && !e.target.matches("input, textarea, select") && !cancelBtn.disabled) {
+      if (e.key === "Escape" && !typing && !cancelBtn.disabled) {
         cancelBtn.click();
+        return;
+      }
+      if ((e.ctrlKey || e.metaKey) && e.shiftKey && (e.key === "C" || e.key === "c")) {
+        e.preventDefault();
+        if (!copyBtn.disabled) copyBtn.click();
+        return;
+      }
+      if (typing || e.ctrlKey || e.metaKey || e.altKey) return;
+      if (e.key === "g" || e.key === "G") {
+        e.preventDefault();
+        const smooth = !matchMedia("(prefers-reduced-motion: reduce)").matches;
+        document.getElementById("results-section").scrollIntoView({ behavior: smooth ? "smooth" : "auto", block: "start" });
+        filterInput.focus();
+        return;
+      }
+      if ((e.key === "r" || e.key === "R") && (scanState === "idle" || scanState === "done" || scanState === "failed" || scanState === "cancelled")) {
+        e.preventDefault();
+        form.requestSubmit();
       }
     });
 
@@ -2533,6 +3042,8 @@
       }
     })();
     refreshProfiles();
+    appbarStart.addEventListener("click", () => startBtn.click());
+    syncAppbarStart();
 
     // /api/status is the sole version authority and tells us if a scan is live.
     let scanRunningAtLoad = false;
@@ -2558,7 +3069,7 @@
         if (scanRunningAtLoad || scanState === "running" || scanState === "starting") return;
         if (Array.isArray(data.results) && data.results.length > 0) {
           results.length = 0;
-          seenKeys.clear();
+          keyToIndex.clear();
           data.results.forEach(v => {
             if (v && typeof v === "object" && typeof v.ip === "string") addResult(v);
           });
@@ -2572,6 +3083,12 @@
         }
       })
       .catch(() => {});
+
+    // Restore the last successful scan config across restarts (ports kept as typed).
+    try {
+      const saved = store.get("last-cfg", "");
+      if (saved) applyConfig(JSON.parse(saved));
+    } catch { /* corrupt or unavailable; keep defaults */ }
   </script>
 </body>
 </html>
