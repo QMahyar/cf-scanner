@@ -113,7 +113,7 @@ jobs:
           submodules: recursive
       - uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: "1.85"
+          toolchain: "1.88"
           components: rustfmt, clippy
       - name: Test
         run: cargo test --locked
@@ -141,7 +141,7 @@ jobs:
           submodules: recursive
       - uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: "1.85"
+          toolchain: "1.88"
           targets: aarch64-unknown-linux-gnu, x86_64-pc-windows-msvc
       - uses: Swatinem/rust-cache@v2
         with:
