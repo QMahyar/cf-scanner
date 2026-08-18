@@ -85,6 +85,42 @@ tests, coverage, `cargo audit`, the xray-parity job (fails fast if the
 pinned XTLS release disappears), and the placeholder guard.
 Tag pushes and PRs additionally run the Release workflow in "plan" mode.
 
+## First-time npm setup (one-time)
+
+The package is created by the first publish — there is no claim step
+(`@qmahyar/cf-scanner` was first published 2026-08-17 at 0.4.0; later
+publishes update it in place). What must exist before CI can publish:
+
+1. **Scope ownership:** scoped packages can only be published by the npm
+   account (or org) that owns the scope. `npm whoami` on any publishing
+   machine must print `qmahyar` — otherwise every publish fails with E404
+   or E403 even when logged in. (`npm whoami` answering E401 = not logged
+   in at all.)
+2. **Local login** (dev machines only, for documented emergencies):
+   `npm login` in `npm/cf-scanner/`.
+3. **The `NPM_TOKEN` repository secret:** npmjs.com → Access Tokens →
+   Generate New Token → **Automation**, then `gh secret set NPM_TOKEN`.
+   Without it the Release workflow's `npm-publish` job dies at `npm
+   publish` with `ENEEDAUTH need auth`.
+
+### The NPM_TOKEN lifecycle (agent-facing)
+
+- The token is an npm **automation token** (bypasses 2FA/OTP) stored only
+  in GitHub's encrypted repo secrets (`gh secret list` shows it; it never
+  appears in the repo, logs, or artifacts). The current one was set
+  2026-08-18 and **expires after 90 days**.
+- Every release after a tag push is fully automatic: the `npm-publish` job
+  reads `NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}`, publishes
+  `@qmahyar/cf-scanner` at the `package.json` version, and no human login
+  is ever needed.
+- **Expiry signal:** the job fails with `ENEEDAUTH need auth` (or a
+  `E401`/`403` from the registry) even though the secret exists and the
+  RELEASE_TAG guard passed. That means the token expired or was revoked —
+  do NOT debug the workflow; ask the user for a fresh 90-day automation
+  token and run `gh secret set NPM_TOKEN`, then re-run the failed job (or
+  re-push the tag per the fix flow). After replacement, re-verify with
+  `npm view @qmahyar/cf-scanner version`.
+
 ## npm package
 
 `@qmahyar/cf-scanner` (in `npm/cf-scanner/`) is a thin binary-download
@@ -94,13 +130,10 @@ tag does) from the GitHub Release pinned by `RELEASE_TAG` in `install.js`.
 
 **Publishing is automatic** — the Release workflow's `npm-publish` job runs
 after `host` creates the GitHub Release (the install script downloads from
-it). It requires the `NPM_TOKEN` repository secret: an npm **automation
-token** (create at npmjs.com → Access Tokens; automation tokens bypass the
-interactive OTP that npm 2FA demands on publish), set via
-`gh secret set NPM_TOKEN`. Without the secret the job fails with
-`Input required: token` — that is the signal to add it, not to publish by
-hand. There is nothing to run locally; the only action is in the release
-commit, before tagging:
+it). It requires the `NPM_TOKEN` repository secret (see "First-time npm
+setup"): an npm **automation token** — automation tokens bypass the
+interactive OTP that npm 2FA demands on publish. There is nothing to run
+locally; the only action is in the release commit, before tagging:
 
 1. **Bump `npm/cf-scanner/package.json` `version`** (patch bump is fine) and
    set `RELEASE_TAG` in `install.js` to the tag you are about to push. They
@@ -174,9 +207,11 @@ release exists, never rewrite it — cut a new PATCH.
   `dist init`, so re-check it after any regeneration.
 - **WiX is CI-only** — MSI builds fail on dev boxes without WiX. Expected.
 - **`npm-publish` needs the `NPM_TOKEN` secret** — an npm automation token
-  (2FA bypass). Missing secret = the job fails with "Input required: token";
-  set it via `gh secret set NPM_TOKEN`, then re-run the failed job (or
-  re-push the tag per the fix flow).
+  (2FA bypass). Missing secret = the job fails at `npm publish` with
+  `ENEEDAUTH need auth`; set it via `gh secret set NPM_TOKEN`, then re-run
+  the failed job (or re-push the tag per the fix flow). Same symptom
+  after expiry: the token is only valid 90 days — ask the user for a new
+  one (see "The NPM_TOKEN lifecycle" above).
 - **Broken npm versions cannot be removed immediately** — the last published
   version is unpublishable, and any version is locked for 24h after
   publish. Fix = PATCH bump, never delete (same as binary releases).

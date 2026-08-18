@@ -41,6 +41,26 @@ git restore data/bundled/xray data/bundled/xray.exe
 
 Release flow (tag → CI → GitHub Release → npm publish, all automatic) is in `docs/release-process.md` — never publish artifacts or the npm package manually.
 
+npm publishing knowledge (AGENTS must know, condensed from `docs/release-process.md`):
+- The npm wrapper `@qmahyar/cf-scanner` (`npm/cf-scanner/`) is published by
+  the Release workflow's `npm-publish` job (after `host` creates the GitHub
+  Release). It needs the `NPM_TOKEN` repo secret (npm automation token) and
+  an npm account that owns the `@qmahyar` scope (`npm whoami` → `qmahyar`).
+- Missing `NPM_TOKEN` = job dies with `ENEEDAUTH need auth` — set it with
+  `gh secret set NPM_TOKEN`, then re-run the failed job or re-push the tag.
+- The token is a 90-day npm automation token (no 2FA). Expiry shows up as
+  `ENEEDAUTH`/E401 despite the secret existing — then ask the USER for a
+  fresh token, run `gh secret set NPM_TOKEN`, re-run; never try to publish
+  around it.
+- The package exists on the registry since 2026-08-17 (0.4.0 first) — publish
+  updates it in place; there is no claim step.
+- `RELEASE_TAG` in `npm/cf-scanner/install.js` must equal the released tag
+  (the workflow greps it); npm `version` is registry bookkeeping only.
+- npm refuses republishing the same version and unpublish is blocked 24h —
+  a broken npm release is fixed with a PATCH bump, never a delete.
+- Manual `npm publish` is only for documented emergencies (see the doc);
+  users install via `npm i -g @qmahyar/cf-scanner`.
+
 ## Architecture
 
 - Single process. CLI, HTTP server, wizard, frontend = thin clients of ONE
