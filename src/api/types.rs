@@ -13,7 +13,12 @@ pub const DEFAULT_WARP_PORTS: &[u16] = &[2408, 500, 854, 880, 1701, 3138, 4500];
 /// it via the existing 1..=1000 range.
 pub const DEFAULT_CONCURRENCY: u16 = 64;
 pub const DEFAULT_TIMEOUT_MS: u64 = 3_000;
-pub const DEFAULT_PROBE_URL: &str = "https://cp.cloudflare.com/";
+pub const DEFAULT_PROBE_URL: &str = "https://www.google.com/robots.txt";
+
+fn default_probe_url() -> String {
+    DEFAULT_PROBE_URL.to_owned()
+}
+
 pub const MAX_SCAN_COUNT: u32 = 100_000;
 /// Unique ports allowed in one scan; bounds the probe fan-out (OOM guard).
 pub const MAX_PORTS: usize = 64;
@@ -103,7 +108,7 @@ pub struct Phase2Config {
     /// SNI fronting variants; empty = use each config's own SNI.
     pub snis: Vec<String>,
     /// Legacy single-probe field; new clients send `probe_urls` instead.
-    #[serde(default)]
+    #[serde(default = "default_probe_url")]
     pub probe_url: String,
     /// Tiny HTTP targets fetched through the tunnel to prove connectivity;
     /// every one must return 200 for a pass (max 8, each http(s)). Empty =
@@ -983,10 +988,17 @@ mod tests {
         );
         assert_eq!(serde_json::from_str::<Phase2Config>(&json).unwrap(), p2);
         // Omitted fields keep old payloads decoding: probe_urls defaults to
-        // the empty list and the legacy probe_url gets the default URL.
+        // the empty list and an explicit probe_url round-trips as-is.
         let legacy = r#"{"configs":["vless://uuid@example.com:443"],"fragment":"Off","snis":[],"probe_url":"https://cp.cloudflare.com/","concurrency":3}"#;
         let decoded: Phase2Config = serde_json::from_str(legacy).unwrap();
         assert!(decoded.probe_urls.is_empty());
+        assert_eq!(
+            decoded.probe_url, "https://cp.cloudflare.com/",
+            "an explicit probe_url survives decoding"
+        );
+        // A payload with no probe_url at all falls back to the default.
+        let bare = r#"{"configs":["vless://uuid@example.com:443"],"fragment":"Off","snis":[],"concurrency":3}"#;
+        let decoded: Phase2Config = serde_json::from_str(bare).unwrap();
         assert_eq!(decoded.probe_url, DEFAULT_PROBE_URL);
     }
 

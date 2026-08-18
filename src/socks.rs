@@ -2,6 +2,7 @@
 //! inbound, then the same TLS+HTTP GET leg as a direct fetch. Used for the
 //! phase-2 tunnel probes (verify.rs); not a general-purpose client.
 
+use std::io;
 use std::net::SocketAddr;
 use std::time::Duration;
 
@@ -36,9 +37,21 @@ where
 
     let bytes: Vec<u8> = {
         let mut buf = Vec::new();
-        rd.take(MAX_BODY_BYTES as u64 + 64 * 1024)
-            .read_to_end(&mut buf)
-            .await?;
+        let mut rd = rd.take(MAX_BODY_BYTES as u64 + 64 * 1024);
+        let mut chunk = [0u8; 8192];
+        loop {
+            match rd.read(&mut chunk).await {
+                Ok(0) => break,
+                Ok(n) => buf.extend_from_slice(&chunk[..n]),
+                // HTTP/1.1 `Connection: close` ends the body at EOF; some
+                // servers (and every tunneled hop that drops TLS close_notify,
+                // e.g. Cloudflare Workers proxying) close without the TLS
+                // goodbye. rustls reports that as UnexpectedEof; keep the
+                // bytes already delivered instead of failing the fetch.
+                Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => break,
+                Err(e) => return Err(e).context("failed reading HTTP response"),
+            }
+        }
         buf
     };
     let split = bytes

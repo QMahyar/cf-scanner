@@ -1030,7 +1030,7 @@
                   </div>
                   <div class="field">
                     <label for="phase2_probe_urls">Probe URLs (one per line; every one must return HTTP 200)</label>
-                    <textarea id="phase2_probe_urls" name="phase2_probe_urls" rows="2" disabled aria-describedby="help-phase2-urls">https://cp.cloudflare.com/</textarea>
+                    <textarea id="phase2_probe_urls" name="phase2_probe_urls" rows="2" disabled aria-describedby="help-phase2-urls">https://www.google.com/robots.txt</textarea>
                     <span class="help" id="help-phase2-urls">Each URL is fetched through the tested endpoint; a candidate passes only when every URL responds 200. Max 8.</span>
                   </div>
                 </div>
@@ -2325,7 +2325,7 @@
           custom_fragment,
           snis: form.elements["phase2_snis"].value.split(",").map(s => s.trim()).filter(Boolean),
           probe_url: "",
-          probe_urls: probeUrls.length > 0 ? probeUrls : ["https://cp.cloudflare.com/"],
+          probe_urls: probeUrls.length > 0 ? probeUrls : ["https://www.google.com/robots.txt"],
           concurrency: Number(form.elements["phase2_concurrency"].value)
         };
       }
@@ -3339,7 +3339,7 @@
       form.elements["phase2_probe_urls"].value = p2
         ? (p2.probe_urls && p2.probe_urls.length > 0 ? p2.probe_urls : (p2.probe_url ? [p2.probe_url] : []))
           .join("\n")
-        : "https://cp.cloudflare.com/";
+        : "https://www.google.com/robots.txt";
       form.elements["phase2_concurrency"].value = p2 ? p2.concurrency : 3;
 
       // Re-run the enable/disable handlers so the form reflects the loaded config.
