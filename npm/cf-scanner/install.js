@@ -28,7 +28,7 @@ const REPO = "QMahyar/cf-scanner";
 // fixes like this one) without a new binary release. Bump RELEASE_TAG with
 // every new binary release; bump version with every npm publish.
 const VERSION = require("./package.json").version;
-const RELEASE_TAG = "v0.4.0";
+const RELEASE_TAG = "v0.5.0";
 
 /** Maps (os, arch) → dist target triple. */
 const TARGETS = {

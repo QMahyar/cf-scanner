@@ -3,7 +3,7 @@
 All notable changes to CF-Scanner are documented here, grouped by
 Added / Changed / Fixed / Deprecated / Removed / Security, newest on top.
 
-## [Unreleased]
+## [0.5.0] - 2026-08-18
 
 ### Added
 - **In-process VLESS/Trojan verifier.** Phase-2 attempts whose protocol is
@@ -43,6 +43,21 @@ Added / Changed / Fixed / Deprecated / Removed / Security, newest on top.
   wgcf-style `okhttp/3.12.1` user agent).
 
 ### Fixed
+- **Phase-2 probes through Cloudflare Worker (edgetunnel) configs never
+  passed.** Two causes: (1) the default probe URL `https://cp.cloudflare.com/`
+  cannot be proxied by a Worker — Cloudflare blocks outbound TCP sockets to
+  its own IP ranges, so the tunnel hung after the vless header; the default
+  is now `https://www.google.com/robots.txt`. (2) The worker tunnel closes
+  the upstream without a TLS close_notify, which rustls reported as
+  `UnexpectedEof`; the SOCKS5 HTTP client now treats that as the end of an
+  HTTP/1.1 `Connection: close` body instead of discarding the delivered
+  response. Verified end-to-end: a worker vless config now passes 4/4 and
+  12/12 candidates.
+- **xray binary download failed on GitHub release URLs.** The custom HTTP
+  client could not follow GitHub's 302-to-CDN redirect; the download now
+  uses reqwest with a redirect policy. Also trimmed a trailing newline from
+  the pinned xray version that corrupted asset URLs, and the UI no longer
+  shows a doubled "v" prefix next to the version.
 - **Reset left stale rows in the table.** The reset handler cleared the
   data model but never marked the table dirty, so the DOM kept showing
   old rows while the stats read 0 (QA finding, fixed and verified).
