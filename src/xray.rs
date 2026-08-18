@@ -19,7 +19,6 @@ use sha2::{Digest as _, Sha256};
 use crate::api::types::{CustomFragment, FragmentPreset};
 use crate::configs::{OutboundSpec, Protocol, WsSettings, sanitize_error_text};
 use crate::paths;
-use crate::ranges;
 
 pub const VERSION: &str = include_str!("../data/xray-version.txt");
 const RELEASE_BASE: &str = "https://github.com/XTLS/Xray-core/releases/download";
@@ -523,7 +522,8 @@ fn cached_matches_dgst(bin: &Path) -> bool {
 /// file.
 pub async fn download_binary(fetch: &impl BinaryFetch) -> Result<PathBuf> {
     let asset = asset_name()?;
-    let url = format!("{RELEASE_BASE}/{VERSION}/{asset}");
+    let version = VERSION.trim();
+    let url = format!("{RELEASE_BASE}/{version}/{asset}");
     let dgst_url = format!("{url}.dgst");
 
     let (zip, dgst) = tokio::join!(fetch.bytes(&url), fetch.bytes(&dgst_url));
@@ -656,7 +656,21 @@ pub struct RealFetch;
 
 impl BinaryFetch for RealFetch {
     async fn bytes(&self, url: &str) -> Result<Vec<u8>> {
-        ranges::fetch_bytes(url).await
+        let resp = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::limited(10))
+            .timeout(std::time::Duration::from_secs(60))
+            .build()
+            .context("failed to build HTTP client")?
+            .get(url)
+            .send()
+            .await
+            .context("failed to start download")?
+            .error_for_status()
+            .context("download returned an error")?
+            .bytes()
+            .await
+            .context("failed to read download body")?;
+        Ok(resp.to_vec())
     }
 }
 

@@ -2579,7 +2579,7 @@
           el.classList.add("ok");
           icon.textContent = "\u2713";
           title.textContent = "xray binary ready";
-          detail.textContent = "v" + data.version + " \u00b7 " + (data.path || "");
+          detail.textContent = data.version + " \u00b7 " + (data.path || "");
           btn.style.display = "none";
         } else {
           el.hidden = false;
@@ -2599,7 +2599,7 @@
                 el.classList.remove("warn");
                 icon.textContent = "\u2713";
                 title.textContent = "xray binary ready";
-                detail.textContent = "v" + data.version + " \u00b7 " + (res.path || "");
+                detail.textContent = data.version + " \u00b7 " + (res.path || "");
                 btn.style.display = "none";
               } else {
                 title.textContent = "Download failed";
