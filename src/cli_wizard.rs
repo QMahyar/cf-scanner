@@ -39,7 +39,7 @@ fn prompt_warp() -> Result<ScanConfig> {
         .default(20)
         .interact()?;
     let probes: u8 = Input::new()
-        .with_prompt("Handshake probes per endpoint (1-10, drives loss %)")
+        .with_prompt("Handshake probes per endpoint (1-10; higher = stricter 'working' — any dropped probe excludes the endpoint)")
         .validate_with(|n: &u8| (1..=10).contains(n).then_some(()).ok_or("must be 1-10"))
         .default(3)
         .interact()?;

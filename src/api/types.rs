@@ -152,7 +152,8 @@ impl Default for Phase2Config {
 pub struct WarpConfig {
     /// `ip`, `ip:port`, or CIDR lines; empty = bundled pools.
     pub custom_endpoints: Vec<String>,
-    /// Handshake attempts per endpoint (1..=10); drives loss %.
+    /// Handshake attempts per endpoint (1..=10); an endpoint counts as
+    /// working only when every probe responds (any dropped probe excludes it).
     pub probes_per_endpoint: u8,
     /// Pasted WireGuard / AmneziaWG config text (verification only, opt-in).
     pub wgconf: Option<String>,
@@ -221,7 +222,8 @@ pub struct Verdict {
     pub ip: IpAddr,
     pub port: u16,
     pub latency_ms: Option<u32>,
-    /// WARP and phase-2 only.
+    /// WARP and phase-2 only. WARP rows always carry 0.0 (lossy endpoints
+    /// are excluded, not reported).
     pub loss_pct: Option<f32>,
     pub country: Option<String>,
     /// Phase-2 only: colo code from /cdn-cgi/trace.

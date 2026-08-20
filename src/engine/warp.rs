@@ -33,9 +33,9 @@ struct WarpTask {
 
 impl ScanController {
     /// WARP run: every (endpoint, port) group gets `probes_per_endpoint`
-    /// handshake probes; open (Response/Cookie) groups emit a verdict with
-    /// min latency and loss %. `scanned` counts completed groups, so totals
-    /// stay readable in the UI.
+    /// handshake probes; zero-loss (Response/Cookie) groups emit a verdict
+    /// with min latency and loss %. `scanned` counts completed groups, so
+    /// totals stay readable in the UI.
     pub(super) async fn run_warp(&self, cfg: ScanConfig, seed: u64) -> Result<ScanSummary> {
         cfg.validate()?;
         let warp = cfg.warp.clone().unwrap_or_default();
@@ -163,7 +163,7 @@ impl ScanController {
                         break;
                     }
                     ctx.scanned.fetch_add(1, Ordering::Relaxed);
-                    if let Some(latency) = latency_ms {
+                    if let Some(latency) = latency_ms.filter(|_| failed == 0) {
                         ctx.found.fetch_add(1, Ordering::Relaxed);
                         let verdict = Verdict {
                             ip: task.ip,
@@ -326,14 +326,13 @@ mod tests {
         let summary = run_local(&c, warp_cfg(3, &["10.0.0.1", "10.0.0.2"]), 1)
             .await
             .unwrap();
-        assert_eq!(summary.found, 2);
+        // Zero-loss endpoint emits a verdict; lossy endpoint is excluded.
+        assert_eq!(summary.found, 1);
         assert_eq!(summary.scanned, 2);
         let results = c.results();
+        assert_eq!(results.len(), 1);
         assert_eq!(results[0].latency_ms, Some(5));
         assert_eq!(results[0].loss_pct, Some(0.0));
-        assert_eq!(results[1].latency_ms, Some(9));
-        let loss = results[1].loss_pct.unwrap();
-        assert!((loss - 66.67).abs() < 0.1, "loss={loss}");
     }
 
     #[tokio::test]
