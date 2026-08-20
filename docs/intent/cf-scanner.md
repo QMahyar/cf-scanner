@@ -67,7 +67,9 @@ browser frontend, and an agent-friendly CLI — all driving the same engine.
   Ports configurable, default 2408 (+ 500/854/880/1701/3138/4500 etc.).
   Custom endpoint list input allowed.
 - Discovery: dummy-key WireGuard handshake probe; Response/Cookie packet = open;
-  latency + loss % (N probes) reported.
+  latency + loss % (N probes) reported. An endpoint counts as working only when
+  every probe answered (0% loss) — rows with any probe loss are excluded from
+  results, never listed.
 - Optional: user's real wgconf (WireGuard/AmneziaWG) pasted as text or file →
   real handshake with their keypair = verified with THEIR config.
 - Opt-in only ("generate a WARP config for me"): local Curve25519 keygen →

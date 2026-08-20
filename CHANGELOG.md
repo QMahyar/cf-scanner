@@ -3,6 +3,33 @@
 All notable changes to CF-Scanner are documented here, grouped by
 Added / Changed / Fixed / Deprecated / Removed / Security, newest on top.
 
+## [Unreleased]
+
+### Changed
+- **WARP working verdict now requires zero probe loss.** An endpoint appears
+  in results only if every WireGuard probe answered (0% loss); endpoints with
+  any probe loss are excluded entirely instead of being listed with a loss %.
+  "Stop after N found" and latency-based ranking count zero-loss endpoints
+  only (QA decision 2026-08-20, see ADR-002 update).
+
+### Fixed
+- **Stale validation message.** "Fix the highlighted fields to continue."
+  no longer lingers after the user corrects the field — the message clears
+  live while typing and stays cleared after Next.
+- **Forward tab clicks were silently swallowed** until validation passed.
+  Tabs now navigate freely in both directions; validation errors paint on the
+  target step when it is shown.
+- **Mode switch kept the previous mode's default port** (e.g. 2408 carried
+  into CDN mode). The wizard now shows an inline amber warning when a custom
+  port differs from the mode default and never silently rewrites custom
+  values; untouched defaults still auto-correct (443 ↔ 2408).
+- **Rate stat showed "0/s" when idle.** The rate is now hidden whenever no
+  scan is running and appears only during a live scan.
+- **"URIs" download option was offered when nothing could be exported**
+  (WARP mode without configs). The option is now disabled in that state.
+- Heading hierarchy: "Generate WARP config (optional)" was an H4 under an H2
+  (skipped H3); it is now an H3.
+
 ## [0.5.0] - 2026-08-18
 
 ### Added

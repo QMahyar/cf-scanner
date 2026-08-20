@@ -45,9 +45,11 @@ Expected outcomes:
 - Open endpoints (Response/Cookie packet shape) with latency + loss %;
   custom endpoint lists (`--warp-endpoints`) work. (`--ipv6` is CDN-only —
   the CLI rejects it for WARP; see `src/main.rs`.)
+- Every result row must show loss **0%** — an endpoint with any probe loss is
+  excluded from results (working = open AND zero probe loss).
 
 Record: probe count, open count (e.g. "183/204 open"), ports that answered,
-loss/latency ranges, wall time.
+latency ranges, wall time.
 
 ## 3. Registration via `warp-config generate --license`
 

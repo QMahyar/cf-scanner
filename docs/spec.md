@@ -190,8 +190,9 @@ pub struct Verdict {
 - [ ] Phase 2 verifies a candidate IP through embedded Xray with the user's
       config; verdict includes fragment preset + SNI; xray binary bundled in
       release archives (fallback: checksum-verified runtime download)
-- [ ] WARP mode probes known pools × ports with WG Init; open/verdict +
-      latency + loss; works with user wgconf (incl. AmneziaWG-style)
+- [ ] WARP mode probes known pools × ports with WG Init; working = open +
+      zero probe loss (latency + 0% loss); works with user wgconf (incl.
+      AmneziaWG-style)
 - [ ] Opt-in WARP registration produces a valid wgconf via v0a884 API,
       exported as text/.conf; WARP+ binding option present
 - [ ] Results: last-scan-only + reset; sort by latency/country/datacenter/loss;

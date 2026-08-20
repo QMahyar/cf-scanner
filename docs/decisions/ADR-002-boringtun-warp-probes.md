@@ -49,3 +49,21 @@ on packet shape alone, never on index matching.
   (type + length) = open; anything else = closed.
 - Tests can exercise Init building and reply parsing without touching the
   network (boringtun is pure Rust).
+
+## Update 2026-08-20: working verdict requires zero probe loss
+
+Verified live that an "open" endpoint can drop individual probes (typically
+early timeouts, e.g. 33.3% loss on 3 probes). Listing those rows as working
+produced misleading results, so the verdict rule was tightened:
+
+- A row is emitted only when the endpoint is open **and** every probe
+  answered (`failed == 0`). Endpoints with any probe loss never appear in
+  results; the loss column on emitted rows is always 0%.
+- "Stop after N found" and latency ranking therefore count zero-loss
+  endpoints only.
+- Rationale: the loss column's purpose was quality ranking, not advertising
+  flaky endpoints; a lossy endpoint's latency is also unreliable as a
+  quality signal.
+- This changes result counts vs. the pre-2026-08-20 rule (open alone); it
+  was decided during the UI bug-fix pass (wayfinder issue #7) and verified
+  live: 32/32 candidates at 0% loss.
