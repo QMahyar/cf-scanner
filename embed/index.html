@@ -162,7 +162,13 @@
       color: var(--accent-contrast);
       box-shadow: 0 2px 10px color-mix(in srgb, var(--accent) 25%, transparent);
     }
-    .appbar h1 { font-size: 1.25rem; }
+    .appbar-inner { min-width: 0; }
+    .appbar-inner > div { min-width: 0; }
+    .appbar-inner h1 {
+      font-size: 1.25rem;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    .appbar-inner > button, .appbar-inner > a { flex: none; }
     .appbar-sub { font-size: 0.78rem; color: var(--muted); }
     .appbar-spacer { flex: 1 1 auto; }
     .version-pill {
@@ -626,6 +632,8 @@
       .appbar-inner { gap: 0.6rem; padding: 0.55rem 0.9rem; }
       .appbar-sub { display: none; }
       .version-pill { display: none; }
+      .appbar-inner #theme-btn { width: 44px; padding: 0; font-size: 0; justify-content: center; }
+      .appbar-inner #theme-btn svg { width: 18px; height: 18px; }
     }
     @media (max-width: 480px) {
       .seg-item { white-space: normal; text-align: center; line-height: 1.25; }
@@ -859,9 +867,9 @@
                   <div class="field" id="preset-row">
                     <label for="preset">Preset</label>
                     <select name="preset" id="preset">
-                      <option value="Quick" selected>Quick &mdash; 1 IP per /24 (~4K probes)</option>
-                      <option value="Normal">Normal &mdash; 3 IPs per /24 (~12K probes)</option>
-                      <option value="Full">Full &mdash; every IP (~1.5M probes)</option>
+                      <option value="Quick" selected>Quick &mdash; 1 per /24 (~4K probes)</option>
+                      <option value="Normal">Normal &mdash; 3 per /24 (~12K probes)</option>
+                      <option value="Full">Full &mdash; all IPs (~1.5M probes)</option>
                     </select>
                   </div>
                   <div class="field">
@@ -906,7 +914,7 @@
                     <span>Include IPv6 candidates (default: IPv4 only)</span>
                   </label>
                   <label class="check" id="warp-probes-label" hidden>
-                    <span>Probes per endpoint (1&ndash;10); higher = more accurate loss %</span>
+                    <span>Probes per endpoint (1&ndash;10); higher = stricter 'working' &mdash; any dropped probe excludes the endpoint</span>
                     <input name="warp_probes" type="number" min="1" max="10" value="3">
                   </label>
                 </div>
@@ -971,7 +979,7 @@
                   </div>
                 </div>
                 <div class="sub-section">
-                  <h4 class="panel-title">Generate WARP config (optional)</h4>
+                  <h3 class="panel-title">Generate WARP config (optional)</h3>
                   <div class="inline-row">
                     <div class="field" style="flex: 1 1 280px; max-width: 420px;">
                       <label for="warp-license">WARP+ license key (optional)</label>
@@ -1109,7 +1117,7 @@
           </button>
           <label class="copy-n" title="Copy the top N results; leave empty to copy all">
             <span>Top</span>
-            <input id="copy-count" type="number" min="1" value="10" aria-label="Copy top N">
+            <input id="copy-count" type="number" min="1" value="10" aria-label="Copy top N" title="Copy the top N results; leave empty to copy all">
           </label>
           <button id="copy-btn" type="button" class="secondary" disabled>Copy</button>
           <button id="copy-uris-btn" type="button" class="secondary" disabled hidden>Copy URIs</button>
@@ -1141,7 +1149,7 @@
             <span class="stat-label">Elapsed</span>
             <span class="stat-value mono" id="stat-elapsed">0:00</span>
           </div>
-          <div class="stat">
+          <div class="stat" id="stat-rate-wrap">
             <span class="stat-label">Rate</span>
             <span class="stat-value mono" id="stat-rate">&mdash;</span>
           </div>
@@ -1255,6 +1263,9 @@
     const statFound = document.getElementById("stat-found");
     const statElapsed = document.getElementById("stat-elapsed");
     const statRate = document.getElementById("stat-rate");
+    const statRateWrap = document.getElementById("stat-rate-wrap");
+    const uriOption = downloadFormat.querySelector('option[value="uri"]');
+    let lastEventStatus = "Idle \u2014 configure and start a scan.";
     const START_LABEL_HTML = startBtn.innerHTML;
     const appbarStart = document.getElementById("appbar-start");
     const filterInput = document.getElementById("filter-input");
@@ -1415,6 +1426,7 @@
       status.dataset.state = state || "";
       statusCard.dataset.state = state || "";
       status.textContent = text;
+      if (state) lastEventStatus = text;
     }
     function resetBanner() {
       stopElapsed();
@@ -1441,6 +1453,7 @@
       scanStrip.hidden = true;
       hideBest();
       syncAppbarStart();
+      syncRateVisibility();
     }
     function syncAppbarStart() {
       const running = startBtn.disabled;
@@ -1498,6 +1511,7 @@
       document.title = "Scanning\u2026 \u2014 CF-Scanner";
       updateStrip();
       syncAppbarStart();
+      syncRateVisibility();
       scheduleRender();
       if (!es) connectEvents();
     }
@@ -1562,6 +1576,7 @@
         postScanPush();
       }
       syncAppbarStart();
+      syncRateVisibility();
     }
     function failScan(msg) {
       if (model.state.scan === "done" || model.state.scan === "cancelled" || model.state.scan === "failed") return;
@@ -1584,6 +1599,7 @@
       flushNow();
       scanStrip.hidden = true;
       syncAppbarStart();
+      syncRateVisibility();
     }
     let retryBtn = null;
     function showRetry() {
@@ -1627,6 +1643,7 @@
           startBtn.classList.remove("is-running");
           resetBtn.disabled = false;
           syncAppbarStart();
+          syncRateVisibility();
           showErrorCard(msg);
           if (resp.status === 409) startPolling();
           return;
@@ -1647,6 +1664,7 @@
         startBtn.classList.remove("is-running");
         resetBtn.disabled = false;
         syncAppbarStart();
+        syncRateVisibility();
         showErrorCard("Server unreachable: " + err);
       }
     }
@@ -1804,6 +1822,7 @@
       const exportable = model.results.some(v => canExportRow(v, v.phase2));
       copyUrisBtn.hidden = !exportable;
       copyUrisBtn.disabled = !exportable;
+      uriOption.disabled = !exportable;
     }
 
     // ---- best-endpoints block (post-scan decision support) ----
@@ -1964,7 +1983,13 @@
         cta.textContent = "Configure a scan";
         cta.addEventListener("click", () => {
           const smooth = !matchMedia("(prefers-reduced-motion: reduce)").matches;
-          document.getElementById("scan-form").scrollIntoView({ behavior: smooth ? "smooth" : "auto", block: "start" });
+          const form = document.getElementById("scan-form");
+          form.scrollIntoView({ behavior: smooth ? "smooth" : "auto", block: "start" });
+          const target = form.querySelector('input[name="target-radio"]:checked');
+          const focusEl = target && target.value === "preset"
+            ? document.getElementById("preset")
+            : form.elements["count"];
+          if (focusEl && !focusEl.disabled) focusEl.focus();
         });
         td.appendChild(cta);
       }
@@ -2512,10 +2537,18 @@
       el.addEventListener("blur", () => {
         if (el.disabled) return;
         setFieldError(name, VALIDATORS[name](el.value, form));
+        if (name === "ports" && !VALIDATORS[name](el.value, form)) {
+          portsHelp.style.color = "";
+        }
+        refreshValidationStatus();
       });
       el.addEventListener("input", () => {
         if (el.disabled || el.getAttribute("aria-invalid") !== "true") return;
         setFieldError(name, VALIDATORS[name](el.value, form));
+        if (name === "ports" && !VALIDATORS[name](el.value, form)) {
+          portsHelp.style.color = "";
+        }
+        refreshValidationStatus();
       });
     });
 
@@ -2537,6 +2570,19 @@
         b.setAttribute("aria-selected", String(on));
       });
     }
+    function syncRateVisibility() {
+      const running = model.state.scan === "running" || model.state.scan === "starting";
+      statRateWrap.hidden = !running;
+    }
+    function refreshValidationStatus() {
+      if (model.state.scan === "running" || model.state.scan === "starting") return;
+      const bad = validateStep(wizCurrent);
+      if (bad) {
+        showStatus("Fix the highlighted fields to continue.");
+      } else {
+        showStatus(lastEventStatus);
+      }
+    }
     function validateStep(n) {
       let firstBad = null;
       for (const name of WIZ_STEP_FIELDS[n]) {
@@ -2549,8 +2595,9 @@
       return firstBad;
     }
     function nextStep() {
+      refreshValidationStatus();
       const bad = validateStep(wizCurrent);
-      if (bad) { bad.focus(); showStatus("Fix the highlighted fields to continue."); return; }
+      if (bad) { bad.focus(); refreshValidationStatus(); return; }
       if (wizCurrent < 3) goToStep(wizCurrent + 1);
       else form.requestSubmit();
     }
@@ -2560,8 +2607,9 @@
     }));
     wizBtnEls.forEach(b => b.addEventListener("click", () => {
       const target = Number(b.dataset.go);
-      if (target >= wizCurrent) return; // forward only through Next (validated)
       goToStep(target);
+      validateStep(target);
+      refreshValidationStatus();
     }));
 
     // ---- xray binary status (check on load, offer download if missing) ----
@@ -2580,6 +2628,7 @@
           icon.textContent = "\u2713";
           title.textContent = "xray binary ready";
           detail.textContent = data.version + " \u00b7 " + (data.path || "");
+          detail.title = data.path || "";
           btn.style.display = "none";
         } else {
           el.hidden = false;
@@ -3123,6 +3172,23 @@
     const warpEndpointsRow = document.getElementById("warp-endpoints-row");
     const includeV6Label = document.getElementById("include-v6-label");
     const presetRow = document.getElementById("preset-row");
+    const portsHelp = document.getElementById("help-ports");
+
+    function syncPortsWarning(warpMode) {
+      const val = form.elements["ports"].value.trim();
+      const def = warpMode ? "2408" : "443";
+      if (val && val !== def) {
+        const label = warpMode ? "WARP" : "CDN";
+        portsHelp.textContent = "Port " + val + " is unusual for " + label + " mode \u2014 double-check before scanning.";
+        portsHelp.style.color = "var(--warning)";
+      } else {
+        portsHelp.textContent = portsHelp.dataset.original || "e.g., 443,8443 \u2014 valid range 1\u201365535";
+        portsHelp.style.color = "";
+      }
+    }
+    form.elements["ports"].addEventListener("input", () => {
+      syncPortsWarning(form.elements["mode"].value === "Warp");
+    });
 
     function onModeChange(e) {
       const warpMode = e.target.value === "Warp";
@@ -3140,6 +3206,7 @@
         if (form.elements["ports"].value === "443") form.elements["ports"].value = "2408";
       }
       form.elements["ports"].placeholder = warpMode ? "2408" : "443";
+      syncPortsWarning(warpMode);
       document.body.classList.toggle("mode-warp", warpMode);
       modeSummary.textContent = warpMode
         ? "Finds WARP UDP endpoints with WireGuard probes \u2014 no phase 2."
@@ -3430,7 +3497,7 @@
     appbarStart.addEventListener("click", () => {
       for (let n = 1; n <= 2; n++) {
         const bad = validateStep(n);
-        if (bad) { goToStep(n); bad.focus(); showStatus("Fix the highlighted fields to continue."); return; }
+        if (bad) { goToStep(n); bad.focus(); refreshValidationStatus(); return; }
       }
       goToStep(3);
       startBtn.click();
