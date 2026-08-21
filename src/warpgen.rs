@@ -311,6 +311,7 @@ fn write_private(path: &Path, text: &str) -> std::io::Result<()> {
     #[cfg(not(unix))]
     {
         fs::write(path, text)?;
+        crate::paths::lock_down_to_owner(path)?;
     }
     Ok(())
 }

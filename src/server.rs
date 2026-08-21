@@ -86,10 +86,10 @@ async fn persist_profiles(dir: &std::path::Path, profiles: &HashMap<String, Scan
                 use std::os::unix::fs::PermissionsExt as _;
                 let _ = fs::set_permissions(&path, fs::Permissions::from_mode(0o600));
             }
-            // TODO(windows): profiles.json is created with the default ACL,
-            // so other local users can read scan configs. Restrict to the
-            // current user (SetNamedSecurityInfo / DACL) when the file is
-            // created; needs windows-sys, deferred to avoid a new dependency.
+            #[cfg(not(unix))]
+            {
+                crate::paths::lock_down_to_owner(&path).ok();
+            }
         }
     })
     .await;

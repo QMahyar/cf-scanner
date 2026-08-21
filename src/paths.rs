@@ -45,6 +45,95 @@ pub fn xray_binary_path() -> Result<PathBuf> {
     Ok(data_dir()?.join(name))
 }
 
+/// Restricts a secret-bearing file (identity keys, profiles, trial configs)
+/// to the current user: a protected DACL with one grant replaces whatever
+/// inherited ACEs the parent directory contributed. Unix callers don't need
+/// this — secrets are written 0o600 at open time; this closes the Windows
+/// half of the same boundary. Owner-only suffices because nothing on this
+/// machine legitimately needs SYSTEM/Admins read access to these files.
+#[cfg(windows)]
+pub fn lock_down_to_owner(path: &std::path::Path) -> std::io::Result<()> {
+    use std::os::windows::ffi::OsStrExt as _;
+    use windows::Win32::Foundation::{GENERIC_ALL, HANDLE, NO_ERROR, WIN32_ERROR};
+    use windows::Win32::Security::Authorization::{
+        EXPLICIT_ACCESS_W, GRANT_ACCESS, SE_FILE_OBJECT, SetEntriesInAclW, SetNamedSecurityInfoW,
+        TRUSTEE_IS_SID, TRUSTEE_IS_USER, TRUSTEE_W,
+    };
+    use windows::Win32::Security::{
+        ACL, DACL_SECURITY_INFORMATION, GetTokenInformation, NO_INHERITANCE,
+        PROTECTED_DACL_SECURITY_INFORMATION, PSID, TOKEN_QUERY, TOKEN_USER, TokenUser,
+    };
+    use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+    use windows::core::{PCWSTR, PWSTR};
+
+    fn win_err(err: WIN32_ERROR) -> std::io::Error {
+        std::io::Error::from_raw_os_error(err.0 as i32)
+    }
+
+    fn hresult_err(err: windows::core::Error) -> std::io::Error {
+        std::io::Error::from_raw_os_error(err.code().0)
+    }
+
+    let mut token = HANDLE::default();
+    unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) }
+        .map_err(hresult_err)?;
+    let mut len = 0u32;
+    // Sized query: the first call fails with ERROR_INSUFFICIENT_BUFFER and
+    // fills `len` with the TOKEN_USER size.
+    let _ = unsafe { GetTokenInformation(token, TokenUser, None, 0, &mut len) };
+    let mut buf = vec![0u8; len as usize];
+    unsafe {
+        GetTokenInformation(
+            token,
+            TokenUser,
+            Some(buf.as_mut_ptr().cast()),
+            len,
+            &mut len,
+        )
+    }
+    .map_err(hresult_err)?;
+    let sid: PSID = unsafe { (*(buf.as_ptr() as *const TOKEN_USER)).User.Sid };
+
+    let ea = [EXPLICIT_ACCESS_W {
+        grfAccessPermissions: GENERIC_ALL.0,
+        grfAccessMode: GRANT_ACCESS,
+        grfInheritance: NO_INHERITANCE,
+        Trustee: TRUSTEE_W {
+            pMultipleTrustee: std::ptr::null_mut(),
+            MultipleTrusteeOperation: Default::default(),
+            TrusteeForm: TRUSTEE_IS_SID,
+            TrusteeType: TRUSTEE_IS_USER,
+            ptstrName: PWSTR(sid.0.cast()),
+        },
+    }];
+    let mut new_acl: *mut ACL = std::ptr::null_mut();
+    let err = unsafe { SetEntriesInAclW(Some(&ea), None, &mut new_acl) };
+    if err != NO_ERROR {
+        return Err(win_err(err));
+    }
+    let wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+    let err = unsafe {
+        SetNamedSecurityInfoW(
+            PCWSTR::from_raw(wide.as_ptr()),
+            SE_FILE_OBJECT,
+            DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+            None,
+            None,
+            Some(new_acl),
+            None,
+        )
+    };
+    if err != NO_ERROR {
+        return Err(win_err(err));
+    }
+    Ok(())
+}
+
+#[cfg(not(windows))]
+pub fn lock_down_to_owner(_path: &std::path::Path) -> std::io::Result<()> {
+    Ok(())
+}
+
 #[cfg(test)]
 pub(crate) mod test_env {
     //! Isolated-data-dir harness for the paths and xray test modules.
@@ -102,6 +191,25 @@ pub(crate) mod test_env {
 mod tests {
     use super::*;
     use crate::paths::test_env::{DATA_DIR_LOCK, IsolatedDataDir};
+
+    #[cfg(windows)]
+    #[test]
+    fn lock_down_to_owner_keeps_the_file_usable_by_the_owner() {
+        let dir = std::env::temp_dir().join(format!("cf-scanner-acl-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("secret.json");
+        std::fs::write(&file, b"{}").unwrap();
+        lock_down_to_owner(&file).expect("DACL lockdown must succeed for the owner");
+        // The owner must still be able to rewrite the file afterwards.
+        std::fs::OpenOptions::new()
+            .write(true)
+            .truncate(true)
+            .open(&file)
+            .expect("owner retains write access");
+        assert_eq!(std::fs::read(&file).unwrap(), b"");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn data_dir_honors_cf_scanner_data_dir_override() {
