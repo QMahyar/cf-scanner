@@ -28,9 +28,11 @@ use crate::probe::no_verify_client_config;
 use crate::socks;
 use crate::verify::{ProbeRequest, TunnelProbe, TunnelResult};
 
-/// Response cap shared with the socks client: untrusted tunneled bodies
-/// cannot exhaust memory.
-const MAX_BODY_BYTES: usize = 64 * 1024 * 1024;
+/// Probe-shaped body cap, far below the socks client's 64 MiB reader cap:
+/// the verifier only needs a /cdn-cgi/trace-sized body, so a hostile server
+/// declaring a huge Content-Length or chunk size must fail the probe instead
+/// of forcing a large zeroed allocation per attempt.
+const MAX_PROBE_BODY_BYTES: usize = 1024 * 1024;
 /// The HTTP head (status + headers) is tiny; anything bigger is a protocol
 /// failure, not a real response.
 const MAX_HEADER_BYTES: usize = 64 * 1024;
@@ -547,8 +549,8 @@ async fn read_http_body<S: AsyncRead + Unpin + ?Sized>(
                 raw.extend_from_slice(b"0\r\n\r\n");
                 break;
             }
-            if size > MAX_BODY_BYTES.saturating_sub(raw.len()) {
-                bail!("chunked body exceeds the {MAX_BODY_BYTES} cap");
+            if size > MAX_PROBE_BODY_BYTES.saturating_sub(raw.len()) {
+                bail!("chunked body exceeds the {MAX_PROBE_BODY_BYTES} cap");
             }
             raw.extend_from_slice(format!("{size:x}\r\n").as_bytes());
             let mut data = vec![0u8; size];
@@ -574,8 +576,8 @@ async fn read_http_body<S: AsyncRead + Unpin + ?Sized>(
             .nth(1)
             .and_then(|s| s.trim().parse().ok())
             .context("malformed content-length")?;
-        if n > MAX_BODY_BYTES {
-            bail!("response body exceeds the {MAX_BODY_BYTES} cap");
+        if n > MAX_PROBE_BODY_BYTES {
+            bail!("response body exceeds the {MAX_PROBE_BODY_BYTES} cap");
         }
         let mut body = vec![0u8; n];
         stream
@@ -587,7 +589,7 @@ async fn read_http_body<S: AsyncRead + Unpin + ?Sized>(
         // No framing: the connection closes the response.
         let mut body = Vec::new();
         stream
-            .take(MAX_BODY_BYTES as u64)
+            .take(MAX_PROBE_BODY_BYTES as u64)
             .read_to_end(&mut body)
             .await
             .context("reading close-delimited body")?;

@@ -627,18 +627,34 @@ async fn fetch_one(url: &str, extra_headers: &str) -> Result<(String, u16, Vec<S
         Some((h, p)) => (h, format!("/{p}")),
         None => (rest, "/".to_owned()),
     };
-    let (host, port) = match host_port.rsplit_once(':') {
-        Some((h, p)) => (h, p.parse::<u16>().context("bad port")?),
-        None => (host_port, 443),
-    };
+    let (host, port) = parse_host_port(host_port)?;
 
-    let stream = TcpStream::connect((host, port)).await?;
-    let request = http_request(host, &path, extra_headers);
+    let stream = TcpStream::connect((host.as_str(), port)).await?;
+    let request = http_request(&host, &path, extra_headers);
     let server_name =
         rustls::pki_types::ServerName::try_from(host.to_owned()).context("invalid hostname")?;
     let tls = tls_connector().connect(server_name, stream).await?;
     let (status, headers, body) = send_http(tls, &request).await?;
     Ok((url.to_owned(), status, headers, body))
+}
+
+/// Splits an authority into host + port. Bracketed IPv6 literals keep their
+/// colons intact (`[2606:4700::1]:443`); a bare host defaults to 443.
+fn parse_host_port(host_port: &str) -> Result<(String, u16)> {
+    if let Some(rest) = host_port.strip_prefix('[') {
+        let (host, after) = rest
+            .split_once(']')
+            .ok_or_else(|| anyhow!("unterminated bracketed host"))?;
+        let port = match after.strip_prefix(':') {
+            Some(p) => p.parse::<u16>().context("bad port")?,
+            None => 443,
+        };
+        return Ok((host.to_owned(), port));
+    }
+    match host_port.rsplit_once(':') {
+        Some((h, p)) => Ok((h.to_owned(), p.parse::<u16>().context("bad port")?)),
+        None => Ok((host_port.to_owned(), 443)),
+    }
 }
 
 #[cfg(test)]
@@ -681,6 +697,30 @@ mod tests {
         assert!(validate_fetch_url("https://169.254.0.1/x").is_err());
         assert!(validate_fetch_url("https://0.0.0.0/x").is_err());
         assert!(validate_fetch_url("not a url").is_err());
+    }
+
+    #[test]
+    fn parse_host_port_handles_ipv6_literals_and_defaults() {
+        let parse = parse_host_port;
+        assert_eq!(
+            parse("[2606:4700::1]:443").unwrap(),
+            ("2606:4700::1".to_owned(), 443)
+        );
+        assert_eq!(parse("[::1]:8080").unwrap(), ("::1".to_owned(), 8080));
+        assert_eq!(
+            parse("[2001:db8::a]").unwrap(),
+            ("2001:db8::a".to_owned(), 443)
+        );
+        assert_eq!(
+            parse("example.com").unwrap(),
+            ("example.com".to_owned(), 443)
+        );
+        assert_eq!(
+            parse("example.com:8443").unwrap(),
+            ("example.com".to_owned(), 8443)
+        );
+        assert!(parse("[::1:443").is_err(), "unterminated bracket");
+        assert!(parse("example.com:70000").is_err(), "port out of range");
     }
 
     #[test]

@@ -42,7 +42,15 @@ where
         loop {
             match rd.read(&mut chunk).await {
                 Ok(0) => break,
-                Ok(n) => buf.extend_from_slice(&chunk[..n]),
+                Ok(n) => {
+                    buf.extend_from_slice(&chunk[..n]);
+                    // An explicit failure, not a silent truncation: a caller
+                    // judging a probe by the body must never see a cropped
+                    // response that parses as success.
+                    if buf.len() > MAX_BODY_BYTES {
+                        bail!("response body exceeded the {MAX_BODY_BYTES} byte cap");
+                    }
+                }
                 // HTTP/1.1 `Connection: close` ends the body at EOF; some
                 // servers (and every tunneled hop that drops TLS close_notify,
                 // e.g. Cloudflare Workers proxying) close without the TLS
@@ -110,12 +118,16 @@ pub(crate) fn decode_chunked(mut input: &[u8]) -> Result<Vec<u8>> {
 }
 
 pub(crate) fn tls_connector() -> tokio_rustls::TlsConnector {
-    let mut roots = RootCertStore::empty();
-    roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-    let config = rustls::ClientConfig::builder()
-        .with_root_certificates(roots)
-        .with_no_client_auth();
-    tokio_rustls::TlsConnector::from(std::sync::Arc::new(config))
+    static CONNECTOR: std::sync::LazyLock<tokio_rustls::TlsConnector> =
+        std::sync::LazyLock::new(|| {
+            let mut roots = RootCertStore::empty();
+            roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+            let config = rustls::ClientConfig::builder()
+                .with_root_certificates(roots)
+                .with_no_client_auth();
+            tokio_rustls::TlsConnector::from(std::sync::Arc::new(config))
+        });
+    CONNECTOR.clone()
 }
 
 /// Phase-2 tunnel probe: SOCKS5 (no-auth) CONNECT to `url`'s host through the
@@ -263,6 +275,31 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.to_string().contains("timed out"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn send_http_fails_explicitly_past_the_body_cap() {
+        use tokio::io::AsyncWriteExt as _;
+        let (client, mut server) = tokio::io::duplex(256 * 1024);
+        let writer = tokio::spawn(async move {
+            let header = b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n";
+            if server.write_all(header).await.is_err() {
+                return;
+            }
+            let chunk = vec![7u8; 64 * 1024];
+            // Far past the cap; once the reader errors out and drops its half,
+            // the writes start failing and this task exits.
+            for _ in 0..2200 {
+                if server.write_all(&chunk).await.is_err() {
+                    break;
+                }
+            }
+        });
+        let err = send_http(client, "GET / HTTP/1.1\r\nHost: x\r\n\r\n")
+            .await
+            .expect_err("an over-cap body must fail explicitly");
+        assert!(err.to_string().contains("exceeded"), "wrong failure: {err}");
+        writer.await.unwrap();
     }
 
     // --- decode_chunked bounds (review r6) -----------------------------------

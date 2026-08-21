@@ -226,9 +226,6 @@ pub struct Verdict {
     pub ip: IpAddr,
     pub port: u16,
     pub latency_ms: Option<u32>,
-    /// WARP and phase-2 only. WARP rows always carry 0.0 (lossy endpoints
-    /// are excluded, not reported).
-    pub loss_pct: Option<f32>,
     pub country: Option<String>,
     /// Phase-2 only: colo code from /cdn-cgi/trace.
     pub colo: Option<String>,
@@ -1127,7 +1124,6 @@ mod tests {
                 ip: "1.2.3.4".parse().unwrap(),
                 port: 443,
                 latency_ms: Some(42),
-                loss_pct: None,
                 country: Some("IR".to_owned()),
                 colo: None,
                 phase2: None,

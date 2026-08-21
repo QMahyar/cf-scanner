@@ -170,7 +170,6 @@ impl ScanController {
                             ip: task.ip,
                             port: task.port,
                             latency_ms: Some(latency_ms),
-                            loss_pct: None,
                             country: ctx.geo.country(task.ip),
                             colo: None,
                             phase2: None,

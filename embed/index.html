@@ -1177,7 +1177,6 @@
                 <th class="sortable" data-key="ip" scope="col">IP <span class="caret"></span></th>
                 <th class="sortable" data-key="port" scope="col">Port <span class="caret"></span></th>
                 <th class="sortable" data-key="latency_ms" scope="col">Latency <span class="caret"></span></th>
-                <th class="sortable" data-key="loss_pct" scope="col">Loss <span class="caret"></span></th>
                 <th class="sortable" data-key="country" scope="col">Country <span class="caret"></span></th>
                 <th class="sortable" data-key="colo" scope="col">Colo <span class="caret"></span></th>
                 <th class="sortable" data-key="phase2_latency_ms" scope="col">P2 ms <span class="caret"></span></th>
@@ -2226,9 +2225,6 @@
     }
 
     function lossCell(v) {
-      if (v.loss_pct == null) return cell(null, "muted", "Loss");
-      const cls = v.loss_pct > 0 ? "lat-bad mono" : "mono";
-      return cell(v.loss_pct > 0 ? v.loss_pct.toFixed(1) + "%" : "0%", cls, "Loss");
     }
 
     function phase2Cell(v) {
@@ -2935,11 +2931,11 @@
     }
 
     function toCsv(rows) {
-      const header = ["ip", "port", "latency_ms", "loss_pct", "country", "colo", "phase2_passed", "phase2_fragment", "phase2_sni", "phase2_latency_ms", "phase2_error"];
+      const header = ["ip", "port", "latency_ms", "country", "colo", "phase2_passed", "phase2_fragment", "phase2_sni", "phase2_latency_ms", "phase2_error"];
       const lines = [header.join(",")];
       for (const v of rows) {
         const p2 = v.phase2 || {};
-        lines.push([v.ip, v.port, v.latency_ms, v.loss_pct, v.country, v.colo,
+        lines.push([v.ip, v.port, v.latency_ms, v.country, v.colo,
           p2.passed, p2.fragment, p2.sni, p2.latency_ms, p2.error].map(csvField).join(","));
       }
       return lines.join("\n") + "\n";

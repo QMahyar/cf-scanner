@@ -716,7 +716,6 @@ mod tests {
             ip: "10.0.0.1".parse().unwrap(),
             port: 443,
             latency_ms: Some(5),
-            loss_pct: None,
             country: None,
             colo: Some("FRA".to_owned()),
             phase2: Some(Phase2Verdict {

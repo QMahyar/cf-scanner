@@ -1304,7 +1304,6 @@ mod tests {
             ip: "1.2.3.4".parse().unwrap(),
             port: 443,
             latency_ms: Some(12),
-            loss_pct: None,
             country: None,
             colo: None,
             phase2: None,
