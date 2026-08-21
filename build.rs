@@ -12,12 +12,17 @@
 //!   Dev builds are untouched; the runtime fallback download covers them.
 
 use std::io::Read;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use flate2::read::GzDecoder;
 use sha2::{Digest, Sha256};
 use zip::ZipArchive;
+
+// Same grammar file src/xray.rs parses at runtime; included so the two
+// cannot silently diverge (src/dgst.rs is std-only on purpose).
+#[path = "src/dgst.rs"]
+mod dgst;
 
 const VERSION_FILE: &str = include_str!("data/geoip-version.txt");
 const XRAY_VERSION_FILE: &str = include_str!("data/xray-version.txt");
@@ -79,40 +84,105 @@ fn embed_geoip() {
     // shared and unpredictable); the git-tracked data/ dir stays untouched.
     let cache = out_dir.join(format!("dbip-country-lite-{}.mmdb", version()));
 
-    if !looks_valid(&cache) {
-        match download(&URL.replace("{version}", version())) {
-            Some(bytes) => {
-                let actual = hex_lower(&Sha256::digest(&bytes));
-                if actual != geoip_pin().to_ascii_lowercase() {
-                    eprintln!(
-                        "error: db-ip mmdb checksum mismatch: got {actual}, want {}",
-                        geoip_pin()
-                    );
-                    std::process::exit(1);
-                }
-                let mut decoder = GzDecoder::new(bytes.as_slice());
-                let mut raw = Vec::new();
-                if decoder.read_to_end(&mut raw).is_err() || raw.is_empty() {
-                    eprintln!("error: db-ip download is not valid gzip");
-                    std::process::exit(1);
-                }
-                if std::fs::write(&cache, &raw).is_err() {
-                    eprintln!("error: could not cache {}", cache.display());
-                    std::process::exit(1);
-                }
-            }
-            None => {
-                eprintln!(
-                    "error: db-ip download failed; refusing to embed an empty geoip db \
-                     (pinned version {}, sha256 {}...)",
-                    version(),
-                    &geoip_pin()[..8]
-                );
-                std::process::exit(1);
-            }
-        }
+    if !cache_intact(&cache) {
+        refresh_cache(&cache);
     }
-    let _ = std::fs::copy(&cache, &dest);
+    if let Err(err) = std::fs::copy(&cache, &dest) {
+        eprintln!(
+            "error: could not copy cached db {} into place {}: {err}",
+            cache.display(),
+            dest.display()
+        );
+        std::process::exit(1);
+    }
+}
+
+/// Re-download, verify against the pinned `.mmdb.gz` sha256, decompress, then
+/// atomically place both the cache and its `<cache>.sha256` sidecar (digest
+/// of the decompressed mmdb) so verify-before-use can trust later builds.
+fn refresh_cache(cache: &Path) {
+    let Some(bytes) = download(&URL.replace("{version}", version())) else {
+        eprintln!(
+            "error: db-ip download failed; refusing to embed an empty geoip db \
+             (pinned version {}, sha256 {}...)",
+            version(),
+            &geoip_pin()[..8]
+        );
+        std::process::exit(1);
+    };
+    let actual = hex_lower(&Sha256::digest(&bytes));
+    if actual != geoip_pin().to_ascii_lowercase() {
+        eprintln!(
+            "error: db-ip mmdb checksum mismatch: got {actual}, want {}",
+            geoip_pin()
+        );
+        std::process::exit(1);
+    }
+    let mut decoder = GzDecoder::new(bytes.as_slice());
+    let mut raw = Vec::new();
+    if decoder.read_to_end(&mut raw).is_err() || raw.is_empty() {
+        eprintln!("error: db-ip download is not valid gzip");
+        std::process::exit(1);
+    }
+    if let Err(err) = write_atomic(cache, &raw) {
+        eprintln!("error: could not cache {}: {err}", cache.display());
+        std::process::exit(1);
+    }
+    let sidecar = sidecar_path(cache);
+    let digest = hex_lower(&Sha256::digest(&raw));
+    if let Err(err) = write_atomic(&sidecar, format!("{digest}\n").as_bytes()) {
+        eprintln!(
+            "error: could not write digest sidecar {}: {err}",
+            sidecar.display()
+        );
+        std::process::exit(1);
+    }
+}
+
+/// Verify-before-use: the cache counts as good only when a fresh SHA-256 of
+/// its bytes matches the sidecar written at download time. A truncated or
+/// otherwise corrupted cache (or missing/garbled sidecar) forces re-download
+/// instead of persisting forever the way the old size-only check allowed.
+/// The size floor doubles as a cheap early-out before hashing megabytes.
+fn cache_intact(cache: &Path) -> bool {
+    let Ok(meta) = std::fs::metadata(cache) else {
+        return false;
+    };
+    if meta.len() < MIN_VALID_BYTES {
+        return false;
+    }
+    let Some(expected) = std::fs::read_to_string(sidecar_path(cache))
+        .ok()
+        .as_deref()
+        .and_then(parse_sidecar_digest)
+    else {
+        return false;
+    };
+    let Ok(bytes) = std::fs::read(cache) else {
+        return false;
+    };
+    hex_lower(&Sha256::digest(&bytes)) == expected
+}
+
+/// Sidecar holds just the lowercase hex digest; trailing newline tolerated.
+fn parse_sidecar_digest(text: &str) -> Option<String> {
+    let digest = text.trim();
+    (digest.len() == 64 && digest.bytes().all(|b| b.is_ascii_hexdigit()))
+        .then(|| digest.to_ascii_lowercase())
+}
+
+fn sidecar_path(cache: &Path) -> PathBuf {
+    let mut name = cache.file_name().unwrap_or_default().to_os_string();
+    name.push(".sha256");
+    cache.with_file_name(name)
+}
+
+/// tmp+rename so a killed build never leaves a half-written file that a
+/// later run would accept (the rename replaces any existing file).
+fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let tmp = path.with_extension("tmp");
+    std::fs::write(&tmp, bytes)?;
+    std::fs::rename(tmp, path)
 }
 
 /// dist-only: place the verified xray binary at `data/bundled/<exe>` so the
@@ -161,7 +231,7 @@ fn bundle_xray_if_requested() {
         std::process::exit(1);
     };
     let text = String::from_utf8_lossy(&dgst);
-    let expected = dgst_hex(text.as_ref(), &asset).unwrap_or_else(|| {
+    let expected = dgst::dgst_sha256_hex(text.as_ref()).unwrap_or_else(|| {
         eprintln!("error: no SHA-256 in .dgst for {asset}");
         std::process::exit(1)
     });
@@ -260,18 +330,8 @@ fn xray_asset(target: &str) -> Option<String> {
     Some(format!("Xray-{os}-{arch}.zip"))
 }
 
-/// XTLS `.dgst` text is labeled digests (`SHA2-256= <hex>`, no filename);
-/// scoped to the first 64-char hex run on the SHA-256 line so format
-/// variations are tolerated.
-fn dgst_hex(text: &str, _asset: &str) -> Option<String> {
-    let line = text
-        .lines()
-        .find(|l| l.trim_start().starts_with("SHA2-256"))?;
-    line.split(|c: char| !c.is_ascii_hexdigit())
-        .find(|s| s.len() == 64)
-        .map(str::to_owned)
-}
-
+/// Digest extraction lives in the shared src/dgst.rs (also included by
+/// src/xray.rs) — keep it the single spec of the `.dgst` format.
 fn hex_lower(bytes: &[u8]) -> String {
     let mut s = String::with_capacity(bytes.len() * 2);
     for b in bytes {
@@ -298,10 +358,4 @@ fn download(url: &str) -> Option<Vec<u8>> {
         return None;
     }
     Some(out.stdout)
-}
-
-fn looks_valid(path: &std::path::Path) -> bool {
-    std::fs::metadata(path)
-        .map(|m| m.len() >= MIN_VALID_BYTES)
-        .unwrap_or(false)
 }

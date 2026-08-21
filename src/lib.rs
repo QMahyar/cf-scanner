@@ -5,6 +5,7 @@
 pub mod api;
 pub mod cli_wizard;
 pub mod configs;
+mod dgst;
 pub mod engine;
 pub mod geo;
 pub mod inline_verify;
