@@ -282,11 +282,17 @@ pub fn has_identity() -> bool {
 
 /// Public: the WARP server public key persisted at registration, if any. The
 /// probe prefers this over the bundled constant (a registration refresh).
+/// Key material is validated (base64, exactly 32 bytes) so a corrupt or
+/// hand-edited identity degrades to `None` and callers fall back to the
+/// bundled constant instead of panicking on decode.
 pub fn persisted_server_public_key() -> Option<String> {
-    load_identity()
-        .ok()
-        .and_then(|id| id.peer_public_key)
-        .filter(|k| !k.is_empty())
+    let key = load_identity().ok()?.peer_public_key;
+    if key.as_deref().map(str::is_empty) != Some(false) {
+        return None;
+    }
+    crate::wgconf::decode_key(key.as_deref().unwrap_or_default())
+        .is_ok()
+        .then_some(key.unwrap_or_default())
 }
 
 /// Writes `text` to `path` locked down to the owning user. The 0o600 mode is
@@ -780,6 +786,25 @@ pub(crate) mod tests {
             .block_on(export(None, None))
             .unwrap_err();
         assert!(err.to_string().contains("no saved identity"));
+    }
+
+    #[test]
+    fn corrupt_persisted_public_key_degrades_to_none() {
+        let _guard = IDENTITY_LOCK.lock().unwrap();
+        isolated_identity_dir();
+        let enc = |b: &[u8]| base64::Engine::encode(&base64::engine::general_purpose::STANDARD, b);
+        let short_key = enc(&[1u8; 16]);
+        for bad in ["not-valid-base64!!!", short_key.as_str()] {
+            let identity = format!(
+                r#"{{"id":"t","token":"t","private_key":"{}","client_id":"c","account_type":"free","license":null,"created_at":0,"peer_public_key":"{bad}"}}"#,
+                enc(&[1u8; 32])
+            );
+            std::fs::write(identity_path().unwrap(), identity).unwrap();
+            assert!(
+                persisted_server_public_key().is_none(),
+                "corrupt peer key {bad:?} must degrade to None"
+            );
+        }
     }
 
     /// Drives the whole register -> enable -> license -> fetch flow against a

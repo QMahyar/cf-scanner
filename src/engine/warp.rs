@@ -169,7 +169,6 @@ impl ScanController {
                             ip: task.ip,
                             port: task.port,
                             latency_ms: Some(latency),
-                            loss_pct: Some(failed as f32 / probes_per_endpoint as f32 * 100.0),
                             country: ctx.geo.country(task.ip),
                             colo: None,
                             phase2: None,
@@ -332,7 +331,6 @@ mod tests {
         let results = c.results();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].latency_ms, Some(5));
-        assert_eq!(results[0].loss_pct, Some(0.0));
     }
 
     #[tokio::test]
