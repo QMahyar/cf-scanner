@@ -92,9 +92,15 @@ fn prompt_warp() -> Result<ScanConfig> {
     Ok(cfg)
 }
 
+/// Ctrl+C during a prompt: a typed marker callers can downcast (main.rs)
+/// instead of comparing error text. Display stays "interrupted".
+#[derive(Debug, thiserror::Error)]
+#[error("interrupted")]
+pub struct WizardInterrupted;
+
 pub async fn run(controller: Arc<ScanController>) -> Result<()> {
     match run_wizard(controller).await {
-        Err(err) if is_interrupt(&err) => Err(anyhow!("interrupted")),
+        Err(err) if is_interrupt(&err) => Err(WizardInterrupted.into()),
         other => other,
     }
 }
@@ -500,5 +506,19 @@ mod tests {
         )));
         assert!(!is_interrupt(&err));
         assert!(!is_interrupt(&anyhow!("boom")));
+    }
+
+    #[test]
+    fn wizard_interrupt_downcasts_from_run_error_shape() {
+        let err: anyhow::Error = WizardInterrupted.into();
+        assert_eq!(err.to_string(), "interrupted");
+        assert!(err.is::<WizardInterrupted>());
+        // A raw dialoguer interrupt (what run() sees before mapping) must not
+        // itself satisfy the downcast, or unrelated IO errors would pass.
+        let raw = anyhow::Error::new(dialoguer::Error::IO(std::io::Error::new(
+            std::io::ErrorKind::Interrupted,
+            "ctrl+c",
+        )));
+        assert!(!raw.is::<WizardInterrupted>());
     }
 }

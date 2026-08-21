@@ -38,9 +38,11 @@ enum Command {
         /// Keep serving from the Windows system tray; its menu drives the API
         #[arg(long)]
         tray: bool,
-        /// Register `serve --tray` to start with Windows (requires --tray)
-        #[arg(long, requires = "tray")]
-        autostart: bool,
+        /// Manage start-with-Windows registration: bare flag or `enable`
+        /// registers `serve --tray` once this server is up (needs --tray);
+        /// `remove` unregisters and works without --tray
+        #[arg(long, num_args = 0..=1, default_missing_value = "enable")]
+        autostart: Option<AutostartArg>,
     },
     /// One-shot scan; prints newline-delimited JSON to stdout
     Scan {
@@ -223,6 +225,13 @@ struct ScanArgs {
 enum ModeArg {
     Cdn,
     Warp,
+}
+
+/// `--autostart` value: register or unregister the HKCU Run entry.
+#[derive(Copy, Clone, PartialEq, Eq, Debug, ValueEnum)]
+enum AutostartArg {
+    Enable,
+    Remove,
 }
 
 #[derive(Copy, Clone, ValueEnum)]
@@ -448,8 +457,9 @@ async fn run(cli: Cli) -> Result<()> {
             )));
             match cli_wizard::run(controller).await {
                 Ok(()) => Ok(()),
-                // Ctrl+C during the wizard is a user choice, not a failure.
-                Err(err) if err.to_string() == "interrupted" => Ok(()),
+                // Ctrl+C during the wizard is a user choice, not a failure;
+                // downcast the typed marker instead of matching on text.
+                Err(err) if err.is::<cli_wizard::WizardInterrupted>() => Ok(()),
                 Err(err) => Err(err),
             }
         }
@@ -612,16 +622,19 @@ fn run_export_config(
     Ok(uri)
 }
 
-async fn serve(port: u16, tray_enabled: bool, autostart: bool) -> Result<()> {
-    if autostart {
-        tray::set_autostart(true)?;
+async fn serve(port: u16, tray_enabled: bool, autostart: Option<AutostartArg>) -> Result<()> {
+    // Removal runs before bind: unregistering must not depend on the server
+    // coming up (a busy port must not trap the entry in the registry).
+    if autostart == Some(AutostartArg::Remove) {
+        tray::set_autostart(false)?;
         if cfg!(target_os = "windows") {
             eprintln!(
-                "autostart registered: HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run\\{}",
+                "autostart removed: HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run\\{}",
                 tray::RUN_VALUE_NAME
             );
         }
     }
+    ensure_autostart_valid(tray_enabled, autostart)?;
     let controller = Arc::new(engine::ScanController::new(Arc::new(
         probe::TlsTransport::new(),
     )));
@@ -633,6 +646,17 @@ async fn serve(port: u16, tray_enabled: bool, autostart: bool) -> Result<()> {
     // Unconditional stderr print: the user must see where the server is even
     // without --verbose (info-level logs are hidden by default).
     eprintln!("CF-Scanner running at {url}");
+    // Registered only after a successful bind: an autostart entry that keeps
+    // relaunching a serve which cannot bind would fail at every logon.
+    if autostart == Some(AutostartArg::Enable) {
+        tray::set_autostart(true)?;
+        if cfg!(target_os = "windows") {
+            eprintln!(
+                "autostart registered: HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run\\{}",
+                tray::RUN_VALUE_NAME
+            );
+        }
+    }
     if tray_enabled {
         // --tray never auto-opens the browser: the tray menu's "Open UI" is
         // the way in, so spawning can fail silently without hurting serve.
@@ -643,6 +667,16 @@ async fn serve(port: u16, tray_enabled: bool, autostart: bool) -> Result<()> {
     axum::serve(listener, server::router(controller.clone()))
         .with_graceful_shutdown(shutdown_signal(controller, tray_enabled))
         .await?;
+    Ok(())
+}
+
+/// `--autostart enable` registers a `serve --tray` entry, so it needs
+/// --tray; `remove` stands alone. Clap cannot express per-value requires,
+/// hence this check instead of `requires = "tray"`.
+fn ensure_autostart_valid(tray_enabled: bool, autostart: Option<AutostartArg>) -> Result<()> {
+    if autostart == Some(AutostartArg::Enable) && !tray_enabled {
+        return Err(anyhow!("--autostart requires --tray"));
+    }
     Ok(())
 }
 
@@ -1206,7 +1240,7 @@ mod tests {
     }
 
     #[test]
-    fn serve_tray_flags_parse_and_autostart_requires_tray() {
+    fn serve_tray_flags_parse_and_autostart_shapes() {
         let cli = Cli::try_parse_from(["cf-scanner", "serve", "--tray"]).unwrap();
         match cli.command {
             Command::Serve {
@@ -1216,19 +1250,55 @@ mod tests {
             } => {
                 assert_eq!(port, 8765);
                 assert!(tray);
-                assert!(!autostart);
+                assert_eq!(autostart, None);
             }
             _ => panic!("expected serve"),
         }
+        // Bare flag means enable (back-compat with the old bool --autostart).
         let cli = Cli::try_parse_from(["cf-scanner", "serve", "--tray", "--autostart"]).unwrap();
         match cli.command {
-            Command::Serve { autostart, .. } => assert!(autostart),
-            _ => panic!("expected serve"),
+            Command::Serve {
+                autostart: Some(AutostartArg::Enable),
+                ..
+            } => {}
+            _ => panic!("bare --autostart must mean enable"),
         }
+        let cli = Cli::try_parse_from(["cf-scanner", "serve", "--autostart", "enable"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Serve {
+                autostart: Some(AutostartArg::Enable),
+                ..
+            }
+        ));
+        // Removal needs no --tray; the tray requirement is serve()-level.
+        let cli = Cli::try_parse_from(["cf-scanner", "serve", "--autostart", "remove"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Serve {
+                autostart: Some(AutostartArg::Remove),
+                ..
+            }
+        ));
         assert!(
-            Cli::try_parse_from(["cf-scanner", "serve", "--autostart"]).is_err(),
-            "--autostart without --tray must be rejected"
+            Cli::try_parse_from(["cf-scanner", "serve", "--autostart", "bogus"]).is_err(),
+            "unknown --autostart values must be rejected"
         );
+    }
+
+    #[test]
+    fn autostart_enable_requires_tray_but_remove_does_not() {
+        // The old clap `requires = "tray"` moved here so `remove` can run
+        // standalone; enabling without a tray would register an entry that
+        // cannot bring the UI up.
+        assert!(ensure_autostart_valid(false, Some(AutostartArg::Enable)).is_err());
+        let err = ensure_autostart_valid(false, Some(AutostartArg::Enable)).unwrap_err();
+        assert!(err.to_string().contains("--tray"), "{err:#}");
+        assert!(ensure_autostart_valid(true, Some(AutostartArg::Enable)).is_ok());
+        assert!(ensure_autostart_valid(false, Some(AutostartArg::Remove)).is_ok());
+        assert!(ensure_autostart_valid(true, Some(AutostartArg::Remove)).is_ok());
+        assert!(ensure_autostart_valid(true, None).is_ok());
+        assert!(ensure_autostart_valid(false, None).is_ok());
     }
 
     #[test]

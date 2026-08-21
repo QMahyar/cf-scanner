@@ -284,6 +284,7 @@ async fn write_trial_config(path: &Path, config_json: &Value) -> Result<()> {
         #[cfg(not(unix))]
         {
             std::fs::write(&path, json)?;
+            crate::paths::lock_down_to_owner(&path)?;
         }
         Ok(())
     })
@@ -589,22 +590,11 @@ fn random_u32() -> u32 {
     RngCore::next_u32(&mut OsRng)
 }
 
-/// Parses XTLS `.dgst` text (the current format has no filename, just
-/// `SHA2-256= <hex>` lines); scoped to the first 64-char hex run on the
-/// SHA-256 line so format variations are tolerated.
+/// Maps the shared `.dgst` grammar (crate::dgst — the same file build.rs
+/// includes) onto this module's typed errors.
 fn parse_dgst(text: &str, asset: &str) -> Result<String> {
-    let line = text
-        .lines()
-        .find(|l| l.trim_start().starts_with("SHA2-256"))
-        .ok_or_else(|| anyhow!(".dgst has no SHA2-256 line for {asset}"))?;
-    let hex64: Vec<&str> = line
-        .split(|c: char| !c.is_ascii_hexdigit())
-        .filter(|s| s.len() == 64)
-        .collect();
-    hex64
-        .first()
-        .map(|s| s.to_ascii_lowercase())
-        .ok_or_else(|| anyhow!(".dgst line has no 64-char digest: {line}"))
+    crate::dgst::dgst_sha256_hex(text)
+        .ok_or_else(|| anyhow!("no SHA2-256 digest in .dgst for {asset}"))
 }
 
 /// Extracts just the xray binary out of the release zip.
