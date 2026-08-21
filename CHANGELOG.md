@@ -50,6 +50,15 @@ Added / Changed / Fixed / Deprecated / Removed / Security, newest on top.
 ## [Unreleased]
 
 ### Fixed
+- SSE `/api/events` no longer closes idle connections after replaying the
+  previous run's terminal: a browser EventSource held open between scans used
+  to reconnect-storm (connect -> replay -> close -> reconnect) and could miss
+  the next run entirely. A replayed terminal is now context only; the stream
+  ends on the next run's live terminal or an unrecoverable lag. Graceful
+  shutdown additionally bounds its wait (5 s grace) so deliberately-open idle
+  streams can never hang process exit.
+
+### Fixed
 - **Stale validation message.** "Fix the highlighted fields to continue."
   no longer lingers after the user corrects the field — the message clears
   live while typing and stays cleared after Next.

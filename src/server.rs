@@ -26,7 +26,6 @@ use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock as TokioRwLock;
 use tokio_stream::Stream;
-use tokio_stream::StreamExt as _;
 use tokio_stream::wrappers::BroadcastStream;
 
 use crate::api::types::{DEFAULT_PORT, Mode, ScanConfig, ScanEvent, ScanSummary, Verdict};
@@ -593,28 +592,34 @@ async fn events(
         .clone()
         .filter(|(epoch, _)| *epoch == current_epoch)
         .map(|(_, ev)| ev);
-    let stream: Pin<Box<dyn Stream<Item = Result<Event, Infallible>> + Send>> = match replay {
-        Some(ev) => Box::pin(tokio_stream::once((slot, ev)).map(|(slot, event)| {
-            let _ = &slot;
-            Ok(map_event(event).unwrap_or_default())
-        })),
-        None => Box::pin(TerminalBounded {
+    let stream: Pin<Box<dyn Stream<Item = Result<Event, Infallible>> + Send>> =
+        Box::pin(TerminalBounded {
             rx: BroadcastStream::new(rx),
             _slot: slot,
             done: false,
-        }),
-    };
+            // A terminal from an ALREADY-FINISHED run is context, not an
+            // end-of-stream signal for THIS connection: closing here would
+            // make every idle browser EventSource reconnect-storm (connect ->
+            // replay -> close -> reconnect) and miss the next run's events.
+            // Deliver it once, then keep waiting for a future run's live
+            // tail — only a fresh live terminal or Lagged ends the stream.
+            replay: replay.map(|ev| (ev, false)),
+        });
     Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
 }
 
-/// Live SSE items off the engine's broadcast tail. Ends after the run's
-/// terminal event (Finished/Failed) so an idle response body cannot hold
-/// hyper's graceful shutdown open forever, and on Lagged (irrecoverable gap;
-/// a reconnect replays the terminal instead).
+/// Live SSE items off the engine's broadcast tail, optionally preceded by one
+/// replayed terminal from the previous run. Ends after a LIVE run's terminal
+/// event (Finished/Failed) so an in-flight response body cannot hold hyper's
+/// graceful shutdown open forever, and on Lagged (irrecoverable gap; a
+/// reconnect replays instead).
 struct TerminalBounded {
     rx: BroadcastStream<ScanEvent>,
     _slot: SseSlot,
     done: bool,
+    /// `Some((event, delivered))`: the previous run's terminal until it has
+    /// been yielded.
+    replay: Option<(ScanEvent, bool)>,
 }
 
 impl Stream for TerminalBounded {
@@ -626,6 +631,16 @@ impl Stream for TerminalBounded {
     ) -> std::task::Poll<Option<Self::Item>> {
         if self.done {
             return std::task::Poll::Ready(None);
+        }
+        // The replayed terminal goes out first, exactly once; it does not
+        // end the stream (see the field docs).
+        if let Some((ev, delivered)) = &mut self.replay {
+            if !*delivered {
+                *delivered = true;
+                if let Some(event) = map_event(ev.clone()) {
+                    return std::task::Poll::Ready(Some(Ok(event)));
+                }
+            }
         }
         loop {
             match Pin::new(&mut self.rx).poll_next(cx) {
@@ -1136,6 +1151,7 @@ mod tests {
     use std::net::SocketAddr;
     use std::sync::Mutex;
     use std::time::Duration;
+    use tokio_stream::StreamExt as _;
 
     use crate::api::types::{DEFAULT_WARP_PORTS, MAX_STOP_VALUE};
     use crate::api::types::{Mode, Phase2Config, ScanTarget, StopCondition, WarpConfig};
@@ -1620,6 +1636,7 @@ mod tests {
             rx: BroadcastStream::new(rx),
             _slot: try_acquire_sse_slot(&Arc::new(AtomicUsize::new(0))).unwrap(),
             done: false,
+            replay: None,
         };
         tx.send(ScanEvent::Progress(crate::api::types::ScanProgress {
             scanned: 1,
@@ -1651,6 +1668,55 @@ mod tests {
         assert!(
             matches!(&third, Err(_) | Ok(None)),
             "stream must end after the terminal event: {third:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn replayed_terminal_does_not_close_the_stream() {
+        // A stale terminal delivered as context must not terminate the
+        // connection (idle browser EventSources would reconnect-storm);
+        // only a fresh LIVE terminal from a later run ends it.
+        let (tx, rx) = tokio::sync::broadcast::channel(8);
+        let mut stream = TerminalBounded {
+            rx: BroadcastStream::new(rx),
+            _slot: try_acquire_sse_slot(&Arc::new(AtomicUsize::new(0))).unwrap(),
+            done: false,
+            replay: Some((
+                ScanEvent::Finished(ScanSummary {
+                    scanned: 4,
+                    found: 2,
+                    duration_ms: 3,
+                    cancelled: false,
+                }),
+                false,
+            )),
+        };
+        let first = tokio::time::timeout(Duration::from_secs(1), stream.next())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(first.is_ok(), "replayed finished item must arrive");
+        let second = tokio::time::timeout(Duration::from_millis(150), stream.next()).await;
+        assert!(
+            second.is_err(),
+            "the stream must stay open after a REPLAYED terminal: {second:?}"
+        );
+        tx.send(ScanEvent::Finished(ScanSummary {
+            scanned: 8,
+            found: 3,
+            duration_ms: 9,
+            cancelled: false,
+        }))
+        .unwrap();
+        let third = tokio::time::timeout(Duration::from_secs(1), stream.next())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(third.is_ok(), "live finished item must arrive");
+        let fourth = tokio::time::timeout(Duration::from_millis(150), stream.next()).await;
+        assert!(
+            matches!(&fourth, Err(_) | Ok(None)),
+            "a LIVE terminal must end the stream: {fourth:?}"
         );
     }
 

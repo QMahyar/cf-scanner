@@ -1,8 +1,9 @@
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
+use std::time::Duration;
 
-use anyhow::{Result, anyhow};
+use anyhow::{Context as _, Result, anyhow};
 use cf_scanner::api;
 use cf_scanner::api::types::{
     CdnPreset, DEFAULT_CONCURRENCY, Mode, ScanConfig, ScanEvent, ScanTarget, StopCondition,
@@ -664,9 +665,32 @@ async fn serve(port: u16, tray_enabled: bool, autostart: Option<AutostartArg>) -
             tracing::warn!("could not start system tray: {err:#}");
         }
     }
-    axum::serve(listener, server::router(controller.clone()))
-        .with_graceful_shutdown(shutdown_signal(controller, tray_enabled))
-        .await?;
+    // Graceful shutdown waits for in-flight responses, but an idle SSE
+    // stream is open forever by design — bound the wait so a connected UI
+    // can never hang process exit (the stream itself ends on terminal or
+    // Lagged; this only cuts idle ones at shutdown).
+    const SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
+    let (shutdown_fired_tx, mut shutdown_fired) = tokio::sync::watch::channel(false);
+    let mut server = tokio::spawn(async move {
+        axum::serve(listener, server::router(controller.clone()))
+            .with_graceful_shutdown(async move {
+                shutdown_signal(controller, tray_enabled).await;
+                let _ = shutdown_fired_tx.send(true);
+            })
+            .await
+    });
+    tokio::select! {
+        res = &mut server => {
+            res.context("server task failed")??;
+        }
+        _ = async {
+            let _ = shutdown_fired.changed().await;
+            tokio::time::sleep(SHUTDOWN_GRACE).await;
+        } => {
+            tracing::info!("shutdown grace elapsed; closing remaining connections");
+            server.abort();
+        }
+    }
     Ok(())
 }
 
