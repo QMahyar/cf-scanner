@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
-use anyhow::{Result, anyhow, bail};
+use anyhow::{Context as _, Result, anyhow, bail};
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::watch;
@@ -217,11 +217,15 @@ impl ScanController {
         let ports = cfg.ports.clone();
         let mut groups = Vec::new();
         if warp.custom_endpoints.is_empty() {
+            // Same collect-and-bail contract as the CDN pool: an unparsable
+            // exclusion must fail the run, never silently scan excluded space.
             let excluded = cfg
                 .exclude
                 .iter()
-                .filter_map(|c| ranges::parse_cidr(c).ok())
-                .collect::<Vec<_>>();
+                .map(|c| {
+                    ranges::parse_cidr(c).with_context(|| format!("invalid exclusion CIDR {c:?}"))
+                })
+                .collect::<Result<Vec<_>>>()?;
             let pool = crate::warp::bundled_pool().excluding(&excluded);
             let plan = plan(&pool, &cfg.target, &mut SplitMix64::new(seed));
             for item in &plan {
@@ -380,6 +384,30 @@ mod tests {
         let summary = run_local(&c, cfg, 1).await.unwrap();
         assert_eq!(summary.scanned, 8 * 256, "all bundled pool hosts");
         assert_eq!(summary.found, 0);
+    }
+
+    #[test]
+    fn warp_rejects_unparsable_exclusion_cidrs() {
+        let (c, _) = warp_controller(FakeTransport::new());
+        let mut cfg = warp_cfg(1, &[]);
+        cfg.exclude = vec!["10.0.0.0/33".to_owned()];
+        // Direct planning call: a full run rejects the same entry earlier in
+        // cfg.validate, so this isolates the exclusion handling itself.
+        let err = c
+            .warp_groups(&cfg, cfg.warp.as_ref().unwrap(), 1)
+            .expect_err("an unparsable --exclude CIDR must fail the plan");
+        assert!(err.to_string().contains("10.0.0.0/33"), "{err:#}");
+    }
+
+    #[tokio::test]
+    async fn warp_exclusion_removes_space_from_the_bundled_pool() {
+        let (c, _) = warp_controller(FakeTransport::new());
+        let mut cfg = warp_cfg(1, &[]);
+        cfg.exclude = vec!["0.0.0.0/0".to_owned()];
+        let summary = run_local(&c, cfg, 1).await.unwrap();
+        assert_eq!(summary.scanned, 0, "excluded space must never be probed");
+        assert_eq!(summary.found, 0);
+        assert!(c.results().is_empty());
     }
 
     #[tokio::test]
