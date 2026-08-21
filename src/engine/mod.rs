@@ -302,16 +302,11 @@ impl ScanController {
             }
             *running = true;
         }
-        let result = self.run_seeded_unguarded(cfg, seed).await;
-        if let Err(err) = &result {
-            // The chain can carry imported config material (URLs, paths);
-            // sanitize before it reaches logs or the wire.
-            let msg = crate::configs::sanitize_error_text(&format!("{err:#}"));
-            self.emit(ScanEvent::Failed(msg));
-        }
         // RAII: clears the busy flag (and the cancel slot) even if the run
         // panics, so one bad run can never brick the controller for the rest
-        // of the process's life.
+        // of the process's life. Bound immediately after `running = true` and
+        // before the first panic-capable call: a panic unwinding through the
+        // awaited scan must still hit this drop.
         struct ResetGuard<'a> {
             running: &'a Mutex<bool>,
             cancel_tx: &'a Mutex<Option<watch::Sender<bool>>>,
@@ -329,6 +324,13 @@ impl ScanController {
             running: &self.running,
             cancel_tx: &self.cancel_tx,
         };
+        let result = self.run_seeded_unguarded(cfg, seed).await;
+        if let Err(err) = &result {
+            // The chain can carry imported config material (URLs, paths);
+            // sanitize before it reaches logs or the wire.
+            let msg = crate::configs::sanitize_error_text(&format!("{err:#}"));
+            self.emit(ScanEvent::Failed(msg));
+        }
         result
     }
 
@@ -519,6 +521,8 @@ mod tests {
     use super::*;
     use crate::api::types::{ScanConfig, ScanTarget, StopCondition};
     use crate::probe::FakeTransport;
+    use std::future::Future;
+    use std::pin::Pin;
     use std::time::Duration;
 
     pub(crate) fn ok_cfg(found: u32, cap: Option<u32>) -> ScanConfig {
@@ -637,6 +641,48 @@ mod tests {
         // After the first run finishes, a new run is accepted again.
         let again = c.run(cfg).await.unwrap();
         assert_eq!(again.found, 8);
+    }
+
+    struct PanicSubFetch;
+
+    impl SubFetch for PanicSubFetch {
+        fn fetch(&self, _url: &str) -> Pin<Box<dyn Future<Output = Result<String>> + Send + '_>> {
+            Box::pin(async { panic!("sub fetch exploded") })
+        }
+    }
+
+    #[tokio::test]
+    async fn panic_during_a_run_leaves_the_controller_usable() {
+        let mut controller = ScanController::new(Arc::new(FakeTransport::new()));
+        // Private-seam override: the panic must unwind through run_seeded
+        // itself (worker JoinSets would catch a transport panic before it
+        // ever reaches the guard).
+        controller.sub_fetch = Arc::new(PanicSubFetch);
+        let c = Arc::new(controller);
+
+        let mut cfg = ok_cfg(1, None);
+        cfg.custom_cidrs = vec!["10.0.0.0/29".to_owned()];
+        cfg.phase2 = Some(crate::api::types::Phase2Config {
+            configs: vec!["https://sub.example/list".to_owned()],
+            ..Default::default()
+        });
+
+        let handle = tokio::spawn({
+            let c = c.clone();
+            async move { c.run(cfg).await }
+        });
+        let join_err = handle.await.unwrap_err();
+        assert!(join_err.is_panic(), "the panic must surface as a JoinError");
+
+        assert!(
+            !c.is_running(),
+            "a panic unwinding through the run must clear the busy flag"
+        );
+        let mut retry = ok_cfg(1, None);
+        retry.custom_cidrs = vec!["10.0.0.0/29".to_owned()];
+        let again = c.run(retry).await.expect("retry must start cleanly");
+        assert!(!c.is_running());
+        assert_eq!(again.found, 0);
     }
 
     #[tokio::test]
