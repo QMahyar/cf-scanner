@@ -3,7 +3,7 @@
 All notable changes to CF-Scanner are documented here, grouped by
 Added / Changed / Fixed / Deprecated / Removed / Security, newest on top.
 
-## [Unreleased]
+## [0.5.1] - 2026-08-21
 
 ### Changed
 - **WARP working verdict now requires zero probe loss.** An endpoint appears
@@ -11,6 +11,43 @@ Added / Changed / Fixed / Deprecated / Removed / Security, newest on top.
   any probe loss are excluded entirely instead of being listed with a loss %.
   "Stop after N found" and latency-based ranking count zero-loss endpoints
   only (QA decision 2026-08-20, see ADR-002 update).
+- SSE `/api/events` streams end after the run's terminal event instead of
+  hanging open, so graceful shutdown completes while a UI tab is connected;
+  clients that subscribe mid-finish now replay the terminal exactly once.
+- `--cap` is enforced run-wide across phases 1+2 (was per-phase), and
+  `phase2_only` runs count verification attempts in `summary.scanned`
+  (previously reported 0).
+- Removed the always-0.0 `loss_pct` field from verdicts (API, engine, UI
+  table and CSV export).
+
+### Added
+- `serve --autostart=remove` unregisters the start-with-Windows entry without
+  `--tray`; registration now happens only after a successful bind.
+
+### Fixed
+- WARP mode fails loudly on unparsable `--exclude` CIDRs instead of silently
+  scanning excluded space.
+- A panic unwinding through a scan can no longer leave the controller
+  permanently busy ("a scan is already running").
+- Closed the `/api/events` missed-terminal race, the concurrent-start race
+  (racing POSTs get 409, no phantom `Failed` mid-scan), and the WARP
+  registration overwrite-consent race.
+- A corrupt persisted WARP server key falls back to the bundled constant
+  instead of panicking every probe.
+- Hostile tunneled responses can no longer force 64 MiB allocations per
+  attempt (probe body cap) and over-cap socks responses fail explicitly
+  instead of truncating silently.
+- Windows secret files (`identity.json`, `profiles.json`, trial configs) are
+  locked down to the owning user with a protected DACL.
+- The GeoIP build cache verifies its SHA-256 sidecar before use and writes
+  atomically; truncated caches re-download instead of persisting forever.
+- `xray` download/export errors are sanitized like every other path; the
+  Host allowlist is case-insensitive and rejects `::1` (server binds IPv4
+  loopback only); explicit byte caps on license and export-config fields;
+  wizard Ctrl+C detected by type; outbound fetches accept bracketed IPv6
+  literals.
+
+## [Unreleased]
 
 ### Fixed
 - **Stale validation message.** "Fix the highlighted fields to continue."
