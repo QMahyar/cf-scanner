@@ -44,6 +44,11 @@ fn progress_cadence(total: u64) -> u64 {
 
 type Store = Arc<Mutex<Vec<Verdict>>>;
 
+/// Reservation failure: the single run slot is already taken.
+#[derive(Debug, thiserror::Error)]
+#[error("a scan is already running")]
+pub struct AlreadyRunning;
+
 pub struct ScanController {
     transport: Arc<dyn Transport>,
     warp_transport: Arc<dyn Transport>,
@@ -209,11 +214,38 @@ impl ScanController {
         self: &Arc<Self>,
         cfg: ScanConfig,
         seed: u64,
+        on_event: impl FnMut(ScanEvent),
+    ) -> Result<ScanSummary> {
+        let rx = self.subscribe();
+        let controller = self.clone();
+        let handle = tokio::spawn(async move { controller.run_seeded(cfg, seed).await });
+        self.drive_run(handle, rx, on_event).await
+    }
+
+    /// Streaming variant of [`run_reserved`] for callers that reserved the
+    /// slot via [`reserve`](Self::reserve) (the server's start path reserves
+    /// synchronously, then spawns this). Running it without a reservation
+    /// breaks the one-run-at-a-time invariant.
+    pub async fn run_reserved_streaming(
+        self: &Arc<Self>,
+        cfg: ScanConfig,
+        on_event: impl FnMut(ScanEvent),
+    ) -> Result<ScanSummary> {
+        let rx = self.subscribe();
+        let controller = self.clone();
+        let seed = time_seed();
+        let handle = tokio::spawn(async move { controller.run_reserved(cfg, seed).await });
+        self.drive_run(handle, rx, on_event).await
+    }
+
+    /// Drives a spawned run to completion, invoking `on_event` for every
+    /// broadcast event. Shared by the streaming entry points.
+    async fn drive_run(
+        self: &Arc<Self>,
+        mut handle: tokio::task::JoinHandle<Result<ScanSummary>>,
+        mut rx: broadcast::Receiver<ScanEvent>,
         mut on_event: impl FnMut(ScanEvent),
     ) -> Result<ScanSummary> {
-        let mut rx = self.subscribe();
-        let controller = self.clone();
-        let mut handle = tokio::spawn(async move { controller.run_seeded(cfg, seed).await });
         // Rows this consumer already saw; every branch records into it so the
         // end-of-run store re-sync only emits rows the consumer truly missed
         // (fast consumers get exactly-once, lagging ones get a deduped tail).
@@ -289,29 +321,38 @@ impl ScanController {
         }
     }
 
+    /// Reserves the single run slot synchronously: the caller can flip the
+    /// running state and THEN spawn the run task, so a racing second caller
+    /// sees the reservation instead of a false "idle" (the server's start
+    /// path depends on this — a check-then-spawn gap let two POSTs through).
+    pub fn reserve(&self) -> Result<(), AlreadyRunning> {
+        let mut running = self.running.lock().unwrap_or_else(|e| e.into_inner());
+        if *running {
+            return Err(AlreadyRunning);
+        }
+        *running = true;
+        Ok(())
+    }
+
     /// At most one run per controller: a second concurrent run is rejected
     /// (surfacing as a `Failed` event) so two runs can never race the shared
     /// store or the cancel slot.
     pub async fn run_seeded(&self, cfg: ScanConfig, seed: u64) -> Result<ScanSummary> {
-        {
-            let mut running = self.running.lock().unwrap_or_else(|e| e.into_inner());
-            if *running {
-                let err = anyhow!("a scan is already running");
-                self.emit(ScanEvent::Failed(format!("{err:#}")));
-                return Err(err);
-            }
-            *running = true;
-        }
-        let result = self.run_seeded_unguarded(cfg, seed).await;
-        if let Err(err) = &result {
-            // The chain can carry imported config material (URLs, paths);
-            // sanitize before it reaches logs or the wire.
-            let msg = crate::configs::sanitize_error_text(&format!("{err:#}"));
-            self.emit(ScanEvent::Failed(msg));
-        }
+        self.reserve().map_err(|err| {
+            self.emit(ScanEvent::Failed(format!("{err:#}")));
+            anyhow!("{err}")
+        })?;
+        self.run_reserved(cfg, seed).await
+    }
+
+    /// Runs without re-checking the slot; the caller must have reserved it
+    /// via [`reserve`](Self::reserve) (or be inside [`run_seeded`], which
+    /// reserves first).
+    async fn run_reserved(&self, cfg: ScanConfig, seed: u64) -> Result<ScanSummary> {
         // RAII: clears the busy flag (and the cancel slot) even if the run
         // panics, so one bad run can never brick the controller for the rest
-        // of the process's life.
+        // of the process's life. Created BEFORE the body so a panic mid-run
+        // still unwinds through it.
         struct ResetGuard<'a> {
             running: &'a Mutex<bool>,
             cancel_tx: &'a Mutex<Option<watch::Sender<bool>>>,
@@ -329,6 +370,13 @@ impl ScanController {
             running: &self.running,
             cancel_tx: &self.cancel_tx,
         };
+        let result = self.run_seeded_unguarded(cfg, seed).await;
+        if let Err(err) = &result {
+            // The chain can carry imported config material (URLs, paths);
+            // sanitize before it reaches logs or the wire.
+            let msg = crate::configs::sanitize_error_text(&format!("{err:#}"));
+            self.emit(ScanEvent::Failed(msg));
+        }
         result
     }
 
