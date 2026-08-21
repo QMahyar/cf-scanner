@@ -32,6 +32,10 @@ pub const MAX_CONFIG_ENTRY_BYTES: usize = 8 * 1024;
 pub const MAX_SNI_BYTES: usize = 256;
 pub const MAX_PROBE_URL_BYTES: usize = 2 * 1024;
 pub const MAX_WGCONF_BYTES: usize = 64 * 1024;
+/// WARP+ license key cap on the register endpoint (real keys are short).
+pub const MAX_LICENSE_BYTES: usize = 256;
+/// Original config URI cap for /api/config/export (one URI, not a file dump).
+pub const MAX_EXPORT_CONFIG_BYTES: usize = 64 * 1024;
 /// Upper bound for `stop.found`/`stop.cap`, matching the frontend's field
 /// validators (embed/index.html `intRange(1, 100000000, ...)`); keeps the API
 /// contract and its UI honest about the same limits.

@@ -97,8 +97,8 @@ async fn persist_profiles(dir: &std::path::Path, profiles: &HashMap<String, Scan
 
 /// Host header values the API answers to. Anything else is rejected before
 /// routing (DNS-rebinding / drive-by protection); the server only ever binds
-/// 127.0.0.1.
-const ALLOWED_HOSTS: [&str; 3] = ["127.0.0.1", "localhost", "::1"];
+/// IPv4 loopback, so v6 loopback hosts are not answerable and stay rejected.
+const ALLOWED_HOSTS: [&str; 2] = ["127.0.0.1", "localhost"];
 
 fn host_allowed(host: &str) -> bool {
     let host = host.trim();
@@ -109,7 +109,9 @@ fn host_allowed(host: &str) -> bool {
     } else {
         host
     };
-    ALLOWED_HOSTS.contains(&host)
+    ALLOWED_HOSTS
+        .iter()
+        .any(|allowed| allowed.eq_ignore_ascii_case(host))
 }
 
 fn origin_allowed(origin: &str) -> bool {
@@ -184,9 +186,6 @@ struct AppState {
     controller: Arc<ScanController>,
     profiles: TokioRwLock<HashMap<String, ScanConfig>>,
     ranges: Arc<RangesState>,
-    /// Serializes scan start: the check-and-spawn in start_scan must be
-    /// atomic, else two concurrent POSTs both pass `is_running()`.
-    start_lock: tokio::sync::Mutex<()>,
     sse_connections: Arc<AtomicUsize>,
     warp_register: WarpRegistrar,
     /// Where profiles.json lives; production = the data dir, tests = an
@@ -198,8 +197,13 @@ struct AppState {
     /// Terminal (Finished/Failed) of the latest finished run, tagged with
     /// its epoch; replayed to SSE clients that connect after the run ended.
     last_terminal: Arc<Mutex<Option<(u64, ScanEvent)>>>,
-    /// Last WARP registration attempt, for the 1-per-60s limit.
-    last_register: Mutex<Option<Instant>>,
+    /// Serializes WARP registrations end-to-end and carries the last
+    /// attempt for the 1-per-60s limit. The overwrite-consent check and the
+    /// registration must be ONE critical section: two concurrent first-time
+    /// registers would both see "no identity" and both clobber it. Held
+    /// across the network call; the cooldown already limits registrations to
+    /// 1/60 s, so serializing them costs nothing.
+    register_gate: tokio::sync::Mutex<Option<Instant>>,
 }
 
 /// What /api/ranges serves: the current pool plus when it was last refreshed.
@@ -334,13 +338,12 @@ fn router_with_dir(
         controller,
         profiles: TokioRwLock::new(load_profiles(&profiles_dir)),
         ranges: ranges_state,
-        start_lock: tokio::sync::Mutex::new(()),
         sse_connections: Arc::new(AtomicUsize::new(0)),
         warp_register: registrar,
         profiles_dir,
         run_epoch: Arc::new(AtomicU64::new(0)),
         last_terminal: Arc::new(Mutex::new(None)),
-        last_register: Mutex::new(None),
+        register_gate: tokio::sync::Mutex::new(None),
     });
     Router::new()
         .route("/", get(index))
@@ -444,8 +447,11 @@ async fn method_not_allowed() -> Response {
 }
 
 /// 202 with no body; the run's progress is observable on /api/events. 409
-/// when another scan is already running. A local `start_lock` closes the
-/// check-then-spawn window between concurrent POSTs.
+/// when another scan is already running or starting. The controller slot is
+/// reserved synchronously under its own lock BEFORE the run task is spawned,
+/// so a racing second POST sees the reservation instead of a false "not
+/// running" (the old check-then-spawn gap let a second run slip through and
+/// emit a phantom `Failed` mid-scan).
 async fn start_scan(
     State(state): State<Arc<AppState>>,
     JsonBody(cfg): JsonBody<ScanConfig>,
@@ -460,41 +466,35 @@ async fn start_scan(
             )));
         }
     }
-    let _guard = state
-        .start_lock
-        .try_lock()
-        .map_err(|_| ApiError::conflict("a scan is already starting"))?;
-    if state.controller.is_running() {
-        return Err(ApiError::conflict("a scan is already running"));
-    }
+    state
+        .controller
+        .reserve()
+        .map_err(|_| ApiError::conflict("a scan is already running"))?;
     let epoch = state.run_epoch.fetch_add(1, Ordering::SeqCst) + 1;
-    let controller = state.controller.clone();
+    let controller = Arc::clone(&state.controller);
     let last_terminal = Arc::clone(&state.last_terminal);
     tokio::spawn(async move {
-        let outcome = controller.run(cfg).await;
-        // Record the terminal event so a client connecting after this run
-        // can replay it; the engine already broadcast it live.
-        let terminal = match outcome {
-            Ok(summary) => ScanEvent::Finished(summary),
-            Err(err) => {
-                let msg = crate::configs::sanitize_error_text(&format!("{err:#}"));
-                tracing::error!("scan failed: {msg}");
-                ScanEvent::Failed(msg)
-            }
-        };
-        *last_terminal
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some((epoch, terminal));
-    });
-    // The engine's running flag is set inside the spawned task, so keep the
-    // lock until it lands; a racing second POST must see either the lock or
-    // the flag (or 409 via try_lock) rather than a false "not running".
-    for _ in 0..100 {
-        if state.controller.is_running() {
-            break;
+        // Record the terminal the moment the engine emits it — before the
+        // running flag clears — so an SSE client deciding replay-vs-live from
+        // last_terminal can never land in a window where the terminal was
+        // broadcast but is not yet observable.
+        let outcome = controller
+            .run_reserved_streaming(cfg, |ev| {
+                if matches!(ev, ScanEvent::Finished(_) | ScanEvent::Failed(_)) {
+                    *last_terminal
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner()) =
+                        Some((epoch, ev.clone()));
+                }
+            })
+            .await;
+        if let Err(err) = &outcome {
+            tracing::error!(
+                "scan failed: {}",
+                crate::configs::sanitize_error_text(&format!("{err:#}"))
+            );
         }
-        tokio::task::yield_now().await;
-    }
+    });
     Ok(StatusCode::ACCEPTED)
 }
 
@@ -574,45 +574,88 @@ fn banned_ip(ip: &std::net::IpAddr) -> bool {
 async fn events(
     State(state): State<Arc<AppState>>,
 ) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, ApiError> {
-    let Some(_slot) = try_acquire_sse_slot(&state.sse_connections) else {
+    let Some(slot) = try_acquire_sse_slot(&state.sse_connections) else {
         return Err(ApiError::too_many("too many open event streams"));
     };
-    // A client connecting after the run ended gets its terminal event once:
-    // the broadcast tail would replay the whole finished run (terminal
-    // included), so the replay REPLACES the live stream instead of chaining
-    // onto it, keeping the terminal exactly-once per run. A run in progress
-    // (or starting) streams live with no replay.
-    let replay = if state.controller.is_running() {
-        None
-    } else {
-        state
-            .last_terminal
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clone()
-            .filter(|(epoch, _)| *epoch == state.run_epoch.load(Ordering::SeqCst))
-            .map(|(_, ev)| ev)
-    };
+    // Subscribe BEFORE reading the terminal state: a finish landing between
+    // the old is_running() check and the subscribe lost the terminal for that
+    // client. With the receiver already attached, a terminal emitted after it
+    // arrives on the live stream, and one emitted before it is replayed from
+    // last_terminal — exactly-once either way. The (epoch, terminal) state is
+    // authoritative because start_scan records the terminal at emit time,
+    // before the running flag clears.
+    let rx = state.controller.subscribe();
+    let current_epoch = state.run_epoch.load(Ordering::SeqCst);
+    let replay = state
+        .last_terminal
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone()
+        .filter(|(epoch, _)| *epoch == current_epoch)
+        .map(|(_, ev)| ev);
     let stream: Pin<Box<dyn Stream<Item = Result<Event, Infallible>> + Send>> = match replay {
-        Some(ev) => Box::pin(tokio_stream::once((_slot, ev)).map(|(slot, event)| {
+        Some(ev) => Box::pin(tokio_stream::once((slot, ev)).map(|(slot, event)| {
             let _ = &slot;
             Ok(map_event(event).unwrap_or_default())
         })),
-        None => Box::pin(
-            BroadcastStream::new(state.controller.subscribe())
-                .take_while(|item| item.is_ok())
-                .filter_map(move |event| {
-                    let _ = &_slot;
-                    match event {
-                        Ok(ev) => map_event(ev).map(Ok),
-                        // A Lagged receiver has irrecoverably lost events;
-                        // take_while above ends the stream on the first one.
-                        Err(_lagged) => None,
-                    }
-                }),
-        ),
+        None => Box::pin(TerminalBounded {
+            rx: BroadcastStream::new(rx),
+            _slot: slot,
+            done: false,
+        }),
     };
     Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
+}
+
+/// Live SSE items off the engine's broadcast tail. Ends after the run's
+/// terminal event (Finished/Failed) so an idle response body cannot hold
+/// hyper's graceful shutdown open forever, and on Lagged (irrecoverable gap;
+/// a reconnect replays the terminal instead).
+struct TerminalBounded {
+    rx: BroadcastStream<ScanEvent>,
+    _slot: SseSlot,
+    done: bool,
+}
+
+impl Stream for TerminalBounded {
+    type Item = Result<Event, Infallible>;
+
+    fn poll_next(
+        mut self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Self::Item>> {
+        if self.done {
+            return std::task::Poll::Ready(None);
+        }
+        loop {
+            match Pin::new(&mut self.rx).poll_next(cx) {
+                std::task::Poll::Ready(Some(Ok(ev))) => {
+                    let terminal = matches!(ev, ScanEvent::Finished(_) | ScanEvent::Failed(_));
+                    match map_event(ev) {
+                        Some(event) => {
+                            self.done = terminal;
+                            return std::task::Poll::Ready(Some(Ok(event)));
+                        }
+                        None => {
+                            // Unserializable payload (never expected): drop
+                            // silently; a terminal still ends the stream.
+                            if terminal {
+                                self.done = true;
+                                return std::task::Poll::Ready(None);
+                            }
+                        }
+                    }
+                }
+                // A Lagged receiver has irrecoverably lost events.
+                std::task::Poll::Ready(Some(Err(_lagged))) => {
+                    self.done = true;
+                    return std::task::Poll::Ready(None);
+                }
+                std::task::Poll::Ready(None) => return std::task::Poll::Ready(None),
+                std::task::Poll::Pending => return std::task::Poll::Pending,
+            }
+        }
+    }
 }
 
 /// Maps an engine-domain event onto the SSE wire shape; None when the
@@ -702,6 +745,19 @@ async fn warp_register(
     State(state): State<Arc<AppState>>,
     JsonBody(req): JsonBody<RegisterRequest>,
 ) -> Result<Json<RegisterResponse>, ApiError> {
+    if req
+        .license
+        .as_ref()
+        .is_some_and(|l| l.len() > crate::api::types::MAX_LICENSE_BYTES)
+    {
+        return Err(ApiError::bad_request(format!(
+            "license must be at most {} bytes",
+            crate::api::types::MAX_LICENSE_BYTES
+        )));
+    }
+    // One critical section across the overwrite-consent check, the cooldown
+    // bookkeeping, and the registration itself (see register_gate).
+    let mut last_attempt = state.register_gate.lock().await;
     // Refuse to silently clobber an existing identity; the caller must
     // explicitly opt in (first-time registration has no identity → proceeds).
     if crate::warpgen::has_identity() && !req.overwrite.unwrap_or(false) {
@@ -712,18 +768,12 @@ async fn warp_register(
     // Check-and-set before doing any work: the limit counts every attempt
     // that gets past the overwrite guard (the guard rejection above does
     // not consume the budget).
-    {
-        let mut last = state
-            .last_register
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if last.is_some_and(|at| at.elapsed() < REGISTER_COOLDOWN) {
-            return Err(ApiError::too_many(
-                "registration is rate-limited to one attempt per 60 s",
-            ));
-        }
-        *last = Some(Instant::now());
+    if last_attempt.is_some_and(|at| at.elapsed() < REGISTER_COOLDOWN) {
+        return Err(ApiError::too_many(
+            "registration is rate-limited to one attempt per 60 s",
+        ));
     }
+    *last_attempt = Some(Instant::now());
     let license = req
         .license
         .map(|l| l.trim().to_owned())
@@ -773,6 +823,12 @@ async fn export_config(
         .map_err(|_| ApiError::bad_request("ip must be an IPv4 address"))?;
     if req.port == 0 {
         return Err(ApiError::bad_request("port must be in 1..=65535"));
+    }
+    if req.config.len() > crate::api::types::MAX_EXPORT_CONFIG_BYTES {
+        return Err(ApiError::bad_request(format!(
+            "config must be at most {} bytes",
+            crate::api::types::MAX_EXPORT_CONFIG_BYTES
+        )));
     }
     if req
         .sni
@@ -845,7 +901,7 @@ async fn xray_download() -> Json<XrayDownloadResponse> {
         Err(err) => Json(XrayDownloadResponse {
             success: false,
             path: None,
-            error: Some(format!("{err:#}")),
+            error: Some(crate::configs::sanitize_error_text(&format!("{err:#}"))),
         }),
     }
 }
@@ -1449,9 +1505,73 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn events_stream_emits_progress_and_finished() {
+    async fn events_stream_ends_after_the_terminal_event() {
         // Every host probes slowly so the run outlives the SSE subscription
-        // attach window (no fixed sleeps: fast machines would flake).
+        // attach window (no fixed sleeps: fast machines would flake). The
+        // stream must END after `finished`: an ever-pending body would hold
+        // hyper's graceful shutdown open forever.
+        let mut t = FakeTransport::new();
+        for i in 0..8u8 {
+            t = t.ok_slow(format!("203.0.113.{i}").parse().unwrap(), 443, 25, 500);
+        }
+        let addr = serve(t).await;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let started = Instant::now();
+        let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+        stream
+            .write_all(b"GET /api/events HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(
+            post_scan(addr, &serde_json::to_string(&cfg(1, 1)).unwrap()).await,
+            202
+        );
+        let mut buf = vec![];
+        let mut chunk = [0u8; 4096];
+        let eof = loop {
+            if String::from_utf8_lossy(&buf).contains("event: finished") {
+                break true;
+            }
+            let deadline = tokio::time::sleep(Duration::from_secs(2));
+            tokio::pin!(deadline);
+            tokio::select! {
+                _ = &mut deadline => break false,
+                read = stream.read(&mut chunk) => match read {
+                    Ok(0) => break false,
+                    Ok(n) => buf.extend_from_slice(&chunk[..n]),
+                    Err(_) => break false,
+                },
+            }
+        };
+        assert!(eof, "no terminal event within 2 s");
+        // The connection must close right after the terminal event, not hang:
+        // read to EOF and require it to land well before the request helper's
+        // own 2 s deadline (the old contract pended forever here).
+        loop {
+            let deadline = tokio::time::sleep(Duration::from_secs(2));
+            tokio::pin!(deadline);
+            tokio::select! {
+                _ = &mut deadline => panic!("stream did not end after the terminal event"),
+                read = stream.read(&mut chunk) => match read {
+                    Ok(0) => break,
+                    Ok(n) => buf.extend_from_slice(&chunk[..n]),
+                    Err(_) => break,
+                },
+            }
+        }
+        assert!(started.elapsed() < Duration::from_millis(1500));
+        let text = String::from_utf8_lossy(&buf);
+        assert!(text.contains("event: progress"), "{text}");
+        assert!(text.contains("event: result"), "{text}");
+        assert!(text.contains("event: finished"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn concurrent_scan_starts_emit_no_phantom_failed() {
+        // Racing POSTs must resolve via 409 conflicts alone: the old
+        // check-then-spawn gap let a second run through, whose engine-level
+        // rejection surfaced as a spurious `Failed` event mid-scan.
         let mut t = FakeTransport::new();
         for i in 0..8u8 {
             t = t.ok_slow(format!("203.0.113.{i}").parse().unwrap(), 443, 25, 500);
@@ -1463,15 +1583,75 @@ mod tests {
             Some("event: finished"),
         ));
         tokio::time::sleep(Duration::from_millis(50)).await;
-        let body = cfg(1, 1);
-        assert_eq!(
-            post_scan(addr, &serde_json::to_string(&body).unwrap()).await,
-            202
-        );
+        let body = serde_json::to_string(&cfg(1, 1)).unwrap();
+        let mut posts = Vec::new();
+        for _ in 0..3 {
+            let body = body.clone();
+            posts.push(tokio::spawn(async move {
+                let req = format!(
+                    "POST /api/scan HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                request(addr, &req, None).await.0
+            }));
+        }
+        let mut codes: Vec<u16> = Vec::new();
+        for post in posts {
+            codes.push(post.await.unwrap());
+        }
+        codes.sort_unstable();
+        assert_eq!(codes, vec![202, 409, 409], "exactly one start may win");
         let (_, text) = events.await.unwrap();
-        assert!(text.contains("event: progress"), "{text}");
-        assert!(text.contains("event: result"), "{text}");
         assert!(text.contains("event: finished"), "{text}");
+        assert!(
+            !text.contains("event: failed"),
+            "no phantom Failed may reach clients: {text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn terminal_bounded_stream_stops_after_finished() {
+        // Unit-level contract of the live SSE adapter: items flow until the
+        // terminal event, then the stream ends (None) even though the
+        // broadcast sender stays alive.
+        let (tx, rx) = tokio::sync::broadcast::channel(8);
+        let mut stream = TerminalBounded {
+            rx: BroadcastStream::new(rx),
+            _slot: try_acquire_sse_slot(&Arc::new(AtomicUsize::new(0))).unwrap(),
+            done: false,
+        };
+        tx.send(ScanEvent::Progress(crate::api::types::ScanProgress {
+            scanned: 1,
+            found: 0,
+            total: Some(8),
+        }))
+        .unwrap();
+        tx.send(ScanEvent::Finished(ScanSummary {
+            scanned: 8,
+            found: 1,
+            duration_ms: 5,
+            cancelled: false,
+        }))
+        .unwrap();
+        // axum's Event exposes no getters; item-count + termination is the
+        // adapter's contract (event names are asserted over the wire in
+        // events_stream_ends_after_the_terminal_event).
+        let first = tokio::time::timeout(Duration::from_secs(1), stream.next())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(first.is_ok(), "progress item must arrive");
+        let second = tokio::time::timeout(Duration::from_secs(1), stream.next())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(second.is_ok(), "finished item must arrive");
+        let third = tokio::time::timeout(Duration::from_millis(100), stream.next()).await;
+        assert!(
+            matches!(&third, Err(_) | Ok(None)),
+            "stream must end after the terminal event: {third:?}"
+        );
     }
 
     /// Polls /api/status until the spawned run task has reached the running
@@ -1807,9 +1987,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn accepts_localhost_with_port_and_ipv6_host() {
+    async fn accepts_localhost_case_insensitively_and_rejects_ipv6_host() {
+        // The server binds IPv4 loopback only, so [::1] is not an answerable
+        // Host and must be rejected like any foreign host.
         let addr = serve(FakeTransport::new()).await;
-        for host in ["localhost:8765", "[::1]:8765", "127.0.0.1:1"] {
+        for host in ["localhost:8765", "LOCALHOST:8765", "127.0.0.1:1"] {
             let (status, _) = request(
                 addr,
                 &format!("GET /api/status HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n"),
@@ -1817,6 +1999,15 @@ mod tests {
             )
             .await;
             assert_eq!(status, 200, "host {host:?} must be allowed");
+        }
+        for host in ["[::1]:8765", "[::1]"] {
+            let (status, _) = request(
+                addr,
+                &format!("GET /api/status HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n"),
+                None,
+            )
+            .await;
+            assert_eq!(status, 403, "host {host:?} must be rejected");
         }
     }
 
@@ -2145,6 +2336,90 @@ mod tests {
         .await;
         let (status, text) = post_register(addr, r#"{"license":null,"overwrite":true}"#).await;
         assert_eq!(status, 200, "{text}");
+    }
+
+    /// Registrar that lingers before persisting the identity, widening the
+    /// check-vs-write window so the registration gate's serialization is
+    /// observable (two racing first-time registers must not both succeed).
+    fn slow_identity_registrar() -> WarpRegistrar {
+        let dir = std::env::temp_dir().join("cf-scanner-server-register-tests");
+        Arc::new(move |_| {
+            std::thread::sleep(Duration::from_millis(150));
+            fs::write(
+                dir.join("identity.json"),
+                r#"{"id":"t","token":"t","private_key":"aGFo","client_id":"c","account_type":"free","created_at":0}"#,
+            )
+            .unwrap();
+            Ok("fake-wgconf".to_owned())
+        })
+    }
+
+    #[tokio::test]
+    async fn concurrent_registers_serialize_overwrite_consent() {
+        let _isolated = isolate_identity_dir();
+        let addr = serve_with_registrar(
+            FakeTransport::new(),
+            RangesState::load_text(BUNDLED_RANGES, None),
+            slow_identity_registrar(),
+        )
+        .await;
+        let (a, b) = tokio::join!(
+            post_register(addr, r#"{"license":null}"#),
+            post_register(addr, r#"{"license":null}"#),
+        );
+        let mut codes = [a.0, b.0];
+        codes.sort_unstable();
+        assert_eq!(
+            codes,
+            [200, 409],
+            "the second register must see the identity the first wrote"
+        );
+    }
+
+    #[tokio::test]
+    async fn register_rejects_oversized_license() {
+        let _isolated = isolate_identity_dir();
+        let (registrar, seen) = recording_registrar("fake-wgconf-text");
+        let addr = serve_with_registrar(
+            FakeTransport::new(),
+            RangesState::load_text(BUNDLED_RANGES, None),
+            registrar,
+        )
+        .await;
+        let big = "a".repeat(crate::api::types::MAX_LICENSE_BYTES + 1);
+        let (status, text) = post_register(addr, &format!(r#"{{"license":"{big}"}}"#)).await;
+        assert_eq!(status, 400, "{text}");
+        assert!(
+            text.contains(&format!(
+                "at most {} bytes",
+                crate::api::types::MAX_LICENSE_BYTES
+            )),
+            "{text}"
+        );
+        // At the cap the license goes through to the registrar untouched.
+        let at_cap = "a".repeat(crate::api::types::MAX_LICENSE_BYTES);
+        let (status, text) = post_register(addr, &format!(r#"{{"license":"{at_cap}"}}"#)).await;
+        assert_eq!(status, 200, "{text}");
+        assert_eq!(seen.lock().unwrap().as_deref(), Some(at_cap.as_str()));
+    }
+
+    #[tokio::test]
+    async fn export_rejects_oversized_config() {
+        let addr = serve(FakeTransport::new()).await;
+        let big = format!(
+            "vless://x@1.2.3.4:443?{}",
+            "a".repeat(crate::api::types::MAX_EXPORT_CONFIG_BYTES)
+        );
+        let body = serde_json::json!({"config": big, "ip": "203.0.113.7", "port": 443});
+        let (status, text) = post_export(addr, &body.to_string()).await;
+        assert_eq!(status, 400, "{text}");
+        assert!(
+            text.contains(&format!(
+                "at most {} bytes",
+                crate::api::types::MAX_EXPORT_CONFIG_BYTES
+            )),
+            "{text}"
+        );
     }
 
     #[tokio::test]
