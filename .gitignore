@@ -8,3 +8,5 @@
 cargo-dist/
 
 .pi/
+
+.playwright-mcp/
