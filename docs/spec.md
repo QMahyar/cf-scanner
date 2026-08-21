@@ -60,8 +60,8 @@ Scan (one-shot):  cargo run -- scan --mode cdn --preset quick --target 20
                   cargo run -- scan --mode warp --ports 2408,500
 Refresh ranges:   cargo run -- ranges refresh
 Install dist:     cargo install cargo-dist   (Arch: pacman -S cargo-dist)
-Release dry-run:  dist plan --artifacts=all --tag=v0.4.0
-Release:          dist build --artifacts=all --tag=v0.4.0 && dist host ... (CI)
+Release dry-run:  dist plan --tag=vX.Y.Z
+Release:          dist build --output-format=json "--artifacts=global" ... (CI only, on tag push)
 ```
 
 ## 4. Project Structure

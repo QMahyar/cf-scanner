@@ -18,20 +18,26 @@ telemetry, nothing leaves your machine.
 
 ## Quick Start
 
-### Download
+### Install
 
-Get the latest release from
-[GitHub Releases](https://github.com/QMahyar/cf-scanner/releases):
+**npm (any platform with Node 14+)** — downloads the right binary from the
+GitHub Release automatically:
 
-- **Windows** — the MSI installer (easiest; upgrades in place) or the
+```sh
+npm i -g @qmahyar/cf-scanner
+```
+
+**Or download directly** from the [latest GitHub Release](https://github.com/QMahyar/cf-scanner/releases/latest):
+
+- **Windows** - the MSI installer (easiest; upgrades in place) or the
   portable zip
-- **Linux (x86_64 / aarch64)** — one-line shell installer:
+- **Linux (x86_64 / aarch64)** - one-line shell installer:
 
   ```sh
   curl -LsSf https://github.com/QMahyar/cf-scanner/releases/latest/download/cf-scanner-installer.sh | sh
   ```
 
-- **Any platform** — the portable zip/tarball: extract anywhere and run
+- **Any platform** - the portable zip/tarball: extract anywhere and run
   `cf-scanner` directly (no install step)
 
 ### Run
@@ -79,8 +85,8 @@ with `cargo run --`.
 | `cargo test` | Unit + integration tests |
 | `cargo clippy --all-targets -- -D warnings` | Lint |
 | `cargo fmt --check` | Format check |
-| `dist plan --artifacts=all --tag=v0.4.0` | Release dry-run (cargo-dist 0.32) |
-| `dist build --artifacts=all --tag=v0.4.0` | Build release artifacts (normally via CI) |
+| `dist plan --tag=vX.Y.Z` | Release dry-run (dist, formerly cargo-dist) |
+| `dist build --artifacts=local --target=<host-target>` | Local release smoke test |
 
 Release artifacts are built and published **only by CI** on tag push
 (tag → GitHub Actions → GitHub Release); never publish them manually — see

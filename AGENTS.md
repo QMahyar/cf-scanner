@@ -15,8 +15,8 @@ browser UI + CLI, all over one in-process engine.
 - `docs/release-process.md` — versioning control + publishing pipeline (release/tag/fix flows)
 - `docs/decisions/` — ADRs (ADR-007 = versioning + publishing decision)
 - `docs/review/product-review-2026-08-13.md` — finished-product review
-  (implementation contract for the `review/*` branches)
-- `tasks/plan.md`, `tasks/todo.md` — implementation plan and task list (Task N references in commits)
+  (drove the `review/*` hardening cycle shipped in v0.4.0-v0.5.0; superseded
+  findings were re-audited and shipped in v0.5.1)
 
 ## Skills
 
@@ -33,7 +33,7 @@ cargo test                # unit + integration tests
 cargo clippy --all-targets -- -D warnings
 cargo fmt --check
 cargo audit               # dependency vulnerability scan (cargo install cargo-audit)
-dist plan --artifacts=all --tag=v0.4.0   # release dry-run (dist, formerly cargo-dist)
+dist plan --tag=vX.Y.Z   # release dry-run (dist, formerly cargo-dist)
 # local packaging smoke test, then restore the tracked 0-byte placeholders:
 dist build --artifacts=local --target=<host-target>
 git restore data/bundled/xray data/bundled/xray.exe
