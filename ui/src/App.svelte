@@ -8,7 +8,6 @@
     setProMode,
     ui,
   } from "./lib/store.svelte";
-  import type { ScanSummary } from "./lib/types";
   import SimpleStart from "./lib/components/SimpleStart.svelte";
   import ProPanel from "./lib/components/ProPanel.svelte";
 
@@ -23,11 +22,10 @@
         app.progress = p;
         app.running = true;
       },
-      onResult: (v) => applyResult(v as never),
+      onResult: (v) => applyResult(v),
       onPhase2: (p) => (app.phase2 = p),
       onFinished: (s) => {
-        const summary = s as ScanSummary;
-        app.summary = summary;
+        app.summary = s;
         app.running = false;
         app.phase2 = null;
         api.results().then((r) => (app.results = r.results)).catch(() => {});

@@ -1,26 +1,14 @@
 <script lang="ts">
   import { Copy, Play, Square } from "@lucide/svelte";
-  import { api } from "../api";
-  import { resetResults, simpleConfig, ui } from "../store.svelte";
+  import { simpleConfig, startScan, stopScan, ui } from "../store.svelte";
 
   const app = ui();
   let starting = $state(false);
 
   async function start() {
     starting = true;
-    app.error = null;
-    resetResults();
-    try {
-      await api.scan(simpleConfig());
-      app.running = true;
-    } catch (e) {
-      app.error = String(e);
-    }
+    await startScan(simpleConfig());
     starting = false;
-  }
-
-  async function stop() {
-    await api.cancel();
   }
 
   const best = $derived(
@@ -48,7 +36,7 @@
       </p>
     </div>
     {#if app.running}
-      <button class="btn btn-secondary !px-7 !py-3.5 !text-base" onclick={stop}>
+      <button class="btn btn-secondary !px-7 !py-3.5 !text-base" onclick={stopScan}>
         <Square class="size-5" />
         Stop
       </button>

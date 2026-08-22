@@ -6,6 +6,7 @@
 
   let sortKey = $state<"latency" | "ip">("latency");
   let copiedIdx = $state<number | null>(null);
+  const sortOptions: readonly ("latency" | "ip")[] = ["latency", "ip"];
 
   const sorted = $derived(
     [...results].sort((a, b) =>
@@ -39,7 +40,7 @@
       Results <span class="mono" style="color: var(--ink-muted)">{results.length}</span>
     </h3>
     <div class="flex gap-1 text-xs">
-      {#each ["latency", "ip"] as k (k)}
+      {#each sortOptions as k (k)}
         <button
           class="pill"
           style={sortKey === k

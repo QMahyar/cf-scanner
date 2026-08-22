@@ -1,4 +1,24 @@
-import type { ResultsPayload, ScanConfig, StatusPayload } from "./types";
+import type {
+  Phase2Progress,
+  ResultsPayload,
+  ScanConfig,
+  ScanProgress,
+  ScanSummary,
+  StatusPayload,
+  Verdict,
+} from "./types";
+
+export interface ProfilePayload {
+  name: string;
+  config: ScanConfig;
+}
+
+export interface XrayStatusPayload {
+  found: boolean;
+  path: string | null;
+  data_dir: string;
+  version: string;
+}
 
 async function unwrap<T>(res: Response): Promise<T> {
   if (!res.ok) {
@@ -26,7 +46,7 @@ export const api = {
     }).then(unwrap<unknown>),
   cancel: () => fetch("/api/cancel", { method: "POST" }),
   reset: () => fetch("/api/reset", { method: "POST" }),
-  profiles: () => fetch("/api/profiles").then(unwrap<{ profiles: Record<string, unknown> }>),
+  profiles: () => fetch("/api/profiles").then(unwrap<ProfilePayload[]>),
   saveProfile: (name: string, cfg: unknown) =>
     fetch(`/api/profiles/${encodeURIComponent(name)}`, {
       method: "PUT",
@@ -41,12 +61,11 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ config, ip, port }),
     }).then(unwrap<{ uri: string }>),
-  xrayStatus: () =>
-    fetch("/api/xray/status").then(
-      unwrap<{ available: boolean; path?: string | null }>,
-    ),
+  xrayStatus: () => fetch("/api/xray/status").then(unwrap<XrayStatusPayload>),
   xrayDownload: () =>
-    fetch("/api/xray/download", { method: "POST" }).then(unwrap<unknown>),
+    fetch("/api/xray/download", { method: "POST" }).then(
+      unwrap<{ success: boolean; path?: string | null; error?: string | null }>,
+    ),
   rangesRefresh: () =>
     fetch("/api/ranges/refresh", { method: "POST" }).then(unwrap<unknown>),
   warpRegister: (license: string | null, overwrite: boolean) =>
@@ -60,26 +79,34 @@ export const api = {
 /** Live event stream. The server keeps idle connections open (a replayed
  * terminal is context, not an end-of-stream), so one EventSource lasts the
  * whole session; browsers reconnect transparently on drop. */
-export function subscribe(
-  handlers: {
-    onProgress?: (p: { scanned: number; found: number; total: number | null }) => void;
-    onResult?: (v: unknown) => void;
-    onFinished?: (s: unknown) => void;
-    onPhase2?: (p: { done: number; total: number }) => void;
-    onFailed?: (msg: string) => void;
-  },
-): EventSource {
+export function subscribe(handlers: {
+  onProgress?: (p: ScanProgress) => void;
+  onResult?: (v: Verdict) => void;
+  onFinished?: (s: ScanSummary) => void;
+  onPhase2?: (p: Phase2Progress) => void;
+  onFailed?: (msg: string) => void;
+}): EventSource {
   const es = new EventSource("/api/events");
-  const data = (ev: MessageEvent) => JSON.parse(ev.data);
-  if (handlers.onProgress)
-    es.addEventListener("progress", (e) => handlers.onProgress!(data(e)));
-  if (handlers.onResult)
-    es.addEventListener("result", (e) => handlers.onResult!(data(e)));
-  if (handlers.onFinished)
-    es.addEventListener("finished", (e) => handlers.onFinished!(data(e)));
-  if (handlers.onPhase2)
-    es.addEventListener("phase2-progress", (e) => handlers.onPhase2!(data(e)));
-  if (handlers.onFailed)
-    es.addEventListener("failed", (e) => handlers.onFailed!(data(e)));
+  const listen = <T>(
+    event: string,
+    cb: ((value: T) => void) | undefined,
+  ): void => {
+    if (!cb) return;
+    es.addEventListener(event, (ev: MessageEvent) => {
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(ev.data as string);
+      } catch (err) {
+        console.debug("dropping malformed SSE frame", event, err);
+        return;
+      }
+      cb(parsed as T);
+    });
+  };
+  listen("progress", handlers.onProgress);
+  listen("result", handlers.onResult);
+  listen("finished", handlers.onFinished);
+  listen("phase2-progress", handlers.onPhase2);
+  listen("failed", handlers.onFailed);
   return es;
 }

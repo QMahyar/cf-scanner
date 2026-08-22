@@ -1,3 +1,4 @@
+import { api } from "./api";
 import type { ScanConfig, ScanSummary, Verdict } from "./types";
 
 export interface UiState {
@@ -42,6 +43,27 @@ export function resetResults() {
   app.progress = { scanned: 0, found: 0, total: null };
   app.phase2 = null;
   app.error = null;
+}
+
+export function errorText(e: unknown): string {
+  return e instanceof Error ? e.message : String(e);
+}
+
+/** The one place a scan starts: resets last-scan results, POSTs the config,
+ * flips the running flag, and surfaces failures — callers never duplicate
+ * that sequence. Never throws; check ui().error. */
+export async function startScan(cfg: ScanConfig) {
+  resetResults();
+  try {
+    await api.scan(cfg);
+    app.running = true;
+  } catch (e) {
+    app.error = errorText(e);
+  }
+}
+
+export async function stopScan() {
+  await api.cancel();
 }
 
 /** Default simple-mode config: best defaults for a first-run user. */
