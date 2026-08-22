@@ -3,6 +3,7 @@ import type { ScanConfig, ScanSummary, Verdict } from "./types";
 
 export interface UiState {
   running: boolean;
+  startedAt: number | null;
   progress: { scanned: number; found: number; total: number | null };
   phase2: { done: number; total: number } | null;
   results: Verdict[];
@@ -13,6 +14,7 @@ export interface UiState {
 
 const app = $state<UiState>({
   running: false,
+  startedAt: null,
   progress: { scanned: 0, found: 0, total: null },
   phase2: null,
   results: [],
@@ -43,6 +45,7 @@ export function resetResults() {
   app.progress = { scanned: 0, found: 0, total: null };
   app.phase2 = null;
   app.error = null;
+  app.startedAt = null;
 }
 
 export function errorText(e: unknown): string {
@@ -57,6 +60,7 @@ export async function startScan(cfg: ScanConfig) {
   try {
     await api.scan(cfg);
     app.running = true;
+    app.startedAt = Date.now();
   } catch (e) {
     app.error = errorText(e);
   }
@@ -67,12 +71,12 @@ export async function stopScan() {
 }
 
 /** Default simple-mode config: best defaults for a first-run user. */
-export function simpleConfig(): ScanConfig {
+export function simpleConfig(found = 10): ScanConfig {
   return {
     mode: "Cdn",
     target: { Preset: "Quick" },
     ports: [443],
-    stop: { found: 10, cap: null },
+    stop: { found, cap: null },
     exclude: [],
     custom_cidrs: [],
     concurrency: 128,

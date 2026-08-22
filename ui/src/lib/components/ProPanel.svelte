@@ -110,12 +110,18 @@
       </label>
 
       {#if form.mode === "Cdn"}
-        <label class="text-xs" style="color: var(--ink-muted)">
-          Target
-          <select class="field mt-1" bind:value={form.preset} disabled={form.useCount}>
-            <option>Quick</option><option>Normal</option><option>Full</option>
-          </select>
-        </label>
+        <div>
+          <label class="block text-xs" style="color: var(--ink-muted)">
+            Target
+            <select class="field mt-1" bind:value={form.preset} disabled={form.useCount}>
+              <option>Quick</option><option>Normal</option><option>Full</option>
+            </select>
+          </label>
+          <p class="mt-1 text-[11px]" style="color: var(--ink-muted)">
+            Quick ≈ 4K probes · Normal ≈ 12K · Full = every known CF IP
+            (~1.5M, hours)
+          </p>
+        </div>
         <label class="flex items-end gap-2 pb-1 text-xs" style="color: var(--ink-muted)">
           <input type="checkbox" bind:checked={form.useCount} class="accent-[var(--accent)]" />
           custom count instead
