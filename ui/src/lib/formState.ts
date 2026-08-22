@@ -54,6 +54,39 @@ export function defaultFormState(): FormState {
   };
 }
 
+/** Pure ScanConfig → FormState: inverse of buildConfig for every field it
+ * owns, so loading a profile reproduces the exact inputs that built it
+ * (ports/cidrs rejoin lines or commas, cap "" = none, Count target flips
+ * useCount). Server-unmappable extras (probe_urls, custom_fragment,
+ * phase-2 concurrency) fall back to defaults since the form cannot edit
+ * them. */
+export function formStateFromConfig(cfg: ScanConfig): FormState {
+  const d = defaultFormState();
+  return {
+    mode: cfg.mode,
+    preset: !("Count" in cfg.target) ? cfg.target.Preset : d.preset,
+    count: "Count" in cfg.target ? cfg.target.Count : d.count,
+    useCount: "Count" in cfg.target,
+    portsText: cfg.ports.join(", "),
+    concurrency: cfg.concurrency,
+    timeoutMs: cfg.timeout_ms,
+    includeV6: cfg.include_v6 ?? false,
+    stopFound: cfg.stop.found,
+    capText: cfg.stop.cap === null ? "" : String(cfg.stop.cap),
+    customCidrs: cfg.custom_cidrs.join("\n"),
+    exclude: cfg.exclude.join("\n"),
+    phase2On: cfg.mode === "Cdn" && !!cfg.phase2,
+    configsText: cfg.phase2?.configs.join("\n") ?? "",
+    fragment: cfg.phase2?.fragment ?? d.fragment,
+    snis: cfg.phase2?.snis.join(", ") ?? "",
+    probeUrl: cfg.phase2?.probe_url || d.probeUrl,
+    warpProbes: cfg.warp?.probes_per_endpoint ?? d.warpProbes,
+    warpEndpoints: cfg.warp?.custom_endpoints.join("\n") ?? "",
+    wgconf: cfg.warp?.wgconf ?? "",
+    verifyWarp: cfg.warp?.verify_with_wgconf ?? false,
+  };
+}
+
 export class FormValidationError extends Error {
   readonly errors: string[];
 

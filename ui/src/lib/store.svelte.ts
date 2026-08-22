@@ -10,6 +10,9 @@ export interface UiState {
   summary: ScanSummary | null;
   error: string | null;
   proMode: boolean;
+  /** Original phase-2 config URIs from the last started scan, indexed by
+   * Verdict.config_index; lets result rows export importable URIs. */
+  lastScanConfigs: string[];
 }
 
 const app = $state<UiState>({
@@ -21,6 +24,7 @@ const app = $state<UiState>({
   summary: null,
   error: null,
   proMode: localStorage.getItem("cf-pro-mode") === "1",
+  lastScanConfigs: [],
 });
 
 export function ui(): UiState {
@@ -46,6 +50,7 @@ export function resetResults() {
   app.phase2 = null;
   app.error = null;
   app.startedAt = null;
+  app.lastScanConfigs = [];
 }
 
 export function errorText(e: unknown): string {
@@ -57,6 +62,7 @@ export function errorText(e: unknown): string {
  * that sequence. Never throws; check ui().error. */
 export async function startScan(cfg: ScanConfig) {
   resetResults();
+  app.lastScanConfigs = cfg.phase2?.configs ?? [];
   try {
     await api.scan(cfg);
     app.running = true;

@@ -1,11 +1,15 @@
 <script lang="ts">
-  import { Copy, Download } from "@lucide/svelte";
+  import { Check, Copy, Download, Link2 } from "@lucide/svelte";
+  import { api } from "../api";
   import type { Verdict } from "../types";
+  import { errorText, ui } from "../store.svelte";
 
   let { results }: { results: Verdict[] } = $props();
+  const app = ui();
 
   let sortKey = $state<"latency" | "ip">("latency");
   let copiedIdx = $state<number | null>(null);
+  let copiedUriIdx = $state<number | null>(null);
   const sortOptions: readonly ("latency" | "ip")[] = ["latency", "ip"];
 
   const sorted = $derived(
@@ -23,6 +27,27 @@
       setTimeout(() => (copiedIdx = null), 1200);
     } catch {
       /* clipboard unavailable */
+    }
+  }
+
+  /** The original config URI this row's phase 2 verified with; null when the
+   * row never passed or the index points outside lastScanConfigs (fresh page
+   * after F5 — the server keeps configs in memory only). */
+  function exportableConfig(r: Verdict): string | null {
+    if (!r.phase2?.passed) return null;
+    return app.lastScanConfigs[r.phase2.config_index] ?? null;
+  }
+
+  async function copyImportable(r: Verdict, i: number) {
+    const config = exportableConfig(r);
+    if (!config) return;
+    try {
+      const { uri } = await api.exportUri(config, r.ip, r.port);
+      await navigator.clipboard.writeText(uri);
+      copiedUriIdx = i;
+      setTimeout(() => (copiedUriIdx = null), 1200);
+    } catch (e) {
+      app.error = errorText(e);
     }
   }
 
@@ -85,7 +110,7 @@
                 <span style="color: var(--ink-muted)">—</span>
               {/if}
             </td>
-            <td class="px-2 py-2 text-right">
+            <td class="px-2 py-2 text-right whitespace-nowrap">
               <button
                 class="btn btn-ghost !px-2"
                 title="Copy ip:port"
@@ -97,6 +122,19 @@
                   <Copy class="size-4" />
                 {/if}
               </button>
+              {#if exportableConfig(r)}
+                <button
+                  class="btn btn-ghost !px-2"
+                  title="Copy importable URI (config rewritten to this endpoint)"
+                  onclick={() => copyImportable(r, i)}
+                >
+                  {#if copiedUriIdx === i}
+                    <Check class="size-4" style="color: var(--good)" />
+                  {:else}
+                    <Link2 class="size-4" />
+                  {/if}
+                </button>
+              {/if}
             </td>
           </tr>
         {/each}
