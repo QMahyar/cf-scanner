@@ -110,6 +110,15 @@
     }
   });
 
+  // The click-time summary list is a snapshot; once the form validates
+  // cleanly again (or the mode flip resets ports), retire it so a stale
+  // "Fix these before starting" can't outlive its problems.
+  $effect(() => {
+    if (allIssues.length === 0 && validationErrors.length > 0) {
+      validationErrors = [];
+    }
+  });
+
   const liveIssues = $derived(
     allIssues.filter((i) => i.field !== null && touched[i.field]),
   );

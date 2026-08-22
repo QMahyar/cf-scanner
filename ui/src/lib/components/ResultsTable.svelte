@@ -15,21 +15,16 @@
   let copiedPickedUris = $state(false);
   const sortOptions: readonly ("latency" | "ip")[] = ["latency", "ip"];
 
-  /** Latency ceiling filter; empty input = no filter, garbage = ignored. */
-  let maxLatencyText = $state("");
+  /** Latency ceiling filter; empty input = no filter, garbage = ignored.
+   * Bound to a type="number" input, so Svelte hands us number | null —
+   * never call string methods on it. */
+  let maxLatency = $state<number | null>(null);
   let headCheckbox = $state<HTMLInputElement | null>(null);
 
   /** Row keys the user ticked, keyed ip:port. Selection lives on displayed
    * rows only — a new results array (new scan / F5 refresh) clears it,
    * in-place row updates during a scan keep it. */
   let selected = $state(new Set<string>());
-
-  const maxLatency = $derived.by(() => {
-    const token = maxLatencyText.trim();
-    if (!token) return null;
-    const n = Number(token);
-    return Number.isFinite(n) && n >= 0 ? n : null;
-  });
 
   const sorted = $derived(
     [...results].sort((a, b) =>
@@ -178,7 +173,7 @@
           type="number"
           min="0"
           placeholder="any"
-          bind:value={maxLatencyText}
+          bind:value={maxLatency}
         />
       </label>
       {#each sortOptions as k (k)}
