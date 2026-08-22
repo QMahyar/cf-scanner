@@ -47,6 +47,44 @@ Added / Changed / Fixed / Deprecated / Removed / Security, newest on top.
   wizard Ctrl+C detected by type; outbound fetches accept bracketed IPv6
   literals.
 
+## [0.6.0] - 2026-08-22
+
+### Added
+- **Rebuilt browser UI in Svelte 5**, embedded via rust-embed (the vanilla
+  single-file page is gone). Simple mode by default: one-tap scanning with a
+  live progress bar, rate/ETA and top-endpoint cards. A Pro toggle reveals the
+  full console: complete scan configuration with inline validation and
+  field-level errors, profiles save/load/delete, phase-2 verification with an
+  xray availability chip + download, WARP identity registration (license +
+  overwrite consent) with wgconf export, sortable results table with per-row
+  importable-URI copy and copy-all, custom CIDR/exclusion editors, ranges
+  info, and a small-mode knob ("find up to N IPs").
+- **Cloudflare port picker**: checkbox chips from verified catalogs — CDN =
+  the six TLS ports from Cloudflare's network-ports documentation
+  (443/2053/2083/2087/2096/8443); WARP = the four official WireGuard ports
+  (2408/500/1701/4500) behind a collapsible 50-port community-verified
+  extended list — plus custom-port entry with inline validation.
+- Mobile/responsive pass: results table scrolls inside its card, ≥44px touch
+  targets on coarse pointers, 16px inputs below 640px (no iOS zoom-jump),
+  wrapping header, safe-area insets, scroll-jank-free background blooms.
+
+### Changed
+- SSE `/api/events` keeps idle connections open across scans: a replayed
+  terminal from the previous run is context only, so browser tabs stop
+  reconnect-storming while idle. Graceful shutdown bounds its wait (5 s) so
+  deliberately-open streams can never hang process exit.
+- Latency values use a dedicated green/amber/red ramp; brand orange now means
+  brand/actions only. Fonts ship bundled (Inter + JetBrains Mono) — the UI
+  makes zero CDN calls.
+
+### Fixed
+- Starting a scan no longer errors client-side with "Unexpected end of JSON
+  input" (202-with-empty-body responses are handled).
+- Idle EventSource connections closed-and-reconnected endlessly after
+  replaying a stale terminal, which could also miss the next run's events.
+- Copy affordances tell the truth: cards copy ip:port and say so; passing
+  phase-2 rows offer the real importable URI via `/api/config/export`.
+
 ## [Unreleased]
 
 ### Fixed
