@@ -64,8 +64,10 @@
   }
 </script>
 
-<div class="mx-auto flex min-h-screen max-w-6xl flex-col px-4 sm:px-6">
-  <header class="flex items-center justify-between py-5">
+<div
+  class="mx-auto flex min-h-screen max-w-6xl flex-col pl-[max(1rem,env(safe-area-inset-left))] pr-[max(1rem,env(safe-area-inset-right))] sm:pl-[max(1.5rem,env(safe-area-inset-left))] sm:pr-[max(1.5rem,env(safe-area-inset-right))]"
+>
+  <header class="flex flex-wrap items-center justify-between gap-x-4 gap-y-3 py-5">
     <div class="flex items-center gap-3">
       <div
         class="grid size-10 place-items-center rounded-full"
@@ -77,7 +79,7 @@
         <h1 class="text-lg font-semibold tracking-tight" style="letter-spacing:-0.03em">
           CF-Scanner
         </h1>
-        <p class="mono text-[11px]" style="color: var(--ink-muted)">
+        <p class="mono hidden text-[11px] sm:block" style="color: var(--ink-muted)">
           find working Cloudflare endpoints
         </p>
       </div>
@@ -136,7 +138,10 @@
     {/if}
   </main>
 
-  <footer class="border-t py-4 text-xs" style="border-color: oklch(100% 0 0 / 6%); color: var(--ink-muted);">
+  <footer
+    class="border-t pt-4 pb-[max(1rem,env(safe-area-inset-bottom))] text-xs"
+    style="border-color: oklch(100% 0 0 / 6%); color: var(--ink-muted);"
+  >
     <span>
       GeoIP data by
       <a

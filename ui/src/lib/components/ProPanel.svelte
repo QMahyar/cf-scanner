@@ -450,7 +450,7 @@
         </div>
       {/if}
 
-      <div class="mt-4 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+      <div class="mt-4 grid gap-4 md:grid-cols-2 lg:grid-cols-3">
         <label class="text-xs" style="color: var(--ink-muted)">
           Mode
           <select class="field mt-1" name="mode" bind:value={form.mode}>

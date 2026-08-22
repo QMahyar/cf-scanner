@@ -38,13 +38,22 @@ body {
 
 body {
   background-color: var(--paper);
-  background-image:
-    radial-gradient(42% 34% at 18% 0%, var(--bloom-a), transparent 70%),
-    radial-gradient(36% 30% at 88% 12%, var(--bloom-b), transparent 70%);
-  background-attachment: fixed;
   color: var(--ink);
   font-family: "Inter Variable", system-ui, sans-serif;
   min-height: 100vh;
+}
+
+/* Fixed-position layer paints the blooms once per viewport instead of
+ * repainting background-attachment: fixed on every phone scroll frame */
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  background-image:
+    radial-gradient(42% 34% at 18% 0%, var(--bloom-a), transparent 70%),
+    radial-gradient(36% 30% at 88% 12%, var(--bloom-b), transparent 70%);
 }
 
 .mono {
@@ -185,6 +194,13 @@ body {
   border-color: var(--bad);
 }
 
+/* iOS Safari zooms the viewport when focusing inputs under 16px */
+@media (max-width: 639px) {
+  .field {
+    font-size: 1rem;
+  }
+}
+
 /* Fade-in reveal — atmospheric motion discipline */
 @keyframes fade-in {
   from {
@@ -229,4 +245,21 @@ button.pill:hover:not(:disabled) {
 button.pill:focus-visible {
   outline: 2px solid var(--ring);
   outline-offset: 2px;
+}
+
+/* Coarse pointers need ~44px hit targets; desktop keeps its compact density */
+@media (pointer: coarse) {
+  button.pill {
+    min-height: 2.75rem;
+    padding: 0.55rem 1rem;
+  }
+  .btn-sm {
+    justify-content: center;
+    min-height: 2.75rem;
+    min-width: 2.75rem;
+  }
+  /* On-screen keyboards crush short textareas — give paste-heavy fields room */
+  textarea.field {
+    min-height: 10rem;
+  }
 }

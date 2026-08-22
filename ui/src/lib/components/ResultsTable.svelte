@@ -78,8 +78,8 @@
       {/each}
     </div>
   </div>
-  <div class="max-h-[26rem] overflow-y-auto">
-    <table class="w-full border-collapse text-sm">
+  <div class="max-h-[26rem] overflow-x-auto overflow-y-auto">
+    <table class="w-full min-w-[34rem] border-collapse text-sm">
       <thead class="sticky top-0" style="background: var(--paper-2)">
         <tr class="text-left text-[11px] uppercase tracking-wider" style="color: var(--ink-muted)">
           <th class="px-4 py-2 font-medium">Endpoint</th>
