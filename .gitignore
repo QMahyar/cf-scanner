@@ -12,3 +12,4 @@ cargo-dist/
 .playwright-mcp/
 ui/node_modules/
 ui/.svelte-check*
+vite-dev.log
