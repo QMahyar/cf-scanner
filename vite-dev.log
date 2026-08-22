@@ -1,0 +1,116 @@
+
+> cf-scanner-ui@0.5.1 dev
+> vite --port 5174 --strictPort
+
+[2m1:17:22 AM[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m Forced re-optimization of dependencies
+
+  [32m[1mVITE[22m v7.3.6[39m  [2mready in [0m[1m1604[22m[2m[0m ms[22m
+
+  [32m➜[39m  [1mLocal[22m:   [36mhttp://localhost:[1m5174[22m/[39m
+[2m  [32m➜[39m  [1mNetwork[22m[2m: use [22m[1m--host[22m[2m to expose[22m
+[2m[32m  ➜[39m[22m[2m  press [22m[1mh + enter[22m[2m to show help[22m
+1:17:29 AM [vite-plugin-svelte] E:/Code/CF-Scanner/ui/src/App.svelte:16:16 It looks like you're using the `$state` rune, but there is a local binding called `state`. Referencing a local variable with a `$` prefix will create a store subscription. Please rename `state` to avoid the ambiguity
+https://svelte.dev/e/store_rune_conflict
+1:17:29 AM [vite-plugin-svelte] E:/Code/CF-Scanner/ui/src/App.svelte:17:13 It looks like you're using the `$state` rune, but there is a local binding called `state`. Referencing a local variable with a `$` prefix will create a store subscription. Please rename `state` to avoid the ambiguity
+https://svelte.dev/e/store_rune_conflict
+1:17:29 AM [vite-plugin-svelte] src/App.svelte:16:6 `version` is updated, but is not declared with `$state(...)`. Changing its value will not correctly trigger updates
+https://svelte.dev/e/non_reactive_update
+1:17:29 AM [vite-plugin-svelte] src/App.svelte:17:6 `live` is updated, but is not declared with `$state(...)`. Changing its value will not correctly trigger updates
+https://svelte.dev/e/non_reactive_update
+1:17:29 AM [vite-plugin-svelte] E:/Code/CF-Scanner/ui/src/lib/components/ProPanel.svelte:20:17 It looks like you're using the `$state` rune, but there is a local binding called `state`. Referencing a local variable with a `$` prefix will create a store subscription. Please rename `state` to avoid the ambiguity
+https://svelte.dev/e/store_rune_conflict
+1:17:29 AM [vite-plugin-svelte] E:/Code/CF-Scanner/ui/src/lib/components/ProPanel.svelte:23:13 It looks like you're using the `$state` rune, but there is a local binding called `state`. Referencing a local variable with a `$` prefix will create a store subscription. Please rename `state` to avoid the ambiguity
+https://svelte.dev/e/store_rune_conflict
+1:17:29 AM [vite-plugin-svelte] E:/Code/CF-Scanner/ui/src/lib/components/ProPanel.svelte:24:15 It looks like you're using the `$state` rune, but there is a local binding called `state`. Referencing a local variable with a `$` prefix will create a store subscription. Please rename `state` to avoid the ambiguity
+https://svelte.dev/e/store_rune_conflict
+1:17:29 AM [vite-plugin-svelte] E:/Code/CF-Scanner/ui/src/lib/components/ProPanel.svelte:25:14 It looks like you're using the `$state` rune, but there is a local binding called `state`. Referencing a local variable with a `$` prefix will create a store subscription. Please rename `state` to avoid the ambiguity
+https://svelte.dev/e/store_rune_conflict
+1:17:29 AM [vite-plugin-svelte] E:/Code/CF-Scanner/ui/src/lib/components/ProPanel.svelte:26:17 It looks like you're using the `$state` rune, but there is a local binding called `state`. Referencing a local variable with a `$` prefix will create a store subscription. Please rename `state` to avoid the ambiguity
+https://svelte.dev/e/store_rune_conflict
+1:17:29 AM [vite-plugin-svelte] E:/Code/CF-Scanner/ui/src/lib/components/ProPanel.svelte:27:14 It looks like you're using the `$state` rune, but there is a local binding called `state`. Referencing a local variable with a `$` prefix will create a store subscription. Please rename `state` to avoid the ambiguity
+https://svelte.dev/e/store_rune_conflict
+1:17:29 AM [vite-plugin-svelte] E:/Code/CF-Scanner/ui/src/lib/components/ProPanel.svelte:28:20 It looks like you're using the `$state` rune, but there is a local binding called `state`. Referencing a local variable with a `$` prefix will create a store subscription. Please rename `state` to avoid the ambiguity
+https://svelte.dev/e/store_rune_conflict
+1:17:29 AM [vite-plugin-svelte] E:/Code/CF-Scanner/ui/src/lib/components/ProPanel.svelte:29:18 It looks like you're using the `$state` rune, but there is a local binding called `state`. Referencing a local variable with a `$` prefix will create a store subscription. Please rename `state` to avoid the ambiguity
+https://svelte.dev/e/store_rune_conflict
+1:17:29 AM [vite-plugin-svelte] E:/Code/CF-Scanner/ui/src/lib/components/ProPanel.svelte:30:18 It looks like you're using the `$state` rune, but there is a local binding called `state`. Referencing a local variable with a `$` prefix will create a store subscription. Please rename `state` to avoid the ambiguity
+https://svelte.dev/e/store_rune_conflict
+1:17:29 AM [vite-plugin-svelte] E:/Code/CF-Scanner/ui/src/lib/components/ProPanel.svelte:31:18 It looks like you're using the `$state` rune, but there is a local binding called `state`. Referencing a local variable with a `$` prefix will create a store subscription. Please rename `state` to avoid the ambiguity
+https://svelte.dev/e/store_rune_conflict
+1:17:29 AM [vite-plugin-svelte] E:/Code/CF-Scanner/ui/src/lib/components/ProPanel.svelte:32:12 It looks like you're using the `$state` rune, but there is a local binding called `state`. Referencing a local variable with a `$` prefix will create a store subscription. Please rename `state` to avoid the ambiguity
+https://svelte.dev/e/store_rune_conflict
+1:17:29 AM [vite-plugin-svelte] E:/Code/CF-Scanner/ui/src/lib/components/ProPanel.svelte:33:20 It looks like you're using the `$state` rune, but there is a local binding called `state`. Referencing a local variable with a `$` prefix will create a store subscription. Please rename `state` to avoid the ambiguity
+https://svelte.dev/e/store_rune_conflict
+1:17:29 AM [vite-plugin-svelte] E:/Code/CF-Scanner/ui/src/lib/components/ProPanel.svelte:34:16 It looks like you're using the `$state` rune, but there is a local binding called `state`. Referencing a local variable with a `$` prefix will create a store subscription. Please rename `state` to avoid the ambiguity
+https://svelte.dev/e/store_rune_conflict
+1:17:29 AM [vite-plugin-svelte] E:/Code/CF-Scanner/ui/src/lib/components/ProPanel.svelte:36:17 It looks like you're using the `$state` rune, but there is a local binding called `state`. Referencing a local variable with a `$` prefix will create a store subscription. Please rename `state` to avoid the ambiguity
+https://svelte.dev/e/store_rune_conflict
+1:17:29 AM [vite-plugin-svelte] E:/Code/CF-Scanner/ui/src/lib/components/ProPanel.svelte:37:20 It looks like you're using the `$state` rune, but there is a local binding called `state`. Referencing a local variable with a `$` prefix will create a store subscription. Please rename `state` to avoid the ambiguity
+https://svelte.dev/e/store_rune_conflict
+1:17:29 AM [vite-plugin-svelte] E:/Code/CF-Scanner/ui/src/lib/components/ProPanel.svelte:38:17 It looks like you're using the `$state` rune, but there is a local binding called `state`. Referencing a local variable with a `$` prefix will create a store subscription. Please rename `state` to avoid the ambiguity
+https://svelte.dev/e/store_rune_conflict
+1:17:29 AM [vite-plugin-svelte] E:/Code/CF-Scanner/ui/src/lib/components/ProPanel.svelte:39:13 It looks like you're using the `$state` rune, but there is a local binding called `state`. Referencing a local variable with a `$` prefix will create a store subscription. Please rename `state` to avoid the ambiguity
+https://svelte.dev/e/store_rune_conflict
+1:17:29 AM [vite-plugin-svelte] E:/Code/CF-Scanner/ui/src/lib/components/ProPanel.svelte:40:17 It looks like you're using the `$state` rune, but there is a local binding called `state`. Referencing a local variable with a `$` prefix will create a store subscription. Please rename `state` to avoid the ambiguity
+https://svelte.dev/e/store_rune_conflict
+1:17:29 AM [vite-plugin-svelte] E:/Code/CF-Scanner/ui/src/lib/components/ProPanel.svelte:42:19 It looks like you're using the `$state` rune, but there is a local binding called `state`. Referencing a local variable with a `$` prefix will create a store subscription. Please rename `state` to avoid the ambiguity
+https://svelte.dev/e/store_rune_conflict
+1:17:29 AM [vite-plugin-svelte] E:/Code/CF-Scanner/ui/src/lib/components/ProPanel.svelte:43:22 It looks like you're using the `$state` rune, but there is a local binding called `state`. Referencing a local variable with a `$` prefix will create a store subscription. Please rename `state` to avoid the ambiguity
+https://svelte.dev/e/store_rune_conflict
+1:17:29 AM [vite-plugin-svelte] E:/Code/CF-Scanner/ui/src/lib/components/ProPanel.svelte:44:15 It looks like you're using the `$state` rune, but there is a local binding called `state`. Referencing a local variable with a `$` prefix will create a store subscription. Please rename `state` to avoid the ambiguity
+https://svelte.dev/e/store_rune_conflict
+1:17:29 AM [vite-plugin-svelte] E:/Code/CF-Scanner/ui/src/lib/components/ProPanel.svelte:45:19 It looks like you're using the `$state` rune, but there is a local binding called `state`. Referencing a local variable with a `$` prefix will create a store subscription. Please rename `state` to avoid the ambiguity
+https://svelte.dev/e/store_rune_conflict
+1:17:29 AM [vite-plugin-svelte] src/lib/components/ProPanel.svelte:20:6 `starting` is updated, but is not declared with `$state(...)`. Changing its value will not correctly trigger updates
+https://svelte.dev/e/non_reactive_update
+1:17:29 AM [vite-plugin-svelte] src/lib/components/ProPanel.svelte:23:6 `mode` is updated, but is not declared with `$state(...)`. Changing its value will not correctly trigger updates
+https://svelte.dev/e/non_reactive_update
+1:17:29 AM [vite-plugin-svelte] src/lib/components/ProPanel.svelte:24:6 `preset` is updated, but is not declared with `$state(...)`. Changing its value will not correctly trigger updates
+https://svelte.dev/e/non_reactive_update
+1:17:29 AM [vite-plugin-svelte] src/lib/components/ProPanel.svelte:25:6 `count` is updated, but is not declared with `$state(...)`. Changing its value will not correctly trigger updates
+https://svelte.dev/e/non_reactive_update
+1:17:29 AM [vite-plugin-svelte] src/lib/components/ProPanel.svelte:26:6 `useCount` is updated, but is not declared with `$state(...)`. Changing its value will not correctly trigger updates
+https://svelte.dev/e/non_reactive_update
+1:17:29 AM [vite-plugin-svelte] src/lib/components/ProPanel.svelte:27:6 `ports` is updated, but is not declared with `$state(...)`. Changing its value will not correctly trigger updates
+https://svelte.dev/e/non_reactive_update
+1:17:29 AM [vite-plugin-svelte] src/lib/components/ProPanel.svelte:28:6 `concurrency` is updated, but is not declared with `$state(...)`. Changing its value will not correctly trigger updates
+https://svelte.dev/e/non_reactive_update
+1:17:29 AM [vite-plugin-svelte] src/lib/components/ProPanel.svelte:29:6 `timeoutMs` is updated, but is not declared with `$state(...)`. Changing its value will not correctly trigger updates
+https://svelte.dev/e/non_reactive_update
+1:17:29 AM [vite-plugin-svelte] src/lib/components/ProPanel.svelte:30:6 `includeV6` is updated, but is not declared with `$state(...)`. Changing its value will not correctly trigger updates
+https://svelte.dev/e/non_reactive_update
+1:17:29 AM [vite-plugin-svelte] src/lib/components/ProPanel.svelte:31:6 `stopFound` is updated, but is not declared with `$state(...)`. Changing its value will not correctly trigger updates
+https://svelte.dev/e/non_reactive_update
+1:17:29 AM [vite-plugin-svelte] src/lib/components/ProPanel.svelte:32:6 `cap` is updated, but is not declared with `$state(...)`. Changing its value will not correctly trigger updates
+https://svelte.dev/e/non_reactive_update
+1:17:29 AM [vite-plugin-svelte] src/lib/components/ProPanel.svelte:33:6 `customCidrs` is updated, but is not declared with `$state(...)`. Changing its value will not correctly trigger updates
+https://svelte.dev/e/non_reactive_update
+1:17:29 AM [vite-plugin-svelte] src/lib/components/ProPanel.svelte:34:6 `exclude` is updated, but is not declared with `$state(...)`. Changing its value will not correctly trigger updates
+https://svelte.dev/e/non_reactive_update
+1:17:29 AM [vite-plugin-svelte] src/lib/components/ProPanel.svelte:36:6 `phase2On` is updated, but is not declared with `$state(...)`. Changing its value will not correctly trigger updates
+https://svelte.dev/e/non_reactive_update
+1:17:29 AM [vite-plugin-svelte] src/lib/components/ProPanel.svelte:37:6 `configsText` is updated, but is not declared with `$state(...)`. Changing its value will not correctly trigger updates
+https://svelte.dev/e/non_reactive_update
+1:17:29 AM [vite-plugin-svelte] src/lib/components/ProPanel.svelte:38:6 `fragment` is updated, but is not declared with `$state(...)`. Changing its value will not correctly trigger updates
+https://svelte.dev/e/non_reactive_update
+1:17:29 AM [vite-plugin-svelte] src/lib/components/ProPanel.svelte:39:6 `snis` is updated, but is not declared with `$state(...)`. Changing its value will not correctly trigger updates
+https://svelte.dev/e/non_reactive_update
+1:17:29 AM [vite-plugin-svelte] src/lib/components/ProPanel.svelte:40:6 `probeUrl` is updated, but is not declared with `$state(...)`. Changing its value will not correctly trigger updates
+https://svelte.dev/e/non_reactive_update
+1:17:29 AM [vite-plugin-svelte] src/lib/components/ProPanel.svelte:42:6 `warpProbes` is updated, but is not declared with `$state(...)`. Changing its value will not correctly trigger updates
+https://svelte.dev/e/non_reactive_update
+1:17:29 AM [vite-plugin-svelte] src/lib/components/ProPanel.svelte:43:6 `warpEndpoints` is updated, but is not declared with `$state(...)`. Changing its value will not correctly trigger updates
+https://svelte.dev/e/non_reactive_update
+1:17:29 AM [vite-plugin-svelte] src/lib/components/ProPanel.svelte:44:6 `wgconf` is updated, but is not declared with `$state(...)`. Changing its value will not correctly trigger updates
+https://svelte.dev/e/non_reactive_update
+1:17:29 AM [vite-plugin-svelte] src/lib/components/ProPanel.svelte:45:6 `verifyWarp` is updated, but is not declared with `$state(...)`. Changing its value will not correctly trigger updates
+https://svelte.dev/e/non_reactive_update
+1:17:29 AM [vite-plugin-svelte] E:/Code/CF-Scanner/ui/src/lib/components/SimpleStart.svelte:7:17 It looks like you're using the `$state` rune, but there is a local binding called `state`. Referencing a local variable with a `$` prefix will create a store subscription. Please rename `state` to avoid the ambiguity
+https://svelte.dev/e/store_rune_conflict
+1:17:29 AM [vite-plugin-svelte] src/lib/components/SimpleStart.svelte:7:6 `starting` is updated, but is not declared with `$state(...)`. Changing its value will not correctly trigger updates
+https://svelte.dev/e/non_reactive_update
+[2m1:21:27 AM[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/App.svelte, /src/lib/components/ProPanel.svelte, /src/lib/components/SimpleStart.svelte[22m
+[2m1:21:27 AM[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/lib/components/ProPanel.svelte[22m
+[2m1:21:27 AM[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/lib/components/SimpleStart.svelte[22m
+[2m1:21:27 AM[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/App.svelte[22m
+[2m1:22:07 AM[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mpage reload [39m[2mindex.html[22m

@@ -28,7 +28,7 @@ browser UI + CLI, all over one in-process engine.
 
 ```
 cargo build --release     # build
-cargo run -- serve        # dev: API + UI on 127.0.0.1:8765
+cargo run -- serve        # dev: API + UI on 127.0.0.1:8765 (UI: cd ui && npm ci && npm run build first, or it serves the committed ui/dist)
 cargo test                # unit + integration tests
 cargo clippy --all-targets -- -D warnings
 cargo fmt --check

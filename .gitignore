@@ -10,3 +10,5 @@ cargo-dist/
 .pi/
 
 .playwright-mcp/
+ui/node_modules/
+ui/.svelte-check*

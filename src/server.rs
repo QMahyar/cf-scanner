@@ -15,12 +15,10 @@ use std::time::{Duration, Instant};
 
 use axum::extract::rejection::JsonRejection;
 use axum::extract::{FromRequest, Path, Request, State};
-#[cfg(debug_assertions)]
-use axum::http::header;
 use axum::http::{StatusCode, Uri};
 use axum::middleware::{self, Next};
 use axum::response::sse::{Event, KeepAlive, Sse};
-use axum::response::{Html, IntoResponse, Response};
+use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
@@ -35,7 +33,15 @@ use crate::ranges::{self, CidrPool, HttpGet};
 use crate::warpgen;
 use crate::xray;
 
-const EMBEDDED_INDEX: &str = include_str!("../embed/index.html");
+const EMBEDDED_INDEX: &str = "index.html";
+
+/// The compiled Svelte UI (`ui/dist`, committed so a plain `cargo build`
+/// works without Node). Release builds embed it into the binary; debug
+/// builds read from disk on every request, so `npm run build` output shows
+/// up on browser refresh.
+#[derive(rust_embed::RustEmbed)]
+#[folder = "ui/dist"]
+struct UiAssets;
 const DEFAULT_RANGES_REFRESH_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
 /// Cap on concurrent SSE event streams so hung tabs cannot hoard broadcast
 /// receivers; the UI needs one, extras are an abuse signal.
@@ -369,36 +375,46 @@ fn router_with_dir(
         .layer(middleware::from_fn(localhost_only))
 }
 
-/// Unmatched paths keep the uniform JSON error envelope: `/api/*` always,
-/// everything else in release builds (the UI is a single embedded page).
-/// Dev builds serve `embed/` from disk so the UI can be iterated without
-/// rebuilding.
+/// Unmatched paths serve the embedded Svelte UI: `/` and `/index.html` the
+/// page shell, hashed asset files by exact path; everything else (including
+/// any `/api/*` miss) keeps the uniform JSON error envelope. The UI is a
+/// single page with no client-side routing, so unknown paths stay 404 —
+/// no SPA fallback widening the surface.
 async fn fallback(uri: Uri) -> Response {
-    if uri.path().starts_with("/api/") {
-        return ApiError::not_found(format!("no such endpoint: {}", uri.path())).into_response();
+    let path = uri.path();
+    if path.starts_with("/api/") {
+        return ApiError::not_found(format!("no such endpoint: {path}")).into_response();
     }
-    debug_fallback(uri)
+    let file = match path {
+        "/" | "/index.html" => EMBEDDED_INDEX,
+        p => p.trim_start_matches('/'),
+    };
+    ui_response(file).unwrap_or_else(|| ApiError::not_found("not found").into_response())
 }
 
-/// Dev builds serve the single-page UI from disk so it can be iterated
-/// without rebuilding; the page is fully self-contained (inline CSS/JS).
-#[cfg(debug_assertions)]
-fn debug_fallback(uri: Uri) -> Response {
-    if matches!(uri.path(), "/" | "/index.html") {
-        return serve_index_file();
-    }
-    ApiError::not_found("not found").into_response()
+fn ui_response(file: &str) -> Option<Response> {
+    let data = UiAssets::get(file)?;
+    let mime = match file.rsplit('.').next().unwrap_or("") {
+        "html" => "text/html; charset=utf-8",
+        "js" | "mjs" => "text/javascript",
+        "css" => "text/css",
+        "woff2" => "font/woff2",
+        "woff" => "font/woff",
+        "svg" => "image/svg+xml",
+        "json" => "application/json",
+        _ => "application/octet-stream",
+    };
+    let mut headers = axum::http::HeaderMap::new();
+    headers.insert(axum::http::header::CONTENT_TYPE, mime.parse().unwrap());
+    headers.insert("content-security-policy", SECURITY_CSP.parse().unwrap());
+    headers.insert("x-content-type-options", "nosniff".parse().unwrap());
+    headers.insert("referrer-policy", "no-referrer".parse().unwrap());
+    Some((headers, data.data).into_response())
 }
 
-#[cfg(not(debug_assertions))]
-fn debug_fallback(_uri: Uri) -> Response {
-    ApiError::not_found("not found").into_response()
-}
-
-/// Directives every HTML response must carry; the single inline script and
-/// styles need 'unsafe-inline' (the UI is one self-contained file, no external
-/// resources), everything else stays locked down.
-const SECURITY_CSP: &str = "default-src 'self'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'; script-src-attr 'none'";
+/// Directives every HTML response must carry. The compiled UI ships real
+/// asset files, so everything stays 'self' — no inline script or style.
+const SECURITY_CSP: &str = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self' data:; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'; script-src-attr 'none'";
 
 /// Adds the security headers every response should carry, leaving any header
 /// the handler already set untouched (the HTML handlers set their own CSP).
@@ -412,30 +428,6 @@ async fn security_headers(request: Request, next: Next) -> Response {
         .entry("x-content-type-options")
         .or_insert(axum::http::HeaderValue::from_static("nosniff"));
     response
-}
-
-/// Dev-only: read `embed/index.html` from the working directory (the release
-/// binary embeds it via include_str!; a debug build run from the repo root
-/// finds it on disk).
-#[cfg(debug_assertions)]
-fn serve_index_file() -> Response {
-    match fs::read("embed/index.html") {
-        Ok(bytes) => {
-            let mut headers = axum::http::HeaderMap::new();
-            headers.insert(
-                header::CONTENT_TYPE,
-                "text/html; charset=utf-8".parse().unwrap(),
-            );
-            headers.insert("content-security-policy", SECURITY_CSP.parse().unwrap());
-            headers.insert("x-content-type-options", "nosniff".parse().unwrap());
-            headers.insert("referrer-policy", "no-referrer".parse().unwrap());
-            (headers, bytes).into_response()
-        }
-        Err(err) => {
-            tracing::warn!("could not read embed/index.html: {err}");
-            ApiError::internal("embedded UI missing (run from the repo root)").into_response()
-        }
-    }
 }
 
 /// Wrong method on a known path: 405 with the same JSON envelope as every
@@ -1051,12 +1043,8 @@ fn validate_profile_name(name: &str) -> Result<(), String> {
     Ok(())
 }
 
-async fn index() -> impl IntoResponse {
-    let mut headers = axum::http::HeaderMap::new();
-    headers.insert("content-security-policy", SECURITY_CSP.parse().unwrap());
-    headers.insert("x-content-type-options", "nosniff".parse().unwrap());
-    headers.insert("referrer-policy", "no-referrer".parse().unwrap());
-    (headers, Html(EMBEDDED_INDEX))
+async fn index() -> Response {
+    ui_response(EMBEDDED_INDEX).expect("ui/dist/index.html is embedded at compile time")
 }
 
 struct ApiError {
@@ -1429,8 +1417,9 @@ mod tests {
             "script-src-attr 'none'",
             "base-uri 'self'",
             "object-src 'none'",
-            "script-src 'unsafe-inline'",
-            "style-src 'unsafe-inline'",
+            "script-src 'self'",
+            "style-src 'self'",
+            "font-src 'self' data:",
         ] {
             assert!(csp.contains(directive), "CSP missing {directive}: {csp}");
         }
