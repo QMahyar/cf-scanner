@@ -321,7 +321,7 @@
 
 <div class="fade-in flex flex-col gap-6">
   <!-- scan form -->
-  <section class="card px-5 py-5">
+  <section class="card px-6 py-6">
     <!-- profiles bar: outside the <form> so Enter here never starts a scan -->
     <div
       class="mb-4 flex flex-wrap items-center gap-2 border-b pb-4"
@@ -354,7 +354,7 @@
         bind:value={profileNameInput}
       />
       <button
-        class="btn btn-secondary !py-1.5"
+        class="btn btn-secondary btn-sm"
         onclick={saveProfile}
         disabled={profileBusy}
         title="Save the current form values under this name"
@@ -362,7 +362,7 @@
         <Save class="size-3.5" /> Save
       </button>
       <button
-        class="btn btn-secondary !py-1.5"
+        class="btn btn-secondary btn-sm"
         onclick={deleteSelectedProfile}
         disabled={!selectedProfile || profileBusy}
         title="Delete the selected profile"
@@ -405,7 +405,7 @@
             {#if !xray.found}
               <button
                 type="button"
-                class="btn btn-secondary !py-1.5"
+                class="btn btn-secondary btn-sm"
                 onclick={downloadXray}
                 disabled={xrayBusy}
                 data-state={xrayBusy ? "loading" : undefined}
@@ -417,7 +417,7 @@
           {/if}
           <button
             type="button"
-            class="btn btn-secondary !py-1.5"
+            class="btn btn-secondary btn-sm"
             onclick={loadRangeInfo}
             title="Show how many candidate IPs are loaded and when they were last refreshed"
           >
@@ -651,7 +651,7 @@
               </label>
               <button
                 type="button"
-                class="btn btn-secondary !py-1.5"
+                class="btn btn-secondary btn-sm"
                 onclick={() => registerWarp(false)}
                 disabled={registering}
                 data-state={registering ? "loading" : undefined}
@@ -668,7 +668,7 @@
                 {#if offerOverwrite && !registering}
                   <button
                     type="button"
-                    class="btn btn-secondary !py-1"
+                    class="btn btn-secondary btn-sm"
                     onclick={() => registerWarp(true)}
                     title="Replace the previously registered identity with a new one"
                   >
@@ -690,7 +690,7 @@
                   value={registeredConf}
                 ></textarea>
                 <div class="mt-2 flex flex-wrap gap-2">
-                  <button type="button" class="btn btn-secondary !py-1.5" onclick={copyConf}>
+                  <button type="button" class="btn btn-secondary btn-sm" onclick={copyConf}>
                     {#if confCopied}
                       <Check class="size-3.5" style="color: var(--good)" /> Copied
                     {:else}
@@ -699,7 +699,7 @@
                   </button>
                   <button
                     type="button"
-                    class="btn btn-primary !py-1.5"
+                    class="btn btn-primary btn-sm"
                     onclick={useRegisteredConf}
                     title="Paste into the wgconf field above and enable real-keypair verification"
                   >
@@ -772,7 +772,7 @@
       <!-- sticky actions: one canonical Start/Stop pair, visible even with
            phase-2/WARP textareas expanded -->
       <div
-        class="sticky bottom-0 z-10 -mx-5 -mb-5 mt-5 rounded-b-2xl px-5 pb-4 pt-3 backdrop-blur-md"
+        class="sticky bottom-0 z-10 -mx-6 -mb-6 mt-5 rounded-b-2xl px-6 pb-4 pt-3 backdrop-blur-md"
         style="background: color-mix(in oklab, var(--paper-2) 88%, transparent); box-shadow: 0 -12px 24px oklch(0% 0 0 / 25%);"
       >
         <div class="flex flex-wrap items-center justify-end gap-2">

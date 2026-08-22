@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { Check, Copy, Download, Link2 } from "@lucide/svelte";
+  import { Check, Copy, Link2 } from "@lucide/svelte";
   import { api } from "../api";
   import type { Verdict } from "../types";
   import { errorText, ui } from "../store.svelte";
@@ -53,9 +53,9 @@
 
   function latencyClass(ms: number | null): string {
     if (ms === null) return "var(--ink-muted)";
-    if (ms < 300) return "var(--good)";
-    if (ms < 800) return "var(--accent)";
-    return "var(--bad)";
+    if (ms < 300) return "var(--lat-fast)";
+    if (ms < 800) return "var(--lat-mid)";
+    return "var(--lat-slow)";
   }
 </script>
 
@@ -112,19 +112,19 @@
             </td>
             <td class="px-2 py-2 text-right whitespace-nowrap">
               <button
-                class="btn btn-ghost !px-2"
+                class="btn btn-ghost btn-sm"
                 title="Copy ip:port"
                 onclick={() => copyUri(r, i)}
               >
                 {#if copiedIdx === i}
-                  <Download class="size-4" style="color: var(--good)" />
+                  <Check class="size-4" style="color: var(--good)" />
                 {:else}
                   <Copy class="size-4" />
                 {/if}
               </button>
               {#if exportableConfig(r)}
                 <button
-                  class="btn btn-ghost !px-2"
+                  class="btn btn-ghost btn-sm"
                   title="Copy importable URI (config rewritten to this endpoint)"
                   onclick={() => copyImportable(r, i)}
                 >

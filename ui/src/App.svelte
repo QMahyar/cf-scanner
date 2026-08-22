@@ -69,7 +69,7 @@
     <div class="flex items-center gap-3">
       <div
         class="grid size-10 place-items-center rounded-full"
-        style="background: var(--accent); box-shadow: 0 0 24px var(--bloom-a);"
+        style="background: var(--accent); box-shadow: 0 0 12px var(--bloom-a);"
       >
         <Radar class="size-5" color="var(--accent-ink)" strokeWidth={2.4} />
       </div>
@@ -83,21 +83,28 @@
       </div>
     </div>
     <div class="flex items-center gap-2">
-      <span class="pill" style="background: var(--paper-3); color: var(--ink-muted);">
+      <span
+        class="version-badge mono"
+        title={live === "live"
+          ? "Connected to the local scan engine — results stay on this machine"
+          : live === "offline"
+            ? "Engine unreachable — showing last known state"
+            : "Connecting to the local scan engine…"}
+      >
         <span
           class="size-1.5 rounded-full"
           style="background: {live === 'live'
             ? 'var(--good)'
             : live === 'offline'
               ? 'var(--bad)'
-              : 'var(--accent)'}"
+              : 'var(--ink-muted)'}"
         ></span>
-        {liveLabel}
+        {liveLabel} · v{version || "…"}
       </span>
       <button
         type="button"
         class="btn btn-secondary"
-        class:btn-primary={app.proMode}
+        class:btn-state-on={app.proMode}
         onclick={togglePro}
         aria-pressed={app.proMode}
         title="Reveal every control: profiles, phase-2 verification, WARP identity, exports"
@@ -116,7 +123,7 @@
         role="alert"
       >
         {app.error}
-        <button class="btn btn-ghost ml-2 !px-2 !py-1" onclick={() => (app.error = null)}>
+        <button class="btn btn-ghost btn-sm ml-2" onclick={() => (app.error = null)}>
           dismiss
         </button>
       </div>
@@ -129,11 +136,7 @@
     {/if}
   </main>
 
-  <footer
-    class="flex flex-wrap items-center justify-between gap-2 border-t py-4 text-xs"
-    style="border-color: oklch(100% 0 0 / 6%); color: var(--ink-muted);"
-  >
-    <span class="mono">v{version || "…"} · results stay on this machine · scans talk only to Cloudflare</span>
+  <footer class="border-t py-4 text-xs" style="border-color: oklch(100% 0 0 / 6%); color: var(--ink-muted);">
     <span>
       GeoIP data by
       <a

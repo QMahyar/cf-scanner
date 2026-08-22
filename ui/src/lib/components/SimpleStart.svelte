@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { Check, Copy, Play, Square } from "@lucide/svelte";
+  import { Check, Copy, Gauge, Play, Square } from "@lucide/svelte";
   import { simpleConfig, startScan, stopScan, ui } from "../store.svelte";
 
   const app = ui();
@@ -58,7 +58,7 @@
   }
 </script>
 
-<section class="card card-lift fade-in px-6 py-8 sm:px-10 sm:py-12">
+<section class="card card-lift fade-in px-6 py-6">
   <div class="flex flex-col items-start gap-6 sm:flex-row sm:items-center sm:justify-between">
     <div>
       <p class="mono text-xs uppercase tracking-widest" style="color: var(--accent)">
@@ -77,7 +77,7 @@
       </p>
     </div>
     {#if app.running}
-      <button class="btn btn-secondary !px-7 !py-3.5 !text-base" onclick={stopScan}>
+      <button class="btn btn-secondary btn-lg" onclick={stopScan}>
         <Square class="size-5" />
         Stop
       </button>
@@ -104,7 +104,7 @@
             />
           </label>
           <button
-            class="btn btn-primary !px-8 !py-4 !text-base"
+            class="btn btn-primary btn-lg"
             onclick={start}
             disabled={starting}
             data-state={starting ? "loading" : undefined}
@@ -158,15 +158,37 @@
       >
         <div
           class="h-full rounded-full transition-all duration-300"
-          style="width: {pct ?? 6}%; background: var(--accent); box-shadow: 0 0 16px var(--bloom-a);"
+          style="width: {pct ?? 6}%; background: var(--accent);"
         ></div>
       </div>
     </div>
   {/if}
 </section>
 
+{#if !app.running && app.summary === null && best.length === 0}
+  <section
+    class="card fade-in flex flex-wrap items-center justify-center gap-x-3 gap-y-2 px-4 py-3"
+    aria-label="What a scan does"
+  >
+    <span class="flex items-center gap-1.5 text-xs whitespace-nowrap" style="color: var(--ink-muted)">
+      <Play class="size-3.5" />
+      Scan Cloudflare's edge
+    </span>
+    <span aria-hidden="true" class="h-0 w-6 sm:w-10 border-t border-dashed" style="border-color: oklch(100% 0 0 / 15%)"></span>
+    <span class="flex items-center gap-1.5 text-xs whitespace-nowrap" style="color: var(--ink-muted)">
+      <Gauge class="size-3.5" />
+      Rank by real latency
+    </span>
+    <span aria-hidden="true" class="h-0 w-6 sm:w-10 border-t border-dashed" style="border-color: oklch(100% 0 0 / 15%)"></span>
+    <span class="flex items-center gap-1.5 text-xs whitespace-nowrap" style="color: var(--ink-muted)">
+      <Copy class="size-3.5" />
+      Copy what works
+    </span>
+  </section>
+{/if}
+
 {#if finishedIdle && app.results.length === 0}
-  <section class="card fade-in px-6 py-8" aria-label="No results guidance">
+  <section class="card fade-in px-6 py-6" aria-label="No results guidance">
     <h3 class="text-base font-semibold">No working endpoints found</h3>
     <p class="mt-2 max-w-lg text-sm" style="color: var(--ink-muted)">
       Your network may be blocking Cloudflare probes on these ports. Try more
@@ -214,7 +236,7 @@
             </p>
           </div>
           <button
-            class="btn btn-ghost !px-2"
+            class="btn btn-ghost btn-sm"
             title="Copy this endpoint (ip:port)"
             onclick={() => navigator.clipboard.writeText(`${r.ip}:${r.port}`)}
           >
