@@ -25,10 +25,12 @@
   import {
     buildConfig,
     defaultFormState,
+    defaultSelectedPorts,
     FORM_PERSIST_KEY,
     formStateFromConfig,
     formStateFromPersisted,
     persistedFormState,
+    portCatalog,
     FormValidationError,
   } from "../formState";
   import type { FieldIssue, FormField, FormState } from "../formState";
@@ -106,7 +108,7 @@
     [/timeout/i, "timeoutMs"],
     [/\bcap\b/i, "capText"],
     [/stop\.found|\bstop\b/i, "stopFound"],
-    [/\bports?\b/i, "portsText"],
+    [/\bports?\b/i, "customPortsText"],
   ];
 
   function routeServerDetail(detail: string): Partial<Record<FormField, string>> {
@@ -145,6 +147,24 @@
     touched[name as FormField] = true;
     delete serverFieldErrors[name as FormField];
   }
+
+  function togglePort(p: number) {
+    form.selectedPorts = form.selectedPorts.includes(p)
+      ? form.selectedPorts.filter((x) => x !== p)
+      : [...form.selectedPorts, p];
+    touched.selectedPorts = true;
+    delete serverFieldErrors.customPortsText;
+  }
+
+  // Flipping CDN ↔ WARP swaps the chip catalog: re-default the selection so
+  // stale cross-family ports can't linger silently.
+  $effect(() => {
+    void form.mode;
+    if (hydrated) {
+      form.selectedPorts = defaultSelectedPorts(form.mode);
+      form.customPortsText = "";
+    }
+  });
 
   function onFormSubmit(e: SubmitEvent) {
     e.preventDefault();
@@ -492,15 +512,65 @@
           {@render fieldError("count")}
         </label>
 
+        <div class="text-xs sm:col-span-2 lg:col-span-3">
+          <span style="color: var(--ink-muted)">
+            Cloudflare ports
+            {#if form.mode === "Warp"}
+              <span class="mono text-[10px]">(WireGuard UDP · official)</span>
+            {:else}
+              <span class="mono text-[10px]">(TLS · per Cloudflare network-ports docs)</span>
+            {/if}
+          </span>
+          <div class="mt-1.5 flex flex-wrap gap-1.5">
+            {#each portCatalog(form.mode).primary as p (p)}
+              <button
+                type="button"
+                class="pill"
+                style={form.selectedPorts.includes(p)
+                  ? "background: var(--accent); color: var(--accent-ink)"
+                  : "background: var(--paper-3); color: var(--ink)"}
+                aria-pressed={form.selectedPorts.includes(p)}
+                onclick={() => togglePort(p)}
+              >
+                {p}
+              </button>
+            {/each}
+          </div>
+          {#if form.mode === "Warp" && portCatalog(form.mode).extended.length > 0}
+            <details class="mt-2">
+              <summary class="cursor-pointer" style="color: var(--ink-muted)">
+                extended community ports ({portCatalog(form.mode).extended.length})
+              </summary>
+              <div class="mt-1.5 flex flex-wrap gap-1.5">
+                {#each portCatalog(form.mode).extended as p (p)}
+                  <button
+                    type="button"
+                    class="pill"
+                    style={form.selectedPorts.includes(p)
+                      ? "background: var(--accent); color: var(--accent-ink)"
+                      : "background: var(--paper-3); color: var(--ink)"}
+                    aria-pressed={form.selectedPorts.includes(p)}
+                    onclick={() => togglePort(p)}
+                  >
+                    {p}
+                  </button>
+                {/each}
+              </div>
+            </details>
+          {/if}
+          {@render fieldError("selectedPorts")}
+        </div>
+
         <label class="text-xs" style="color: var(--ink-muted)">
-          Ports (comma-separated)
+          Custom port(s) — comma-separated
           <input
             class="field mono mt-1"
-            name="portsText"
-            aria-invalid={fieldErrors.portsText ? "true" : undefined}
-            bind:value={form.portsText}
+            name="customPortsText"
+            placeholder="8443"
+            aria-invalid={fieldErrors.customPortsText ? "true" : undefined}
+            bind:value={form.customPortsText}
           />
-          {@render fieldError("portsText")}
+          {@render fieldError("customPortsText")}
         </label>
 
         <label class="text-xs" style="color: var(--ink-muted)">

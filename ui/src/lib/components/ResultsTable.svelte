@@ -9,6 +9,7 @@
 
   let sortKey = $state<"latency" | "ip">("latency");
   let copiedIdx = $state<number | null>(null);
+  let copiedAll = $state(false);
   let copiedUriIdx = $state<number | null>(null);
   const sortOptions: readonly ("latency" | "ip")[] = ["latency", "ip"];
 
@@ -25,6 +26,17 @@
       await navigator.clipboard.writeText(`${r.ip}:${r.port}`);
       copiedIdx = i;
       setTimeout(() => (copiedIdx = null), 1200);
+    } catch {
+      /* clipboard unavailable */
+    }
+  }
+
+  async function copyAll() {
+    try {
+      const lines = sorted.map((r) => `${r.ip}:${r.port}`).join("\n");
+      await navigator.clipboard.writeText(lines);
+      copiedAll = true;
+      setTimeout(() => (copiedAll = false), 1200);
     } catch {
       /* clipboard unavailable */
     }
@@ -76,6 +88,16 @@
           sort {k}
         </button>
       {/each}
+      <button
+        class="pill"
+        style={copiedAll
+          ? "background: var(--paper-3); color: var(--good)"
+          : "background: var(--paper-3); color: var(--ink-muted)"}
+        title="Copy every endpoint, one ip:port per line"
+        onclick={copyAll}
+      >
+        {copiedAll ? "copied ✓" : "copy all"}
+      </button>
     </div>
   </div>
   <div class="max-h-[26rem] overflow-x-auto overflow-y-auto">

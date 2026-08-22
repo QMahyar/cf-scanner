@@ -65,6 +65,9 @@ export async function assertOk(res: Response): Promise<Response> {
 
 async function unwrap<T>(res: Response): Promise<T> {
   if (!res.ok) throw await apiErrorFrom(res);
+  // 202 (scan accepted) and 204 carry no body: parsing them as JSON throws
+  // "Unexpected end of JSON input" even though the request succeeded.
+  if (res.status === 202 || res.status === 204) return undefined as T;
   return res.json() as Promise<T>;
 }
 

@@ -1,14 +1,22 @@
 import type { CdnPreset, FragmentPreset, Mode, ScanConfig } from "./types";
+import {
+  CDN_HTTPS_PORTS,
+  WARP_EXTENDED_PORTS,
+  WARP_PRIMARY_PORTS,
+} from "./cfPorts";
 
 /** Everything the Pro panel can set, exactly as the user typed it.
- * Text fields stay text so "cleared" is representable (e.g. capText "" = no
- * hard cap); buildConfig does the strict parse at start time. */
+ * Ports are a checkbox selection from the curated Cloudflare catalogs plus a
+ * free-text custom field; buildConfig merges and validates both at start
+ * time. Text fields stay text so "cleared" is representable (e.g. capText ""
+ * = no hard cap). */
 export interface FormState {
   mode: Mode;
   preset: CdnPreset;
   count: number;
   useCount: boolean;
-  portsText: string;
+  selectedPorts: number[];
+  customPortsText: string;
   concurrency: number;
   timeoutMs: number;
   includeV6: boolean;
@@ -27,6 +35,20 @@ export interface FormState {
   verifyWarp: boolean;
 }
 
+/** Ports offered as chips for a mode: the official catalog first, then the
+ * community-verified extended WARP list behind a disclosure. */
+export function portCatalog(mode: Mode): { primary: number[]; extended: number[] } {
+  return mode === "Warp"
+    ? { primary: WARP_PRIMARY_PORTS, extended: WARP_EXTENDED_PORTS }
+    : { primary: CDN_HTTPS_PORTS, extended: [] };
+}
+
+/** Mode's default checked chips; exported so the panel can re-default the
+ * selection when the user flips CDN ↔ WARP mid-form. */
+export function defaultSelectedPorts(mode: Mode): number[] {
+  return mode === "Warp" ? [2408] : [443];
+}
+
 /** Pro panel defaults; simple mode keeps its own in simpleConfig(). */
 export function defaultFormState(): FormState {
   return {
@@ -34,7 +56,8 @@ export function defaultFormState(): FormState {
     preset: "Quick",
     count: 350,
     useCount: false,
-    portsText: "443",
+    selectedPorts: defaultSelectedPorts("Cdn"),
+    customPortsText: "",
     concurrency: 128,
     timeoutMs: 2000,
     includeV6: false,
@@ -62,12 +85,19 @@ export function defaultFormState(): FormState {
  * them. */
 export function formStateFromConfig(cfg: ScanConfig): FormState {
   const d = defaultFormState();
+  const catalog = portCatalog(cfg.mode);
+  const known = new Set([...catalog.primary, ...catalog.extended]);
+  const selected = cfg.ports.filter((p) => known.has(p));
+  const custom = cfg.ports.filter((p) => !known.has(p));
   return {
     mode: cfg.mode,
     preset: !("Count" in cfg.target) ? cfg.target.Preset : d.preset,
     count: "Count" in cfg.target ? cfg.target.Count : d.count,
     useCount: "Count" in cfg.target,
-    portsText: cfg.ports.join(", "),
+    // A profile whose ports are all unknown to the current catalog keeps at
+    // least the mode default checked, so the form never renders zero chips.
+    selectedPorts: selected.length > 0 ? selected : d.selectedPorts,
+    customPortsText: custom.join(", "),
     concurrency: cfg.concurrency,
     timeoutMs: cfg.timeout_ms,
     includeV6: cfg.include_v6 ?? false,
@@ -140,26 +170,23 @@ function wholeNumber(
   return n;
 }
 
-function parsePorts(text: string, issues: FieldIssue[]): number[] {
-  if (!text.trim()) {
-    issues.push({
-      field: "portsText",
-      message: "Ports: at least one port is required",
-    });
-    return [];
-  }
+function parseCustomPorts(text: string, issues: FieldIssue[]): number[] {
+  if (!text.trim()) return [];
   const ports: number[] = [];
   for (const raw of text.split(",")) {
     const token = raw.trim();
     if (!token) {
-      issues.push({ field: "portsText", message: "Ports: empty entry between commas" });
+      issues.push({
+        field: "customPortsText",
+        message: "Custom ports: empty entry between commas",
+      });
       continue;
     }
     const port = Number(token);
     if (!Number.isInteger(port) || port < 1 || port > 65535) {
       issues.push({
-        field: "portsText",
-        message: `Ports: "${token}" is not a valid port (whole number 1–65535)`,
+        field: "customPortsText",
+        message: `Custom ports: "${token}" is not a valid port (whole number 1–65535)`,
       });
       continue;
     }
@@ -187,7 +214,24 @@ function parseCap(text: string, issues: FieldIssue[]): number | null {
 export function buildConfig(f: FormState): ScanConfig {
   const issues: FieldIssue[] = [];
 
-  const ports = parsePorts(f.portsText, issues);
+  // Chips + custom merge into one deduped, ascending port list. The WARP
+  // default-port guard stays even though no WARP chip is 443: a user can
+  // still type 443 as a custom port.
+  const customPorts = parseCustomPorts(f.customPortsText, issues);
+  const ports = [...new Set([...f.selectedPorts, ...customPorts])].sort((a, b) => a - b);
+  if (ports.length === 0) {
+    issues.push({
+      field: "selectedPorts",
+      message: "Ports: check at least one port or enter a custom one",
+    });
+  }
+  if (f.mode === "Warp" && ports.includes(443)) {
+    issues.push({
+      field: "customPortsText",
+      message:
+        "WARP speaks WireGuard, not MASQUE — UDP 443 only serves the MASQUE protocol (try 2408, 500, 1701 or 4500)",
+    });
+  }
   const cap = parseCap(f.capText, issues);
   const count = wholeNumber(f.count, "Candidate count", 1, "count", issues);
   const stopFound = wholeNumber(
@@ -299,6 +343,12 @@ export function formStateFromPersisted(raw: string): FormState | null {
   }
 
   if (!["Cdn", "Warp"].includes(out.mode)) out.mode = d.mode;
+  // Sanitize the port selection: integers 1-65535 only, and at least the
+  // mode default so a corrupted blob can't produce a zero-port form.
+  out.selectedPorts = out.selectedPorts.filter(
+    (p) => Number.isInteger(p) && p >= 1 && p <= 65535,
+  );
+  if (out.selectedPorts.length === 0) out.selectedPorts = defaultSelectedPorts(out.mode);
   if (!["Quick", "Normal", "Full"].includes(out.preset)) out.preset = d.preset;
   if (!["off", "light", "medium", "heavy", "custom"].includes(out.fragment))
     out.fragment = d.fragment;
