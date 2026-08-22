@@ -72,13 +72,7 @@ export interface ScanSummary {
 
 export interface ResultsPayload {
   results: Verdict[];
-  summary: {
-    scanned: number;
-    found: number;
-    duration_ms: number | null;
-    cancelled: boolean;
-    is_running?: boolean;
-  };
+  summary: ScanSummary | null;
 }
 
 export interface StatusPayload {

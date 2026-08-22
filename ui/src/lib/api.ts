@@ -20,6 +20,13 @@ export interface XrayStatusPayload {
   version: string;
 }
 
+export interface RangesPayload {
+  host_count: number;
+  last_updated: string | null;
+}
+
+export type LiveStatus = "connecting" | "live" | "offline";
+
 async function unwrap<T>(res: Response): Promise<T> {
   if (!res.ok) {
     let message = `${res.status}`;
@@ -66,8 +73,7 @@ export const api = {
     fetch("/api/xray/download", { method: "POST" }).then(
       unwrap<{ success: boolean; path?: string | null; error?: string | null }>,
     ),
-  rangesRefresh: () =>
-    fetch("/api/ranges/refresh", { method: "POST" }).then(unwrap<unknown>),
+  ranges: () => fetch("/api/ranges").then(unwrap<RangesPayload>),
   warpRegister: (license: string | null, overwrite: boolean) =>
     fetch("/api/warp/register", {
       method: "POST",
@@ -78,15 +84,23 @@ export const api = {
 
 /** Live event stream. The server keeps idle connections open (a replayed
  * terminal is context, not an end-of-stream), so one EventSource lasts the
- * whole session; browsers reconnect transparently on drop. */
+ * whole session; browsers reconnect transparently on drop. onStatus tracks
+ * the real connection: live on open, connecting while the browser
+ * auto-reconnects, offline only when navigator says the network is gone. */
 export function subscribe(handlers: {
   onProgress?: (p: ScanProgress) => void;
   onResult?: (v: Verdict) => void;
   onFinished?: (s: ScanSummary) => void;
   onPhase2?: (p: Phase2Progress) => void;
   onFailed?: (msg: string) => void;
+  onStatus?: (s: LiveStatus) => void;
 }): EventSource {
   const es = new EventSource("/api/events");
+  if (handlers.onStatus) {
+    es.onopen = () => handlers.onStatus?.("live");
+    es.onerror = () =>
+      handlers.onStatus?.(navigator.onLine ? "connecting" : "offline");
+  }
   const listen = <T>(
     event: string,
     cb: ((value: T) => void) | undefined,

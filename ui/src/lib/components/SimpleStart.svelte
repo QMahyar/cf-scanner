@@ -32,7 +32,8 @@
       </h2>
       <p class="mt-2 max-w-md text-sm" style="color: var(--ink-muted)">
         Scans Cloudflare's edge from your network and ranks what actually
-        answers. Nothing leaves this machine.
+        answers. Results never leave this machine — scans talk only to
+        Cloudflare.
       </p>
     </div>
     {#if app.running}
@@ -96,7 +97,7 @@
         </div>
         <button
           class="btn btn-ghost !px-2"
-          title="Copy a ready-to-import URI for this IP"
+          title="Copy this endpoint (ip:port)"
           onclick={() => navigator.clipboard.writeText(`${r.ip}:${r.port}`)}
         >
           <Copy class="size-4" />

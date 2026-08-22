@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { Radar, Rocket, SlidersHorizontal } from "@lucide/svelte";
-  import { api, subscribe } from "./lib/api";
+  import { api, subscribe, type LiveStatus } from "./lib/api";
   import {
     applyResult,
     resetResults,
@@ -13,10 +13,31 @@
 
   const app = ui();
   let version = $state("");
-  let live = $state<"connecting" | "live" | "offline">("connecting");
+  let live = $state<LiveStatus>("connecting");
+  const liveLabel = $derived(
+    live === "live" ? "Live" : live === "offline" ? "Offline" : "Connecting…",
+  );
+
+  /** F5 mid-scan: the engine keeps last-scan state in memory, so pull it
+   * once instead of showing a blank page until the next SSE tick. */
+  async function hydrate() {
+    try {
+      const [s, r] = await Promise.all([api.status(), api.results()]);
+      version = s.version;
+      for (const v of r.results) applyResult(v);
+      if (r.summary) {
+        app.summary = r.summary;
+        app.progress.scanned = Math.max(app.progress.scanned, r.summary.scanned);
+        app.progress.found = Math.max(app.progress.found, r.summary.found);
+      }
+      if (s.is_running) app.running = true;
+    } catch {
+      /* server unreachable; the live pill reports connectivity */
+    }
+  }
 
   onMount(() => {
-    api.status().then((s) => (version = s.version)).catch(() => {});
+    void hydrate();
     subscribe({
       onProgress: (p) => {
         app.progress = p;
@@ -34,11 +55,8 @@
         app.error = msg;
         app.running = false;
       },
-    }).onerror = () => {
-      live = navigator.onLine ? "connecting" : "offline";
-    };
-    // The stream stays open across scans; mark it live once connected.
-    setTimeout(() => (live = "live"), 800);
+      onStatus: (s) => (live = s),
+    });
   });
 
   function togglePro() {
@@ -74,7 +92,7 @@
               ? 'var(--bad)'
               : 'var(--accent)'}"
         ></span>
-        {live}
+        {liveLabel}
       </span>
       <button
         type="button"
@@ -115,7 +133,7 @@
     class="flex flex-wrap items-center justify-between gap-2 border-t py-4 text-xs"
     style="border-color: oklch(100% 0 0 / 6%); color: var(--ink-muted);"
   >
-    <span class="mono">v{version || "…"} · last-scan-only · nothing leaves this machine</span>
+    <span class="mono">v{version || "…"} · results stay on this machine · scans talk only to Cloudflare</span>
     <span>
       GeoIP data by
       <a

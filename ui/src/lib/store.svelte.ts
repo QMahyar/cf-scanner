@@ -6,7 +6,7 @@ export interface UiState {
   progress: { scanned: number; found: number; total: number | null };
   phase2: { done: number; total: number } | null;
   results: Verdict[];
-  summary: (ScanSummary & { is_running?: boolean }) | null;
+  summary: ScanSummary | null;
   error: string | null;
   proMode: boolean;
 }

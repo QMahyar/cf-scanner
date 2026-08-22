@@ -4,14 +4,14 @@
     Download,
     Gauge,
     Globe,
+    Info,
     KeyRound,
     Play,
-    RefreshCw,
     Save,
     ShieldCheck,
     Square,
   } from "@lucide/svelte";
-  import { api } from "../api";
+  import { api, type RangesPayload } from "../api";
   import { errorText, startScan, stopScan, ui } from "../store.svelte";
   import {
     buildConfig,
@@ -25,6 +25,7 @@
   let starting = $state(false);
   let validationErrors = $state<string[]>([]);
   let form = $state<FormState>(defaultFormState());
+  let rangesInfo = $state<RangesPayload | null>(null);
 
   async function start() {
     starting = true;
@@ -39,9 +40,9 @@
     starting = false;
   }
 
-  async function refreshRanges() {
+  async function loadRangeInfo() {
     try {
-      await api.rangesRefresh();
+      rangesInfo = await api.ranges();
       app.error = null;
     } catch (e) {
       app.error = errorText(e);
@@ -59,10 +60,10 @@
       <div class="flex items-center gap-2">
         <button
           class="btn btn-secondary !py-1.5"
-          onclick={refreshRanges}
-          title="Re-fetch official Cloudflare ranges into the data dir"
+          onclick={loadRangeInfo}
+          title="Show how many candidate IPs are loaded and when they were last refreshed"
         >
-          <RefreshCw class="size-3.5" /> Refresh ranges
+          <Info class="size-3.5" /> Range info
         </button>
         {#if app.running}
           <button class="btn btn-secondary !py-1.5" onclick={stopScan}>
@@ -80,6 +81,13 @@
         {/if}
       </div>
     </div>
+
+    {#if rangesInfo}
+      <p class="mono fade-in mt-2 text-[11px]" style="color: var(--ink-muted)">
+        {rangesInfo.host_count.toLocaleString("en-US")} hosts · updated
+        {rangesInfo.last_updated ?? "bundled"}
+      </p>
+    {/if}
 
     {#if validationErrors.length > 0}
       <div class="fade-in mt-3 text-xs" role="alert" style="color: var(--bad)">
@@ -115,7 +123,7 @@
       {/if}
 
       <label class="text-xs" style="color: var(--ink-muted)">
-        {form.mode === "Cdn" && !form.useCount ? "Stop after N working" : "Candidates"}
+        Candidates to test
         <input class="field mono mt-1" type="number" min="1" max="100000" bind:value={form.count} />
       </label>
 
@@ -135,12 +143,12 @@
       </label>
 
       <label class="text-xs" style="color: var(--ink-muted)">
-        Stop after N working
+        Stop after N working found
         <input class="field mono mt-1" type="number" min="1" bind:value={form.stopFound} />
       </label>
 
       <label class="text-xs" style="color: var(--ink-muted)">
-        Hard cap on probes (empty = none)
+        Hard cap on probes (blank = unlimited)
         <input
           class="field mono mt-1"
           type="text"
