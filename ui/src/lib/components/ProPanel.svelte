@@ -34,6 +34,7 @@
     FormValidationError,
   } from "../formState";
   import type { FieldIssue, FormField, FormState } from "../formState";
+  import { EXCLUDE_WARP_INGRESS } from "../cidrPresets";
   import ResultsTable from "./ResultsTable.svelte";
 
   const app = ui();
@@ -68,6 +69,37 @@
   let offerOverwrite = $state(false);
   let registeredConf = $state("");
   let confCopied = $state(false);
+
+  /** wgconf file import: hidden picker + visible button. Files above this
+   * ceiling are rejected before reading — a wgconf is a few KB; anything
+   * bigger is the wrong file. */
+  const WGCONF_MAX_BYTES = 64 * 1024;
+  let wgconfFileInput = $state<HTMLInputElement | null>(null);
+  let wgconfFileName = $state("");
+  let wgconfFileError = $state<string | null>(null);
+
+  async function loadWgconfFile(
+    e: Event & { currentTarget: EventTarget & HTMLInputElement },
+  ) {
+    const input = e.currentTarget;
+    const file = input.files?.[0] ?? null;
+    // Reset so re-picking the same file fires change again.
+    input.value = "";
+    wgconfFileError = null;
+    if (!file) return;
+    if (file.size > WGCONF_MAX_BYTES) {
+      wgconfFileError = `"${file.name}" is ${Math.ceil(file.size / 1024)} KB — wgconf files must be 64 KB or smaller`;
+      return;
+    }
+    try {
+      form.wgconf = await file.text();
+      form.verifyWarp = true;
+      wgconfFileName = file.name;
+      delete serverFieldErrors.wgconf;
+    } catch {
+      wgconfFileError = `Could not read "${file.name}"`;
+    }
+  }
 
   const allIssues = $derived.by(() => {
     try {
@@ -154,6 +186,44 @@
       : [...form.selectedPorts, p];
     touched.selectedPorts = true;
     delete serverFieldErrors.customPortsText;
+  }
+
+  /** Chip-row shortcuts: select the mode's whole catalog (primary +
+   * extended, regardless of whether the details list is expanded) or wipe
+   * the selection. Both mark touched so live validation reacts. */
+  function selectAllPorts() {
+    const catalog = portCatalog(form.mode);
+    form.selectedPorts = [...catalog.primary, ...catalog.extended];
+    touched.selectedPorts = true;
+    delete serverFieldErrors.customPortsText;
+  }
+
+  function clearPorts() {
+    form.selectedPorts = [];
+    touched.selectedPorts = true;
+    delete serverFieldErrors.customPortsText;
+  }
+
+  /** Append the WARP-ingress preset to the exclusions, deduping against
+   * lines already present so clicking twice never duplicates a CIDR. */
+  function excludeWarpIngress() {
+    const kept = form.exclude
+      .split("\n")
+      .map((s) => s.trim())
+      .filter(Boolean);
+    const seen = new Set(kept);
+    form.exclude = [
+      ...kept,
+      ...EXCLUDE_WARP_INGRESS.filter((c) => !seen.has(c)),
+    ].join("\n");
+    touched.exclude = true;
+    delete serverFieldErrors.exclude;
+  }
+
+  function clearExclusions() {
+    form.exclude = "";
+    touched.exclude = true;
+    delete serverFieldErrors.exclude;
   }
 
   // Flipping CDN ↔ WARP swaps the chip catalog: re-default the selection so
@@ -513,14 +583,36 @@
         </label>
 
         <div class="text-xs sm:col-span-2 lg:col-span-3">
-          <span style="color: var(--ink-muted)">
-            Cloudflare ports
-            {#if form.mode === "Warp"}
-              <span class="mono text-[10px]">(WireGuard UDP · official)</span>
-            {:else}
-              <span class="mono text-[10px]">(TLS · per Cloudflare network-ports docs)</span>
-            {/if}
-          </span>
+          <div class="flex flex-wrap items-center justify-between gap-x-2 gap-y-1">
+            <span style="color: var(--ink-muted)">
+              Cloudflare ports
+              {#if form.mode === "Warp"}
+                <span class="mono text-[10px]">(WireGuard UDP · official)</span>
+              {:else}
+                <span class="mono text-[10px]">(TLS · per Cloudflare network-ports docs)</span>
+              {/if}
+            </span>
+            <span class="flex items-center gap-1">
+              <button
+                type="button"
+                class="pill cursor-pointer"
+                style="background: var(--paper-3); color: var(--ink-muted)"
+                title="Select every catalog port for this mode (including extended)"
+                onclick={selectAllPorts}
+              >
+                all
+              </button>
+              <button
+                type="button"
+                class="pill cursor-pointer"
+                style="background: var(--paper-3); color: var(--ink-muted)"
+                title="Clear the port selection"
+                onclick={clearPorts}
+              >
+                none
+              </button>
+            </span>
+          </div>
           <div class="mt-1.5 flex flex-wrap gap-1.5">
             {#each portCatalog(form.mode).primary as p (p)}
               <button
@@ -662,6 +754,30 @@
             {@render fieldError("exclude")}
           </label>
         </div>
+        <div class="mt-2 flex flex-wrap items-center gap-1.5">
+          <button
+            type="button"
+            class="pill cursor-pointer"
+            style="background: var(--paper-3); color: var(--ink)"
+            title="Append Cloudflare's WARP ingress ranges to the exclusion list (deduped)"
+            onclick={excludeWarpIngress}
+          >
+            Exclude WARP ingress
+          </button>
+          <button
+            type="button"
+            class="pill cursor-pointer"
+            style="color: var(--ink-muted)"
+            title="Empty the exclusion list"
+            onclick={clearExclusions}
+          >
+            clear
+          </button>
+          <span class="mono text-[10px]" style="color: var(--ink-muted)">
+            adds 162.159.192.0/24 + 162.159.193.0/24 — Cloudflare One docs list
+            these as WARP ingress; probing them in CDN mode wastes candidates
+          </span>
+        </div>
       </details>
 
       {#if form.mode === "Warp"}
@@ -689,16 +805,47 @@
               bind:value={form.warpEndpoints}></textarea>
             {@render fieldError("warpEndpoints")}
           </label>
-          <label class="text-xs sm:col-span-2" style="color: var(--ink-muted)">
-            wgconf (paste your wg:// URI, wg-quick INI, or Amnezia config — enables real-keypair verification)
-            <textarea
-              class="field mono mt-1"
-              rows="3"
-              name="wgconf"
-              aria-invalid={fieldErrors.wgconf ? "true" : undefined}
-              bind:value={form.wgconf}></textarea>
+          <div class="text-xs sm:col-span-2" style="color: var(--ink-muted)">
+            <label class="block">
+              wgconf (paste your wg:// URI, wg-quick INI, or Amnezia config — enables real-keypair verification)
+              <textarea
+                class="field mono mt-1"
+                rows="3"
+                name="wgconf"
+                aria-invalid={fieldErrors.wgconf ? "true" : undefined}
+                bind:value={form.wgconf}></textarea>
+            </label>
             {@render fieldError("wgconf")}
-          </label>
+            <div class="mt-1.5 flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                class="btn btn-secondary btn-sm"
+                title="Read a WireGuard .conf file into the field above (verification is enabled automatically)"
+                onclick={() => wgconfFileInput?.click()}
+              >
+                <FolderOpen class="size-3.5" /> Load .conf file
+              </button>
+              {#if wgconfFileName}
+                <span
+                  class="fade-in mono max-w-48 truncate text-[11px]"
+                  style="color: var(--ink-muted)"
+                  title={wgconfFileName}>{wgconfFileName}</span
+                >
+              {/if}
+            </div>
+            {#if wgconfFileError}
+              <p class="fade-in mt-1 text-[11px]" role="alert" style="color: var(--bad)">
+                {wgconfFileError}
+              </p>
+            {/if}
+            <input
+              bind:this={wgconfFileInput}
+              class="hidden"
+              type="file"
+              accept=".conf,.txt"
+              onchange={loadWgconfFile}
+            />
+          </div>
           <label class="flex items-center gap-2 text-xs" style="color: var(--ink-muted)">
             <input type="checkbox" name="verifyWarp" bind:checked={form.verifyWarp} disabled={!form.wgconf} class="accent-[var(--accent)]" />
             verify with this identity's real keypair

@@ -1,5 +1,5 @@
 import { ApiError, api } from "./api";
-import type { ScanConfig, ScanSummary, Verdict } from "./types";
+import type { Mode, ScanConfig, ScanSummary, Verdict } from "./types";
 
 export interface UiState {
   running: boolean;
@@ -89,8 +89,29 @@ export async function stopScan() {
   await api.cancel();
 }
 
-/** Default simple-mode config: best defaults for a first-run user. */
-export function simpleConfig(found = 10): ScanConfig {
+/** Default simple-mode configs: best defaults for a first-run user. CDN keeps
+ * the Quick preset on 443; WARP sweeps the official WireGuard ports over a
+ * small bounded candidate count so a first run finishes fast. */
+export function simpleConfig(found = 10, mode: Mode = "Cdn"): ScanConfig {
+  if (mode === "Warp") {
+    return {
+      mode: "Warp",
+      target: { Count: 100 },
+      ports: [2408, 500, 1701, 4500],
+      stop: { found, cap: null },
+      exclude: [],
+      custom_cidrs: [],
+      concurrency: 128,
+      timeout_ms: 2000,
+      phase2: null,
+      warp: {
+        custom_endpoints: [],
+        probes_per_endpoint: 3,
+        wgconf: null,
+        verify_with_wgconf: false,
+      },
+    };
+  }
   return {
     mode: "Cdn",
     target: { Preset: "Quick" },

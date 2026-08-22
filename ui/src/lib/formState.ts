@@ -44,9 +44,14 @@ export function portCatalog(mode: Mode): { primary: number[]; extended: number[]
 }
 
 /** Mode's default checked chips; exported so the panel can re-default the
- * selection when the user flips CDN ↔ WARP mid-form. */
+ * selection when the user flips CDN ↔ WARP mid-form. WARP defaults to the
+ * whole catalog (primary + extended) — WireGuard answers on any of them, so
+ * a first WARP scan should sweep everything known; CDN stays conservative
+ * on 443 only. */
 export function defaultSelectedPorts(mode: Mode): number[] {
-  return mode === "Warp" ? [2408] : [443];
+  return mode === "Warp"
+    ? [...WARP_PRIMARY_PORTS, ...WARP_EXTENDED_PORTS]
+    : [443];
 }
 
 /** Pro panel defaults; simple mode keeps its own in simpleConfig(). */

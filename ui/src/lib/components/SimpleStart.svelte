@@ -1,15 +1,17 @@
 <script lang="ts">
   import { Check, Copy, Gauge, Play, Square } from "@lucide/svelte";
   import { simpleConfig, startScan, stopScan, ui } from "../store.svelte";
+  import type { Mode } from "../types";
 
   const app = ui();
+  let scanMode = $state<Mode>("Cdn");
   let starting = $state(false);
   let findUpTo = $state(10);
   let copiedAll = $state(false);
 
   async function start() {
     starting = true;
-    await startScan(simpleConfig(findUpTo));
+    await startScan(simpleConfig(findUpTo, scanMode));
     starting = false;
   }
 
@@ -61,6 +63,31 @@
 <section class="card card-lift fade-in px-6 py-6">
   <div class="flex flex-col items-start gap-6 sm:flex-row sm:items-center sm:justify-between">
     <div>
+      <div
+        class="mb-3 inline-flex items-center gap-1 rounded-full p-1"
+        style="background: var(--paper-3)"
+        role="group"
+        aria-label="Scan target"
+      >
+        <button
+          type="button"
+          class="btn btn-sm btn-secondary"
+          class:btn-state-on={scanMode === "Cdn"}
+          aria-pressed={scanMode === "Cdn"}
+          onclick={() => (scanMode = "Cdn")}
+        >
+          CDN
+        </button>
+        <button
+          type="button"
+          class="btn btn-sm btn-secondary"
+          class:btn-state-on={scanMode === "Warp"}
+          aria-pressed={scanMode === "Warp"}
+          onclick={() => (scanMode = "Warp")}
+        >
+          WARP
+        </button>
+      </div>
       <p class="mono text-xs uppercase tracking-widest" style="color: var(--accent)">
         cloudflare endpoint finder
       </p>
@@ -68,7 +95,9 @@
         class="mt-2 text-3xl font-semibold sm:text-4xl"
         style="letter-spacing:-0.03em"
       >
-        One tap to working IPs.
+        {scanMode === "Warp"
+          ? "One tap to working endpoints."
+          : "One tap to working IPs."}
       </h2>
       <p class="mt-2 max-w-md text-sm" style="color: var(--ink-muted)">
         Scans Cloudflare's edge from your network and ranks what actually
@@ -110,7 +139,11 @@
             data-state={starting ? "loading" : undefined}
           >
             <Play class="size-5" />
-            {starting ? "Starting…" : "Start scan"}
+            {starting
+              ? "Starting…"
+              : scanMode === "Warp"
+                ? "Scan WARP"
+                : "Start scan"}
           </button>
         </div>
         <span class="mono text-[11px]" style="color: var(--ink-muted)">
@@ -143,7 +176,7 @@
             <span class="mono font-semibold" style="color: var(--accent)">
               {app.progress.found}</span>
             <span title="passed a real TLS handshake">working</span>
-            <span style="color: var(--ink-muted)">· {app.progress.scanned} checked{pct !== null ? ` · ${pct}%` : ""}</span>
+            <span style="color: var(--ink-muted)">· {app.progress.scanned} {scanMode === "Warp" ? "endpoints checked" : "checked"}{pct !== null ? ` · ${pct}%` : ""}</span>
           </span>
           {#if pace}
             <span class="mono text-xs" style="color: var(--ink-muted)">
