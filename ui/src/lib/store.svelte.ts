@@ -1,4 +1,4 @@
-import { api } from "./api";
+import { ApiError, api } from "./api";
 import type { ScanConfig, ScanSummary, Verdict } from "./types";
 
 export interface UiState {
@@ -59,16 +59,29 @@ export function errorText(e: unknown): string {
 
 /** The one place a scan starts: resets last-scan results, POSTs the config,
  * flips the running flag, and surfaces failures — callers never duplicate
- * that sequence. Never throws; check ui().error. */
-export async function startScan(cfg: ScanConfig) {
+ * that sequence. Never throws; check ui().error, and use the returned
+ * rejection to route 400/422 messages into per-field errors. */
+export interface StartOutcome {
+  ok: boolean;
+  /** Set when the POST was rejected with a status the UI can map to fields. */
+  rejected: { status: number; detail: string } | null;
+}
+
+export async function startScan(cfg: ScanConfig): Promise<StartOutcome> {
   resetResults();
   app.lastScanConfigs = cfg.phase2?.configs ?? [];
   try {
     await api.scan(cfg);
     app.running = true;
     app.startedAt = Date.now();
+    return { ok: true, rejected: null };
   } catch (e) {
     app.error = errorText(e);
+    const rejected =
+      e instanceof ApiError && (e.status === 400 || e.status === 422)
+        ? { status: e.status, detail: e.detail || e.message }
+        : null;
+    return { ok: false, rejected };
   }
 }
 

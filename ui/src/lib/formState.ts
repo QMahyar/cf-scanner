@@ -87,13 +87,27 @@ export function formStateFromConfig(cfg: ScanConfig): FormState {
   };
 }
 
-export class FormValidationError extends Error {
-  readonly errors: string[];
+export type FormField = keyof FormState;
 
-  constructor(errors: string[]) {
-    super(errors.join(" · "));
+/** One validation problem: which FormState key failed (null = form-wide) and
+ * what to tell the user. The field key lets the UI light up the exact input. */
+export interface FieldIssue {
+  field: FormField | null;
+  message: string;
+}
+
+export class FormValidationError extends Error {
+  readonly issues: FieldIssue[];
+
+  constructor(issues: FieldIssue[]) {
+    super(issues.map((i) => i.message).join(" · "));
     this.name = "FormValidationError";
-    this.errors = errors;
+    this.issues = issues;
+  }
+
+  /** Flat messages for click-time summary lists. */
+  get errors(): string[] {
+    return this.issues.map((i) => i.message);
   }
 }
 
@@ -111,30 +125,42 @@ function csv(text: string): string[] {
     .filter(Boolean);
 }
 
-function wholeNumber(value: unknown, label: string, min: number, issues: string[]): number {
+function wholeNumber(
+  value: unknown,
+  label: string,
+  min: number,
+  field: FormField,
+  issues: FieldIssue[],
+): number {
   const n = Math.trunc(Number(value));
   if (!Number.isFinite(n) || n < min) {
-    issues.push(`${label}: enter a whole number ≥ ${min}`);
+    issues.push({ field, message: `${label}: enter a whole number ≥ ${min}` });
     return min;
   }
   return n;
 }
 
-function parsePorts(text: string, issues: string[]): number[] {
+function parsePorts(text: string, issues: FieldIssue[]): number[] {
   if (!text.trim()) {
-    issues.push("Ports: at least one port is required");
+    issues.push({
+      field: "portsText",
+      message: "Ports: at least one port is required",
+    });
     return [];
   }
   const ports: number[] = [];
   for (const raw of text.split(",")) {
     const token = raw.trim();
     if (!token) {
-      issues.push("Ports: empty entry between commas");
+      issues.push({ field: "portsText", message: "Ports: empty entry between commas" });
       continue;
     }
     const port = Number(token);
     if (!Number.isInteger(port) || port < 1 || port > 65535) {
-      issues.push(`Ports: "${token}" is not a valid port (whole number 1–65535)`);
+      issues.push({
+        field: "portsText",
+        message: `Ports: "${token}" is not a valid port (whole number 1–65535)`,
+      });
       continue;
     }
     ports.push(port);
@@ -142,12 +168,15 @@ function parsePorts(text: string, issues: string[]): number[] {
   return ports;
 }
 
-function parseCap(text: string, issues: string[]): number | null {
+function parseCap(text: string, issues: FieldIssue[]): number | null {
   const token = text.trim();
   if (!token) return null;
   const cap = Number(token);
   if (!Number.isInteger(cap) || cap < 1) {
-    issues.push(`Hard cap: "${token}" is not a positive integer (clear the field for no cap)`);
+    issues.push({
+      field: "capText",
+      message: `Hard cap: "${token}" is not a positive integer (clear the field for no cap)`,
+    });
     return null;
   }
   return cap;
@@ -156,20 +185,41 @@ function parseCap(text: string, issues: string[]): number | null {
 /** Pure FormState → ScanConfig. Throws FormValidationError listing every
  * problem it found instead of silently mangling input into NaN/0. */
 export function buildConfig(f: FormState): ScanConfig {
-  const issues: string[] = [];
+  const issues: FieldIssue[] = [];
 
   const ports = parsePorts(f.portsText, issues);
   const cap = parseCap(f.capText, issues);
-  const count = wholeNumber(f.count, "Candidate count", 1, issues);
-  const stopFound = wholeNumber(f.stopFound, "Stop after N working", 1, issues);
-  const concurrency = wholeNumber(f.concurrency, "Concurrency", 1, issues);
-  const timeoutMs = wholeNumber(f.timeoutMs, "Timeout", 1, issues);
-  const warpProbes = wholeNumber(f.warpProbes, "Handshake probes per endpoint", 1, issues);
+  const count = wholeNumber(f.count, "Candidate count", 1, "count", issues);
+  const stopFound = wholeNumber(
+    f.stopFound,
+    "Stop after N working",
+    1,
+    "stopFound",
+    issues,
+  );
+  const concurrency = wholeNumber(
+    f.concurrency,
+    "Concurrency",
+    1,
+    "concurrency",
+    issues,
+  );
+  const timeoutMs = wholeNumber(f.timeoutMs, "Timeout", 1, "timeoutMs", issues);
+  const warpProbes = wholeNumber(
+    f.warpProbes,
+    "Handshake probes per endpoint",
+    1,
+    "warpProbes",
+    issues,
+  );
 
   const phase2Wanted = f.mode === "Cdn" && f.phase2On;
   const phase2Configs = phase2Wanted ? lines(f.configsText) : [];
   if (phase2Wanted && phase2Configs.length === 0) {
-    issues.push("Phase 2: add at least one config URI to verify");
+    issues.push({
+      field: "configsText",
+      message: "Phase 2: add at least one config URI to verify",
+    });
   }
 
   if (issues.length > 0) throw new FormValidationError(issues);
@@ -210,4 +260,47 @@ export function buildConfig(f: FormState): ScanConfig {
   }
 
   return cfg;
+}
+
+/** localStorage key for the persisted Pro-panel form. Bump to reset users'
+ * saved forms when FormState changes shape (restore merges over defaults,
+ * so additive keys never need a bump). */
+export const FORM_PERSIST_KEY = "cf-form-v1";
+
+/** FormState → JSON for localStorage. wgconf is deliberately dropped: it
+ * carries a WireGuard private key and must not sit on disk in plaintext;
+ * verifyWarp without it is meaningless so it is reset too. */
+export function persistedFormState(f: FormState): string {
+  const copy: FormState = { ...f };
+  copy.wgconf = "";
+  copy.verifyWarp = false;
+  return JSON.stringify(copy);
+}
+
+/** Inverse of persistedFormState: parse + merge known keys over defaults so
+ * older/newer shapes stay forward-compatible. Returns null when unparseable
+ * or not an object; mistyped values fall back to their defaults. */
+export function formStateFromPersisted(raw: string): FormState | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+
+  const saved = parsed as Record<string, unknown>;
+  const d = defaultFormState();
+  const out: FormState = { ...d };
+  const sink = out as unknown as Record<string, unknown>;
+  for (const key of Object.keys(d) as FormField[]) {
+    if (key in saved && typeof saved[key] === typeof d[key])
+      sink[key] = saved[key];
+  }
+
+  if (!["Cdn", "Warp"].includes(out.mode)) out.mode = d.mode;
+  if (!["Quick", "Normal", "Full"].includes(out.preset)) out.preset = d.preset;
+  if (!["off", "light", "medium", "heavy", "custom"].includes(out.fragment))
+    out.fragment = d.fragment;
+  return out;
 }

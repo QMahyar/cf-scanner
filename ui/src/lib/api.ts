@@ -27,36 +27,44 @@ export interface RangesPayload {
 
 export type LiveStatus = "connecting" | "live" | "offline";
 
+/** Failure from a non-2xx API response. Carries the HTTP status and the
+ * server envelope's detail so callers can route messages to form fields
+ * (400/422) instead of only showing a global banner. */
+export class ApiError extends Error {
+  readonly status: number;
+  readonly detail: string;
+
+  constructor(status: number, summary: string, detail: string) {
+    super(detail ? `${summary}: ${detail}` : summary || String(status));
+    this.name = "ApiError";
+    this.status = status;
+    this.detail = detail;
+  }
+}
+
+async function apiErrorFrom(res: Response): Promise<ApiError> {
+  let summary = `${res.status}`;
+  let detail = "";
+  try {
+    const body = await res.json();
+    if (body?.error) summary = body.error;
+    if (body?.message) detail = body.message;
+  } catch {
+    /* non-JSON error body */
+  }
+  return new ApiError(res.status, summary, detail);
+}
+
 /** saveProfile/deleteProfile answer 200/201/204 with no useful body but
  * still use the ApiError envelope on failure — pass their Response through
  * this to get unwrap()-style thrown Errors. */
 export async function assertOk(res: Response): Promise<Response> {
-  if (!res.ok) {
-    let message = `${res.status}`;
-    try {
-      const body = await res.json();
-      if (body?.error) message = body.error;
-      if (body?.message) message += `: ${body.message}`;
-    } catch {
-      /* non-JSON error body */
-    }
-    throw new Error(message);
-  }
+  if (!res.ok) throw await apiErrorFrom(res);
   return res;
 }
 
 async function unwrap<T>(res: Response): Promise<T> {
-  if (!res.ok) {
-    let message = `${res.status}`;
-    try {
-      const body = await res.json();
-      if (body?.error) message = body.error;
-      if (body?.message) message += `: ${body.message}`;
-    } catch {
-      /* non-JSON error body */
-    }
-    throw new Error(message);
-  }
+  if (!res.ok) throw await apiErrorFrom(res);
   return res.json() as Promise<T>;
 }
 
