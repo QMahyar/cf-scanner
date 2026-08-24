@@ -167,6 +167,21 @@ validate-at-entry gating both scan AND preset save. Two read-only audits
   (vitest = new dep — ask first). Rust side landed 2026-08-23
   (tests/fixtures/grammar-cases.json + ranges/api tests).
 
+## Addendum 3 — real phase-2 passes (2026-08-24)
+
+- CDN phase 2 verified live with a real edgetunnel vless config: 13/13
+  candidates passed through the worker (p2 latency ~1-2s). The earlier
+  all-fail runs were the synthetic fake-UUID config — correct behavior.
+- WARP verify upgraded from shape-only (which could not distinguish a
+  dummy-key handshake from a real one — CF answers both) to a FULL session:
+  complete the cryptographic handshake under the user's keypair, then push an
+  encrypted DNS query (cloudflare.com A → 1.1.1.1) through the tunnel and
+  require a data reply (`ProbeDepth::FullSession`, src/warp.rs). Discovery
+  stays shape-only. Loopback tests prove discrimination: a responder that
+  answers the handshake but drops data fails verification. Live: user's
+  Horror AmneziaWG config verified on 8.47.69.81:2408 (found @450ms incl.
+  data round-trip).
+
 ## Addendum 2 — live-debug fixes (2026-08-24)
 
 - **UI phase-2 was dead on arrival**: form sent lowercase fragment variants

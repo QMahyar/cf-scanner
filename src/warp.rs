@@ -7,7 +7,10 @@
 //! wgcf-ecosystem scanners classify on packet shape alone). The socket is
 //! connected to the probed endpoint, so shape is a sound signal.
 //! Dummy-key probes work because Cloudflare answers handshakes for arbitrary
-//! client keys.
+//! client keys — which is why discovery stays shape-only, while verify mode
+//! (user keypair) runs a FULL session: complete the cryptographic handshake,
+//! then push an encrypted DNS query through the tunnel and require a data
+//! reply. Shape alone cannot tell a dummy-key handshake from a real one.
 
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr};
@@ -157,6 +160,7 @@ impl Transport for WgVerifyTransport {
             ip,
             port,
             timeout_ms,
+            ProbeDepth::FullSession,
         ))
     }
 }
@@ -181,12 +185,27 @@ impl Transport for WarpTransport {
             ip,
             port,
             timeout_ms,
+            ProbeDepth::ShapeOnly,
         ))
     }
 }
 
 /// One WG handshake attempt shared by both transports: reuses the endpoint's
-/// bound socket, Init in, structurally valid Response/Cookie out.
+/// How deeply a probe validates an endpoint.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ProbeDepth {
+    /// Shape-only: a valid Response/Cookie proves liveness (discovery).
+    ShapeOnly,
+    /// Full session: cryptographically complete the handshake under the
+    /// caller's keypair, then push an encrypted DNS query through the tunnel
+    /// and require a data reply (verify mode). A shape-only reply cannot
+    /// distinguish a dummy-key handshake from a real one; a data round-trip
+    /// can.
+    FullSession,
+}
+
+/// Bound socket, Init in, structurally valid Response/Cookie out — and, at
+/// `ProbeDepth::FullSession`, a completed handshake plus a data round-trip.
 async fn probe_once(
     sockets: &SocketCache,
     static_secret: StaticSecret,
@@ -194,6 +213,7 @@ async fn probe_once(
     ip: Ipv4Addr,
     port: u16,
     timeout_ms: u64,
+    depth: ProbeDepth,
 ) -> Result<u32, ProbeError> {
     // Randomized 10-40ms pacing between handshakes: synchronized Init bursts
     // trip WARP's per-IP rate shaping and read as false negatives. Bounded,
@@ -222,9 +242,7 @@ async fn probe_once(
     let mut reply = [0u8; 2048];
     match timeout(Duration::from_millis(timeout_ms), socket.recv(&mut reply)).await {
         Ok(Ok(n)) => {
-            if classify(&reply[..n]) {
-                Ok(started.elapsed().as_millis() as u32)
-            } else {
+            if !classify(&reply[..n]) {
                 tracing::debug!(
                     len = n,
                     wg_type = u32::from_le_bytes(reply[..n.min(4)].try_into().unwrap_or([0; 4])),
@@ -233,12 +251,141 @@ async fn probe_once(
                         .map(|b| u32::from_le_bytes(b.try_into().unwrap())),
                     "non-handshake WARP reply"
                 );
-                Err(ProbeError::Refused("reply is not a WARP handshake"))
+                return Err(ProbeError::Refused("reply is not a WARP handshake"));
             }
+            if depth == ProbeDepth::ShapeOnly {
+                return Ok(started.elapsed().as_millis() as u32);
+            }
+            finish_full_session(&mut tunn, &socket, &reply[..n], started, timeout_ms).await
         }
         Ok(Err(_)) => Err(ProbeError::Refused("udp receive failed")),
         Err(_) => Err(ProbeError::Timeout { timeout_ms }),
     }
+}
+
+/// Handshake half of the full-session probe: validate the Response under our
+/// keypair (boringtun rejects responses not bound to our Init), then prove
+/// the session carries data with an encrypted DNS query to 1.1.1.1.
+async fn finish_full_session(
+    tunn: &mut Tunn,
+    socket: &UdpSocket,
+    response: &[u8],
+    started: std::time::Instant,
+    timeout_ms: u64,
+) -> Result<u32, ProbeError> {
+    let mut out = [0u8; 2048];
+    match tunn.decapsulate(None, response, &mut out) {
+        // Done: handshake complete and authenticated (a response not bound to
+        // our Init fails decryption here). Some stacks also queue a keepalive
+        // frame — send it when present.
+        TunnResult::Done => {}
+        TunnResult::WriteToNetwork(keepalive) => {
+            socket
+                .send(keepalive)
+                .await
+                .map_err(|_| ProbeError::Refused("keepalive send failed"))?;
+        }
+        TunnResult::Err(_) => {
+            return Err(ProbeError::Refused("handshake rejected under this keypair"));
+        }
+        _ => return Err(ProbeError::Refused("unexpected handshake result")),
+    }
+
+    // Encrypted DNS query (cloudflare.com A) wrapped in IP/UDP for the tunnel.
+    let query = build_dns_probe_packet();
+    let mut wire = [0u8; 2048];
+    let data = match tunn.encapsulate(&query, &mut wire) {
+        TunnResult::WriteToNetwork(pkt) => pkt,
+        TunnResult::Err(_) => return Err(ProbeError::Refused("session not ready for data")),
+        _ => return Err(ProbeError::Refused("unexpected encapsulate result")),
+    };
+    socket
+        .send(data)
+        .await
+        .map_err(|_| ProbeError::Refused("data send failed"))?;
+
+    let mut reply = [0u8; 2048];
+    let received = timeout(Duration::from_millis(timeout_ms), socket.recv(&mut reply)).await;
+    match received {
+        Ok(Ok(n)) => match tunn.decapsulate(None, &reply[..n], &mut out) {
+            // WriteToTunnelV4/V6: the reply decrypted into a valid inner IP
+            // packet under our session keys — data genuinely flowed.
+            TunnResult::WriteToTunnelV4(inner, _) | TunnResult::WriteToTunnelV6(inner, _) => {
+                if inner.is_empty() {
+                    Err(ProbeError::Refused("empty data reply through tunnel"))
+                } else {
+                    Ok(started.elapsed().as_millis() as u32)
+                }
+            }
+            TunnResult::WriteToNetwork(_) => {
+                // Keepalive/cookie instead of our data reply: session works
+                // but the endpoint did not answer the query — not verified.
+                Err(ProbeError::Refused("no data reply through tunnel"))
+            }
+            TunnResult::Done | TunnResult::Err(_) => {
+                Err(ProbeError::Refused("tunnel rejected data reply"))
+            }
+        },
+        Ok(Err(_)) => Err(ProbeError::Refused("udp receive failed")),
+        Err(_) => Err(ProbeError::Timeout { timeout_ms }),
+    }
+}
+
+/// Minimal inner IPv4/UDP packet carrying a DNS A query for cloudflare.com,
+/// addressed 172.16.0.2 → 1.1.1.1 (the wgconf Address convention).
+fn build_dns_probe_packet() -> Vec<u8> {
+    const SRC: [u8; 4] = [172, 16, 0, 2];
+    const DST: [u8; 4] = [1, 1, 1, 1];
+
+    let mut dns = Vec::with_capacity(32);
+    dns.extend_from_slice(&[0x1a, 0x2b]); // id
+    dns.extend_from_slice(&[0x01, 0x00]); // flags: RD
+    dns.extend_from_slice(&[0, 1, 0, 0, 0, 0, 0, 0]); // qd=1
+    dns.extend_from_slice(&[10]); // cloudflare
+    dns.extend_from_slice(b"cloudflare");
+    dns.extend_from_slice(&[3]);
+    dns.extend_from_slice(b"com");
+    dns.push(0);
+    dns.extend_from_slice(&[0, 1, 0, 1]); // A, IN
+
+    let mut udp = Vec::with_capacity(8 + dns.len());
+    udp.extend_from_slice(&[0x9d, 0x34]); // sport 40212
+    udp.extend_from_slice(&[0, 53]); // dport 53
+    udp.extend_from_slice(&((8 + dns.len()) as u16).to_be_bytes());
+    udp.extend_from_slice(&[0, 0]); // checksum 0 (optional over IPv4)
+    udp.extend_from_slice(&dns);
+
+    let total = 20 + udp.len();
+    let mut ip = Vec::with_capacity(total);
+    ip.extend_from_slice(&[0x45, 0x00]);
+    ip.extend_from_slice(&(total as u16).to_be_bytes());
+    ip.extend_from_slice(&[0, 1, 0x40, 0x00]); // id, DF
+    ip.extend_from_slice(&[64, 17]); // ttl, proto UDP
+    ip.extend_from_slice(&[0, 0]); // checksum placeholder
+    ip.extend_from_slice(&SRC);
+    ip.extend_from_slice(&DST);
+    let sum = ones_complement_sum16(&ip);
+    ip[10..12].copy_from_slice(&sum.to_be_bytes());
+    ip.extend_from_slice(&udp);
+    ip
+}
+
+/// RFC 1071 ones-complement checksum over the header (checksum field zeroed
+/// by the caller before summing).
+fn ones_complement_sum16(bytes: &[u8]) -> u16 {
+    let mut sum = 0u32;
+    for pair in bytes.chunks(2) {
+        let word = match pair {
+            [hi, lo] => u16::from_be_bytes([*hi, *lo]),
+            [hi] => u16::from_be_bytes([*hi, 0]),
+            _ => unreachable!("chunks(2) yields 1 or 2 bytes"),
+        };
+        sum += u32::from(word);
+    }
+    while sum >> 16 != 0 {
+        sum = (sum & 0xFFFF) + (sum >> 16);
+    }
+    !(sum as u16)
 }
 
 static NEXT_INDEX: AtomicU32 = AtomicU32::new(1);
@@ -380,10 +527,10 @@ mod tests {
         assert!(matches!(err, ProbeError::Timeout { .. }), "{err:?}");
     }
 
-    /// Full WireGuard handshake over loopback: `WgVerifyTransport` (built from
-    /// a parsed wgconf) initiates, a boringtun responder answers. Proves the
-    /// verify path uses the user's real keypair (spec testing strategy:
-    /// boringtun round-trip with a local test keypair).
+    /// Full WireGuard session over loopback: `WgVerifyTransport` (built from
+    /// a parsed wgconf) initiates, a boringtun responder completes the
+    /// handshake AND echoes a data packet back through its own tunnel — the
+    /// exact bar FullSession verification sets (handshake + data reply).
     #[tokio::test]
     async fn wg_verify_transport_completes_a_real_handshake_with_a_peer() {
         use rand_core::OsRng;
@@ -428,12 +575,30 @@ mod tests {
                         match tunn.decapsulate(None, &buf[..n], &mut out) {
                             TunnResult::WriteToNetwork(resp) => {
                                 server_socket.send_to(resp, peer).await.unwrap();
-                                return;
                             }
                             other => panic!("responder could not answer an Init: {other:?}"),
                         }
                     }
-                    Ok(_) => continue,
+                    Ok(_) => {
+                        // Post-handshake traffic: decrypt under the session;
+                        // echo the inner packet back through our own tunnel,
+                        // which only works if the handshake truly completed.
+                        match tunn.decapsulate(None, &buf[..n], &mut out) {
+                            TunnResult::WriteToTunnelV4(inner, _) => {
+                                let mut wire = [0u8; 2048];
+                                match tunn.encapsulate(inner, &mut wire) {
+                                    TunnResult::WriteToNetwork(reply) => {
+                                        server_socket.send_to(reply, peer).await.unwrap();
+                                    }
+                                    other => {
+                                        panic!("responder could not encapsulate data: {other:?}")
+                                    }
+                                }
+                            }
+                            TunnResult::Done | TunnResult::WriteToNetwork(_) => continue,
+                            other => panic!("responder rejected a data packet: {other:?}"),
+                        }
+                    }
                     Err(e) => panic!("responder rejected the packet: {e:?}"),
                 }
             }
@@ -444,6 +609,73 @@ mod tests {
             .await
             .unwrap();
         assert!(lat < 2000);
-        responder.await.unwrap();
+        responder.abort();
+    }
+
+    /// A responder that answers the handshake but drops data must NOT pass
+    /// FullSession verification — this is the discrimination the old
+    /// shape-only check could not make.
+    #[tokio::test]
+    async fn full_session_probe_fails_when_data_is_dropped() {
+        use rand_core::OsRng;
+
+        let server_secret = StaticSecret::random_from_rng(OsRng);
+        let server_public = PublicKey::from(&server_secret);
+        let client_secret = StaticSecret::random_from_rng(OsRng);
+        let client_public = PublicKey::from(&client_secret);
+
+        let wg = crate::wgconf::WgConfig {
+            private_key: base64::Engine::encode(
+                &base64::engine::general_purpose::STANDARD,
+                client_secret.to_bytes(),
+            ),
+            address: "172.16.0.2/32".to_owned(),
+            dns: None,
+            mtu: None,
+            amnezia: Default::default(),
+            peer: crate::wgconf::WgPeer {
+                public_key: base64::Engine::encode(
+                    &base64::engine::general_purpose::STANDARD,
+                    server_public.as_bytes(),
+                ),
+                preshared_key: None,
+                allowed_ips: vec![],
+                endpoint: None,
+                persistent_keepalive: None,
+            },
+        };
+        let transport = WgVerifyTransport::from_config(&wg).unwrap();
+
+        let server_socket = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let addr = server_socket.local_addr().unwrap();
+        let responder = tokio::spawn(async move {
+            let mut tunn = Tunn::new(server_secret, client_public, None, None, 99, None);
+            let mut buf = [0u8; 2048];
+            let mut out = [0u8; 2048];
+            loop {
+                let (n, peer) = server_socket.recv_from(&mut buf).await.unwrap();
+                if matches!(
+                    Tunn::parse_incoming_packet(&buf[..n]),
+                    Ok(boringtun::noise::Packet::HandshakeInit(_))
+                ) {
+                    if let TunnResult::WriteToNetwork(resp) =
+                        tunn.decapsulate(None, &buf[..n], &mut out)
+                    {
+                        server_socket.send_to(resp, peer).await.unwrap();
+                    }
+                }
+                // Data packets: silently dropped, like an unregistered peer.
+            }
+        });
+
+        let err = transport
+            .probe(Ipv4Addr::LOCALHOST.into(), addr.port(), 400)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, ProbeError::Timeout { .. } | ProbeError::Refused(_)),
+            "dropped data must fail verification, got {err:?}"
+        );
+        responder.abort();
     }
 }
