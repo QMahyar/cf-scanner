@@ -85,7 +85,49 @@ Added / Changed / Fixed / Deprecated / Removed / Security, newest on top.
 - Copy affordances tell the truth: cards copy ip:port and say so; passing
   phase-2 rows offer the real importable URI via `/api/config/export`.
 
-## [Unreleased]
+## [0.7.0] - 2026-08-24
+
+### Added
+- **Bilingual UI (English/Persian) with full RTL.** Header language toggle
+  (persisted, `html[dir/lang]` applied pre-paint), Vazirmatn webfont,
+  logical-property sweep, LTR-isolated data tokens. Pro panel fully
+  translated (~120 keys).
+- **Beginner mode upgrades:** candidates-to-test knob alongside find-target,
+  copy → share-sheet → .txt export fallback chain, honest stop-overshoot
+  hint ("a few extra working IPs may land after the target").
+- **Pro mode additions:** ranges list-file import (server-grammar
+  validated, bare IPs classified per mode), AmneziaWG noise editor over the
+  pasted wgconf (plain INI or `awg://` base64 URI round-trip, Off/Light/
+  Heavy presets, constraint validation per the 2026-08-23 research), and
+  Skip-to-Phase-2 — cancels phase 1 mid-scan and verifies the banked
+  candidates via `phase2_only`, with a low-yield suggestion badge.
+- **WARP verify mode completes a full WireGuard session.** Verify probes
+  now finish the cryptographic handshake under the user's keypair AND push
+  an encrypted DNS query through the tunnel, passing only on a data reply —
+  shape-only replies cannot tell a dummy-key handshake from a real one.
+  Discovery stays shape-only; verified scans badge their results.
+- **Client-side validator module** (`ui/src/lib/validators.ts`) mirroring
+  the server grammar: inline field errors gate both scan start and profile
+  save; pasted endpoint/CIDR lists normalize on blur (blank and duplicate
+  lines dropped); the ranges importer classifies with the same rules.
+- Results-table UX: tri-state `aria-sort` headers, 44 px touch targets,
+  bulk-copy live region, skeleton rows, filtered/true-empty states, and a
+  render cap for very large scans.
+- Grammar fixture (`tests/fixtures/grammar-cases.json`) pinning
+  CIDR/endpoint/SNI parsing for the server tests and the UI mirror.
+
+### Fixed
+- **UI phase-2 starts were rejected (422).** The form sent lowercase
+  fragment presets (`off`) while the API contract is `Off`/`Light`/… —
+  every UI-initiated phase-2 scan failed before it began. The form now maps
+  to the wire form (saved profiles keep loading) and fragment errors route
+  to the fragment field.
+- Pasting a wgconf now auto-enables real-keypair verification (previously
+  only the file-import path did), so verify-mode scans are never silently
+  run with the dummy key.
+- Mode flip no longer wipes restored port selections on hydration or
+  cross-mode profile loads; each import button targets its own field;
+  failed stop/cancel requests surface in the UI; ETAs humanize past 60 s.
 
 ### Fixed
 - SSE `/api/events` no longer closes idle connections after replaying the

@@ -202,3 +202,5 @@ validate-at-entry gating both scan AND preset save. Two read-only audits
   (stop checks precede dispatch; in-flight probes land) — user chose
   keep-as-is; honest hint added under the knobs.
 
+
+- Known flake (pre-existing, environmental): server profile tests can fail with 200-vs-201 when a live cf-scanner serve instance shares the data dir during cargo test — CI runners are unaffected; kill local servers before release gates.
