@@ -12,6 +12,12 @@ run so two Release workflows cannot race `gh release create`);
 
 ## Versioning control
 
+- **Agents: releases are USER-GATED.** Before touching any version string
+  (`Cargo.toml`, `npm/cf-scanner/package.json`, `install.js RELEASE_TAG`)
+  or creating/pushing/moving a tag, propose the exact version number to the
+  USER and wait for an explicit yes for THAT number. No dry-run bumps in
+  commits, no "fix the version while I'm here" — a version change without
+  approval is a process violation even if CI would pass.
 - **Semantic versioning.** MAJOR = breaking change (spec: API contract or
   behavior changes), MINOR = new backward-compatible functionality, PATCH =
   backward-compatible fix. API contract changes (`src/api/`) are
@@ -27,18 +33,20 @@ run so two Release workflows cannot race `gh release create`);
 
 ## Prepare the release
 
-1. **Bump the version** in `Cargo.toml` (the git tag is the source of truth;
+1. **Get USER approval for the version number** (agents: mandatory gate —
+   propose, wait for the explicit yes; humans: pick the semver bump).
+2. **Bump the version** in `Cargo.toml` (the git tag is the source of truth;
    the tag, `Cargo.toml`, and the changelog must never disagree).
-2. **Bump the npm wrapper** if binaries changed: `npm/cf-scanner/package.json`
+3. **Bump the npm wrapper** if binaries changed: `npm/cf-scanner/package.json`
    `version` (patch bump) + `RELEASE_TAG` in `install.js` must match the tag
    being released (see "npm package" below).
-3. **Cut the changelog:** rename `## [Unreleased]` to
+4. **Cut the changelog:** rename `## [Unreleased]` to
    `## [x.y.z] - YYYY-MM-DD`. Entries are written with their change, so the
    cut is a header move, not a rewrite. Do not add new `[Unreleased]`
    entries after the cut.
-4. **Run the local gates:** `cargo test`, `cargo clippy --all-targets -- -D
+5. **Run the local gates:** `cargo test`, `cargo clippy --all-targets -- -D
    warnings`, `cargo fmt --check`, `cargo audit`.
-5. **Commit the release commit** on `main`; the tag points at it.
+6. **Commit the release commit** on `main`; the tag points at it.
 
 ## Pre-flight checklist (before tagging)
 

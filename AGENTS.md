@@ -39,7 +39,7 @@ dist build --artifacts=local --target=<host-target>
 git restore data/bundled/xray data/bundled/xray.exe
 ```
 
-Release flow (tag → CI → GitHub Release → npm publish, all automatic) is in `docs/release-process.md` — never publish artifacts or the npm package manually.
+Release flow (tag → CI → GitHub Release → npm publish, all automatic) is in `docs/release-process.md` — never publish artifacts or the npm package manually. **Agents: every release is USER-GATED — propose the version, wait for an explicit yes, only then bump/tag/push.**
 
 npm publishing knowledge (AGENTS must know, condensed from `docs/release-process.md`):
 - The npm wrapper `@qmahyar/cf-scanner` (`npm/cf-scanner/`) is published by
@@ -132,6 +132,11 @@ npm publishing knowledge (AGENTS must know, condensed from `docs/release-process
   `--port`; keep configs/keys out of logs.
 - Ask first: adding dependencies; changing `src/api/`; dist/release config;
   bundling new binaries/data files; changing default scan behavior.
+  **Versions & releases are USER-GATED:** never bump any version string
+  (`Cargo.toml`, `npm/cf-scanner/package.json`, `install.js RELEASE_TAG`),
+  create/move/delete a release tag, push a tag, or publish — not even to
+  dry-run a bump in a commit — without asking the USER first and getting an
+  explicit yes for THAT version number.
 - Never: log/transmit imported configs or keys; embed secrets; delete tests
   to make CI green; commit xray binaries or mmdb to git; scan ranges other
   than official CF lists, WARP pools, or explicit user input.

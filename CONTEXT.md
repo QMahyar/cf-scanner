@@ -51,7 +51,9 @@ Read next (pick by task, not wholesale):
 5. Fetches go through `ranges::HTTP_CLIENT` (redirect-guarded, per-call timeout).
 6. Error envelopes always carry `code`; secrets never reach messages/logs.
 7. Release bumps three files atomically (Cargo.toml, npm package.json,
-   install.js RELEASE_TAG) or CI version-parity fails.
+   install.js RELEASE_TAG) or CI version-parity fails — and every bump/tag/
+   publish is USER-GATED: agents propose the version and wait for an
+   explicit yes before shipping anything.
 
 ## Glossary (domain model)
 
