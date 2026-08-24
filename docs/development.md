@@ -6,7 +6,9 @@ locally here should be exercised before pushing.
 
 ## Prerequisites
 
-- Rust stable, edition 2024 (`rustup default stable`).
+- Rust edition 2024. The toolchain is pinned by `rust-toolchain.toml`
+  (`1.88`, same as CI) — any rustup-installed toolchain resolves to it
+  automatically on first build; `MSRV` floor in Cargo.toml stays 1.85.
 - `curl` on PATH — build.rs uses it to fetch the GeoIP mmdb and (dist builds
   only) the pinned xray binary.
 - Network access for the db-ip download: the mmdb is pinned by SHA-256 and a

@@ -89,11 +89,11 @@ src/
   wgconf.rs          WireGuard/AmneziaWG config parse + render
   paths.rs           platform data-dir paths
   probe.rs           TLS handshake probe + scoring (latency)
-  geo.rs             mmdb lookup (country), /cdn-cgi/trace colo parse
-  cli_wizard.rs      interactive prompts over the same API
-  api/               request/response types (the contract all UIs share)
-embed/
-  index.html         single-file frontend (vanilla JS + native EventSource)
+   geo.rs             mmdb lookup (country), /cdn-cgi/trace colo parse
+   cli_wizard.rs      interactive prompts over the same API
+   api/               request/response types (the contract all UIs share)
+embed/               (superseded: the frontend is `ui/src` (Svelte 5) built
+                     to committed `ui/dist`, embedded via rust-embed)
 data/
   cf-ranges.txt      official IPv4 CIDRs
   cf-ranges-v6.txt   official IPv6 CIDRs (opt-in since v0.2.0)

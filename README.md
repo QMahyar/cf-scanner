@@ -20,8 +20,9 @@ telemetry, nothing leaves your machine.
 
 ### Install
 
-**npm (any platform with Node 14+)** — downloads the right binary from the
-GitHub Release automatically:
+**npm (any platform with Node ≥ 14.14)** — downloads the right binary from
+the GitHub Release automatically and **verifies its SHA-256** against the
+published checksum before extracting:
 
 ```sh
 npm i -g @qmahyar/cf-scanner
@@ -44,6 +45,7 @@ npm i -g @qmahyar/cf-scanner
 
 ```sh
 cf-scanner serve     # API + UI on http://127.0.0.1:8765
+cf-scanner serve --open   # same, and opens your browser
 ```
 
 Then open <http://127.0.0.1:8765> in your browser. Prefer a different port?
@@ -74,9 +76,10 @@ with `cargo run --`.
 
 | Command | Description |
 |---------|-------------|
-| `cf-scanner serve` | Start API + embedded UI on 127.0.0.1:8765 |
-| `cf-scanner scan --mode cdn --preset quick --target 20` | One-shot CDN scan (JSON lines on stdout) |
+| `cf-scanner serve` | Start API + embedded UI on 127.0.0.1:8765 (`--open` opens the browser) |
+| `cf-scanner scan --mode cdn --preset quick --target 20` | One-shot CDN scan (JSON lines on stdout; `--target` alias `--stop-after`, `--cap` alias `--max-probes`) |
 | `cf-scanner scan --mode warp --ports 2408,500` | One-shot WARP scan |
+| `cf-scanner scan … --json-errors` | Print `{"error": …}` on stdout when the scan fails (agent-friendly) |
 | `cf-scanner wizard` | Interactive wizard over the same engine |
 | `cf-scanner warp-config generate` | Opt-in WARP registration (v0a884 API) + wgconf build |
 | `cf-scanner warp-config export` | Export the registered WARP config as text/.conf |
@@ -116,8 +119,9 @@ Release artifacts are built and published **only by CI** on tag push
 - **GeoIP.** db-ip.com Lite country MMDB embedded at build time
   (`include_bytes!` + maxminddb). Country is resolved offline per verdict.
   Data is CC BY 4.0 — attribution link in the UI footer.
-- **Frontend.** One embedded HTML file (vanilla JS + native EventSource, zero
-  build step), served by the same binary.
+- **Frontend.** A Svelte 5 SPA (`ui/src`, runes-only, bilingual EN/FA with
+  RTL) compiled to a committed `ui/dist` and embedded into the binary via
+  rust-embed — still a single file to serve, no external assets at runtime.
 
 Design rationale lives in [docs/decisions/](docs/decisions/).
 
@@ -147,7 +151,8 @@ Design rationale lives in [docs/decisions/](docs/decisions/).
 - Binds to 127.0.0.1 only; the port is configurable with `--port`.
 - Imported configs and keys are never logged or transmitted.
 - Downloaded binaries are checksum-verified against pinned versions
-  (`data/xray-version.txt`, `data/geoip-version.txt`).
+  (`data/xray-version.txt`, `data/geoip-version.txt`); the npm wrapper
+  re-verifies the archive SHA-256 at install time.
 - No history, no telemetry: results live in memory only; `reset` clears them.
 
 ## Troubleshooting
@@ -187,9 +192,10 @@ MIT.
 ## Documentation
 
 - `docs/README.md` — documentation index
+- `CONTEXT.md` — progressive context map (module index + domain glossary)
 - `docs/intent/cf-scanner.md` — confirmed user intent + verified research
 - `docs/spec.md` — the approved spec
 - `docs/development.md` — local build + test flow
 - `docs/release-process.md` — versioning control + publishing pipeline
 - `docs/decisions/` — architecture decision records
-- `tasks/plan.md`, `tasks/todo.md` — implementation plan and task list
+- `tasks/wayfinder-map.md` — v0.8.0 review-remediation decision ledger

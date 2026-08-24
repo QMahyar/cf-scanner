@@ -180,5 +180,6 @@ decision required where marked **[DECISION]**.
    zero deps, vendorable. `/cdn-cgi/trace` is unofficial but live-verified:
    plain `key=value` lines with `colo` (3-letter datacenter code).
    Sources: https://htmx.org/extensions/sse/, https://picocss.com
-   (Superseded by implementation: the shipped UI is vanilla JS + native
-   EventSource + custom design system (0.3.0) — see CHANGELOG.)
+   (Superseded by implementation: the shipped UI is a Svelte 5 SPA in
+   `ui/src` compiled to committed `ui/dist`, embedded via rust-embed —
+   see docs/spec.md §2 shipped-reality note and CHANGELOG.)

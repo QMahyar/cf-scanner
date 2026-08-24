@@ -67,7 +67,8 @@ npm publishing knowledge (AGENTS must know, condensed from `docs/release-process
   engine (ScanController) and ONE API contract in `src/api/types.rs`.
 - Contract first: `src/api/` defines ScanConfig/Verdict/StopCondition/events;
   engine returns domain types; server maps domain → API. Never serialize
-  engine types directly.
+  engine types directly. Engine consumes `api::types` directly by design
+  (ADR-011) — do not "fix" this without revisiting the ADR.
 - Probe transports are injectable (trait) so tests never touch the network.
 - xray = subprocess (`xray run -c config.json`, local socks inbound). The
   crates.io `xray-core` crate is ONLY a gRPC client — do not use it to embed.
@@ -83,7 +84,35 @@ npm publishing knowledge (AGENTS must know, condensed from `docs/release-process
 - GeoIP: db-ip Lite mmdb embedded via include_bytes! + maxminddb 0.30
   (geoip2 types built in). Country offline; datacenter = colo from
   /cdn-cgi/trace (phase 2 only). Attribution required (CC BY 4.0, footer link).
-- CLI agents: `scan` prints newline-delimited JSON on stdout + final summary.
+- CLI agents: `scan` prints newline-delimited JSON on stdout + final summary;
+  stderr carries human-only noise (progress ticker is TTY-gated).
+  `--json-errors` prints `{"error": ...}` on stdout for failures.
+
+### v0.8.0 invariants (do not regress)
+
+- Scan dispatch = per-worker bounded channels (`i % concurrency` round-robin,
+  no shared receiver mutex); producer uses backpressured `send().await`.
+- Cancellation races in-flight probes via `tokio::select!` +
+  `ProbeContext::cancelled()` — new probe loops must keep this pattern.
+- The verdict store flushes are plain pushes (`BATCH_FLUSH=256`) + lazy
+  `sort_if_dirty` (latency asc, ip/port tiebreak). Never read the raw store
+  expecting sorted order — go through `results()`.
+- Event broadcast capacity is 4096; SSE `TerminalBounded` survives `Lagged`
+  (replays last terminal snapshot, keeps listening) instead of closing.
+- WARP: `SocketCache` is per-controller (`ScanController::warp_cache`),
+  injected via `WarpTransport::with_cache`; never hold its lock across
+  `.await`; no global static socket cache. Server pubkey resolves ONCE per
+  scan into the transport.
+- All direct HTTPS fetches (ranges refresh, xray download, subscriptions) go
+  through `ranges::HTTP_CLIENT` whose redirect policy enforces
+  `validate_fetch_url` per hop. The client has NO global timeout — every
+  call site MUST set `.timeout(...)`.
+- Error envelopes carry a machine `code` field (`status_to_code`); typed
+  `warpgen::WarpRegisterError` maps registration failures to 504/429/502 in
+  `server.rs::map_register_error`. New error paths must set a code.
+- `ScanConfig`/`Phase2Config`/`WarpConfig` are `deny_unknown_fields`: any NEW
+  request field needs `#[serde(default)]`, and unknown keys are rejected
+  (axum maps that to 422 → code `invalid_config`).
 
 ## Code conventions
 
@@ -112,7 +141,19 @@ npm publishing knowledge (AGENTS must know, condensed from `docs/release-process
 - Termux build = static musl; xray linux-arm64 is glibc (needs Termux glibc
   pkg). Document, don't fix.
 - No official /cdn-cgi/trace docs (community endpoint); parse defensively.
-- WARP server pubkey: bundle known constant, refresh from registration API.
+- WARP server pubkey: bundle known constant, refresh from registration API;
+  a corrupt persisted key warns and falls back to bundled (never silent).
 - Windows binaries unsigned → SmartScreen warning (accepted, documented).
 - Dev without release bundles: xray download fallback = pinned GitHub release
   tag from `data/xray-version.txt` + `.dgst` verification into data dir.
+- `.dgst` grammar is strict: `SHA2-256= <64 hex>[ <filename>]` — the parser
+  (`src/dgst.rs`, shared with build.rs) rejects longer hex runs; keep both
+  callers in sync through that one file only.
+- Xray zip downloads are capped (archive + entry, 64 MiB) and the cached-
+  binary memo re-stats the file — don't bypass `ensure_binary`.
+- Toolchain is pinned by `rust-toolchain.toml` (= CI's 1.88); the version-
+  parity CI job requires Cargo.toml == npm package.json == RELEASE_TAG on
+  every release bump. Bump all three or CI fails.
+- Frontend is Svelte 5 (runes-only) in `ui/src` → committed `ui/dist`,
+  embedded via rust-embed. After UI changes: `cd ui && npm run check &&
+  npm run build`, then commit dist together with src.

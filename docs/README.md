@@ -1,5 +1,8 @@
 # CF-Scanner — Documentation Index
 
+Start with [CONTEXT.md](../CONTEXT.md) for the progressive project map
+(orientation → module index → invariants → glossary), then go deeper here.
+
 ## Design & intent
 
 - [intent/cf-scanner.md](intent/cf-scanner.md) — confirmed user intent +
@@ -32,6 +35,9 @@
 
 ## Tracking
 
+- [tasks/wayfinder-map.md](../tasks/wayfinder-map.md) — v0.8.0 ten-agent
+  review remediation: consolidated/deduplicated findings, scores, decisions
+  (incl. what was deliberately NOT done and why)
 - [tasks/plan.md](../tasks/plan.md) — implementation plan (historical ledger;
   superseded by todo.md + the review report)
 - [tasks/todo.md](../tasks/todo.md) — shipped task list
