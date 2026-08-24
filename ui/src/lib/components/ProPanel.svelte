@@ -591,9 +591,10 @@
   {/if}
 {/snippet}
 
-<div class="fade-in flex flex-col gap-6">
+<div class="fade-in flex flex-col gap-8">
   <!-- scan form -->
-  <section class="card px-6 py-6">
+  <section class="shell">
+    <div class="core px-6 py-8 sm:px-8 sm:py-10">
     <!-- profiles bar: outside the <form> so Enter here never starts a scan -->
     <div
       class="mb-4 flex flex-wrap items-center gap-2 border-b pb-4"
@@ -1253,11 +1254,14 @@
           {:else}
             <button
               type="submit"
-              class="btn btn-primary"
+              class="btn btn-primary group"
               disabled={starting}
               data-state={starting ? "loading" : undefined}
             >
-              <Play class="size-3.5" /> {t("pro.action.start")}
+              <span class="icon-chip !size-7">
+                <Play class="size-3.5" />
+              </span>
+              {t("pro.action.start")}
             </button>
           {/if}
         </div>
@@ -1268,6 +1272,7 @@
         {/if}
       </div>
     </form>
+    </div>
   </section>
 
   {#if app.phase2}

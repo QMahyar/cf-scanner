@@ -4,6 +4,7 @@
   import { api, subscribe, type LiveStatus } from "./lib/api";
   import { currentLocale, t, toggleLocale } from "./lib/i18n.svelte";
   import { applyResult, recordTick, setProMode, ui } from "./lib/store.svelte";
+  import { reveal } from "./lib/reveal";
   import SimpleStart from "./lib/components/SimpleStart.svelte";
   import ProPanel from "./lib/components/ProPanel.svelte";
 
@@ -77,15 +78,23 @@
 </script>
 
 <div
-  class="mx-auto flex min-h-screen max-w-6xl flex-col ps-[max(1rem,env(safe-area-inset-left))] pe-[max(1rem,env(safe-area-inset-right))] sm:ps-[max(1.5rem,env(safe-area-inset-left))] sm:pe-[max(1.5rem,env(safe-area-inset-right))]"
+  class="mx-auto flex min-h-dvh max-w-6xl flex-col ps-[max(1rem,env(safe-area-inset-left))] pe-[max(1rem,env(safe-area-inset-right))] sm:ps-[max(1.5rem,env(safe-area-inset-left))] sm:pe-[max(1.5rem,env(safe-area-inset-right))]"
 >
-  <header class="flex flex-wrap items-center justify-between gap-x-4 gap-y-3 py-5">
+  <header
+    class="sticky top-3 z-30 mx-auto mt-4 mb-8 flex w-full flex-wrap items-center justify-between gap-x-4 gap-y-2 rounded-[1.6rem] px-4 py-2.5 backdrop-blur-2xl sm:rounded-full sm:px-3"
+    style="
+      background: oklch(12% 0.01 260 / 72%);
+      box-shadow:
+        0 0 0 1px var(--hairline),
+        0 18px 48px oklch(0% 0 0 / 40%);
+    "
+  >
     <div class="flex items-center gap-3">
       <div
-        class="grid size-10 place-items-center rounded-full"
-        style="background: var(--accent); box-shadow: 0 0 12px var(--bloom-a);"
+        class="grid size-9 place-items-center rounded-full"
+        style="background: var(--accent); box-shadow: 0 0 16px var(--orb-c);"
       >
-        <Radar class="size-5" color="var(--accent-ink)" strokeWidth={2.4} />
+        <Radar class="size-[1.15rem]" color="var(--accent-ink)" strokeWidth={1.8} />
       </div>
       <div>
         <h1 class="text-lg font-semibold" style="letter-spacing:-0.03em">
@@ -148,10 +157,10 @@
     </div>
   {/if}
 
-  <main class="flex flex-1 flex-col gap-6 pb-10">
+  <main class="flex flex-1 flex-col gap-8 pb-16">
     {#if app.error}
       <div
-        class="fade-in card flex items-start gap-2 px-4 py-3 text-sm"
+        class="fade-in shell-sm flex items-start gap-2 px-4 py-3 text-sm"
         style="background: oklch(22% 0.06 25 / 40%); color: var(--bad);"
         role="alert"
       >
@@ -163,14 +172,18 @@
     {/if}
 
     {#if app.proMode}
-      <ProPanel />
+      <div use:reveal>
+        <ProPanel />
+      </div>
     {:else}
-      <SimpleStart />
+      <div use:reveal>
+        <SimpleStart />
+      </div>
     {/if}
   </main>
 
   <footer
-    class="border-t pt-4 pb-[max(1rem,env(safe-area-inset-bottom))] text-xs"
+    class="border-t pt-5 pb-[max(1.25rem,env(safe-area-inset-bottom))] text-xs"
     style="border-color: oklch(100% 0 0 / 6%); color: var(--ink-muted);"
   >
     <span>{t("app.footer.geo").split("db-ip.com")[0]}<a

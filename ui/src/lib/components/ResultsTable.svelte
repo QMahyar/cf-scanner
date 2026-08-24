@@ -189,7 +189,8 @@
   const SKELETON_ROWS = 6;
 </script>
 
-<section class="card fade-in overflow-hidden">
+<section class="shell fade-in">
+  <div class="core overflow-hidden">
   <div class="flex flex-wrap items-center justify-between gap-x-3 gap-y-2 px-4 py-3">
     <h3 class="text-sm font-semibold">
       {t("table.results")}
@@ -410,4 +411,5 @@
       </button>
     </div>
   {/if}
+  </div>
 </section>

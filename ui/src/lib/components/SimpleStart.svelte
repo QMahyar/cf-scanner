@@ -77,47 +77,46 @@
   }
 </script>
 
-<section class="card card-lift fade-in px-6 py-6">
-  <div class="flex flex-col items-start gap-6 sm:flex-row sm:items-center sm:justify-between">
-    <div>
-      <div
-        class="mb-3 inline-flex items-center gap-1 rounded-full p-1"
-        style="background: var(--paper-3)"
-        role="group"
-        aria-label={t("simple.target")}
-      >
-        <button
-          type="button"
-          class="btn btn-sm btn-secondary"
-          class:btn-state-on={scanMode === "Cdn"}
-          aria-pressed={scanMode === "Cdn"}
-          onclick={() => (scanMode = "Cdn")}
+<section class="shell fade-in">
+  <div class="core px-6 py-8 sm:px-8 sm:py-10">
+    <div class="flex flex-col items-start gap-6 sm:flex-row sm:items-center sm:justify-between">
+      <div>
+        <span class="eyebrow mb-4">{scanMode === "Warp" ? "WARP" : "CDN"}</span>
+        <div
+          class="mb-4 inline-flex items-center rounded-full p-1"
+          style="background: var(--paper-3)"
+          role="group"
+          aria-label={t("simple.target")}
         >
-          CDN
-        </button>
-        <button
-          type="button"
-          class="btn btn-sm btn-secondary"
-          class:btn-state-on={scanMode === "Warp"}
-          aria-pressed={scanMode === "Warp"}
-          onclick={() => (scanMode = "Warp")}
+          <button
+            type="button"
+            class="btn btn-sm btn-secondary"
+            class:btn-state-on={scanMode === "Cdn"}
+            aria-pressed={scanMode === "Cdn"}
+            onclick={() => (scanMode = "Cdn")}
+          >
+            CDN
+          </button>
+          <button
+            type="button"
+            class="btn btn-sm btn-secondary"
+            class:btn-state-on={scanMode === "Warp"}
+            aria-pressed={scanMode === "Warp"}
+            onclick={() => (scanMode = "Warp")}
+          >
+            WARP
+          </button>
+        </div>
+        <h2
+          class="text-3xl font-semibold sm:text-[2.75rem] sm:leading-[1.05]"
+          style="letter-spacing:-0.03em"
         >
-          WARP
-        </button>
+          {scanMode === "Warp" ? t("simple.heading.warp") : t("simple.heading.cdn")}
+        </h2>
+        <p class="mt-3 max-w-md text-sm" style="color: var(--ink-muted)">
+          {t("simple.intro")}
+        </p>
       </div>
-      <p class="mono text-xs uppercase tracking-widest" style="color: var(--accent)">
-        {t("simple.badge.cdn")}
-      </p>
-      <h2
-        class="mt-2 text-3xl font-semibold sm:text-4xl"
-        style="letter-spacing:-0.03em"
-      >
-        {scanMode === "Warp" ? t("simple.heading.warp") : t("simple.heading.cdn")}
-      </h2>
-      <p class="mt-2 max-w-md text-sm" style="color: var(--ink-muted)">
-        {t("simple.intro")}
-      </p>
-    </div>
     {#if app.running}
       <button class="btn btn-secondary btn-lg" onclick={stopScan}>
         <Square class="size-5" />
@@ -166,12 +165,14 @@
             />
           </label>
           <button
-            class="btn btn-primary btn-lg"
+            class="btn btn-primary btn-lg group"
             onclick={start}
             disabled={starting}
             data-state={starting ? "loading" : undefined}
           >
-            <Play class="size-5" />
+            <span class="icon-chip">
+              <Play class="size-4" />
+            </span>
             {starting
               ? t("simple.starting")
               : scanMode === "Warp"
@@ -223,8 +224,8 @@
         style="background: var(--paper-3)"
       >
         <div
-          class="h-full rounded-full transition-all duration-300"
-          style="width: {pct ?? 6}%; background: var(--accent);"
+          class="bar-fill h-full w-full rounded-full transition-transform duration-500"
+          style="transform: scaleX({(pct ?? 6) / 100}); background: var(--accent);"
         ></div>
       </div>
       {#if app.running}
@@ -234,6 +235,7 @@
       {/if}
     </div>
   {/if}
+  </div>
 </section>
 
 {#if !app.running && app.summary === null && best.length === 0}
@@ -301,20 +303,25 @@
     </div>
     <div class="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
       {#each best.slice(0, SHOWN) as r, i (r.ip + ":" + r.port)}
-        <article class="card card-lift flex items-center justify-between gap-3 px-4 py-3">
-          <div class="min-w-0">
-            <p class="mono truncate text-sm font-semibold"><span dir="ltr">{r.ip}:{r.port}</span></p>
-            <p class="text-xs" style="color: var(--ink-muted)">
-              <span dir="ltr">{r.latency_ms}ms</span>{r.country ? ` · ${r.country}` : ""}{i === 0 ? ` · ${t("card.fastest")}` : ""}
-            </p>
+        <article
+          class="shell-sm fade-in flex items-center justify-between gap-3"
+          style="animation-delay: {Math.min(i, 8) * 45}ms"
+        >
+          <div class="core core-tight flex min-w-0 flex-1 items-center justify-between gap-3 px-4 py-3">
+            <div class="min-w-0">
+              <p class="mono truncate text-sm font-semibold"><span dir="ltr">{r.ip}:{r.port}</span></p>
+              <p class="text-xs" style="color: var(--ink-muted)">
+                <span dir="ltr">{r.latency_ms}ms</span>{r.country ? ` · ${r.country}` : ""}{i === 0 ? ` · ${t("card.fastest")}` : ""}
+              </p>
+            </div>
+            <button
+              class="btn btn-ghost btn-sm shrink-0"
+              title={t("card.copyTitle")}
+              onclick={() => navigator.clipboard.writeText(`${r.ip}:${r.port}`)}
+            >
+              <Copy class="size-4" />
+            </button>
           </div>
-          <button
-            class="btn btn-ghost btn-sm"
-            title={t("card.copyTitle")}
-            onclick={() => navigator.clipboard.writeText(`${r.ip}:${r.port}`)}
-          >
-            <Copy class="size-4" />
-          </button>
         </article>
       {/each}
     </div>
