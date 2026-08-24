@@ -987,10 +987,7 @@ mod tests {
         let err = build_scan_config(&a).unwrap_err();
         // Rejection moved to the single source (ScanConfig::validate); the
         // CLI no longer duplicates the check with its own message.
-        assert!(
-            err.to_string().contains("stop.cap out of range"),
-            "{err:#}"
-        );
+        assert!(err.to_string().contains("stop.cap out of range"), "{err:#}");
     }
 
     #[test]
