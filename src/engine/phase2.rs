@@ -71,6 +71,10 @@ impl ScanController {
         let first_error: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
         let cap = cfg.stop.cap;
 
+        let specs = Arc::new(specs);
+        let snis = Arc::new(snis);
+        let probe_urls = Arc::new(probe_urls);
+        let v4_candidates = Arc::new(v4_candidates);
         let mut tasks = JoinSet::new();
         for _ in 0..p2.concurrency {
             let probe = self.tunnel_probe.clone();
@@ -195,13 +199,23 @@ impl ScanController {
                 .send(ScanEvent::Phase2Progress(Phase2Progress { done, total }));
         }
 
-        if attempts.load(Ordering::Relaxed) > 0 && completed.load(Ordering::Relaxed) == 0 {
-            let reason = first_error
+        let attempts_val = attempts.load(Ordering::Relaxed);
+        let completed_val = completed.load(Ordering::Relaxed);
+        if attempts_val > 0 && completed_val == 0 {
+            let reason_opt = first_error
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
-                .clone()
-                .unwrap_or_default();
-            bail!("phase 2: every attempt failed before a probe ran: {reason}");
+                .clone();
+            match reason_opt {
+                Some(reason) => {
+                    bail!("phase 2: every attempt failed before a probe ran: {reason}")
+                }
+                None => {
+                    bail!(
+                        "phase 2: every verification attempt completed but none passed (0/{attempts_val})"
+                    )
+                }
+            }
         }
         Ok(())
     }

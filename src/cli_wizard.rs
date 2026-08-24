@@ -107,13 +107,31 @@ pub async fn run(controller: Arc<ScanController>) -> Result<()> {
 
 async fn run_wizard(controller: Arc<ScanController>) -> Result<()> {
     eprintln!("CF-Scanner wizard — CDN/proxy scan with optional xray phase-2 verification");
-    let cfg = prompt_config()?;
+    // dialoguer prompts are blocking stdin reads: keep them off the tokio
+    // workers or a background runtime task could starve while we wait.
+    let cfg = tokio::task::spawn_blocking(prompt_config)
+        .await
+        .map_err(|e| anyhow!("wizard task failed: {e}"))??;
     eprintln!();
-    if !Confirm::new()
-        .with_prompt("Start scan now?")
-        .default(true)
-        .interact()?
-    {
+    eprintln!(
+        "mode={} ports={:?} concurrency={} timeout_ms={}",
+        match cfg.mode {
+            Mode::Cdn => "cdn",
+            Mode::Warp => "warp",
+        },
+        cfg.ports,
+        cfg.concurrency,
+        cfg.timeout_ms
+    );
+    let confirmed = tokio::task::spawn_blocking(|| {
+        Confirm::new()
+            .with_prompt("Start scan now?")
+            .default(true)
+            .interact()
+    })
+    .await
+    .map_err(|e| anyhow!("wizard task failed: {e}"))??;
+    if !confirmed {
         eprintln!("aborted");
         return Ok(());
     }
@@ -121,8 +139,9 @@ async fn run_wizard(controller: Arc<ScanController>) -> Result<()> {
     let cancel_on_ctrl_c = {
         let controller = controller.clone();
         tokio::spawn(async move {
-            if tokio::signal::ctrl_c().await.is_ok() {
-                controller.cancel();
+            match tokio::signal::ctrl_c().await {
+                Ok(()) => controller.cancel(),
+                Err(err) => tracing::error!("could not listen for Ctrl+C: {err}"),
             }
         })
     };

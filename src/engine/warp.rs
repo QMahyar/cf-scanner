@@ -10,8 +10,6 @@ use std::time::Instant;
 
 use anyhow::{Context as _, Result, anyhow, bail};
 use tokio::sync::mpsc;
-use tokio::sync::mpsc::error::TrySendError;
-use tokio::sync::watch;
 use tokio::task::JoinSet;
 
 use super::{
@@ -51,6 +49,8 @@ impl ScanController {
             let wg = crate::wgconf::parse_wg_entry(text)
                 .map_err(|e| anyhow!("invalid wgconf: {e:#}"))?;
             Arc::new(crate::warp::WgVerifyTransport::from_config(&wg)?)
+        } else if let Some(cache) = &self.warp_cache {
+            Arc::new(crate::warp::WarpTransport::with_cache(cache.clone()))
         } else {
             self.warp_transport.clone()
         };
@@ -70,8 +70,7 @@ impl ScanController {
             return Ok(self.finish(started, 0, 0));
         }
 
-        let (cancel_tx, cancel_rx) = watch::channel(false);
-        *self.cancel_tx.lock().unwrap_or_else(|e| e.into_inner()) = Some(cancel_tx);
+        let cancel_rx = self.cancel_signal();
 
         let ctx = Arc::new(ProbeContext {
             cancel: cancel_rx,
@@ -81,51 +80,51 @@ impl ScanController {
             cadence,
             total,
             store: self.store.clone(),
+            dirty: self.store_dirty.clone(),
             events: self.events.clone(),
             geo: self.geo.clone(),
         });
 
         let concurrency = usize::from(cfg.concurrency).max(1);
-        let (tx, rx) = mpsc::channel::<WarpTask>(concurrency * 2);
-        let rx = Arc::new(tokio::sync::Mutex::new(rx));
+        let per_worker_cap = ((concurrency * 4).div_ceil(concurrency)).max(4);
+        let mut worker_txs = Vec::with_capacity(concurrency);
+        let mut worker_rxs = Vec::with_capacity(concurrency);
+        for _ in 0..concurrency {
+            let (tx, rx) = mpsc::channel::<WarpTask>(per_worker_cap);
+            worker_txs.push(tx);
+            worker_rxs.push(rx);
+        }
 
-        // Producer: feeds (endpoint, port) groups, checking the stop
-        // conditions before every send (same lazy-stop contract as CDN).
+        // Producer: feeds (endpoint, port) groups via per-worker channels.
         let producer = {
-            let tx = tx;
             let ctx = Arc::clone(&ctx);
+            let groups = groups.clone();
             tokio::spawn(async move {
-                for (ip, ports) in &groups {
+                let mut idx: usize = 0;
+                'outer: for (ip, ports) in &groups {
                     let ip = IpAddr::from(*ip);
                     for &port in ports {
                         if ctx.should_stop() {
-                            return;
+                            break 'outer;
                         }
                         let task = WarpTask { ip, port };
-                        loop {
-                            if ctx.should_stop() {
-                                return;
-                            }
-                            match tx.try_send(task.clone()) {
-                                Ok(()) => break,
-                                Err(TrySendError::Closed(_)) => return,
-                                Err(TrySendError::Full(_)) => {
-                                    tokio::task::yield_now().await;
-                                }
-                            }
+                        let w = idx % concurrency;
+                        idx = idx.wrapping_add(1);
+                        if ctx.should_stop() {
+                            break 'outer;
+                        }
+                        if worker_txs[w].send(task).await.is_err() {
+                            break 'outer;
                         }
                     }
                 }
             })
         };
 
-        // Workers: one fixed task per concurrency slot; each group's
-        // handshakes are serial, and a cancel between handshakes drops the
-        // group uncounted (same semantics as the pre-E2 per-task cancel).
+        // Workers: one fixed task per concurrency slot; each owns its receiver.
         let mut workers = JoinSet::new();
-        for _ in 0..concurrency {
+        for mut rx in worker_rxs {
             let ctx = Arc::clone(&ctx);
-            let rx = Arc::clone(&rx);
             let transport = transport.clone();
             let timeout_ms = cfg.timeout_ms;
             workers.spawn(async move {
@@ -134,15 +133,9 @@ impl ScanController {
                     if ctx.should_stop() {
                         break;
                     }
-                    let task = {
-                        let mut guard = rx.lock().await;
-                        if ctx.should_stop() {
-                            break;
-                        }
-                        match guard.recv().await {
-                            Some(task) => task,
-                            None => break,
-                        }
+                    let task = match rx.recv().await {
+                        Some(task) => task,
+                        None => break,
                     };
                     let mut latency_ms: Option<u32> = None;
                     let mut failed = 0u64;
@@ -152,7 +145,15 @@ impl ScanController {
                             cancelled = true;
                             break;
                         }
-                        match transport.probe(task.ip, task.port, timeout_ms).await {
+                        let outcome = tokio::select! {
+                            outcome = transport.probe(task.ip, task.port, timeout_ms) => Some(outcome),
+                            _ = ctx.cancelled() => None,
+                        };
+                        let Some(outcome) = outcome else {
+                            cancelled = true;
+                            break;
+                        };
+                        match outcome {
                             Ok(latency) => {
                                 latency_ms = Some(latency_ms.map_or(latency, |m| m.min(latency)));
                             }
@@ -175,7 +176,7 @@ impl ScanController {
                         };
                         batch.push(verdict.clone());
                         if batch.len() >= BATCH_FLUSH {
-                            merge_sorted(&ctx.store, std::mem::take(&mut batch));
+                            merge_sorted(&ctx.store, &ctx.dirty, std::mem::take(&mut batch));
                         }
                         let _ = ctx.events.send(ScanEvent::Result(Box::new(verdict)));
                     }
@@ -184,7 +185,7 @@ impl ScanController {
                         ctx.progress(scanned, ctx.found.load(Ordering::Relaxed));
                     }
                 }
-                merge_sorted(&ctx.store, batch);
+                merge_sorted(&ctx.store, &ctx.dirty, batch);
             });
         }
 

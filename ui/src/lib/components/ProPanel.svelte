@@ -231,8 +231,13 @@
       validationErrors = [];
       await startScan(cfg);
     } catch (e) {
-      if (e instanceof FormValidationError) validationErrors = e.errors;
-      else app.error = errorText(e);
+      if (e instanceof FormValidationError) {
+        validationErrors = e.errors;
+        queueMicrotask(() => {
+          const el = document.querySelector('[aria-invalid="true"]') as HTMLElement | null;
+          el?.focus();
+        });
+      } else app.error = errorText(e);
     } finally {
       skipping = false;
     }
@@ -313,6 +318,10 @@
       if (e instanceof FormValidationError) {
         validationErrors = e.errors;
         for (const i of e.issues) if (i.field !== null) touched[i.field] = true;
+        queueMicrotask(() => {
+          const el = document.querySelector('[aria-invalid="true"]') as HTMLElement | null;
+          el?.focus();
+        });
       } else {
         app.error = errorText(e);
       }
@@ -574,6 +583,7 @@
 {#snippet fieldError(name: FormField)}
   {#if fieldErrors[name]}
     <span
+      id="err-{name}"
       class="fade-in mt-1 block text-[11px] leading-snug"
       style="color: var(--bad)"
       role="alert">{fieldErrors[name]}</span
@@ -752,6 +762,7 @@
             name="count"
             disabled={form.mode === "Cdn" && !form.useCount}
             aria-invalid={fieldErrors.count ? "true" : undefined}
+            aria-describedby={fieldErrors.count ? "err-count" : undefined}
             bind:value={form.count}
           />
           {@render fieldError("count")}
@@ -827,6 +838,7 @@
             name="customPortsText"
             placeholder={t("pro.field.customPorts.placeholder")}
             aria-invalid={fieldErrors.customPortsText ? "true" : undefined}
+            aria-describedby={fieldErrors.customPortsText ? "err-customPortsText" : undefined}
             bind:value={form.customPortsText}
           />
           {@render fieldError("customPortsText")}
@@ -840,6 +852,7 @@
             max="1000"
             name="concurrency"
             aria-invalid={fieldErrors.concurrency ? "true" : undefined}
+            aria-describedby={fieldErrors.concurrency ? "err-concurrency" : undefined}
             bind:value={form.concurrency}
           />
           {@render fieldError("concurrency")}
@@ -853,6 +866,7 @@
             max="30000"
             name="timeoutMs"
             aria-invalid={fieldErrors.timeoutMs ? "true" : undefined}
+            aria-describedby={fieldErrors.timeoutMs ? "err-timeoutMs" : undefined}
             bind:value={form.timeoutMs}
           />
           {@render fieldError("timeoutMs")}
@@ -866,6 +880,7 @@
             min="1"
             name="stopFound"
             aria-invalid={fieldErrors.stopFound ? "true" : undefined}
+            aria-describedby={fieldErrors.stopFound ? "err-stopFound" : undefined}
             bind:value={form.stopFound}
           />
           {@render fieldError("stopFound")}
@@ -880,6 +895,7 @@
             placeholder={t("pro.field.hardCap.placeholder")}
             name="capText"
             aria-invalid={fieldErrors.capText ? "true" : undefined}
+            aria-describedby={fieldErrors.capText ? "err-capText" : undefined}
             bind:value={form.capText}
           />
           {@render fieldError("capText")}
@@ -905,6 +921,7 @@
               rows="3"
               name="customCidrs"
               aria-invalid={fieldErrors.customCidrs ? "true" : undefined}
+              aria-describedby={fieldErrors.customCidrs ? "err-customCidrs" : undefined}
               bind:value={form.customCidrs}
               onchange={() => normalizeField("customCidrs")}></textarea>
             {@render fieldError("customCidrs")}
@@ -916,6 +933,7 @@
               rows="3"
               name="exclude"
               aria-invalid={fieldErrors.exclude ? "true" : undefined}
+              aria-describedby={fieldErrors.exclude ? "err-exclude" : undefined}
               bind:value={form.exclude}
               onchange={() => normalizeField("exclude")}></textarea>
             {@render fieldError("exclude")}
@@ -968,6 +986,7 @@
               max="10"
               name="warpProbes"
               aria-invalid={fieldErrors.warpProbes ? "true" : undefined}
+              aria-describedby={fieldErrors.warpProbes ? "err-warpProbes" : undefined}
               bind:value={form.warpProbes}
             />
             {@render fieldError("warpProbes")}
@@ -979,6 +998,7 @@
               rows="2"
               name="warpEndpoints"
               aria-invalid={fieldErrors.warpEndpoints ? "true" : undefined}
+              aria-describedby={fieldErrors.warpEndpoints ? "err-warpEndpoints" : undefined}
               bind:value={form.warpEndpoints}
               onchange={() => normalizeField("warpEndpoints")}></textarea>
             {@render fieldError("warpEndpoints")}
@@ -1009,6 +1029,7 @@
                 rows="3"
                 name="wgconf"
                 aria-invalid={fieldErrors.wgconf ? "true" : undefined}
+                aria-describedby={fieldErrors.wgconf ? "err-wgconf" : undefined}
                 bind:value={form.wgconf}
                 onchange={() => {
                   // Mirror the file-load behavior: a pasted config implies
@@ -1164,6 +1185,7 @@
                   rows="3"
                   name="configsText"
                   aria-invalid={fieldErrors.configsText ? "true" : undefined}
+                  aria-describedby={fieldErrors.configsText ? "err-configsText" : undefined}
                   bind:value={form.configsText}
                   onchange={() => normalizeField("configsText")}></textarea>
                 {@render fieldError("configsText")}
@@ -1182,6 +1204,7 @@
                   name="snis"
                   placeholder={t("pro.phase2.sniPlaceholder")}
                   aria-invalid={fieldErrors.snis ? "true" : undefined}
+                  aria-describedby={fieldErrors.snis ? "err-snis" : undefined}
                   bind:value={form.snis}
                 />
                 {@render fieldError("snis")}
@@ -1193,6 +1216,7 @@
                 class="field mono mt-1"
                 name="probeUrl"
                 aria-invalid={fieldErrors.probeUrl ? "true" : undefined}
+                aria-describedby={fieldErrors.probeUrl ? "err-probeUrl" : undefined}
                 bind:value={form.probeUrl}
               />
               {@render fieldError("probeUrl")}
@@ -1204,8 +1228,8 @@
       <!-- sticky actions: one canonical Start/Stop pair, visible even with
            phase-2/WARP textareas expanded -->
       <div
-        class="sticky bottom-0 z-10 -mx-6 -mb-6 mt-5 rounded-b-2xl px-6 pb-4 pt-3 backdrop-blur-md"
-        style="background: color-mix(in oklab, var(--paper-2) 88%, transparent); box-shadow: 0 -12px 24px oklch(0% 0 0 / 25%);"
+        class="sticky bottom-0 z-10 -mx-6 -mb-6 mt-5 rounded-b-2xl px-6 pt-3 backdrop-blur-md"
+        style="background: color-mix(in oklab, var(--paper-2) 88%, transparent); box-shadow: 0 -12px 24px oklch(0% 0 0 / 25%); padding-bottom: max(1rem, env(safe-area-inset-bottom));"
       >
         <div class="flex flex-wrap items-center justify-end gap-2">
           {#if app.running}

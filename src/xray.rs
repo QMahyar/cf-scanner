@@ -233,6 +233,7 @@ async fn wait_for_socks(
     timeout: Duration,
 ) -> Result<()> {
     let deadline = tokio::time::Instant::now() + timeout;
+    let mut interval = Duration::from_millis(20);
     loop {
         if let Some(status) = child.try_wait().context("failed to poll xray")? {
             bail!("{}", early_exit_message(&status));
@@ -242,7 +243,10 @@ async fn wait_for_socks(
             Err(_) if tokio::time::Instant::now() >= deadline => {
                 bail!("socks {addr} not reachable within {timeout:?}")
             }
-            Err(_) => tokio::time::sleep(Duration::from_millis(20)).await,
+            Err(_) => {
+                tokio::time::sleep(interval).await;
+                interval = (interval.mul_f64(1.5)).min(Duration::from_millis(200));
+            }
         }
     }
 }
@@ -470,10 +474,18 @@ pub async fn ensure_binary(fetch: &impl BinaryFetch) -> Result<PathBuf> {
     let state = BINARY_STATE.get_or_init(|| tokio::sync::Mutex::new(None));
     let mut guard = state.lock().await;
     if let Some(result) = &*guard {
-        return match result {
-            Ok(path) => Ok(path.clone()),
-            Err(message) => Err(anyhow!(message.clone())),
-        };
+        match result {
+            Ok(path) => {
+                let valid = path
+                    .metadata()
+                    .is_ok_and(|m| m.is_file() && m.len() >= MIN_BUNDLED_BYTES);
+                if valid {
+                    return Ok(path.clone());
+                }
+                // cached binary vanished or truncated: treat as miss
+            }
+            Err(message) => return Err(anyhow!(message.clone())),
+        }
     }
     let result = resolve_binary(fetch).await;
     match &result {
@@ -599,15 +611,29 @@ fn parse_dgst(text: &str, asset: &str) -> Result<String> {
 
 /// Extracts just the xray binary out of the release zip.
 fn extract_xray_from_zip(zip_bytes: &[u8], dest: &Path) -> Result<()> {
+    const MAX_ZIP_BYTES: usize = 64 * 1024 * 1024;
+    const MAX_ENTRY_BYTES: u64 = 64 * 1024 * 1024;
+    if zip_bytes.len() > MAX_ZIP_BYTES + 1024 {
+        bail!("xray archive exceeds 64 MiB cap");
+    }
     let reader = std::io::Cursor::new(zip_bytes);
     let mut archive = zip::ZipArchive::new(reader).context("invalid xray zip")?;
     let name = find_entry(&archive, exe_name())?;
-    let mut entry = archive.by_index(name)?;
-    std::fs::write(dest, {
-        let mut buf = Vec::with_capacity(entry.size() as usize);
-        entry.read_to_end(&mut buf)?;
-        buf
-    })?;
+    let entry = archive.by_index(name)?;
+    if entry.size() > MAX_ENTRY_BYTES {
+        bail!(
+            "xray archive entry exceeds 64 MiB cap: {} claims {} bytes",
+            exe_name(),
+            entry.size()
+        );
+    }
+    let mut buf = Vec::new();
+    let mut limited = entry.take(MAX_ENTRY_BYTES + 1);
+    limited.read_to_end(&mut buf)?;
+    if buf.len() as u64 > MAX_ENTRY_BYTES {
+        bail!("xray archive entry exceeds 64 MiB cap: decompressed size exceeds limit");
+    }
+    std::fs::write(dest, buf)?;
     Ok(())
 }
 
@@ -646,12 +672,9 @@ pub struct RealFetch;
 
 impl BinaryFetch for RealFetch {
     async fn bytes(&self, url: &str) -> Result<Vec<u8>> {
-        let resp = reqwest::Client::builder()
-            .redirect(reqwest::redirect::Policy::limited(10))
-            .timeout(std::time::Duration::from_secs(60))
-            .build()
-            .context("failed to build HTTP client")?
+        let resp = crate::ranges::HTTP_CLIENT
             .get(url)
+            .timeout(Duration::from_secs(60))
             .send()
             .await
             .context("failed to start download")?

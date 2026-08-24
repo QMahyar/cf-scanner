@@ -77,6 +77,12 @@ impl TlsTransport {
 /// fronting IPs whose certificate SANs never match the probed name.
 /// Explicit ring provider: no process-level install needed in tests or when
 /// other rustls consumers install a different provider.
+///
+/// # WARNING: disables all certificate verification
+/// This verifier DISABLES all certificate checks and is ONLY acceptable for
+/// phase-1 SNI probing and phase-2 tunnel dials to user-supplied endpoints
+/// (inline_verify uses it in production); it MUST NEVER be used for direct
+/// config/range downloads.
 pub(crate) fn no_verify_client_config() -> ClientConfig {
     ClientConfig::builder_with_provider(ring::default_provider().into())
         .with_safe_default_protocol_versions()
@@ -103,18 +109,19 @@ impl Transport for TlsTransport {
         let server_name = self.server_name.clone();
         Box::pin(async move {
             let fut = async {
-                let stream = TcpStream::connect((ip, port))
-                    .await
-                    // Static reason, not the io error text: connect-refused is
-                    // the common-case outcome on millions of probes, and the
-                    // reason is diagnostic enough (the underlying errno text
-                    // added nothing callers branch on).
-                    .map_err(|_| ProbeError::Refused("connection refused/closed"))?;
+                let stream = TcpStream::connect((ip, port)).await.map_err(|e| {
+                    tracing::debug!(error = %e, "probe connect failed");
+                    ProbeError::Refused("connection refused/closed")
+                })?;
+                let _ = stream.set_nodelay(true);
                 let mut tls = self
                     .connector
                     .connect(server_name, stream)
                     .await
-                    .map_err(|_| ProbeError::Tls("handshake failed"))?;
+                    .map_err(|e| {
+                        tracing::debug!(error = %e, "probe tls handshake failed");
+                        ProbeError::Tls("handshake failed")
+                    })?;
                 // Half-close to signal we want no response data back.
                 let _ = tls.shutdown().await;
                 Ok(())

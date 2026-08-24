@@ -20,6 +20,8 @@ const SUB_UA: &str = "cf-scanner/0.1.0";
 const WS: &str = "ws";
 /// Error lines longer than this are truncated (e.g. xray stderr tails).
 const MAX_ERROR_LINE_BYTES: usize = 512;
+/// Decoded UUID/password cap; ids are embedded verbatim into xray configs.
+const MAX_USER_ID_BYTES: usize = 1024;
 
 /// Chars percent-encoded in a rendered URI's userinfo segment. RFC 3986
 /// allows raw unreserved + sub-delims + ':' there, but our parser (like most
@@ -353,6 +355,12 @@ fn parse_sip002(entry: &str) -> Result<OutboundSpec> {
         _ if userinfo.is_empty() => bail!("missing user id or password"),
         _ => userinfo,
     };
+    // The id lands verbatim in generated xray configs: a percent-encoded
+    // megabyte in one query param would slip past whole-entry length checks
+    // counted elsewhere, so bound the decoded value itself.
+    if user_id.len() > MAX_USER_ID_BYTES {
+        bail!("user id exceeds {MAX_USER_ID_BYTES} bytes");
+    }
 
     let security = q.get("security").cloned().unwrap_or_else(|| {
         if protocol == Protocol::Trojan {

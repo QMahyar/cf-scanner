@@ -39,10 +39,10 @@ pub const SERVER_PUBLIC_KEY_B64: &str = "bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wP
 /// handshake, only that the Init is well-formed.
 const DUMMY_STATIC_PRIVATE: [u8; 32] = [0u8; 32];
 
-fn server_public_key() -> PublicKey {
+pub fn server_public_key() -> PublicKey {
     // A registration refresh wins over the bundled constant; the identity
     // file is only ever written by us (0o600, atomic), so a corrupt entry
-    // falls back silently.
+    // falls back silently (warn logged in warpgen).
     let b64 = crate::warpgen::persisted_server_public_key()
         .unwrap_or_else(|| SERVER_PUBLIC_KEY_B64.to_owned());
     let bytes = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, b64)
@@ -58,14 +58,23 @@ pub fn bundled_pool() -> CidrPool {
 }
 
 /// A real UDP WireGuard handshake probe: Init in, Response/Cookie out.
-/// Unit struct on purpose: the engine constructs it as a bare path
-/// (`Arc::new(warp::WarpTransport)`), so the socket reuse cache lives in a
-/// process-wide static instead of on the transport.
-pub struct WarpTransport;
+/// The socket cache is injected so tests never share a process-wide socket
+/// pool and the engine can create per-controller instances.
+pub struct WarpTransport {
+    server_public: PublicKey,
+    sockets: std::sync::Arc<SocketCache>,
+}
 
 impl WarpTransport {
     pub fn new() -> Self {
-        Self
+        Self::with_cache(std::sync::Arc::new(SocketCache::default()))
+    }
+
+    pub fn with_cache(cache: std::sync::Arc<SocketCache>) -> Self {
+        Self {
+            server_public: server_public_key(),
+            sockets: cache,
+        }
     }
 }
 
@@ -86,19 +95,17 @@ const MAX_SOCKETS: usize = 1024;
 /// back to back, so a fresh bind per attempt (43K on the full pool) is pure
 /// overhead; at most `MAX_SOCKETS` fds stay open at once.
 #[derive(Default)]
-struct SocketCache {
+pub struct SocketCache {
     sockets: tokio::sync::Mutex<HashMap<(Ipv4Addr, u16), Arc<UdpSocket>>>,
 }
 
 impl SocketCache {
     async fn get_or_bind(&self, ip: Ipv4Addr, port: u16) -> Result<Arc<UdpSocket>, ProbeError> {
-        let mut map = self.sockets.lock().await;
-        if let Some(socket) = map.get(&(ip, port)) {
-            return Ok(socket.clone());
-        }
-        if map.len() >= MAX_SOCKETS {
-            let victim = map.keys().next().copied().expect("cache is non-empty here");
-            map.remove(&victim);
+        {
+            let map = self.sockets.lock().await;
+            if let Some(socket) = map.get(&(ip, port)) {
+                return Ok(socket.clone());
+            }
         }
         let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0))
             .await
@@ -108,15 +115,18 @@ impl SocketCache {
             .await
             .map_err(|_| ProbeError::Refused("udp connect failed"))?;
         let socket = Arc::new(socket);
+        let mut map = self.sockets.lock().await;
+        if let Some(existing) = map.get(&(ip, port)) {
+            return Ok(existing.clone());
+        }
+        if map.len() >= MAX_SOCKETS {
+            let victim = map.keys().next().copied().expect("cache is non-empty here");
+            map.remove(&victim);
+        }
         map.insert((ip, port), socket.clone());
         Ok(socket)
     }
 }
-
-/// Shared across every dummy-key `WarpTransport` (the engine builds one per
-/// controller; `Arc<dyn Transport>` keeps it for the controller's lifetime).
-static WARP_SOCKETS: std::sync::LazyLock<SocketCache> =
-    std::sync::LazyLock::new(SocketCache::default);
 
 /// The same probe driven by a user's wgconf keypair instead of the dummy key
 /// (Task 13): a real handshake under the user's identity proves the endpoint
@@ -178,15 +188,20 @@ impl Transport for WarpTransport {
                 async move { Err(ProbeError::Refused("WARP endpoints are IPv4-only")) },
             );
         };
-        Box::pin(probe_once(
-            &WARP_SOCKETS,
-            StaticSecret::from(DUMMY_STATIC_PRIVATE),
-            server_public_key(),
-            ip,
-            port,
-            timeout_ms,
-            ProbeDepth::ShapeOnly,
-        ))
+        let server_public = self.server_public;
+        let sockets = self.sockets.clone();
+        Box::pin(async move {
+            probe_once(
+                &sockets,
+                StaticSecret::from(DUMMY_STATIC_PRIVATE),
+                server_public,
+                ip,
+                port,
+                timeout_ms,
+                ProbeDepth::ShapeOnly,
+            )
+            .await
+        })
     }
 }
 
@@ -677,5 +692,30 @@ mod tests {
             "dropped data must fail verification, got {err:?}"
         );
         responder.abort();
+    }
+
+    #[tokio::test]
+    async fn socket_cache_reuses_and_evicts() {
+        let cache = SocketCache::default();
+        let s1 = cache.get_or_bind(Ipv4Addr::LOCALHOST, 12000).await.unwrap();
+        let s2 = cache.get_or_bind(Ipv4Addr::LOCALHOST, 12000).await.unwrap();
+        assert!(
+            Arc::ptr_eq(&s1, &s2),
+            "same endpoint must reuse the cached socket"
+        );
+        for i in 0..(MAX_SOCKETS + 5) {
+            let ip = Ipv4Addr::from(0x0a000001u32.wrapping_add(i as u32));
+            let port = 20000 + (i as u16 % 500);
+            let _ = cache.get_or_bind(ip, port).await.unwrap();
+        }
+        let len = cache.sockets.lock().await.len();
+        assert!(len <= MAX_SOCKETS, "cache must stay bounded, got {len}");
+        let s = cache
+            .get_or_bind(Ipv4Addr::new(8, 8, 8, 8), 5353)
+            .await
+            .unwrap();
+        assert!(s.local_addr().is_ok());
+        let s3 = cache.get_or_bind(Ipv4Addr::LOCALHOST, 12000).await.unwrap();
+        assert!(s3.local_addr().is_ok());
     }
 }

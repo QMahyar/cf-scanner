@@ -123,12 +123,27 @@ export function subscribe(handlers: {
   onPhase2?: (p: Phase2Progress) => void;
   onFailed?: (msg: string) => void;
   onStatus?: (s: LiveStatus) => void;
+  onReconnect?: () => void;
 }): EventSource {
   const es = new EventSource("/api/events");
-  if (handlers.onStatus) {
-    es.onopen = () => handlers.onStatus?.("live");
+  let firstOpen = true;
+  if (handlers.onStatus || handlers.onReconnect) {
+    es.onopen = () => {
+      handlers.onStatus?.("live");
+      if (!firstOpen) handlers.onReconnect?.();
+      firstOpen = false;
+    };
     es.onerror = () =>
       handlers.onStatus?.(navigator.onLine ? "connecting" : "offline");
+  } else if (handlers.onReconnect) {
+    es.onopen = () => {
+      if (!firstOpen) handlers.onReconnect?.();
+      firstOpen = false;
+    };
+  } else {
+    es.onopen = () => {
+      firstOpen = false;
+    };
   }
   const listen = <T>(
     event: string,

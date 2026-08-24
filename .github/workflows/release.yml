@@ -56,6 +56,9 @@ concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  TOOLCHAIN: "1.88"
+
 jobs:
   # Run 'dist plan' (or host) to determine what tasks we need to do
   plan:
@@ -113,7 +116,7 @@ jobs:
           submodules: recursive
       - uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: "1.88"
+          toolchain: ${{ env.TOOLCHAIN }}
           components: rustfmt, clippy
       - name: Test
         run: cargo test --locked
@@ -121,8 +124,9 @@ jobs:
         run: cargo clippy --all-targets --locked -- -D warnings
       - name: Format
         run: cargo fmt --check
-      - name: Install cargo-audit
-        run: cargo install cargo-audit@0.22.1 --locked
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit@0.22.1
       - name: Audit dependencies
         run: cargo audit
 
@@ -141,7 +145,7 @@ jobs:
           submodules: recursive
       - uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: "1.88"
+          toolchain: ${{ env.TOOLCHAIN }}
           targets: aarch64-unknown-linux-gnu, x86_64-pc-windows-msvc
       - uses: Swatinem/rust-cache@v2
         with:

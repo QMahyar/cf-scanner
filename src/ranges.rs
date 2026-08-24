@@ -6,20 +6,35 @@
 
 use std::fs;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::sync::LazyLock;
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
 use serde::Deserialize;
-use tokio::net::TcpStream;
 
 use crate::paths;
-use crate::socks::{http_request, send_http, tls_connector};
 
 pub const BUNDLED_RANGES: &str = include_str!("../data/cf-ranges.txt");
 pub const BUNDLED_RANGES_V6: &str = include_str!("../data/cf-ranges-v6.txt");
 pub const OFFICIAL_IPS_URL: &str = "https://api.cloudflare.com/client/v4/ips";
 pub const OFFICIAL_IPS_V6_URL: &str = "https://www.cloudflare.com/ips-v6/";
 const FETCH_TIMEOUT: Duration = Duration::from_secs(20);
+
+pub(crate) static HTTP_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
+    reqwest::Client::builder()
+        .use_rustls_tls()
+        .redirect(reqwest::redirect::Policy::custom(|attempt| {
+            if attempt.previous().len() >= 5 {
+                return attempt.error("too many redirects");
+            }
+            if let Err(err) = validate_fetch_url(attempt.url().as_str()) {
+                return attempt.error(err.to_string());
+            }
+            attempt.follow()
+        }))
+        .build()
+        .expect("HTTP client must build")
+});
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Cidr {
@@ -162,12 +177,12 @@ pub struct CidrPool {
 
 impl CidrPool {
     pub fn bundled() -> Self {
-        Self::parse(BUNDLED_RANGES).expect("bundled ranges must parse")
+        Self::parse(BUNDLED_RANGES).expect("bundled ranges must parse: data/cf-ranges.txt")
     }
 
     /// The official Cloudflare IPv6 ranges; opt-in via `ScanConfig::include_v6`.
     pub fn bundled_v6() -> Self {
-        Self::parse(BUNDLED_RANGES_V6).expect("bundled v6 ranges must parse")
+        Self::parse(BUNDLED_RANGES_V6).expect("bundled v6 ranges must parse: data/cf-ranges-v6.txt")
     }
 
     pub fn parse(text: &str) -> Result<Self> {
@@ -543,30 +558,35 @@ async fn fetch_tls(url: &str) -> Result<String> {
 }
 
 async fn fetch_tls_inner(url: &str, extra_headers: &str) -> Result<Vec<u8>> {
-    // GitHub release URLs and subscription links 30x to CDNs; follow up to
-    // 5 redirects so downloads survive the common 302 hop. The initial URL
-    // and every hop go through the same https + routable-host guard.
     validate_fetch_url(url)?;
-    let mut current = url.to_owned();
-    for _ in 0..5 {
-        let (_fetched_url, status, headers, body) = fetch_one(&current, extra_headers).await?;
-        if matches!(status, 301 | 302 | 303 | 307 | 308) {
-            let location = headers
-                .iter()
-                .find(|h| h.to_ascii_lowercase().starts_with("location:"))
-                .map(|h| h.trim().strip_prefix("location:").unwrap_or("").trim())
-                .filter(|l| !l.is_empty())
-                .ok_or_else(|| anyhow!("redirect without Location from {current}"))?;
-            current = url::Url::parse(&current)?.join(location)?.to_string();
-            validate_fetch_url(&current)?;
+    let mut request = HTTP_CLIENT
+        .get(url)
+        .timeout(FETCH_TIMEOUT)
+        .header(reqwest::header::USER_AGENT, "cf-scanner/0.1.0");
+    for line in extra_headers.split("\r\n") {
+        let line = line.trim();
+        if line.is_empty() {
             continue;
         }
-        return Ok(body);
+        if let Some((name, value)) = line.split_once(':') {
+            request = request.header(name.trim(), value.trim());
+        }
     }
-    bail!(
-        "too many redirects fetching {}",
-        sanitize_url_for_error(url)
-    )
+    let response = request
+        .send()
+        .await
+        .with_context(|| format!("fetch failed for {}", sanitize_url_for_error(url)))?;
+    let bytes = response.bytes().await.with_context(|| {
+        format!(
+            "failed to read response body of {}",
+            sanitize_url_for_error(url)
+        )
+    })?;
+    const MAX_BODY_BYTES: usize = 64 * 1024 * 1024;
+    if bytes.len() > MAX_BODY_BYTES {
+        bail!("response body exceeded the {MAX_BODY_BYTES} byte cap");
+    }
+    Ok(bytes.to_vec())
 }
 
 /// URL text safe for errors/logs: userinfo (and query/fragment) stripped.
@@ -615,46 +635,6 @@ fn validate_fetch_url(url: &str) -> Result<()> {
         }
     }
     Ok(())
-}
-
-/// One HTTPS GET: returns (requested_url, status, headers, body). Bodies are
-/// capped (64 MiB) and chunked responses are decoded.
-async fn fetch_one(url: &str, extra_headers: &str) -> Result<(String, u16, Vec<String>, Vec<u8>)> {
-    let rest = url
-        .strip_prefix("https://")
-        .ok_or_else(|| anyhow!("only https:// URLs supported"))?;
-    let (host_port, path) = match rest.split_once('/') {
-        Some((h, p)) => (h, format!("/{p}")),
-        None => (rest, "/".to_owned()),
-    };
-    let (host, port) = parse_host_port(host_port)?;
-
-    let stream = TcpStream::connect((host.as_str(), port)).await?;
-    let request = http_request(&host, &path, extra_headers);
-    let server_name =
-        rustls::pki_types::ServerName::try_from(host.to_owned()).context("invalid hostname")?;
-    let tls = tls_connector().connect(server_name, stream).await?;
-    let (status, headers, body) = send_http(tls, &request).await?;
-    Ok((url.to_owned(), status, headers, body))
-}
-
-/// Splits an authority into host + port. Bracketed IPv6 literals keep their
-/// colons intact (`[2606:4700::1]:443`); a bare host defaults to 443.
-fn parse_host_port(host_port: &str) -> Result<(String, u16)> {
-    if let Some(rest) = host_port.strip_prefix('[') {
-        let (host, after) = rest
-            .split_once(']')
-            .ok_or_else(|| anyhow!("unterminated bracketed host"))?;
-        let port = match after.strip_prefix(':') {
-            Some(p) => p.parse::<u16>().context("bad port")?,
-            None => 443,
-        };
-        return Ok((host.to_owned(), port));
-    }
-    match host_port.rsplit_once(':') {
-        Some((h, p)) => Ok((h.to_owned(), p.parse::<u16>().context("bad port")?)),
-        None => Ok((host_port.to_owned(), 443)),
-    }
 }
 
 #[cfg(test)]
@@ -720,30 +700,6 @@ mod tests {
         assert!(validate_fetch_url("https://169.254.0.1/x").is_err());
         assert!(validate_fetch_url("https://0.0.0.0/x").is_err());
         assert!(validate_fetch_url("not a url").is_err());
-    }
-
-    #[test]
-    fn parse_host_port_handles_ipv6_literals_and_defaults() {
-        let parse = parse_host_port;
-        assert_eq!(
-            parse("[2606:4700::1]:443").unwrap(),
-            ("2606:4700::1".to_owned(), 443)
-        );
-        assert_eq!(parse("[::1]:8080").unwrap(), ("::1".to_owned(), 8080));
-        assert_eq!(
-            parse("[2001:db8::a]").unwrap(),
-            ("2001:db8::a".to_owned(), 443)
-        );
-        assert_eq!(
-            parse("example.com").unwrap(),
-            ("example.com".to_owned(), 443)
-        );
-        assert_eq!(
-            parse("example.com:8443").unwrap(),
-            ("example.com".to_owned(), 8443)
-        );
-        assert!(parse("[::1:443").is_err(), "unterminated bracket");
-        assert!(parse("example.com:70000").is_err(), "port out of range");
     }
 
     #[test]
@@ -820,6 +776,12 @@ mod tests {
             pool.ranges().iter().all(|c| c.host_count() >= 1u128 << 96),
             "every bundled v6 range must be huge"
         );
+    }
+
+    #[test]
+    fn bundled_pools_parse_non_empty() {
+        assert!(!CidrPool::bundled().ranges().is_empty());
+        assert!(!CidrPool::bundled_v6().ranges().is_empty());
     }
 
     #[test]

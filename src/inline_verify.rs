@@ -161,8 +161,16 @@ async fn run_attempt(
                     }
                 }
             }
-            let (_, live) = tunnel.as_mut().expect("tunnel established above");
-            let stream = live.stream.take().expect("live tunnel owns a stream");
+            let Some((_, live)) = tunnel.as_mut() else {
+                tracing::debug!(ip = %dial_ip, "inline probe: tunnel invariant violated");
+                all_ok = false;
+                break;
+            };
+            let Some(stream) = live.stream.take() else {
+                tracing::debug!(ip = %dial_ip, "inline probe: tunnel invariant violated");
+                all_ok = false;
+                break;
+            };
             match exchange(stream, &mut live.marker_consumed, spec, target).await {
                 Ok((stream, status, body)) => {
                     live.stream = Some(stream);

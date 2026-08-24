@@ -206,9 +206,21 @@ async fn cleanup_trial_dir(trial_dir: &Path) {
 /// (`remove_dir_all` of a missing path returns Ok).
 struct TrialDirGuard(PathBuf);
 
+impl TrialDirGuard {
+    /// Deterministic blocking removal for tests that assert the dir is gone
+    /// (the tokio `Drop` impl must not block the runtime, so it detaches).
+    #[cfg(test)]
+    pub(crate) fn cleanup_blocking(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
 impl Drop for TrialDirGuard {
     fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
+        let dir = self.0.clone();
+        std::thread::spawn(move || {
+            let _ = std::fs::remove_dir_all(dir);
+        });
     }
 }
 
@@ -220,8 +232,34 @@ fn sweep_stale_trial_dirs(work_dir: &Path) {
     sweep_stale_trial_dirs_before(work_dir, std::time::SystemTime::now() - STALE_TRIAL_AGE);
 }
 
-/// The sweep runs off the async executor (per-attempt blocking fs).
+/// Throttle for the per-attempt sweep: 30k attempts must not do 30k
+/// `read_dir`+`metadata` sweeps. The real cost is paid once per top-level
+/// verify call; subsequent probes in the same scan see a cheap early return.
+/// Uses wall-clock secs so no extra state is threaded through callers.
+static LAST_SWEEP_SECS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// The sweep runs off the async executor (per-attempt blocking fs) but is
+/// throttled to once per `STALE_TRIAL_AGE`.
 async fn sweep_stale_trial_dirs_async(work_dir: &Path) {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let last = LAST_SWEEP_SECS.load(std::sync::atomic::Ordering::Relaxed);
+    if last != 0 && now.saturating_sub(last) < STALE_TRIAL_AGE.as_secs() {
+        return;
+    }
+    if LAST_SWEEP_SECS
+        .compare_exchange(
+            last,
+            now,
+            std::sync::atomic::Ordering::Relaxed,
+            std::sync::atomic::Ordering::Relaxed,
+        )
+        .is_err()
+    {
+        return;
+    }
     let work_dir = work_dir.to_path_buf();
     let _ = tokio::task::spawn_blocking(move || sweep_stale_trial_dirs(&work_dir)).await;
 }
@@ -254,7 +292,8 @@ fn next_trial_id() -> u64 {
 /// can bind it. A tiny race, mitigated by the socks readiness poll failing
 /// the attempt (never the process).
 fn pick_ephemeral_port() -> Result<u16> {
-    let listener = std::net::TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))?;
+    let listener = std::net::TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+        .map_err(|e| anyhow!("no free ephemeral port ({}): {e}", e.kind()))?;
     Ok(listener.local_addr()?.port())
 }
 
@@ -380,13 +419,21 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         {
-            let guard = TrialDirGuard(dir.clone());
+            let mut guard = TrialDirGuard(dir.clone());
             assert!(dir.exists());
-            drop(guard);
+            guard.cleanup_blocking();
+            assert!(
+                !dir.exists(),
+                "cleanup_blocking must remove the credential dir"
+            );
+            // Drop after explicit cleanup is a detached no-op.
         }
-        assert!(!dir.exists(), "drop must remove the credential dir");
-        // Dropping after an explicit cleanup is a no-op, not an error.
-        let _ = TrialDirGuard(dir.clone());
+        assert!(!dir.exists());
+        // Detached Drop on a missing dir must not panic; give the thread a moment.
+        let guard = TrialDirGuard(dir.clone());
+        drop(guard);
+        std::thread::sleep(Duration::from_millis(20));
+        assert!(!dir.exists());
     }
 
     #[test]

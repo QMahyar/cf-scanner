@@ -94,6 +94,7 @@ browser frontend, and an agent-friendly CLI — all driving the same engine.
   (see correction #1).
 - Frontend: one embedded HTML file, vanilla JS + native EventSource + custom
   design system (v0.3.0), zero build step.
+  - Shipped reality (v0.7+): Svelte 5 SPA in `ui/` compiled to committed `ui/dist`, embedded via `rust-embed` (`src/server.rs`), bilingual EN/FA — see `docs/spec.md` §2.
 
 ### Release pipeline (confirmed)
 - Public GitHub repo, MIT license. Name: CF-Scanner / cf-scanner.

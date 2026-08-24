@@ -194,8 +194,10 @@ fn bundle_xray_if_requested() {
     }
     let target = std::env::var("TARGET").unwrap_or_default();
     let Some(asset) = xray_asset(&target) else {
-        eprintln!("warn: no xray asset for target {target}; archive ships without xray");
-        return;
+        eprintln!(
+            "error: no xray asset for target {target}; refusing to ship archive without xray"
+        );
+        std::process::exit(1);
     };
     let exe = if asset.contains("windows") {
         "xray.exe"
@@ -351,7 +353,21 @@ fn make_executable(_path: &std::path::Path) {}
 
 fn download(url: &str) -> Option<Vec<u8>> {
     let out = Command::new("curl")
-        .args(["-fsSL", "--max-time", "180", "-o", "-", url])
+        .args([
+            "-fsSL",
+            "--retry",
+            "3",
+            "--retry-delay",
+            "2",
+            "--proto",
+            "=https",
+            "--tlsv1.2",
+            "--max-time",
+            "180",
+            "-o",
+            "-",
+            url,
+        ])
         .output()
         .ok()?;
     if !out.status.success() || out.stdout.is_empty() {

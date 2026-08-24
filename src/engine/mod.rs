@@ -11,7 +11,7 @@ pub use plan::{PlanItem, SplitMix64, plan};
 
 use std::collections::HashSet;
 use std::net::IpAddr;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Instant, SystemTime};
 
@@ -52,11 +52,13 @@ pub struct AlreadyRunning;
 pub struct ScanController {
     transport: Arc<dyn Transport>,
     warp_transport: Arc<dyn Transport>,
+    warp_cache: Option<Arc<crate::warp::SocketCache>>,
     sub_fetch: Arc<dyn SubFetch>,
     tunnel_probe: Arc<dyn TunnelProbe>,
     geo: Arc<Geo>,
     events: broadcast::Sender<ScanEvent>,
     store: Store,
+    store_dirty: Arc<AtomicBool>,
     summary: Mutex<Option<ScanSummary>>,
     cancel_tx: Mutex<Option<watch::Sender<bool>>>,
     running: Mutex<bool>,
@@ -64,7 +66,11 @@ pub struct ScanController {
 
 impl ScanController {
     pub fn new(transport: Arc<dyn Transport>) -> Self {
-        Self::with_transports(transport, Arc::new(crate::warp::WarpTransport))
+        let warp_cache = Arc::new(crate::warp::SocketCache::default());
+        let warp_transport = Arc::new(crate::warp::WarpTransport::with_cache(warp_cache.clone()));
+        let mut ctrl = Self::with_transports(transport, warp_transport);
+        ctrl.warp_cache = Some(warp_cache);
+        ctrl
     }
 
     /// One controller serving both modes (the server's case): CDN probes go
@@ -73,15 +79,17 @@ impl ScanController {
         transport: Arc<dyn Transport>,
         warp_transport: Arc<dyn Transport>,
     ) -> Self {
-        let (events, _) = broadcast::channel(1024);
+        let (events, _) = broadcast::channel(4096);
         Self {
             transport,
             warp_transport,
+            warp_cache: None,
             sub_fetch: Arc::new(RealSubFetch),
             tunnel_probe: Arc::new(HybridTunnelProbe::new(Arc::new(XrayTunnelProbe))),
             geo: Arc::new(Geo::embedded()),
             events,
             store: Arc::new(Mutex::new(Vec::new())),
+            store_dirty: Arc::new(AtomicBool::new(false)),
             summary: Mutex::new(None),
             cancel_tx: Mutex::new(None),
             running: Mutex::new(false),
@@ -115,6 +123,7 @@ impl ScanController {
 
     /// Snapshot of the last scan's working endpoints, sorted by latency.
     pub fn results(&self) -> Vec<Verdict> {
+        sort_if_dirty(&self.store, &self.store_dirty);
         self.store.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
@@ -162,6 +171,7 @@ impl ScanController {
     /// itself is the one clearing, not a concurrent caller).
     fn clear_store(&self) {
         self.store.lock().unwrap_or_else(|e| e.into_inner()).clear();
+        self.store_dirty.store(false, Ordering::Relaxed);
         self.summary
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -495,7 +505,7 @@ fn plan_probe_count(plan: &[PlanItem], ports: &[u16]) -> u64 {
 
 /// Verdicts a worker accumulates before flushing to the shared store, so the
 /// store lock is taken once per batch instead of once per verdict.
-const BATCH_FLUSH: usize = 64;
+const BATCH_FLUSH: usize = 256;
 
 /// Shared state for one probe phase: stop conditions, counters, and the
 /// event/store handles every worker needs. `Arc`-shared between the producer
@@ -508,6 +518,7 @@ struct ProbeContext {
     cadence: u64,
     total: u64,
     store: Store,
+    dirty: Arc<AtomicBool>,
     events: broadcast::Sender<ScanEvent>,
     geo: Arc<Geo>,
 }
@@ -525,6 +536,18 @@ impl ProbeContext {
                 .is_some_and(|cap| self.scanned.load(Ordering::Relaxed) >= u64::from(cap))
     }
 
+    async fn cancelled(&self) {
+        let mut rx = self.cancel.clone();
+        loop {
+            if *rx.borrow() {
+                return;
+            }
+            if rx.changed().await.is_err() {
+                return;
+            }
+        }
+    }
+
     fn progress(&self, scanned: u64, found: u64) {
         let _ = self.events.send(ScanEvent::Progress(ScanProgress {
             scanned,
@@ -534,32 +557,26 @@ impl ProbeContext {
     }
 }
 
-/// Sorted merge of a worker's verdict batch into the global store: one lock,
-/// O(n + b) instead of b single-insert O(n) memmoves.
-fn merge_sorted(store: &Store, mut batch: Vec<Verdict>) {
+fn merge_sorted(store: &Store, dirty: &AtomicBool, batch: Vec<Verdict>) {
     if batch.is_empty() {
         return;
     }
-    batch.sort_unstable_by_key(|v| v.latency_ms);
     let mut results = store.lock().unwrap_or_else(|e| e.into_inner());
-    if results.is_empty() {
-        *results = batch;
+    results.extend(batch);
+    dirty.store(true, Ordering::Relaxed);
+}
+
+fn sort_if_dirty(store: &Store, dirty: &AtomicBool) {
+    if !dirty.swap(false, Ordering::AcqRel) {
         return;
     }
-    let mut merged = Vec::with_capacity(results.len() + batch.len());
-    let (mut i, mut j) = (0, 0);
-    while i < results.len() && j < batch.len() {
-        if results[i].latency_ms <= batch[j].latency_ms {
-            merged.push(results[i].clone());
-            i += 1;
-        } else {
-            merged.push(batch[j].clone());
-            j += 1;
-        }
-    }
-    merged.extend_from_slice(&results[i..]);
-    merged.extend_from_slice(&batch[j..]);
-    *results = merged;
+    let mut results = store.lock().unwrap_or_else(|e| e.into_inner());
+    results.sort_unstable_by(|a, b| {
+        a.latency_ms
+            .cmp(&b.latency_ms)
+            .then_with(|| a.ip.cmp(&b.ip))
+            .then_with(|| a.port.cmp(&b.port))
+    });
 }
 
 #[cfg(test)]
@@ -853,5 +870,61 @@ mod tests {
             events.iter().any(|e| matches!(e, ScanEvent::Finished(_))),
             "the terminal event must arrive too"
         );
+    }
+
+    #[test]
+    fn store_lazy_sort_orders_by_latency_then_ip_port() {
+        let c = Arc::new(ScanController::new(Arc::new(FakeTransport::new())));
+        let v1 = Verdict {
+            ip: "10.0.0.3".parse().unwrap(),
+            port: 443,
+            latency_ms: Some(50),
+            country: None,
+            colo: None,
+            phase2: None,
+        };
+        let v2 = Verdict {
+            ip: "10.0.0.1".parse().unwrap(),
+            port: 443,
+            latency_ms: Some(10),
+            country: None,
+            colo: None,
+            phase2: None,
+        };
+        let v3 = Verdict {
+            ip: "10.0.0.2".parse().unwrap(),
+            port: 80,
+            latency_ms: Some(10),
+            country: None,
+            colo: None,
+            phase2: None,
+        };
+        merge_sorted(
+            &c.store,
+            &c.store_dirty,
+            vec![v1.clone(), v2.clone(), v3.clone()],
+        );
+        let results = c.results();
+        assert_eq!(results.len(), 3);
+        // Sorted by latency, then ip, then port: 10@10.0.0.1:443, 10@10.0.0.2:80, 50@10.0.0.3:443
+        assert_eq!(results[0].ip, "10.0.0.1".parse::<IpAddr>().unwrap());
+        assert_eq!(results[0].port, 443);
+        assert_eq!(results[1].ip, "10.0.0.2".parse::<IpAddr>().unwrap());
+        assert_eq!(results[1].port, 80);
+        assert_eq!(results[2].ip, "10.0.0.3".parse::<IpAddr>().unwrap());
+        // push after read dirties again
+        let v4 = Verdict {
+            ip: "10.0.0.4".parse().unwrap(),
+            port: 443,
+            latency_ms: Some(5),
+            country: None,
+            colo: None,
+            phase2: None,
+        };
+        merge_sorted(&c.store, &c.store_dirty, vec![v4.clone()]);
+        let results2 = c.results();
+        assert_eq!(results2.len(), 4);
+        assert_eq!(results2[0].latency_ms, Some(5));
+        assert_eq!(results2[0].ip, "10.0.0.4".parse::<IpAddr>().unwrap());
     }
 }

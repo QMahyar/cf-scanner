@@ -1,15 +1,9 @@
 <script lang="ts">
-  import { onMount } from "svelte";
+  import { onDestroy, onMount } from "svelte";
   import { Languages, Radar, SlidersHorizontal } from "@lucide/svelte";
   import { api, subscribe, type LiveStatus } from "./lib/api";
-  import { currentLocale, setLocale, t, toggleLocale } from "./lib/i18n.svelte";
-  import {
-    applyResult,
-    recordTick,
-    resetResults,
-    setProMode,
-    ui,
-  } from "./lib/store.svelte";
+  import { currentLocale, t, toggleLocale } from "./lib/i18n.svelte";
+  import { applyResult, recordTick, setProMode, ui } from "./lib/store.svelte";
   import SimpleStart from "./lib/components/SimpleStart.svelte";
   import ProPanel from "./lib/components/ProPanel.svelte";
 
@@ -42,9 +36,17 @@
     }
   }
 
+  let es: EventSource | null = null;
+  let hadLive = $state(false);
+  const showReconnecting = $derived(hadLive && live !== "live");
+
+  $effect(() => {
+    if (live === "live") hadLive = true;
+  });
+
   onMount(() => {
     void hydrate();
-    subscribe({
+    es = subscribe({
       onProgress: (p) => {
         recordTick(p);
         app.progress = p;
@@ -63,8 +65,11 @@
         app.running = false;
       },
       onStatus: (s) => (live = s),
+      onReconnect: () => void hydrate(),
     });
   });
+
+  onDestroy(() => es?.close());
 
   function togglePro() {
     setProMode(!app.proMode);
@@ -129,6 +134,19 @@
       </button>
     </div>
   </header>
+
+  {#if showReconnecting}
+    <div
+      class="fade-in mb-2 rounded-md border px-3 py-2 text-xs"
+      style="border-color: oklch(100% 0 0 / 8%); background: var(--paper-2); color: var(--ink-muted)"
+      role="status"
+      aria-live="polite"
+    >
+      {live === "offline" ? t("live.offline") : t("live.connecting")} · {live === "offline"
+        ? t("app.live.offlineTitle")
+        : t("app.live.connectingTitle")}
+    </div>
+  {/if}
 
   <main class="flex flex-1 flex-col gap-6 pb-10">
     {#if app.error}

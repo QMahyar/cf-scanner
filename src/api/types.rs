@@ -44,6 +44,9 @@ pub const MAX_STOP_VALUE: u32 = 100_000_000;
 pub const MAX_SNI_LABEL_CHARS: usize = 63;
 /// Total hostname length cap for SNI (RFC 1035: FQDN max 253 chars).
 pub const MAX_SNI_HOSTNAME_CHARS: usize = 253;
+/// Custom WARP endpoint lines allowed in one scan; bounds the UDP fan-out
+/// (`warp_groups` materializes one task per endpoint × port).
+pub const MAX_ENDPOINTS: usize = 2048;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Mode {
@@ -103,6 +106,7 @@ pub struct CustomFragment {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Phase2Config {
     /// vless:// trojan:// vmess:// ss:// links, subscription URLs, or local
     /// Xray JSON file paths. At least one required.
@@ -153,6 +157,7 @@ impl Default for Phase2Config {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct WarpConfig {
     /// `ip`, `ip:port`, or CIDR lines; empty = bundled pools.
     pub custom_endpoints: Vec<String>,
@@ -177,6 +182,7 @@ impl Default for WarpConfig {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ScanConfig {
     pub mode: Mode,
     pub target: ScanTarget,
@@ -365,6 +371,8 @@ pub enum ConfigError {
         "custom fragment {0} range out of bounds (length 1-65535, interval 1-60000), got {1:?}"
     )]
     InvalidFragmentRange(&'static str, String),
+    #[error("warp.custom_endpoints must have at most {MAX_ENDPOINTS} entries, got {0}")]
+    TooManyEndpoints(usize),
 }
 
 impl ScanConfig {
@@ -461,6 +469,9 @@ impl WarpConfig {
         {
             return Err(ConfigError::WgconfTooLong(MAX_WGCONF_BYTES));
         }
+        if self.custom_endpoints.len() > MAX_ENDPOINTS {
+            return Err(ConfigError::TooManyEndpoints(self.custom_endpoints.len()));
+        }
         for ep in &self.custom_endpoints {
             validate_endpoint(ep)?;
         }
@@ -471,6 +482,11 @@ impl WarpConfig {
 fn validate_ports(ports: &[u16]) -> Result<(), ConfigError> {
     if ports.is_empty() {
         return Err(ConfigError::InvalidPort(0));
+    }
+    // Pre-check the RAW length before the O(n log n) sort: a JSON body with
+    // millions of duplicate entries must be rejected without doing the work.
+    if ports.len() > MAX_PORTS * 64 {
+        return Err(ConfigError::TooManyPorts(ports.len()));
     }
     for &p in ports {
         if p == 0 {

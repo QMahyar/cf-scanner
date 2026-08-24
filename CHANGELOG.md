@@ -3,87 +3,86 @@
 All notable changes to CF-Scanner are documented here, grouped by
 Added / Changed / Fixed / Deprecated / Removed / Security, newest on top.
 
-## [0.5.1] - 2026-08-21
+## [Unreleased]
 
-### Changed
-- **WARP working verdict now requires zero probe loss.** An endpoint appears
-  in results only if every WireGuard probe answered (0% loss); endpoints with
-  any probe loss are excluded entirely instead of being listed with a loss %.
-  "Stop after N found" and latency-based ranking count zero-loss endpoints
-  only (QA decision 2026-08-20, see ADR-002 update).
-- SSE `/api/events` streams end after the run's terminal event instead of
-  hanging open, so graceful shutdown completes while a UI tab is connected;
-  clients that subscribe mid-finish now replay the terminal exactly once.
-- `--cap` is enforced run-wide across phases 1+2 (was per-phase), and
-  `phase2_only` runs count verification attempts in `summary.scanned`
-  (previously reported 0).
-- Removed the always-0.0 `loss_pct` field from verdicts (API, engine, UI
-  table and CSV export).
+## [0.8.0] - 2026-08-24
+
+Ten-agent full-product review remediation: security hardening, engine
+performance overhaul, API polish, CLI/UX, frontend a11y, and release-chain
+integrity. All gates green (361 lib + 35 CLI + 8 integration tests, clippy
+`-D warnings`, `cargo fmt`, UI `svelte-check` strict, Playwright visual QA).
 
 ### Added
-- `serve --autostart=remove` unregisters the start-with-Windows entry without
-  `--tray`; registration now happens only after a successful bind.
-
-### Fixed
-- WARP mode fails loudly on unparsable `--exclude` CIDRs instead of silently
-  scanning excluded space.
-- A panic unwinding through a scan can no longer leave the controller
-  permanently busy ("a scan is already running").
-- Closed the `/api/events` missed-terminal race, the concurrent-start race
-  (racing POSTs get 409, no phantom `Failed` mid-scan), and the WARP
-  registration overwrite-consent race.
-- A corrupt persisted WARP server key falls back to the bundled constant
-  instead of panicking every probe.
-- Hostile tunneled responses can no longer force 64 MiB allocations per
-  attempt (probe body cap) and over-cap socks responses fail explicitly
-  instead of truncating silently.
-- Windows secret files (`identity.json`, `profiles.json`, trial configs) are
-  locked down to the owning user with a protected DACL.
-- The GeoIP build cache verifies its SHA-256 sidecar before use and writes
-  atomically; truncated caches re-download instead of persisting forever.
-- `xray` download/export errors are sanitized like every other path; the
-  Host allowlist is case-insensitive and rejects `::1` (server binds IPv4
-  loopback only); explicit byte caps on license and export-config fields;
-  wizard Ctrl+C detected by type; outbound fetches accept bracketed IPv6
-  literals.
-
-## [0.6.0] - 2026-08-22
-
-### Added
-- **Rebuilt browser UI in Svelte 5**, embedded via rust-embed (the vanilla
-  single-file page is gone). Simple mode by default: one-tap scanning with a
-  live progress bar, rate/ETA and top-endpoint cards. A Pro toggle reveals the
-  full console: complete scan configuration with inline validation and
-  field-level errors, profiles save/load/delete, phase-2 verification with an
-  xray availability chip + download, WARP identity registration (license +
-  overwrite consent) with wgconf export, sortable results table with per-row
-  importable-URI copy and copy-all, custom CIDR/exclusion editors, ranges
-  info, and a small-mode knob ("find up to N IPs").
-- **Cloudflare port picker**: checkbox chips from verified catalogs — CDN =
-  the six TLS ports from Cloudflare's network-ports documentation
-  (443/2053/2083/2087/2096/8443); WARP = the four official WireGuard ports
-  (2408/500/1701/4500) behind a collapsible 50-port community-verified
-  extended list — plus custom-port entry with inline validation.
-- Mobile/responsive pass: results table scrolls inside its card, ≥44px touch
-  targets on coarse pointers, 16px inputs below 640px (no iOS zoom-jump),
-  wrapping header, safe-area insets, scroll-jank-free background blooms.
+- **CLI:** grouped `--help` sections (candidate/stopping/tuning/phase2/WARP),
+  `--cap`→`max-probes` and `--target`→`stop-after` aliases, `--warp-wgconf`
+  alias, `serve --open` (cross-platform browser launch), TTY-only live
+  progress ticker for one-shot scans, `--json-errors` machine-readable
+  failures, help examples block.
+- **API:** machine-readable `code` field on every error envelope; typed WARP
+  registration errors now map to proper statuses (timeout→504,
+  rate-limit→429, rejection/server→502) instead of blanket 502; xray
+  download failures use the uniform error envelope (no more HTTP 200 with
+  `{success:false}`); SSE events carry an explicit `retry:` hint.
+- **Resilience:** SSE stream survives broadcast lag — it replays the last
+  terminal snapshot and keeps listening instead of closing (reconnect-storm
+  fix); UI re-hydrates status/results when EventSource reconnects and shows
+  an offline banner; EventSource handle is closed on teardown.
 
 ### Changed
-- SSE `/api/events` keeps idle connections open across scans: a replayed
-  terminal from the previous run is context only, so browser tabs stop
-  reconnect-storming while idle. Graceful shutdown bounds its wait (5 s) so
-  deliberately-open streams can never hang process exit.
-- Latency values use a dedicated green/amber/red ramp; brand orange now means
-  brand/actions only. Fonts ship bundled (Inter + JetBrains Mono) — the UI
-  makes zero CDN calls.
+- **Engine throughput:** per-worker task queues replace the shared
+  mutex-guarded receiver (dispatch no longer serializes); producer uses
+  backpressured `send().await` instead of a try_send/sleep poll; probe
+  futures race cancellation (`select!`) so Stop takes effect immediately
+  instead of after the in-flight timeout; result store flushes are O(1)
+  pushes with lazy sort-on-read (was O(found²) merge churn); broadcast
+  buffer 1024→4096; batch flush 64→256; per-port RNG hoisted out of hot
+  loops; phase-2 shares config/candidate sets via `Arc` across workers.
+- **WARP:** server public key resolved once per scan (was one identity.json
+  read PER PROBE); socket cache is per-controller and injectable, never
+  holds its lock across `.await`, and the global static is gone; corrupt
+  persisted identity keys log a warning before falling back to bundled.
+- **Fetch stack:** ranges + xray downloads share one reqwest client whose
+  redirect policy enforces the SSRF guard per hop; ~200 lines of hand-rolled
+  TLS/HTTP/chunked fetch code deleted; TCP_NODELAY on probe sockets;
+  wait-for-xray polling backs off exponentially; trial-dir sweeps throttle
+  to once per stale window and guard cleanup leaves the runtime thread.
+- **Frontend:** latin-only Inter subsets (-83 KB dist), first-invalid focus
+  management, `aria-describedby` wiring on all field errors, `aria-sort` on
+  sortable buttons, checkbox focus rings, copy feedback via `role=status`,
+  safe-area padding on the sticky action bar, live pace/ETA tick,
+  Copy-all respects active filters, `tsconfig` now `strict`.
+
+### Security
+- `--warp-wgconf-file` read capped at 64 KiB before parse (OOM guard).
+- Xray zip: archive and entry sizes capped at 64 MiB (zip-bomb guard);
+  cached-binary memo re-stats the file so a vanished/truncated binary
+  re-downloads instead of failing at spawn.
+- `Origin: null` requests denied (sandboxed-frame CSRF surface); JSON body
+  rejection text sanitized + truncated before echoing into error envelopes.
+- Contract tightening: `deny_unknown_fields` on ScanConfig/Phase2/Warp
+  payloads, custom WARP endpoints capped (2048), raw port-array precheck
+  before dedupe sort, decoded SIP002 user-id cap, wg URI host grammar check,
+  profile-name traversal characters rejected.
+- npm wrapper verifies the downloaded archive against its published
+  `.sha256` (fail closed), extracts via argv-form `spawnSync` (no shell
+  interpolation), retries downloads once, requires Node ≥14.14.
+- CI gains a version-parity job (Cargo.toml == npm package.json ==
+  RELEASE_TAG) and a pinned rust-toolchain (1.88 = CI toolchain).
 
 ### Fixed
-- Starting a scan no longer errors client-side with "Unexpected end of JSON
-  input" (202-with-empty-body responses are handled).
-- Idle EventSource connections closed-and-reconnected endlessly after
-  replaying a stale terminal, which could also miss the next run's events.
-- Copy affordances tell the truth: cards copy ip:port and say so; passing
-  phase-2 rows offer the real importable URI via `/api/config/export`.
+- Ctrl+C hook failures are logged instead of silently leaving a scan
+  running (scan + wizard paths); wizard prompts moved off tokio workers
+  (`spawn_blocking`) and show a config summary before confirming.
+- Inline phase-2 verifier invariant violations return failed verdicts
+  instead of panicking a worker task; "every attempt failed" messages no
+  longer claim probes never ran when they simply did not pass; ephemeral
+  port errors carry their io::ErrorKind.
+- dgst parser is line-exact (`SHA2-256= <hex>[ <filename>]`) so a long hex
+  comment cannot satisfy the checksum; bundled range pools assert non-empty
+  at test time; Windows token-size query validates ERROR_INSUFFICIENT_BUFFER
+  before sizing its buffer.
+- Stale docs/comments corrected (profiles persistence, spec/intent frontend
+  reality notes, CHANGELOG newest-first order restored).
 
 ## [0.7.0] - 2026-08-24
 
@@ -129,7 +128,6 @@ Added / Changed / Fixed / Deprecated / Removed / Security, newest on top.
   cross-mode profile loads; each import button targets its own field;
   failed stop/cancel requests surface in the UI; ETAs humanize past 60 s.
 
-### Fixed
 - SSE `/api/events` no longer closes idle connections after replaying the
   previous run's terminal: a browser EventSource held open between scans used
   to reconnect-storm (connect -> replay -> close -> reconnect) and could miss
@@ -138,7 +136,6 @@ Added / Changed / Fixed / Deprecated / Removed / Security, newest on top.
   shutdown additionally bounds its wait (5 s grace) so deliberately-open idle
   streams can never hang process exit.
 
-### Fixed
 - **Stale validation message.** "Fix the highlighted fields to continue."
   no longer lingers after the user corrects the field — the message clears
   live while typing and stays cleared after Next.
@@ -155,6 +152,88 @@ Added / Changed / Fixed / Deprecated / Removed / Security, newest on top.
   (WARP mode without configs). The option is now disabled in that state.
 - Heading hierarchy: "Generate WARP config (optional)" was an H4 under an H2
   (skipped H3); it is now an H3.
+
+## [0.6.0] - 2026-08-22
+
+### Added
+- **Rebuilt browser UI in Svelte 5**, embedded via rust-embed (the vanilla
+  single-file page is gone). Simple mode by default: one-tap scanning with a
+  live progress bar, rate/ETA and top-endpoint cards. A Pro toggle reveals the
+  full console: complete scan configuration with inline validation and
+  field-level errors, profiles save/load/delete, phase-2 verification with an
+  xray availability chip + download, WARP identity registration (license +
+  overwrite consent) with wgconf export, sortable results table with per-row
+  importable-URI copy and copy-all, custom CIDR/exclusion editors, ranges
+  info, and a small-mode knob ("find up to N IPs").
+- **Cloudflare port picker**: checkbox chips from verified catalogs — CDN =
+  the six TLS ports from Cloudflare's network-ports documentation
+  (443/2053/2083/2087/2096/8443); WARP = the four official WireGuard ports
+  (2408/500/1701/4500) behind a collapsible 50-port community-verified
+  extended list — plus custom-port entry with inline validation.
+- Mobile/responsive pass: results table scrolls inside its card, ≥44px touch
+  targets on coarse pointers, 16px inputs below 640px (no iOS zoom-jump),
+  wrapping header, safe-area insets, scroll-jank-free background blooms.
+
+### Changed
+- SSE `/api/events` keeps idle connections open across scans: a replayed
+  terminal from the previous run is context only, so browser tabs stop
+  reconnect-storming while idle. Graceful shutdown bounds its wait (5 s) so
+  deliberately-open streams can never hang process exit.
+- Latency values use a dedicated green/amber/red ramp; brand orange now means
+  brand/actions only. Fonts ship bundled (Inter + JetBrains Mono) — the UI
+  makes zero CDN calls.
+
+### Fixed
+- Starting a scan no longer errors client-side with "Unexpected end of JSON
+  input" (202-with-empty-body responses are handled).
+- Idle EventSource connections closed-and-reconnected endlessly after
+  replaying a stale terminal, which could also miss the next run's events.
+- Copy affordances tell the truth: cards copy ip:port and say so; passing
+  phase-2 rows offer the real importable URI via `/api/config/export`.
+
+## [0.5.1] - 2026-08-21
+
+### Changed
+- **WARP working verdict now requires zero probe loss.** An endpoint appears
+  in results only if every WireGuard probe answered (0% loss); endpoints with
+  any probe loss are excluded entirely instead of being listed with a loss %.
+  "Stop after N found" and latency-based ranking count zero-loss endpoints
+  only (QA decision 2026-08-20, see ADR-002 update).
+- SSE `/api/events` streams end after the run's terminal event instead of
+  hanging open, so graceful shutdown completes while a UI tab is connected;
+  clients that subscribe mid-finish now replay the terminal exactly once.
+- `--cap` is enforced run-wide across phases 1+2 (was per-phase), and
+  `phase2_only` runs count verification attempts in `summary.scanned`
+  (previously reported 0).
+- Removed the always-0.0 `loss_pct` field from verdicts (API, engine, UI
+  table and CSV export).
+
+### Added
+- `serve --autostart=remove` unregisters the start-with-Windows entry without
+  `--tray`; registration now happens only after a successful bind.
+
+### Fixed
+- WARP mode fails loudly on unparsable `--exclude` CIDRs instead of silently
+  scanning excluded space.
+- A panic unwinding through a scan can no longer leave the controller
+  permanently busy ("a scan is already running").
+- Closed the `/api/events` missed-terminal race, the concurrent-start race
+  (racing POSTs get 409, no phantom `Failed` mid-scan), and the WARP
+  registration overwrite-consent race.
+- A corrupt persisted WARP server key falls back to the bundled constant
+  instead of panicking every probe.
+- Hostile tunneled responses can no longer force 64 MiB allocations per
+  attempt (probe body cap) and over-cap socks responses fail explicitly
+  instead of truncating silently.
+- Windows secret files (`identity.json`, `profiles.json`, trial configs) are
+  locked down to the owning user with a protected DACL.
+- The GeoIP build cache verifies its SHA-256 sidecar before use and writes
+  atomically; truncated caches re-download instead of persisting forever.
+- `xray` download/export errors are sanitized like every other path; the
+  Host allowlist is case-insensitive and rejects `::1` (server binds IPv4
+  loopback only); explicit byte caps on license and export-config fields;
+  wizard Ctrl+C detected by type; outbound fetches accept bracketed IPv6
+  literals.
 
 ## [0.5.0] - 2026-08-18
 

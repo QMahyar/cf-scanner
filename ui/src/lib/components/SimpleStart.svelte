@@ -2,6 +2,8 @@
   import { Check, Copy, Download, Gauge, Play, Share2, Square } from "@lucide/svelte";
   import {
     exportText,
+    filteredEndpoints,
+    resultFilter,
     simpleConfig,
     startScan,
     stopScan,
@@ -18,12 +20,21 @@
   let findUpTo = $state(20);
   let testUpTo = $state(800);
   let copiedAll = $state<ExportHow | null>(null);
+  let tick = $state(0);
+
+  $effect(() => {
+    if (!app.running) return;
+    const id = setInterval(() => tick++, 1000);
+    return () => clearInterval(id);
+  });
 
   async function start() {
     starting = true;
     await startScan(simpleConfig(findUpTo, scanMode, testUpTo));
     starting = false;
   }
+
+  const filter = resultFilter();
 
   const best = $derived(
     [...app.results]
@@ -36,6 +47,7 @@
 
   /** Rate/ETA recomputed on every progress tick — good enough for a hint. */
   const pace = $derived.by(() => {
+    void tick;
     if (!app.running || app.startedAt === null || app.progress.scanned <= 0)
       return null;
     const elapsed = Math.max((Date.now() - app.startedAt) / 1000, 0.5);
@@ -58,7 +70,8 @@
   const finishedIdle = $derived(!app.running && app.summary !== null);
 
   async function copyAll() {
-    const lines = best.map((r) => `${r.ip}:${r.port}`).join("\n");
+    const visible = best.filter((r) => filter.maxLatency === null || (r.latency_ms ?? 9e9) <= filter.maxLatency);
+    const lines = filteredEndpoints(visible, null);
     copiedAll = await exportText(lines, "cf-scanner-endpoints.txt");
     setTimeout(() => (copiedAll = null), 1600);
   }
@@ -270,6 +283,7 @@
           : "background: var(--paper-3); color: var(--ink-muted)"}
         title={t("table.copyAllTitle")}
         onclick={copyAll}
+        aria-live="polite"
       >
         {#if copiedAll !== null}
           <Check class="size-3.5" />
@@ -283,6 +297,7 @@
           {t("results.copyAll")}
         {/if}
       </button>
+      <span role="status" aria-live="polite" class="sr-only">{copiedAll !== null ? (copiedAll === "clipboard" ? t("results.copied") : copiedAll === "share" ? t("results.shared") : t("results.saved")) : ""}</span>
     </div>
     <div class="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
       {#each best.slice(0, SHOWN) as r, i (r.ip + ":" + r.port)}

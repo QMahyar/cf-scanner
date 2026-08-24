@@ -54,7 +54,8 @@ pub fn xray_binary_path() -> Result<PathBuf> {
 #[cfg(windows)]
 pub fn lock_down_to_owner(path: &std::path::Path) -> std::io::Result<()> {
     use std::os::windows::ffi::OsStrExt as _;
-    use windows::Win32::Foundation::{GENERIC_ALL, HANDLE, NO_ERROR, WIN32_ERROR};
+    use windows::Win32::Foundation::ERROR_INSUFFICIENT_BUFFER;
+    use windows::Win32::Foundation::{CloseHandle, GENERIC_ALL, HANDLE, NO_ERROR, WIN32_ERROR};
     use windows::Win32::Security::Authorization::{
         EXPLICIT_ACCESS_W, GRANT_ACCESS, SE_FILE_OBJECT, SetEntriesInAclW, SetNamedSecurityInfoW,
         TRUSTEE_IS_SID, TRUSTEE_IS_USER, TRUSTEE_W,
@@ -78,9 +79,23 @@ pub fn lock_down_to_owner(path: &std::path::Path) -> std::io::Result<()> {
     unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) }
         .map_err(hresult_err)?;
     let mut len = 0u32;
-    // Sized query: the first call fails with ERROR_INSUFFICIENT_BUFFER and
-    // fills `len` with the TOKEN_USER size.
-    let _ = unsafe { GetTokenInformation(token, TokenUser, None, 0, &mut len) };
+    // Sized query: the first call must fail with ERROR_INSUFFICIENT_BUFFER and
+    // fill `len` with the TOKEN_USER size; any other outcome means `len` is
+    // meaningless and the sized buffer below would be empty.
+    let sized = unsafe { GetTokenInformation(token, TokenUser, None, 0, &mut len) };
+    let expected = sized
+        .err()
+        .map(|e| e.code() == windows::core::HRESULT::from_win32(ERROR_INSUFFICIENT_BUFFER.0))
+        .unwrap_or(false);
+    if !expected || len == 0 {
+        unsafe {
+            let _ = CloseHandle(token);
+        }
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "token user size query failed",
+        ));
+    }
     let mut buf = vec![0u8; len as usize];
     unsafe {
         GetTokenInformation(
@@ -91,7 +106,12 @@ pub fn lock_down_to_owner(path: &std::path::Path) -> std::io::Result<()> {
             &mut len,
         )
     }
-    .map_err(hresult_err)?;
+    .map_err(|e| {
+        unsafe {
+            let _ = CloseHandle(token);
+        }
+        hresult_err(e)
+    })?;
     let sid: PSID = unsafe { (*(buf.as_ptr() as *const TOKEN_USER)).User.Sid };
 
     let ea = [EXPLICIT_ACCESS_W {

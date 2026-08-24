@@ -139,7 +139,10 @@ async fn localhost_only(request: Request, next: Next) -> Result<Response, ApiErr
         return Err(ApiError::forbidden("Host header not allowed"));
     }
     if let Some(origin) = headers.get("origin").and_then(|h| h.to_str().ok()) {
-        if origin != "null" && !origin_allowed(origin) {
+        if origin == "null" {
+            return Err(ApiError::forbidden("Origin not allowed"));
+        }
+        if !origin_allowed(origin) {
             return Err(ApiError::forbidden("Origin not allowed"));
         }
     }
@@ -166,15 +169,24 @@ where
     async fn from_request(req: Request, state: &S) -> Result<Self, Self::Rejection> {
         match Json::<T>::from_request(req, state).await {
             Ok(Json(value)) => Ok(JsonBody(value)),
-            Err(rejection) => Err(ApiError {
-                status: rejection.status(),
-                message: rejection.body_text(),
-            }),
+            Err(rejection) => {
+                let status = rejection.status();
+                let raw = rejection.body_text();
+                let sanitized = crate::configs::sanitize_error_text(&raw);
+                let truncated: String = sanitized.chars().take(512).collect();
+                let code = status_to_code(status);
+                Err(ApiError {
+                    status,
+                    code,
+                    message: truncated,
+                })
+            }
         }
     }
 }
 
-/// A named ScanConfig held for the current session only. Never persisted.
+/// A named ScanConfig persisted to profiles.json (wgconf stripped via
+/// sanitize_config) and held in memory for the session; loaded at serve start.
 #[derive(Serialize)]
 struct ProfilePayload {
     name: String,
@@ -447,9 +459,9 @@ async fn start_scan(
     State(state): State<Arc<AppState>>,
     JsonBody(cfg): JsonBody<ScanConfig>,
 ) -> Result<StatusCode, ApiError> {
-    cfg.validate().map_err(ApiError::bad_request)?;
-    reject_default_warp_ports(&cfg).map_err(ApiError::bad_request)?;
-    reject_non_routable(&cfg).map_err(ApiError::bad_request)?;
+    cfg.validate().map_err(ApiError::invalid_config)?;
+    reject_default_warp_ports(&cfg).map_err(ApiError::invalid_config)?;
+    reject_non_routable(&cfg).map_err(ApiError::invalid_config)?;
     if let Some(phase2) = &cfg.phase2 {
         if let Some(local) = phase2.configs.iter().find(|c| !c.contains("://")) {
             return Err(ApiError::bad_request(format!(
@@ -594,8 +606,10 @@ async fn events(
             // make every idle browser EventSource reconnect-storm (connect ->
             // replay -> close -> reconnect) and miss the next run's events.
             // Deliver it once, then keep waiting for a future run's live
-            // tail — only a fresh live terminal or Lagged ends the stream.
+            // tail — only a fresh live terminal ends the stream.
             replay: replay.map(|ev| (ev, false)),
+            last_terminal: Arc::clone(&state.last_terminal),
+            epoch: current_epoch,
         });
     Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
 }
@@ -603,8 +617,9 @@ async fn events(
 /// Live SSE items off the engine's broadcast tail, optionally preceded by one
 /// replayed terminal from the previous run. Ends after a LIVE run's terminal
 /// event (Finished/Failed) so an in-flight response body cannot hold hyper's
-/// graceful shutdown open forever, and on Lagged (irrecoverable gap; a
-/// reconnect replays instead).
+/// graceful shutdown open forever. On Lagged the stream stays alive and
+/// re-emits the latest terminal snapshot (if any) instead of closing, to avoid
+/// EventSource reconnect storms.
 struct TerminalBounded {
     rx: BroadcastStream<ScanEvent>,
     _slot: SseSlot,
@@ -612,6 +627,8 @@ struct TerminalBounded {
     /// `Some((event, delivered))`: the previous run's terminal until it has
     /// been yielded.
     replay: Option<(ScanEvent, bool)>,
+    last_terminal: Arc<Mutex<Option<(u64, ScanEvent)>>>,
+    epoch: u64,
 }
 
 impl Stream for TerminalBounded {
@@ -653,10 +670,24 @@ impl Stream for TerminalBounded {
                         }
                     }
                 }
-                // A Lagged receiver has irrecoverably lost events.
+                // Lagged: avoid closing the stream (reconnect storm). Emit a
+                // fresh terminal snapshot if one exists for this epoch, then
+                // keep listening for live events.
                 std::task::Poll::Ready(Some(Err(_lagged))) => {
-                    self.done = true;
-                    return std::task::Poll::Ready(None);
+                    if let Some(ev) = self
+                        .last_terminal
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner())
+                        .clone()
+                        .filter(|(epoch, _)| *epoch == self.epoch)
+                        .map(|(_, ev)| ev)
+                    {
+                        if let Some(event) = map_event(ev) {
+                            return std::task::Poll::Ready(Some(Ok(event)));
+                        }
+                    }
+                    // No terminal to replay; stay alive and wait for next live event.
+                    continue;
                 }
                 std::task::Poll::Ready(None) => return std::task::Poll::Ready(None),
                 std::task::Poll::Pending => return std::task::Poll::Pending,
@@ -668,12 +699,33 @@ impl Stream for TerminalBounded {
 /// Maps an engine-domain event onto the SSE wire shape; None when the
 /// payload cannot serialize (never expected; the live path drops silently).
 fn map_event(ev: ScanEvent) -> Option<Event> {
+    let retry = Duration::from_secs(3);
     match ev {
-        ScanEvent::Progress(p) => Event::default().event("progress").json_data(p).ok(),
-        ScanEvent::Result(v) => Event::default().event("result").json_data(*v).ok(),
-        ScanEvent::Finished(s) => Event::default().event("finished").json_data(s).ok(),
-        ScanEvent::Phase2Progress(p) => Event::default().event("phase2-progress").json_data(p).ok(),
-        ScanEvent::Failed(msg) => Event::default().event("failed").json_data(msg).ok(),
+        ScanEvent::Progress(p) => Event::default()
+            .retry(retry)
+            .event("progress")
+            .json_data(p)
+            .ok(),
+        ScanEvent::Result(v) => Event::default()
+            .retry(retry)
+            .event("result")
+            .json_data(*v)
+            .ok(),
+        ScanEvent::Finished(s) => Event::default()
+            .retry(retry)
+            .event("finished")
+            .json_data(s)
+            .ok(),
+        ScanEvent::Phase2Progress(p) => Event::default()
+            .retry(retry)
+            .event("phase2-progress")
+            .json_data(p)
+            .ok(),
+        ScanEvent::Failed(msg) => Event::default()
+            .retry(retry)
+            .event("failed")
+            .json_data(msg)
+            .ok(),
     }
 }
 
@@ -789,13 +841,45 @@ async fn warp_register(
     let wgconf = tokio::task::spawn_blocking(move || registrar(license))
         .await
         .map_err(|_| ApiError::internal("registration task panicked"))?
-        .map_err(|err| {
-            ApiError::bad_gateway(format!(
-                "registration failed: {}",
-                crate::configs::sanitize_error_text(&format!("{err:#}"))
-            ))
-        })?;
+        .map_err(map_register_error)?;
     Ok(Json(RegisterResponse { wgconf }))
+}
+
+fn sanitize_truncate(text: &str) -> String {
+    let sanitized = crate::configs::sanitize_error_text(text);
+    sanitized.chars().take(512).collect()
+}
+
+fn map_register_error(err: anyhow::Error) -> ApiError {
+    for cause in err.chain() {
+        if let Some(warp_err) = cause.downcast_ref::<crate::warpgen::WarpRegisterError>() {
+            match warp_err {
+                crate::warpgen::WarpRegisterError::Timeout => {
+                    return ApiError::gateway_timeout("registration timed out");
+                }
+                crate::warpgen::WarpRegisterError::RateLimited => {
+                    return ApiError::too_many(
+                        "registration rate-limited by Cloudflare, try again later",
+                    );
+                }
+                crate::warpgen::WarpRegisterError::Unauthorized { status } => {
+                    return ApiError::bad_gateway(format!(
+                        "Cloudflare rejected the registration (HTTP {status})"
+                    ));
+                }
+                crate::warpgen::WarpRegisterError::Server { status, detail } => {
+                    let detail = sanitize_truncate(detail);
+                    return ApiError::bad_gateway(format!(
+                        "registration failed (HTTP {status}): {detail}"
+                    ));
+                }
+            }
+        }
+    }
+    ApiError::bad_gateway(format!(
+        "registration failed: {}",
+        sanitize_truncate(&format!("{err:#}"))
+    ))
 }
 
 /// `POST /api/config/export` body: one of the user's ORIGINAL config URIs as
@@ -898,18 +982,20 @@ struct XrayDownloadResponse {
     error: Option<String>,
 }
 
-async fn xray_download() -> Json<XrayDownloadResponse> {
+async fn xray_download() -> Result<Json<XrayDownloadResponse>, ApiError> {
     match xray::ensure_binary(&xray::RealFetch).await {
-        Ok(path) => Json(XrayDownloadResponse {
+        Ok(path) => Ok(Json(XrayDownloadResponse {
             success: true,
             path: Some(path.display().to_string()),
             error: None,
-        }),
-        Err(err) => Json(XrayDownloadResponse {
-            success: false,
-            path: None,
-            error: Some(crate::configs::sanitize_error_text(&format!("{err:#}"))),
-        }),
+        })),
+        Err(err) => {
+            let sanitized = crate::configs::sanitize_error_text(&format!("{err:#}"));
+            let truncated: String = sanitized.chars().take(512).collect();
+            // Network/upstream failures surface as 502; unexpected internal as 500.
+            // xray download is network-bound, so default to upstream_error.
+            Err(ApiError::bad_gateway(truncated))
+        }
     }
 }
 
@@ -972,7 +1058,7 @@ async fn put_profile(
     JsonBody(cfg): JsonBody<ScanConfig>,
 ) -> Result<(StatusCode, Json<ProfilePayload>), ApiError> {
     validate_profile_name(&name).map_err(ApiError::bad_request)?;
-    cfg.validate().map_err(ApiError::bad_request)?;
+    cfg.validate().map_err(ApiError::invalid_config)?;
     let cfg = sanitize_config(cfg);
     let mut profiles = state.profiles.write().await;
     if !profiles.contains_key(&name) && profiles.len() >= MAX_PROFILES {
@@ -1049,6 +1135,7 @@ async fn index() -> Response {
 
 struct ApiError {
     status: StatusCode,
+    code: &'static str,
     message: String,
 }
 
@@ -1056,12 +1143,39 @@ struct ApiError {
 struct ErrorResponse {
     error: String,
     message: String,
+    code: &'static str,
+}
+
+fn status_to_code(status: StatusCode) -> &'static str {
+    match status {
+        StatusCode::BAD_REQUEST => "bad_request",
+        StatusCode::PAYLOAD_TOO_LARGE => "payload_too_large",
+        StatusCode::UNPROCESSABLE_ENTITY => "invalid_config",
+        StatusCode::NOT_FOUND => "not_found",
+        StatusCode::METHOD_NOT_ALLOWED => "method_not_allowed",
+        StatusCode::FORBIDDEN => "forbidden",
+        StatusCode::CONFLICT => "conflict",
+        StatusCode::TOO_MANY_REQUESTS => "rate_limited",
+        StatusCode::BAD_GATEWAY => "upstream_error",
+        StatusCode::GATEWAY_TIMEOUT => "gateway_timeout",
+        StatusCode::INTERNAL_SERVER_ERROR => "internal",
+        _ => "internal",
+    }
 }
 
 impl ApiError {
     fn bad_request(err: impl std::fmt::Display) -> Self {
         Self {
             status: StatusCode::BAD_REQUEST,
+            code: "bad_request",
+            message: err.to_string(),
+        }
+    }
+
+    fn invalid_config(err: impl std::fmt::Display) -> Self {
+        Self {
+            status: StatusCode::BAD_REQUEST,
+            code: "invalid_config",
             message: err.to_string(),
         }
     }
@@ -1069,6 +1183,15 @@ impl ApiError {
     fn bad_gateway(message: impl Into<String>) -> Self {
         Self {
             status: StatusCode::BAD_GATEWAY,
+            code: "upstream_error",
+            message: message.into(),
+        }
+    }
+
+    fn gateway_timeout(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::GATEWAY_TIMEOUT,
+            code: "gateway_timeout",
             message: message.into(),
         }
     }
@@ -1076,6 +1199,7 @@ impl ApiError {
     fn internal(message: impl Into<String>) -> Self {
         Self {
             status: StatusCode::INTERNAL_SERVER_ERROR,
+            code: "internal",
             message: message.into(),
         }
     }
@@ -1083,6 +1207,7 @@ impl ApiError {
     fn payload_too_large(message: impl Into<String>) -> Self {
         Self {
             status: StatusCode::PAYLOAD_TOO_LARGE,
+            code: "payload_too_large",
             message: message.into(),
         }
     }
@@ -1090,6 +1215,7 @@ impl ApiError {
     fn conflict(message: impl Into<String>) -> Self {
         Self {
             status: StatusCode::CONFLICT,
+            code: "conflict",
             message: message.into(),
         }
     }
@@ -1097,6 +1223,7 @@ impl ApiError {
     fn not_found(message: impl Into<String>) -> Self {
         Self {
             status: StatusCode::NOT_FOUND,
+            code: "not_found",
             message: message.into(),
         }
     }
@@ -1104,6 +1231,7 @@ impl ApiError {
     fn method_not_allowed(message: impl Into<String>) -> Self {
         Self {
             status: StatusCode::METHOD_NOT_ALLOWED,
+            code: "method_not_allowed",
             message: message.into(),
         }
     }
@@ -1111,6 +1239,7 @@ impl ApiError {
     fn forbidden(message: impl Into<String>) -> Self {
         Self {
             status: StatusCode::FORBIDDEN,
+            code: "forbidden",
             message: message.into(),
         }
     }
@@ -1118,6 +1247,7 @@ impl ApiError {
     fn too_many(message: impl Into<String>) -> Self {
         Self {
             status: StatusCode::TOO_MANY_REQUESTS,
+            code: "rate_limited",
             message: message.into(),
         }
     }
@@ -1128,6 +1258,7 @@ impl IntoResponse for ApiError {
         let body = Json(ErrorResponse {
             error: self.status.canonical_reason().unwrap_or("Error").to_owned(),
             message: self.message,
+            code: self.code,
         });
         (self.status, body).into_response()
     }
@@ -1626,6 +1757,8 @@ mod tests {
             _slot: try_acquire_sse_slot(&Arc::new(AtomicUsize::new(0))).unwrap(),
             done: false,
             replay: None,
+            last_terminal: Arc::new(Mutex::new(None)),
+            epoch: 0,
         };
         tx.send(ScanEvent::Progress(crate::api::types::ScanProgress {
             scanned: 1,
@@ -1679,6 +1812,8 @@ mod tests {
                 }),
                 false,
             )),
+            last_terminal: Arc::new(Mutex::new(None)),
+            epoch: 0,
         };
         let first = tokio::time::timeout(Duration::from_secs(1), stream.next())
             .await
@@ -2837,5 +2972,283 @@ mod tests {
         let (status, text) = post_export(addr, &body.to_string()).await;
         assert_eq!(status, 400, "{text}");
         assert!(!text.contains("sec"), "the config must never echo: {text}");
+    }
+
+    // --- A9 / A13 / A17 new coverage ---
+
+    #[tokio::test]
+    async fn rejects_null_origin() {
+        let addr = serve(FakeTransport::new()).await;
+        let (status, text) = request(
+            addr,
+            "GET /api/status HTTP/1.1\r\nHost: 127.0.0.1\r\nOrigin: null\r\nConnection: close\r\n\r\n",
+            None,
+        )
+        .await;
+        assert_eq!(status, 403, "{text}");
+        let parsed: serde_json::Value = serde_json::from_str(json_body(&text)).unwrap();
+        assert_eq!(parsed["code"], "forbidden");
+        // absent Origin stays allowed
+        let (status, _) = request(
+            addr,
+            "GET /api/status HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n",
+            None,
+        )
+        .await;
+        assert_eq!(status, 200);
+        // normal same-origin still allowed
+        let (status, _) = request(
+            addr,
+            "GET /api/status HTTP/1.1\r\nHost: 127.0.0.1\r\nOrigin: http://127.0.0.1:8765\r\nConnection: close\r\n\r\n",
+            None,
+        )
+        .await;
+        assert_eq!(status, 200);
+    }
+
+    #[tokio::test]
+    async fn json_rejection_is_sanitized_and_truncated() {
+        let addr = serve(FakeTransport::new()).await;
+        // Oversized multiline body with control chars; rejection body_text flows
+        // through sanitize_error_text and 512-char truncation.
+        let big = "x".repeat(2000);
+        let body = format!(
+            "{{\"mode\":\"Cdn\",\"target\":{{\"Preset\":\"Quick\"}},\"ports\":[443],\"bad\":\"{big}\"\nsecond line with control \x07 and https://user:pass@example.com/secret?token=abc#frag"
+        );
+        let req = format!(
+            "POST /api/scan HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        let (status, text) = request(addr, &req, None).await;
+        // The unknown "bad" field trips deny_unknown_fields (a serde DATA
+        // error) before the trailing syntax garbage matters -> 422.
+        assert_eq!(status, 422, "{text}");
+        let parsed: serde_json::Value = serde_json::from_str(json_body(&text)).unwrap();
+        let msg = parsed["message"].as_str().unwrap();
+        assert!(
+            msg.chars().count() <= 512,
+            "message must be truncated to 512 chars: {}",
+            msg.chars().count()
+        );
+        assert!(!msg.contains('\x07'), "control chars must be stripped");
+        assert!(
+            !msg.contains("secret"),
+            "query secrets must be redacted via sanitize"
+        );
+        assert_eq!(parsed["code"], "invalid_config");
+    }
+
+    #[tokio::test]
+    async fn error_responses_carry_machine_readable_codes() {
+        let addr = serve(FakeTransport::new()).await;
+        // 404 code
+        let (status, text) = request(
+            addr,
+            "GET /api/profiles/nope HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n",
+            None,
+        )
+        .await;
+        assert_eq!(status, 404);
+        let parsed: serde_json::Value = serde_json::from_str(json_body(&text)).unwrap();
+        assert_eq!(parsed["code"], "not_found");
+
+        // 403 forbidden
+        let (status, text) = request(
+            addr,
+            "GET /api/status HTTP/1.1\r\nHost: evil.example\r\nConnection: close\r\n\r\n",
+            None,
+        )
+        .await;
+        assert_eq!(status, 403);
+        let parsed: serde_json::Value = serde_json::from_str(json_body(&text)).unwrap();
+        assert_eq!(parsed["code"], "forbidden");
+
+        // 409 conflict (scan already running)
+        let mut t = FakeTransport::new();
+        for i in 0..8u8 {
+            t = t.ok_slow(format!("203.0.113.{i}").parse().unwrap(), 443, 25, 500);
+        }
+        let addr2 = serve(t).await;
+        let body = serde_json::to_string(&cfg(1, 1)).unwrap();
+        assert_eq!(post_scan(addr2, &body).await, 202);
+        wait_until_running(addr2).await;
+        let (status, text) = post_scan_full(addr2, &body).await;
+        assert_eq!(status, 409);
+        let parsed: serde_json::Value = serde_json::from_str(json_body(&text)).unwrap();
+        assert_eq!(parsed["code"], "conflict");
+
+        // invalid_config vs bad_request: cfg.validate failure is invalid_config
+        let addr3 = serve(FakeTransport::new()).await;
+        let mut bad = cfg(1, 1);
+        bad.ports = vec![0];
+        let (status, text) = post_scan_full(addr3, &serde_json::to_string(&bad).unwrap()).await;
+        assert_eq!(status, 400);
+        let parsed: serde_json::Value = serde_json::from_str(json_body(&text)).unwrap();
+        assert_eq!(parsed["code"], "invalid_config");
+
+        // generic bad_request stays bad_request (export oversized)
+        let big = format!(
+            "vless://x@1.2.3.4:443?{}",
+            "a".repeat(crate::api::types::MAX_EXPORT_CONFIG_BYTES)
+        );
+        let body = serde_json::json!({"config": big, "ip": "203.0.113.7", "port": 443});
+        let (status, text) = post_export(addr3, &body.to_string()).await;
+        assert_eq!(status, 400);
+        let parsed: serde_json::Value = serde_json::from_str(json_body(&text)).unwrap();
+        assert_eq!(parsed["code"], "bad_request");
+    }
+
+    #[test]
+    fn map_register_error_maps_variants() {
+        use crate::warpgen::WarpRegisterError;
+        // Timeout -> gateway_timeout 504
+        let err = anyhow::Error::from(WarpRegisterError::Timeout);
+        let api = map_register_error(err);
+        assert_eq!(api.status, StatusCode::GATEWAY_TIMEOUT);
+        assert_eq!(api.code, "gateway_timeout");
+
+        // RateLimited -> rate_limited 429
+        let err = anyhow::Error::from(WarpRegisterError::RateLimited);
+        let api = map_register_error(err);
+        assert_eq!(api.status, StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(api.code, "rate_limited");
+
+        // Unauthorized -> upstream_error 502 with status in message
+        let err = anyhow::Error::from(WarpRegisterError::Unauthorized { status: 401 });
+        let api = map_register_error(err);
+        assert_eq!(api.status, StatusCode::BAD_GATEWAY);
+        assert_eq!(api.code, "upstream_error");
+        assert!(api.message.contains("401"), "{}", api.message);
+
+        // Server -> upstream_error with sanitized detail, truncated
+        let long_detail =
+            "https://user:secret@example.com/x?token=abc ".to_string() + &"y".repeat(1000);
+        let err = anyhow::Error::from(WarpRegisterError::Server {
+            status: 500,
+            detail: long_detail,
+        });
+        let api = map_register_error(err);
+        assert_eq!(api.status, StatusCode::BAD_GATEWAY);
+        assert!(api.message.contains("500"));
+        assert!(!api.message.contains("secret"), "detail must be sanitized");
+        assert!(
+            api.message.chars().count() <= 600,
+            "sanitized detail truncated"
+        );
+
+        // Wrapped via context -> still maps (chain)
+        let err = anyhow::Error::from(WarpRegisterError::Timeout).context("outer wrap");
+        let api = map_register_error(err);
+        assert_eq!(api.code, "gateway_timeout");
+
+        // Unknown -> fallback upstream_error
+        let err = anyhow::anyhow!("some other network failure https://user:pass@example.com/q?x=1");
+        let api = map_register_error(err);
+        assert_eq!(api.code, "upstream_error");
+        assert!(!api.message.contains("pass"), "fallback must sanitize");
+    }
+
+    #[tokio::test]
+    async fn warp_register_maps_typed_errors_over_http() {
+        let _isolated = isolate_identity_dir();
+        // Timeout variant via injected registrar
+        let timeout_reg: WarpRegistrar = Arc::new(|_| {
+            Err(anyhow::Error::from(
+                crate::warpgen::WarpRegisterError::Timeout,
+            ))
+        });
+        let addr = serve_with_registrar(
+            FakeTransport::new(),
+            RangesState::load_text(BUNDLED_RANGES, None),
+            timeout_reg,
+        )
+        .await;
+        let (status, text) = post_register(addr, r#"{"license":null}"#).await;
+        assert_eq!(status, 504, "{text}");
+        let parsed: serde_json::Value = serde_json::from_str(json_body(&text)).unwrap();
+        assert_eq!(parsed["code"], "gateway_timeout");
+
+        // RateLimited -> 429
+        let rl_reg: WarpRegistrar = Arc::new(|_| {
+            Err(anyhow::Error::from(
+                crate::warpgen::WarpRegisterError::RateLimited,
+            ))
+        });
+        let addr = serve_with_registrar(
+            FakeTransport::new(),
+            RangesState::load_text(BUNDLED_RANGES, None),
+            rl_reg,
+        )
+        .await;
+        let (status, text) = post_register(addr, r#"{"license":null}"#).await;
+        assert_eq!(status, 429, "{text}");
+        let parsed: serde_json::Value = serde_json::from_str(json_body(&text)).unwrap();
+        assert_eq!(parsed["code"], "rate_limited");
+    }
+
+    #[tokio::test]
+    async fn lagged_stream_stays_alive_with_terminal_snapshot() {
+        // Lagged must not close the stream; instead it re-emits the terminal
+        // snapshot and continues listening.
+        let (tx, rx) = tokio::sync::broadcast::channel(2);
+        let last = Arc::new(Mutex::new(Some((
+            1u64,
+            ScanEvent::Finished(ScanSummary {
+                scanned: 8,
+                found: 1,
+                duration_ms: 5,
+                cancelled: false,
+            }),
+        ))));
+        let mut stream = TerminalBounded {
+            rx: BroadcastStream::new(rx),
+            _slot: try_acquire_sse_slot(&Arc::new(AtomicUsize::new(0))).unwrap(),
+            done: false,
+            replay: None,
+            last_terminal: Arc::clone(&last),
+            epoch: 1,
+        };
+        // Fill and overflow the 2-slot channel so the receiver lags.
+        tx.send(ScanEvent::Progress(crate::api::types::ScanProgress {
+            scanned: 1,
+            found: 0,
+            total: Some(8),
+        }))
+        .unwrap();
+        tx.send(ScanEvent::Progress(crate::api::types::ScanProgress {
+            scanned: 2,
+            found: 0,
+            total: Some(8),
+        }))
+        .unwrap();
+        tx.send(ScanEvent::Progress(crate::api::types::ScanProgress {
+            scanned: 3,
+            found: 0,
+            total: Some(8),
+        }))
+        .unwrap();
+        // Receiver has missed events -> Lagged. It must yield the terminal snapshot and stay open.
+        let item = tokio::time::timeout(Duration::from_secs(1), stream.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        drop(item);
+        // After the Lagged replay the broadcast may still deliver retained
+        // events (e.g. the newest progress) — the invariant is that the
+        // stream NEVER ends: drain until the window goes quiet.
+        let mut stayed_open = true;
+        for _ in 0..8 {
+            match tokio::time::timeout(Duration::from_millis(100), stream.next()).await {
+                Err(_quiet) => break,
+                Ok(None) => {
+                    stayed_open = false;
+                    break;
+                }
+                Ok(Some(_)) => continue,
+            }
+        }
+        assert!(stayed_open, "stream must stay alive after Lagged replay");
     }
 }

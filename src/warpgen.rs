@@ -21,6 +21,18 @@ const DEFAULT_API_BASE: &str = "https://api.cloudflareclient.com";
 /// Server endpoint baked into exported configs when no override is given.
 pub const DEFAULT_ENDPOINT: &str = "engage.cloudflareclient.com:2408";
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(15);
+
+#[derive(Debug, Clone, thiserror::Error)]
+pub enum WarpRegisterError {
+    #[error("registration timed out")]
+    Timeout,
+    #[error("registration rate limited")]
+    RateLimited,
+    #[error("registration rejected ({status})")]
+    Unauthorized { status: u16 },
+    #[error("registration server error ({status})")]
+    Server { status: u16, detail: String },
+}
 /// Registration is one-shot and rare; api.cloudflareclient.com resolves to
 /// several IPs and ISPs commonly blackhole some of them, so a single attempt
 /// can stall. Retrying with a fresh client (fresh DNS + connection) makes the
@@ -110,7 +122,7 @@ impl WarpClient {
         label: &str,
         build: impl Fn(reqwest::Client) -> reqwest::RequestBuilder,
     ) -> Result<String> {
-        let mut last: Option<anyhow::Error> = None;
+        let mut last: Option<WarpRegisterError> = None;
         for n in 0..MAX_ATTEMPTS {
             if n > 0 {
                 tokio::time::sleep(RETRY_SLEEP).await;
@@ -123,30 +135,53 @@ impl WarpClient {
             let resp = match result {
                 Ok(Ok(resp)) => resp,
                 Ok(Err(err)) => {
-                    last = Some(anyhow!("{err}"));
+                    let detail = crate::configs::sanitize_error_text(&format!("{err}"));
+                    last = Some(WarpRegisterError::Server { status: 0, detail });
                     continue;
                 }
                 Err(_) => {
-                    last = Some(anyhow!("timed out"));
+                    last = Some(WarpRegisterError::Timeout);
                     continue;
                 }
             };
-            let status = resp.status();
-            let text = resp.text().await?;
-            if status.is_success() {
+            let status_code = resp.status();
+            let status = status_code.as_u16();
+            let text = match resp.text().await {
+                Ok(t) => t,
+                Err(err) => {
+                    let detail = crate::configs::sanitize_error_text(&format!("{err}"));
+                    last = Some(WarpRegisterError::Server { status, detail });
+                    continue;
+                }
+            };
+            if status_code.is_success() {
                 return Ok(text);
             }
-            if status.is_server_error() || status == reqwest::StatusCode::TOO_MANY_REQUESTS {
-                last = Some(anyhow!("{status}: {text}"));
+            let sanitized = crate::configs::sanitize_error_text(&text);
+            if status == 429 {
+                last = Some(WarpRegisterError::RateLimited);
                 continue;
             }
-            return Err(anyhow!("v0a884 {label} failed: {status}: {text}"));
+            if status == 401 || status == 403 {
+                return Err(WarpRegisterError::Unauthorized { status }.into());
+            }
+            if status_code.is_server_error() {
+                last = Some(WarpRegisterError::Server {
+                    status,
+                    detail: sanitized,
+                });
+                continue;
+            }
+            return Err(WarpRegisterError::Server {
+                status,
+                detail: sanitized,
+            }
+            .into());
         }
-        Err(last
-            .unwrap_or_else(|| anyhow!("unknown error"))
-            .context(format!(
-                "v0a884 {label} failed after {MAX_ATTEMPTS} attempts"
-            )))
+        let err = last.unwrap_or(WarpRegisterError::Timeout);
+        Err(err).context(format!(
+            "v0a884 {label} failed after {MAX_ATTEMPTS} attempts"
+        ))
     }
 
     async fn post_json(&self, path: &str, body: impl Serialize) -> Result<String> {
@@ -290,9 +325,14 @@ pub fn persisted_server_public_key() -> Option<String> {
     if key.as_deref().map(str::is_empty) != Some(false) {
         return None;
     }
-    crate::wgconf::decode_key(key.as_deref().unwrap_or_default())
-        .is_ok()
-        .then_some(key.unwrap_or_default())
+    let raw = key.as_deref().unwrap_or_default();
+    match crate::wgconf::decode_key(raw) {
+        Ok(_) => Some(key.unwrap_or_default()),
+        Err(_) => {
+            tracing::warn!("persisted WARP server key invalid; falling back to bundled");
+            None
+        }
+    }
 }
 
 /// Writes `text` to `path` locked down to the owning user. The 0o600 mode is
@@ -893,5 +933,193 @@ pub(crate) mod tests {
             let seen = seen.lock().unwrap();
             assert_eq!(seen.len(), 4, "register must emit reg/enable/license/fetch");
         });
+    }
+
+    #[tokio::test]
+    async fn warp_register_maps_429_to_rate_limited_with_retry() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let hits = std::sync::Arc::new(AtomicUsize::new(0));
+        let hits_c = hits.clone();
+        let app = axum::Router::new().route(
+            "/v0a884/reg",
+            axum::routing::post(move || {
+                let hits = hits_c.clone();
+                async move {
+                    hits.fetch_add(1, Ordering::SeqCst);
+                    (StatusCode::TOO_MANY_REQUESTS, "rate limited")
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let client = WarpClient::new(format!("http://{addr}"), Duration::from_secs(2));
+        let (_, public) = keygen();
+        let public_b64 = base64::engine::general_purpose::STANDARD.encode(public.as_bytes());
+        let err = client.register(&public_b64).await.unwrap_err();
+        assert!(
+            err.chain().any(|e| matches!(
+                e.downcast_ref::<WarpRegisterError>(),
+                Some(WarpRegisterError::RateLimited)
+            )),
+            "429 must map to RateLimited, got {err:#}"
+        );
+        assert_eq!(hits.load(Ordering::SeqCst), MAX_ATTEMPTS as usize);
+    }
+
+    #[tokio::test]
+    async fn warp_register_maps_401_to_unauthorized_immediate() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let hits = std::sync::Arc::new(AtomicUsize::new(0));
+        let hits_c = hits.clone();
+        let app = axum::Router::new().route(
+            "/v0a884/reg",
+            axum::routing::post(move || {
+                let hits = hits_c.clone();
+                async move {
+                    hits.fetch_add(1, Ordering::SeqCst);
+                    (StatusCode::UNAUTHORIZED, "unauthorized")
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let client = WarpClient::new(format!("http://{addr}"), Duration::from_secs(2));
+        let (_, public) = keygen();
+        let public_b64 = base64::engine::general_purpose::STANDARD.encode(public.as_bytes());
+        let err = client.register(&public_b64).await.unwrap_err();
+        let found = err
+            .chain()
+            .find_map(|e| e.downcast_ref::<WarpRegisterError>());
+        assert!(
+            matches!(found, Some(WarpRegisterError::Unauthorized { status: 401 })),
+            "got {err:#} {found:?}"
+        );
+        assert_eq!(hits.load(Ordering::SeqCst), 1, "401 must not retry");
+    }
+
+    #[tokio::test]
+    async fn warp_register_maps_403_to_unauthorized() {
+        let app = axum::Router::new().route(
+            "/v0a884/reg",
+            axum::routing::post(async || (StatusCode::FORBIDDEN, "forbidden")),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let client = WarpClient::new(format!("http://{addr}"), Duration::from_secs(2));
+        let (_, public) = keygen();
+        let public_b64 = base64::engine::general_purpose::STANDARD.encode(public.as_bytes());
+        let err = client.register(&public_b64).await.unwrap_err();
+        assert!(
+            err.chain().any(|e| matches!(
+                e.downcast_ref::<WarpRegisterError>(),
+                Some(WarpRegisterError::Unauthorized { status: 403 })
+            )),
+            "{err:#}"
+        );
+    }
+
+    #[tokio::test]
+    async fn warp_register_maps_5xx_to_server_with_sanitized_detail_and_retries() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let hits = std::sync::Arc::new(AtomicUsize::new(0));
+        let hits_c = hits.clone();
+        let body = "error https://user:secret@example.com/path?token=abc#frag";
+        let body_owned = body.to_owned();
+        let app = axum::Router::new().route(
+            "/v0a884/reg",
+            axum::routing::post(move || {
+                let hits = hits_c.clone();
+                let body_owned = body_owned.clone();
+                async move {
+                    hits.fetch_add(1, Ordering::SeqCst);
+                    (StatusCode::INTERNAL_SERVER_ERROR, body_owned)
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let client = WarpClient::new(format!("http://{addr}"), Duration::from_secs(2));
+        let (_, public) = keygen();
+        let public_b64 = base64::engine::general_purpose::STANDARD.encode(public.as_bytes());
+        let err = client.register(&public_b64).await.unwrap_err();
+        let found = err
+            .chain()
+            .find_map(|e| e.downcast_ref::<WarpRegisterError>().cloned());
+        match found {
+            Some(WarpRegisterError::Server { status, detail }) => {
+                assert_eq!(status, 500);
+                assert!(
+                    !detail.contains("secret"),
+                    "detail must be sanitized: {detail}"
+                );
+                assert!(
+                    !detail.contains("token"),
+                    "detail must be sanitized: {detail}"
+                );
+            }
+            other => panic!("expected Server, got {other:?} {err:#}"),
+        }
+        assert_eq!(hits.load(Ordering::SeqCst), MAX_ATTEMPTS as usize);
+    }
+
+    #[tokio::test]
+    async fn warp_register_maps_4xx_other_to_server_immediate() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let hits = std::sync::Arc::new(AtomicUsize::new(0));
+        let hits_c = hits.clone();
+        let app = axum::Router::new().route(
+            "/v0a884/reg",
+            axum::routing::post(move || {
+                let hits = hits_c.clone();
+                async move {
+                    hits.fetch_add(1, Ordering::SeqCst);
+                    (StatusCode::BAD_REQUEST, "bad request")
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let client = WarpClient::new(format!("http://{addr}"), Duration::from_secs(2));
+        let (_, public) = keygen();
+        let public_b64 = base64::engine::general_purpose::STANDARD.encode(public.as_bytes());
+        let err = client.register(&public_b64).await.unwrap_err();
+        assert!(
+            err.chain().any(|e| matches!(
+                e.downcast_ref::<WarpRegisterError>(),
+                Some(WarpRegisterError::Server { status: 400, .. })
+            )),
+            "{err:#}"
+        );
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn warp_register_maps_timeout_to_timeout() {
+        let app = axum::Router::new().route(
+            "/v0a884/reg",
+            axum::routing::post(async || {
+                tokio::time::sleep(Duration::from_millis(500)).await;
+                (StatusCode::OK, axum::Json(mock_registration()))
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let client = WarpClient::new(format!("http://{addr}"), Duration::from_millis(80));
+        let (_, public) = keygen();
+        let public_b64 = base64::engine::general_purpose::STANDARD.encode(public.as_bytes());
+        let err = client.register(&public_b64).await.unwrap_err();
+        assert!(
+            err.chain().any(|e| matches!(
+                e.downcast_ref::<WarpRegisterError>(),
+                Some(WarpRegisterError::Timeout)
+            )),
+            "{err:#}"
+        );
     }
 }

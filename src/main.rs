@@ -1,9 +1,10 @@
+use std::io::IsTerminal as _;
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{Context as _, Result, anyhow};
+use anyhow::{Context as _, Result, anyhow, bail};
 use cf_scanner::api;
 use cf_scanner::api::types::{
     CdnPreset, DEFAULT_CONCURRENCY, Mode, ScanConfig, ScanEvent, ScanTarget, StopCondition,
@@ -18,16 +19,30 @@ use tracing_subscriber::filter::LevelFilter;
     name = "cf-scanner",
     version,
     propagate_version = true,
-    about = "Find working Cloudflare IPs/endpoints on ISP-restricted networks"
+    about = "Find working Cloudflare IPs/endpoints on ISP-restricted networks",
+    after_help = EXAMPLES
 )]
 struct Cli {
     /// Info-level logs (RUST_LOG, when set, still wins)
     #[arg(long, global = true)]
     verbose: bool,
 
+    /// Print machine-readable {"error": ...} JSON to stdout on failure
+    #[arg(long, global = true)]
+    json_errors: bool,
+
     #[command(subcommand)]
     command: Command,
 }
+
+const EXAMPLES: &str = "\
+Examples:
+  cf-scanner serve --open                 Start API+UI and open the browser
+  cf-scanner scan --preset quick          Fast CDN sweep (1 IP per /24)
+  cf-scanner scan --mode warp --count 512 WARP endpoint discovery
+  cf-scanner scan --phase2-configs vless://... --phase2-fragment medium
+                                          Verify candidates through xray
+Results print as newline-delimited JSON; pipe to jq for processing.";
 
 #[derive(Subcommand)]
 enum Command {
@@ -36,6 +51,9 @@ enum Command {
         /// Port to bind (default 8765)
         #[arg(long, default_value_t = 8765)]
         port: u16,
+        /// Open the browser at the served URL once the listener is up
+        #[arg(long)]
+        open: bool,
         /// Keep serving from the Windows system tray; its menu drives the API
         #[arg(long)]
         tray: bool,
@@ -118,73 +136,114 @@ enum WarpConfigAction {
 #[derive(clap::Args, Clone)]
 struct ScanArgs {
     /// Scan mode (phase-2 via xray in CDN mode; UDP discovery in WARP)
-    #[arg(long, value_enum, default_value_t = ModeArg::Cdn)]
+    #[arg(long, value_enum, default_value_t = ModeArg::Cdn, help_heading = "Candidate selection")]
     mode: ModeArg,
 
     /// Candidate preset; conflicts with --count
-    #[arg(long, value_enum, conflicts_with = "count")]
+    #[arg(
+        long,
+        value_enum,
+        conflicts_with = "count",
+        help_heading = "Candidate selection"
+    )]
     preset: Option<PresetArg>,
 
     /// Exact number of random candidate IPs; conflicts with --preset
-    #[arg(long, conflicts_with = "preset")]
+    #[arg(long, conflicts_with = "preset", help_heading = "Candidate selection")]
     count: Option<u32>,
 
     /// Stop after this many working endpoints
-    #[arg(long, default_value_t = 20)]
+    #[arg(
+        long,
+        alias = "stop-after",
+        default_value_t = 20,
+        help_heading = "Stopping"
+    )]
     target: u32,
 
     /// Hard cap on probes performed (optional)
-    #[arg(long)]
+    #[arg(long, alias = "max-probes", help_heading = "Stopping")]
     cap: Option<u32>,
 
     /// Comma-separated ports (default 443; WARP mode: 2408,500,...)
-    #[arg(long, value_delimiter = ',')]
+    #[arg(long, value_delimiter = ',', help_heading = "Candidate selection")]
     ports: Option<Vec<u16>>,
 
     /// Parallel probes (1-1000)
-    #[arg(long, default_value_t = DEFAULT_CONCURRENCY)]
+    #[arg(
+        long,
+        default_value_t = DEFAULT_CONCURRENCY,
+        help_heading = "Tuning"
+    )]
     concurrency: u16,
 
     /// Per-probe timeout in ms (100-30000)
-    #[arg(long, default_value_t = 3000)]
+    #[arg(long, default_value_t = 3000, help_heading = "Tuning")]
     timeout_ms: u64,
 
     /// Dirtied CIDRs to skip, comma-separated
-    #[arg(long, value_delimiter = ',')]
+    #[arg(long, value_delimiter = ',', help_heading = "Candidate selection")]
     exclude: Vec<String>,
 
     /// Scan these CIDRs INSTEAD of the bundled ranges, comma-separated
-    #[arg(long, value_delimiter = ',')]
+    #[arg(long, value_delimiter = ',', help_heading = "Candidate selection")]
     custom_cidrs: Vec<String>,
 
     /// Include the bundled Cloudflare IPv6 ranges in the CDN candidate pool
-    #[arg(long)]
+    #[arg(long, help_heading = "Candidate selection")]
     ipv6: bool,
 
     /// Enable phase-2 verification: vless/trojan/vmess/ss URIs, subscription
     /// URLs, or local xray JSON paths, comma-separated
-    #[arg(long, value_delimiter = ',')]
+    #[arg(
+        long,
+        value_delimiter = ',',
+        help_heading = "Phase 2 (xray verification)"
+    )]
     phase2_configs: Vec<String>,
 
     /// Skip phase-1 probing and verify the last scan's candidates (CDN only)
-    #[arg(long, requires = "phase2_configs")]
+    #[arg(
+        long,
+        requires = "phase2_configs",
+        help_heading = "Phase 2 (xray verification)"
+    )]
     phase2_only: bool,
 
     /// Fragment preset for phase 2 (custom needs --phase2-custom)
-    #[arg(long, value_enum, requires = "phase2_configs")]
+    #[arg(
+        long,
+        value_enum,
+        requires = "phase2_configs",
+        help_heading = "Phase 2 (xray verification)"
+    )]
     phase2_fragment: Option<FragmentArg>,
 
     /// Custom fragment "length,interval" (phase2_fragment=custom only)
-    #[arg(long, requires = "phase2_configs")]
+    #[arg(
+        long,
+        requires = "phase2_configs",
+        help_heading = "Phase 2 (xray verification)"
+    )]
     phase2_custom: Option<String>,
 
     /// SNI fronting variants, comma-separated (empty = each config's SNI)
-    #[arg(long, value_delimiter = ',', requires = "phase2_configs")]
+    #[arg(
+        long,
+        value_delimiter = ',',
+        requires = "phase2_configs",
+        help_heading = "Phase 2 (xray verification)"
+    )]
     phase2_snis: Vec<String>,
 
     /// Probe URLs fetched through the tunnel to prove connectivity,
     /// comma-separated (up to 8; every one must return 200 for a pass)
-    #[arg(long, value_delimiter = ',', requires = "phase2_configs")]
+    #[arg(
+        long,
+        value_delimiter = ',',
+        requires = "phase2_configs",
+        help_heading = "Phase 2 (xray verification)"
+    )]
     phase2_probe_urls: Vec<String>,
 
     /// Single probe URL (legacy alias for --phase2-probe-urls)
@@ -197,28 +256,32 @@ struct ScanArgs {
     phase2_probe_url: Option<String>,
 
     /// Parallel xray instances for phase 2 (1-8)
-    #[arg(long, requires = "phase2_configs")]
+    #[arg(
+        long,
+        requires = "phase2_configs",
+        help_heading = "Phase 2 (xray verification)"
+    )]
     phase2_concurrency: Option<u8>,
 
     /// WARP: handshake probes per endpoint (1-10, default 3); drives loss %
-    #[arg(long)]
+    #[arg(long, help_heading = "WARP")]
     warp_probes: Option<u8>,
 
     /// WARP: explicit endpoints `ip` or `ip:port`, comma-separated (empty =
     /// bundled pools)
-    #[arg(long, value_delimiter = ',')]
+    #[arg(long, value_delimiter = ',', help_heading = "WARP")]
     warp_endpoints: Vec<String>,
 
     /// WARP: verify discovered endpoints with the user's wgconf keypair
-    #[arg(long, requires = "warp_wgconf_file")]
+    #[arg(long, requires = "warp_wgconf_file", help_heading = "WARP")]
     warp_verify: bool,
 
     /// WARP: path to a wg-quick / AmneziaWG config used for verification
-    #[arg(long)]
+    #[arg(long, alias = "warp-wgconf", help_heading = "WARP")]
     warp_wgconf_file: Option<String>,
 
     /// Deterministic sampling seed (tests, repro)
-    #[arg(long)]
+    #[arg(long, help_heading = "Tuning")]
     seed: Option<u64>,
 }
 
@@ -307,9 +370,6 @@ fn build_scan_config(args: &ScanArgs) -> Result<ScanConfig> {
             "--phase2-only needs phase-1 results from a running scan; one-shot scans cannot use it"
         ));
     }
-    if args.cap == Some(0) {
-        return Err(anyhow!("--cap must be at least 1"));
-    }
     let target = match (args.preset, args.count) {
         (Some(preset), None) => ScanTarget::Preset(CdnPreset::from(preset)),
         (None, Some(count)) => ScanTarget::Count(count),
@@ -322,12 +382,28 @@ fn build_scan_config(args: &ScanArgs) -> Result<ScanConfig> {
     // Empty --custom-cidrs means "use bundled ranges"; clap's value_delimiter
     // yields Vec::new() for an absent flag, which is exactly what we want.
     let phase2 = build_phase2(args)?;
-    let wgconf = args
-        .warp_wgconf_file
-        .as_deref()
-        .map(std::fs::read_to_string)
-        .transpose()
-        .map_err(|e| anyhow!("could not read --warp-wgconf-file: {e}"))?;
+    // Capped read: the size limit is normally enforced by
+    // `WarpConfig::validate`, but the file lands in memory first, so an
+    // accidental `--warp-wgconf-file /dev/zero` must not OOM before that.
+    let wgconf = match args.warp_wgconf_file.as_deref() {
+        Some(path) => {
+            use std::io::Read as _;
+            let file = std::fs::File::open(path)
+                .map_err(|e| anyhow!("could not open --warp-wgconf-file: {e}"))?;
+            let mut buf = String::new();
+            file.take(api::types::MAX_WGCONF_BYTES as u64 + 1)
+                .read_to_string(&mut buf)
+                .map_err(|e| anyhow!("could not read --warp-wgconf-file: {e}"))?;
+            if buf.len() > api::types::MAX_WGCONF_BYTES {
+                bail!(
+                    "--warp-wgconf-file exceeds {} bytes",
+                    api::types::MAX_WGCONF_BYTES
+                );
+            }
+            Some(buf)
+        }
+        None => None,
+    };
     let warp = (mode == Mode::Warp).then(|| api::types::WarpConfig {
         custom_endpoints: args.warp_endpoints.clone(),
         probes_per_endpoint: args.warp_probes.unwrap_or(3),
@@ -421,9 +497,16 @@ async fn main() -> ExitCode {
         ))
         .init();
 
+    let json_errors = cli.json_errors;
     match run(cli).await {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
+            if json_errors {
+                // Machine-readable failure for agents; the chain (`{err:#}`)
+                // stays on stderr for humans.
+                let line = serde_json::json!({ "error": err.to_string() });
+                println!("{line}");
+            }
             eprintln!("error: {err:#}");
             ExitCode::FAILURE
         }
@@ -448,9 +531,10 @@ async fn run(cli: Cli) -> Result<()> {
     match cli.command {
         Command::Serve {
             port,
+            open,
             tray,
             autostart,
-        } => serve(port, tray, autostart).await,
+        } => serve(port, open, tray, autostart).await,
         Command::Scan { args } => run_scan(*args).await,
         Command::Wizard => {
             let controller = Arc::new(engine::ScanController::new(Arc::new(
@@ -531,8 +615,11 @@ async fn run_scan(args: ScanArgs) -> Result<()> {
     let cancel_on_ctrl_c = {
         let controller = controller.clone();
         tokio::spawn(async move {
-            if tokio::signal::ctrl_c().await.is_ok() {
-                controller.cancel();
+            match tokio::signal::ctrl_c().await {
+                Ok(()) => controller.cancel(),
+                // A broken signal hook must not leave the scan running
+                // silently forever (mirrors the serve-path behavior).
+                Err(err) => tracing::error!("could not listen for Ctrl+C: {err}"),
             }
         })
     };
@@ -558,7 +645,21 @@ async fn run_scan(args: ScanArgs) -> Result<()> {
             eprintln!("phase 2: {}/{} verified", p.done, p.total);
         }
         ScanEvent::Failed(_msg) => {}
-        ScanEvent::Progress(_) => {}
+        ScanEvent::Progress(p) => {
+            // TTY-only ticker: NDJSON consumers get clean stdout, humans see
+            // live progress instead of silence between results.
+            if std::io::stderr().is_terminal() {
+                match p.total {
+                    Some(total) => eprint!(
+                        "\r\x1b[Kchecked {}/{} — {} working",
+                        p.scanned, total, p.found
+                    ),
+                    None => {
+                        eprint!("\r\x1b[Kchecked {} — {} working", p.scanned, p.found)
+                    }
+                }
+            }
+        }
     };
     let result = match args.seed {
         Some(seed) => controller.run_streaming_seeded(cfg, seed, streaming).await,
@@ -567,6 +668,9 @@ async fn run_scan(args: ScanArgs) -> Result<()> {
     .map_err(|e| anyhow!("scan failed: {e:#}"));
     cancel_on_ctrl_c.abort();
     let summary = result?;
+    if std::io::stderr().is_terminal() {
+        eprint!("\r\x1b[K");
+    }
     eprintln!(
         "scanned {} hosts, found {} working in {} ms",
         summary.scanned, summary.found, summary.duration_ms
@@ -623,7 +727,12 @@ fn run_export_config(
     Ok(uri)
 }
 
-async fn serve(port: u16, tray_enabled: bool, autostart: Option<AutostartArg>) -> Result<()> {
+async fn serve(
+    port: u16,
+    open_ui: bool,
+    tray_enabled: bool,
+    autostart: Option<AutostartArg>,
+) -> Result<()> {
     // Removal runs before bind: unregistering must not depend on the server
     // coming up (a busy port must not trap the entry in the registry).
     if autostart == Some(AutostartArg::Remove) {
@@ -664,6 +773,8 @@ async fn serve(port: u16, tray_enabled: bool, autostart: Option<AutostartArg>) -
         if let Err(err) = tray::spawn(url.clone(), false) {
             tracing::warn!("could not start system tray: {err:#}");
         }
+    } else if open_ui {
+        open_browser(&url);
     }
     // Graceful shutdown waits for in-flight responses, but an idle SSE
     // stream is open forever by design — bound the wait so a connected UI
@@ -702,6 +813,26 @@ fn ensure_autostart_valid(tray_enabled: bool, autostart: Option<AutostartArg>) -
         return Err(anyhow!("--autostart requires --tray"));
     }
     Ok(())
+}
+
+/// Open `url` in the default browser (`serve --open`). Best-effort: a
+/// missing opener must never take the server down.
+fn open_browser(url: &str) {
+    #[cfg(target_os = "windows")]
+    let spawned = {
+        use std::os::windows::process::CommandExt as _;
+        std::process::Command::new("cmd")
+            .args(["/c", "start", "", url])
+            .creation_flags(0x0800_0000) // CREATE_NO_WINDOW: no console flash
+            .spawn()
+    };
+    #[cfg(target_os = "macos")]
+    let spawned = std::process::Command::new("open").arg(url).spawn();
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let spawned = std::process::Command::new("xdg-open").arg(url).spawn();
+    if let Err(err) = spawned {
+        tracing::warn!("could not open browser at {url}: {err}");
+    }
 }
 
 /// Bind failure message: a busy port gets a hint, anything else stays
@@ -854,8 +985,10 @@ mod tests {
         let mut a = args();
         a.cap = Some(0);
         let err = build_scan_config(&a).unwrap_err();
+        // Rejection moved to the single source (ScanConfig::validate); the
+        // CLI no longer duplicates the check with its own message.
         assert!(
-            err.to_string().contains("--cap must be at least 1"),
+            err.to_string().contains("stop.cap out of range"),
             "{err:#}"
         );
     }
@@ -1269,10 +1402,12 @@ mod tests {
         match cli.command {
             Command::Serve {
                 port,
+                open,
                 tray,
                 autostart,
             } => {
                 assert_eq!(port, 8765);
+                assert!(!open);
                 assert!(tray);
                 assert_eq!(autostart, None);
             }

@@ -7,6 +7,7 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  TOOLCHAIN: "1.88"
 
 jobs:
   checks:
@@ -20,7 +21,7 @@ jobs:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: "1.88"
+          toolchain: ${{ env.TOOLCHAIN }}
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
         with:
@@ -46,7 +47,7 @@ jobs:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: "1.88"
+          toolchain: ${{ env.TOOLCHAIN }}
           components: llvm-tools-preview
       - uses: taiki-e/install-action@cargo-llvm-cov
       - uses: Swatinem/rust-cache@v2
@@ -106,7 +107,7 @@ jobs:
           # The release bundle downloads XRAY_BASE/<tag>/Xray-*.zip; a pinned
           # tag XTLS never published fails every release build, so fail fast
           # on PRs instead of at tag-push.
-          code=$(curl -fsSL -o /dev/null -w '%{http_code}' "https://github.com/XTLS/Xray-core/releases/tag/$tag" 2>/dev/null || echo 000)
+          code=$(curl -fsSL --retry 3 --retry-delay 2 -o /dev/null -w '%{http_code}' "https://github.com/XTLS/Xray-core/releases/tag/$tag" 2>/dev/null || echo 000)
           if [ "$code" != "200" ]; then
             echo "::error::XTLS release for $tag not found (HTTP $code); release bundling would fail"
             exit 1
@@ -119,11 +120,37 @@ jobs:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: "1.88"
+          toolchain: ${{ env.TOOLCHAIN }}
       - uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
-      - name: Install cargo-audit
-        run: cargo install cargo-audit@0.22.1 --locked
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit@0.22.1
       - name: Audit dependencies
         run: cargo audit
+
+  version-parity:
+    name: version parity (Cargo.toml == npm == RELEASE_TAG)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Check version parity
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo_ver=$(grep -E '^\s*version\s*=' Cargo.toml | head -n1 | sed -E 's/.*version\s*=\s*"([^"]+)".*/\1/')
+          npm_ver=$(grep -E '"version"\s*:' npm/cf-scanner/package.json | head -n1 | sed -E 's/.*"version"\s*:\s*"([^"]+)".*/\1/')
+          tag_ver=$(grep -E 'RELEASE_TAG\s*=' npm/cf-scanner/install.js | head -n1 | sed -E 's/.*RELEASE_TAG\s*=\s*"v([^"]+)".*/\1/')
+          echo "Cargo.toml: $cargo_ver"
+          echo "npm/cf-scanner/package.json: $npm_ver"
+          echo "npm/cf-scanner/install.js RELEASE_TAG: v$tag_ver"
+          if [ "$cargo_ver" != "$npm_ver" ]; then
+            echo "::error::version mismatch: Cargo.toml ($cargo_ver) != npm/cf-scanner/package.json ($npm_ver)"
+            exit 1
+          fi
+          if [ "$cargo_ver" != "$tag_ver" ]; then
+            echo "::error::version mismatch: Cargo.toml ($cargo_ver) != RELEASE_TAG (v$tag_ver)"
+            exit 1
+          fi
+          echo "Version parity OK: $cargo_ver"

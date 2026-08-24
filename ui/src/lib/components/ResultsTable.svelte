@@ -2,7 +2,7 @@
   import { Check, Copy, Link2, ShieldCheck } from "@lucide/svelte";
   import { api } from "../api";
   import type { Verdict } from "../types";
-  import { errorText, ui } from "../store.svelte";
+  import { errorText, filteredEndpoints, resultFilter, ui } from "../store.svelte";
   import { t } from "../i18n.svelte";
 
   let { results }: { results: Verdict[] } = $props();
@@ -21,10 +21,7 @@
   let copiedPickedIps = $state(false);
   let copiedPickedUris = $state(false);
 
-  /** Latency ceiling filter; empty input = no filter, garbage = ignored.
-   * Bound to a type="number" input, so Svelte hands us number | null —
-   * never call string methods on it. */
-  let maxLatency = $state<number | null>(null);
+  const filter = resultFilter();
   let headCheckbox = $state<HTMLInputElement | null>(null);
 
   /** Row keys the user ticked, keyed ip:port. Selection lives on displayed
@@ -58,7 +55,7 @@
    * copies, copy-all and the header count all respect the latency filter. */
   const shown = $derived(
     sorted.filter(
-      (r) => maxLatency === null || (r.latency_ms ?? 9e9) <= maxLatency,
+      (r) => filter.maxLatency === null || (r.latency_ms ?? 9e9) <= filter.maxLatency,
     ),
   );
 
@@ -131,7 +128,7 @@
   }
 
   async function copyAll() {
-    await copyText(shown.map((r) => `${r.ip}:${r.port}`).join("\n"), shown.length);
+    await copyText(filteredEndpoints(shown, null), shown.length);
     copiedAll = true;
     setTimeout(() => (copiedAll = false), 1200);
   }
@@ -222,7 +219,7 @@
           type="number"
           min="0"
           placeholder="any"
-          bind:value={maxLatency}
+          bind:value={filter.maxLatency}
         />
       </label>
       <button
@@ -294,7 +291,7 @@
         <div class="mt-2 h-6 animate-pulse rounded" style="background: var(--paper-3); width: {88 - (i % 3) * 12}%"></div>
       {/each}
     </div>
-  {:else if results.length > 0 && shown.length === 0 && maxLatency !== null}
+  {:else if results.length > 0 && shown.length === 0 && filter.maxLatency !== null}
     <div class="px-4 py-5 text-sm">
       <p class="font-semibold">{t("empty.filtered.title")}</p>
       <p class="mt-1 text-xs" style="color: var(--ink-muted)">
@@ -302,7 +299,7 @@
       </p>
       <button
         class="btn btn-secondary btn-sm mt-2"
-        onclick={() => (maxLatency = null)}
+        onclick={() => (filter.maxLatency = null)}
       >
         {t("empty.filtered.clear")}
       </button>
@@ -325,11 +322,13 @@
               </label>
             </th>
             <th class="px-4 py-2 font-medium" scope="col" aria-sort={sortOrder === "ip" ? (sortDir === "asc" ? "ascending" : "descending") : undefined}>
-              <button class="uppercase tracking-wider" onclick={() => cycleSort("ip")}>{t("table.col.endpoint")}<span aria-hidden="true">{sortOrder === "ip" ? (sortDir === "asc" ? " ▲" : " ▼") : ""}</span>
+              <!-- svelte-ignore a11y_role_supports_aria_props_implicit -->
+              <button class="uppercase tracking-wider" onclick={() => cycleSort("ip")} aria-sort={sortOrder === "ip" ? (sortDir === "asc" ? "ascending" : "descending") : undefined} aria-label={sortOrder === "ip" ? `${t("table.col.endpoint")} ${sortDir === "asc" ? "ascending" : "descending"}` : t("table.col.endpoint")}>{t("table.col.endpoint")}<span aria-hidden="true">{sortOrder === "ip" ? (sortDir === "asc" ? " ▲" : " ▼") : ""}</span>
               </button>
             </th>
             <th class="px-4 py-2 font-medium" scope="col" aria-sort={sortOrder === "latency" ? (sortDir === "asc" ? "ascending" : "descending") : undefined}>
-              <button class="uppercase tracking-wider" onclick={() => cycleSort("latency")}>{t("table.col.latency")}<span aria-hidden="true">{sortOrder === "latency" ? (sortDir === "asc" ? " ▲" : " ▼") : ""}</span>
+              <!-- svelte-ignore a11y_role_supports_aria_props_implicit -->
+              <button class="uppercase tracking-wider" onclick={() => cycleSort("latency")} aria-sort={sortOrder === "latency" ? (sortDir === "asc" ? "ascending" : "descending") : undefined} aria-label={sortOrder === "latency" ? `${t("table.col.latency")} ${sortDir === "asc" ? "ascending" : "descending"}` : t("table.col.latency")}>{t("table.col.latency")}<span aria-hidden="true">{sortOrder === "latency" ? (sortDir === "asc" ? " ▲" : " ▼") : ""}</span>
               </button>
             </th>
             <th class="px-4 py-2 font-medium" scope="col">{t("table.col.country")}</th>

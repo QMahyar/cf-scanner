@@ -126,6 +126,15 @@ fn parse_awg_uri(entry: &str) -> Result<WgConfig> {
         .trim_start_matches('[')
         .trim_end_matches(']')
         .to_owned();
+    // The host is rendered verbatim into `Endpoint = {host}:{port}`; conf
+    // parsers read that line raw, so restrict it to hostname/IP grammar.
+    if host.is_empty()
+        || !host
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b':'))
+    {
+        bail!("wg URI host has invalid characters");
+    }
     let port = url.port().ok_or_else(|| anyhow!("wg URI has no port"))?;
     // Raw query split, NOT `query_pairs`: form-urlencoded decoding would turn
     // the `+` inside base64 keys into a space (real-world AmneziaWG URIs ship

@@ -45,6 +45,7 @@ copy/save working IPs one-per-line — all in one binary, no external services.
 - Logging: `tracing` + `tracing-subscriber`; `anyhow` (errors)
 - Frontend: one embedded HTML file, vanilla JS + native EventSource, custom
   design system (0.3.0) — see docs/review/product-review-2026-08-13.md
+  - Shipped reality (v0.7+): Svelte 5 SPA in `ui/` compiled to committed `ui/dist`, embedded via `rust-embed` (`src/server.rs`), bilingual EN/FA.
 - Configuration: hand-rolled JSON in the platform data dir (`profiles.json`,
   `identity.json`, refreshed ranges); no config crate, no TOML
 

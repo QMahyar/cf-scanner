@@ -12,7 +12,8 @@
  * macOS is not yet supported (unsigned binaries trip Gatekeeper).
  */
 
-const { execSync } = require("child_process");
+const { spawnSync } = require("child_process");
+const crypto = require("crypto");
 const fs = require("fs");
 const https = require("https");
 const http = require("http");
@@ -22,13 +23,13 @@ const path = require("path");
 // Config
 // ---------------------------------------------------------------------------
 
-const REPO = "QMahyar/cf-scanner";
+const REPO = "qmahyar/cf-scanner";
 // npm package version (display only) and the GitHub release tag the binary
 // is downloaded from. These CAN differ: the wrapper is republishable (bug
 // fixes like this one) without a new binary release. Bump RELEASE_TAG with
 // every new binary release; bump version with every npm publish.
 const VERSION = require("./package.json").version;
-const RELEASE_TAG = "v0.7.0";
+const RELEASE_TAG = "v0.8.0";
 
 /** Maps (os, arch) → dist target triple. */
 const TARGETS = {
@@ -42,6 +43,14 @@ const BINARY_NAME = process.platform === "win32" ? "cf-scanner.exe" : "cf-scanne
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+function rmRecursive(target) {
+  if (typeof fs.rmSync === "function") {
+    fs.rmSync(target, { recursive: true, force: true });
+  } else {
+    fs.rmdirSync(target, { recursive: true });
+  }
+}
 
 function getPlatformKey() {
   const os = process.platform; // linux, darwin, win32
@@ -73,13 +82,13 @@ function getDownloadUrl(target) {
   return `https://github.com/${REPO}/releases/download/${RELEASE_TAG}/${filename}`;
 }
 
-function download(url) {
+function downloadOnce(url) {
   return new Promise((resolve, reject) => {
     const mod = url.startsWith("https") ? https : http;
     const request = mod.get(url, { headers: { "User-Agent": "cf-scanner-npm" } }, (res) => {
       // Follow redirects (302, 301)
       if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
-        return download(res.headers.location).then(resolve, reject);
+        return downloadOnce(res.headers.location).then(resolve, reject);
       }
       if (res.statusCode !== 200) {
         reject(new Error(`HTTP ${res.statusCode} downloading ${url}`));
@@ -98,12 +107,39 @@ function download(url) {
   });
 }
 
+function download(url) {
+  // Retry once on failure (2 attempts total, small delay), keep redirect following.
+  // downloadOnce handles redirects recursively; we wrap the top-level call.
+  return downloadOnce(url).catch((err) => {
+    return new Promise((resolve, reject) => {
+      setTimeout(() => {
+        downloadOnce(url).then(resolve, reject);
+      }, 500);
+    });
+  });
+}
+
+function verifyChecksum(buffer, sha256Text, url) {
+  const match = sha256Text.match(/[0-9a-fA-F]{64}/);
+  if (!match) {
+    throw new Error(`Invalid sha256 file for ${url}: no 64-hex digest found`);
+  }
+  const expected = match[0].toLowerCase();
+  const actual = crypto.createHash("sha256").update(buffer).digest("hex").toLowerCase();
+  if (actual !== expected) {
+    throw new Error(`Checksum mismatch for ${url}: expected ${expected}, got ${actual}`);
+  }
+}
+
 function extractTarXz(buffer, destDir) {
   // Write to temp file, extract with tar
   const tmpFile = path.join(destDir, "_cf-scanner-dl.tar.xz");
   fs.writeFileSync(tmpFile, buffer);
   try {
-    execSync(`tar -xJf "${tmpFile}" -C "${destDir}"`, { stdio: "ignore" });
+    const result = spawnSync("tar", ["-xJf", tmpFile, "-C", destDir], { stdio: "inherit" });
+    if (result.status !== 0) {
+      throw new Error(`tar extraction failed with code ${result.status}`);
+    }
   } finally {
     fs.unlinkSync(tmpFile);
   }
@@ -114,10 +150,14 @@ function extractZip(buffer, destDir) {
   const tmpFile = path.join(destDir, "_cf-scanner-dl.zip");
   fs.writeFileSync(tmpFile, buffer);
   try {
-    execSync(
-      `powershell -NoProfile -Command "Expand-Archive -Path '${tmpFile}' -DestinationPath '${destDir}' -Force"`,
-      { stdio: "ignore" }
+    const result = spawnSync(
+      "powershell",
+      ["-NoProfile", "-Command", `Expand-Archive -Path '${tmpFile}' -DestinationPath '${destDir}' -Force`],
+      { stdio: "inherit" }
     );
+    if (result.status !== 0) {
+      throw new Error(`PowerShell Expand-Archive failed with code ${result.status}`);
+    }
   } finally {
     fs.unlinkSync(tmpFile);
   }
@@ -135,7 +175,7 @@ function relocateExtracted(scratchDir, binDir, target) {
   fs.renameSync(path.join(nested, BINARY_NAME), path.join(binDir, BINARY_NAME));
   const bundled = path.join(nested, "bundled");
   if (fs.existsSync(bundled)) {
-    fs.rmSync(path.join(binDir, "bundled"), { recursive: true, force: true });
+    rmRecursive(path.join(binDir, "bundled"));
     fs.renameSync(bundled, path.join(binDir, "bundled"));
   }
 }
@@ -162,6 +202,17 @@ async function main() {
   try {
     const buffer = await download(url);
 
+    // Checksum verification: dist emits per-artifact `.sha256` files next to archives.
+    // Fail closed on mismatch or missing sha256 file.
+    let sha256Text;
+    try {
+      const shaBuffer = await download(`${url}.sha256`);
+      sha256Text = shaBuffer.toString("utf8");
+    } catch (e) {
+      throw new Error(`Failed to fetch checksum ${url}.sha256: ${e.message}`);
+    }
+    verifyChecksum(buffer, sha256Text, url);
+
     // Extract into a scratch dir, then move the binary (+ bundled xray)
     // into bin/ so the archive's nesting never leaks into the package.
     const isWindows = process.platform === "win32";
@@ -175,7 +226,7 @@ async function main() {
       }
       relocateExtracted(scratchDir, binDir, target);
     } finally {
-      fs.rmSync(scratchDir, { recursive: true, force: true });
+      rmRecursive(scratchDir);
     }
 
     // Ensure the binary is executable (Linux/macOS)
@@ -198,4 +249,6 @@ async function main() {
   }
 }
 
-main();
+if (require.main === module) {
+  main();
+}

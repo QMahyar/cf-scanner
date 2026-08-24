@@ -181,6 +181,21 @@ export function simpleConfig(
  * context), then the mobile share sheet when present, then an unconditional
  * Blob .txt download as the final fallback. Returns how it resolved so the
  * caller can show honest feedback. */
+
+/** Shared result filter used by ResultsTable and SimpleStart so Copy-all
+ * respects the same active latency filter. Filter lives here, not inside a
+ * single view, so both UIs stay in sync without prop drilling. */
+const sharedFilter = $state<{ maxLatency: number | null }>({ maxLatency: null });
+export function resultFilter(): { maxLatency: number | null } {
+  return sharedFilter;
+}
+
+export function filteredEndpoints(results: Verdict[], maxLatency: number | null): string {
+  return results
+    .filter((r) => maxLatency === null || (r.latency_ms ?? 9e9) <= maxLatency)
+    .map((r) => `${r.ip}:${r.port}`)
+    .join("\n");
+}
 export type ExportHow = "clipboard" | "share" | "download";
 
 export async function exportText(text: string, filename: string): Promise<ExportHow> {
