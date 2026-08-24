@@ -1,9 +1,34 @@
-import type { CdnPreset, FragmentPreset, Mode, ScanConfig } from "./types";
+import type { CdnPreset, FragmentPreset, FragmentWire, Mode, ScanConfig } from "./types";
+
+/** PascalCase wire value → lowercase form value; unknown/legacy values fall
+ * back to the form default so a profile saved by any version still loads. */
+function fragmentFromWire(wire: string | undefined): FragmentPreset {
+  const lower = (wire ?? "").toLowerCase();
+  return ["off", "light", "medium", "heavy", "custom"].includes(lower)
+    ? (lower as FragmentPreset)
+    : "off";
+}
+
 import {
   CDN_HTTPS_PORTS,
   WARP_EXTENDED_PORTS,
   WARP_PRIMARY_PORTS,
 } from "./cfPorts";
+import {
+  MAX_CIDRS,
+  MAX_CONFIG_ENTRY_BYTES,
+  MAX_PHASE2_ENTRIES,
+  MAX_PORTS,
+  MAX_SNI_BYTES,
+  MAX_SCAN_COUNT,
+  MAX_STOP_VALUE,
+  MAX_WGCONF_BYTES,
+  isRoutableIpv4,
+  parseCidr,
+  parseEndpoint,
+  validateProbeUrl,
+  validateSni,
+} from "./validators";
 
 /** Everything the Pro panel can set, exactly as the user typed it.
  * Ports are a checkbox selection from the curated Cloudflare catalogs plus a
@@ -112,7 +137,7 @@ export function formStateFromConfig(cfg: ScanConfig): FormState {
     exclude: cfg.exclude.join("\n"),
     phase2On: cfg.mode === "Cdn" && !!cfg.phase2,
     configsText: cfg.phase2?.configs.join("\n") ?? "",
-    fragment: cfg.phase2?.fragment ?? d.fragment,
+    fragment: fragmentFromWire(cfg.phase2?.fragment),
     snis: cfg.phase2?.snis.join(", ") ?? "",
     probeUrl: cfg.phase2?.probe_url || d.probeUrl,
     warpProbes: cfg.warp?.probes_per_endpoint ?? d.warpProbes,
@@ -164,6 +189,7 @@ function wholeNumber(
   value: unknown,
   label: string,
   min: number,
+  max: number,
   field: FormField,
   issues: FieldIssue[],
 ): number {
@@ -172,7 +198,51 @@ function wholeNumber(
     issues.push({ field, message: `${label}: enter a whole number ≥ ${min}` });
     return min;
   }
+  if (n > max) {
+    issues.push({ field, message: `${label}: maximum is ${max.toLocaleString("en-US")}` });
+    return max;
+  }
   return n;
+}
+
+/** Per-line syntax checks for the free-text list fields, mirroring the
+ * server grammar via validators.ts. Runs inside buildConfig so live inline
+ * errors, scan start and profile save all share one verdict. */
+function checkLines(
+  text: string,
+  field: FormField,
+  label: string,
+  parse: (line: string) => { ok: true; value: string } | { ok: false; message: string },
+  routable: boolean,
+  maxLines: number | null,
+  issues: FieldIssue[],
+): void {
+  const list = lines(text);
+  if (maxLines !== null && list.length > maxLines) {
+    issues.push({
+      field,
+      message: `${label}: at most ${maxLines} lines (got ${list.length})`,
+    });
+    return;
+  }
+  for (const line of list) {
+    const v = parse(line);
+    // `=== false`, not truthiness: without tsconfig strictNullChecks the
+    // truthy form does not narrow this discriminated union.
+    if (v.ok === false) {
+      issues.push({ field, message: `${label}: ${v.message}` });
+      continue;
+    }
+    if (routable) {
+      const ip = v.value.split("/")[0];
+      if (!isRoutableIpv4(ip)) {
+        issues.push({
+          field,
+          message: `${label}: ${ip} is a reserved/local range — the server refuses it`,
+        });
+      }
+    }
+  }
 }
 
 function parseCustomPorts(text: string, issues: FieldIssue[]): number[] {
@@ -230,6 +300,12 @@ export function buildConfig(f: FormState): ScanConfig {
       message: "Ports: check at least one port or enter a custom one",
     });
   }
+  if (ports.length > MAX_PORTS) {
+    issues.push({
+      field: "customPortsText",
+      message: `Ports: at most ${MAX_PORTS} unique ports (got ${ports.length})`,
+    });
+  }
   if (f.mode === "Warp" && ports.includes(443)) {
     issues.push({
       field: "customPortsText",
@@ -238,11 +314,15 @@ export function buildConfig(f: FormState): ScanConfig {
     });
   }
   const cap = parseCap(f.capText, issues);
-  const count = wholeNumber(f.count, "Candidate count", 1, "count", issues);
+  if (cap !== null && cap > MAX_STOP_VALUE) {
+    issues.push({ field: "capText", message: `Hard cap: maximum is ${MAX_STOP_VALUE.toLocaleString("en-US")}` });
+  }
+  const count = wholeNumber(f.count, "Candidate count", 1, MAX_SCAN_COUNT, "count", issues);
   const stopFound = wholeNumber(
     f.stopFound,
     "Stop after N working",
     1,
+    MAX_STOP_VALUE,
     "stopFound",
     issues,
   );
@@ -250,25 +330,91 @@ export function buildConfig(f: FormState): ScanConfig {
     f.concurrency,
     "Concurrency",
     1,
+    1000,
     "concurrency",
     issues,
   );
-  const timeoutMs = wholeNumber(f.timeoutMs, "Timeout", 1, "timeoutMs", issues);
+  const timeoutMs = wholeNumber(f.timeoutMs, "Timeout", 100, 30_000, "timeoutMs", issues);
   const warpProbes = wholeNumber(
     f.warpProbes,
     "Handshake probes per endpoint",
     1,
+    10,
     "warpProbes",
     issues,
   );
 
+  // Free-text lists: same grammar the server enforces, checked at entry so
+  // inline errors and profile-save gating match scan-time 400s exactly.
+  checkLines(f.customCidrs, "customCidrs", "Custom CIDRs", parseCidr, true, MAX_CIDRS, issues);
+  checkLines(f.exclude, "exclude", "Exclude", parseCidr, false, MAX_CIDRS, issues);
+  if (f.mode === "Warp") {
+    checkLines(
+      f.warpEndpoints,
+      "warpEndpoints",
+      "Custom endpoints",
+      parseEndpoint,
+      true,
+      null,
+      issues,
+    );
+  }
+  if (f.wgconf.trim().length > MAX_WGCONF_BYTES) {
+    issues.push({
+      field: "wgconf",
+      message: `wgconf exceeds ${Math.floor(MAX_WGCONF_BYTES / 1024)} KB`,
+    });
+  }
+
   const phase2Wanted = f.mode === "Cdn" && f.phase2On;
   const phase2Configs = phase2Wanted ? lines(f.configsText) : [];
-  if (phase2Wanted && phase2Configs.length === 0) {
-    issues.push({
-      field: "configsText",
-      message: "Phase 2: add at least one config URI to verify",
-    });
+  if (phase2Wanted) {
+    if (phase2Configs.length === 0) {
+      issues.push({
+        field: "configsText",
+        message: "Phase 2: add at least one config URI to verify",
+      });
+    }
+    if (phase2Configs.length > MAX_PHASE2_ENTRIES) {
+      issues.push({
+        field: "configsText",
+        message: `Phase 2: at most ${MAX_PHASE2_ENTRIES} configs (got ${phase2Configs.length})`,
+      });
+    }
+    for (const c of phase2Configs) {
+      if (c.length > MAX_CONFIG_ENTRY_BYTES) {
+        issues.push({
+          field: "configsText",
+          message: `Phase 2: one config exceeds ${Math.floor(MAX_CONFIG_ENTRY_BYTES / 1024)} KB`,
+        });
+        break;
+      }
+      // Server-side API rule: share URIs and subscription URLs carry a
+      // scheme; local xray JSON paths are CLI-only.
+      if (!c.includes("://")) {
+        issues.push({
+          field: "configsText",
+          message: `Phase 2: "${c.slice(0, 32)}${c.length > 32 ? "…" : ""}" has no scheme — paste a vless:// trojan:// vmess:// ss:// link or a subscription URL`,
+        });
+      }
+    }
+    const sniList = csv(f.snis);
+    if (sniList.length > MAX_PHASE2_ENTRIES) {
+      issues.push({
+        field: "snis",
+        message: `SNI variants: at most ${MAX_PHASE2_ENTRIES} (got ${sniList.length})`,
+      });
+    }
+    for (const s of sniList) {
+      const v = validateSni(s);
+      if (v.ok === false) {
+        issues.push({ field: "snis", message: `SNI: ${v.message}` });
+      } else if (v.value.length > MAX_SNI_BYTES) {
+        issues.push({ field: "snis", message: `SNI exceeds ${MAX_SNI_BYTES} bytes` });
+      }
+    }
+    const pv = validateProbeUrl(f.probeUrl);
+    if (pv.ok === false) issues.push({ field: "probeUrl", message: `Probe URL: ${pv.message}` });
   }
 
   if (issues.length > 0) throw new FormValidationError(issues);
@@ -300,7 +446,10 @@ export function buildConfig(f: FormState): ScanConfig {
   if (phase2Wanted) {
     cfg.phase2 = {
       configs: phase2Configs,
-      fragment: f.fragment,
+      // Wire contract is PascalCase (serde default for FragmentPreset); the
+      // form stores lowercase for friendlier selects/persistence.
+      fragment: (f.fragment.charAt(0).toUpperCase() +
+        f.fragment.slice(1)) as FragmentWire,
       snis: csv(f.snis),
       probe_url: f.probeUrl,
       probe_urls: [],

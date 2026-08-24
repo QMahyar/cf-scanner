@@ -1,17 +1,27 @@
 <script lang="ts">
-  import { Check, Copy, Gauge, Play, Square } from "@lucide/svelte";
-  import { simpleConfig, startScan, stopScan, ui } from "../store.svelte";
+  import { Check, Copy, Download, Gauge, Play, Share2, Square } from "@lucide/svelte";
+  import {
+    exportText,
+    simpleConfig,
+    startScan,
+    stopScan,
+    ui,
+    type ExportHow,
+  } from "../store.svelte";
+  import { t } from "../i18n.svelte";
+  import { humanizeSeconds } from "../validators";
   import type { Mode } from "../types";
 
   const app = ui();
   let scanMode = $state<Mode>("Cdn");
   let starting = $state(false);
-  let findUpTo = $state(10);
-  let copiedAll = $state(false);
+  let findUpTo = $state(20);
+  let testUpTo = $state(800);
+  let copiedAll = $state<ExportHow | null>(null);
 
   async function start() {
     starting = true;
-    await startScan(simpleConfig(findUpTo, scanMode));
+    await startScan(simpleConfig(findUpTo, scanMode, testUpTo));
     starting = false;
   }
 
@@ -48,15 +58,9 @@
   const finishedIdle = $derived(!app.running && app.summary !== null);
 
   async function copyAll() {
-    try {
-      await navigator.clipboard.writeText(
-        best.map((r) => `${r.ip}:${r.port}`).join("\n"),
-      );
-      copiedAll = true;
-      setTimeout(() => (copiedAll = false), 1200);
-    } catch {
-      /* clipboard unavailable */
-    }
+    const lines = best.map((r) => `${r.ip}:${r.port}`).join("\n");
+    copiedAll = await exportText(lines, "cf-scanner-endpoints.txt");
+    setTimeout(() => (copiedAll = null), 1600);
   }
 </script>
 
@@ -67,7 +71,7 @@
         class="mb-3 inline-flex items-center gap-1 rounded-full p-1"
         style="background: var(--paper-3)"
         role="group"
-        aria-label="Scan target"
+        aria-label={t("simple.target")}
       >
         <button
           type="button"
@@ -89,35 +93,31 @@
         </button>
       </div>
       <p class="mono text-xs uppercase tracking-widest" style="color: var(--accent)">
-        cloudflare endpoint finder
+        {t("simple.badge.cdn")}
       </p>
       <h2
         class="mt-2 text-3xl font-semibold sm:text-4xl"
         style="letter-spacing:-0.03em"
       >
-        {scanMode === "Warp"
-          ? "One tap to working endpoints."
-          : "One tap to working IPs."}
+        {scanMode === "Warp" ? t("simple.heading.warp") : t("simple.heading.cdn")}
       </h2>
       <p class="mt-2 max-w-md text-sm" style="color: var(--ink-muted)">
-        Scans Cloudflare's edge from your network and ranks what actually
-        answers. Results never leave this machine — scans talk only to
-        Cloudflare. Working = answered a real TLS handshake.
+        {t("simple.intro")}
       </p>
     </div>
     {#if app.running}
       <button class="btn btn-secondary btn-lg" onclick={stopScan}>
         <Square class="size-5" />
-        Stop
+        {t("simple.stop")}
       </button>
     {:else}
       <div class="flex flex-col items-start gap-1.5 sm:items-end">
-        <div class="flex items-center gap-4">
+        <div class="flex flex-wrap items-center gap-x-4 gap-y-2">
           <label
             class="flex items-center gap-2 text-xs whitespace-nowrap"
             style="color: var(--ink-muted)"
           >
-            Find up to
+            {t("simple.findUpTo")}
             <input
               class="field mono !w-20 text-center"
               type="number"
@@ -128,7 +128,27 @@
               onchange={() =>
                 (findUpTo = Math.min(
                   100,
-                  Math.max(5, Math.trunc(Number(findUpTo)) || 10),
+                  Math.max(5, Math.trunc(Number(findUpTo)) || 20),
+                ))}
+            />
+          </label>
+          <label
+            class="flex items-center gap-2 text-xs whitespace-nowrap"
+            style="color: var(--ink-muted)"
+            title={t("simple.testUpTo.hint")}
+          >
+            {t("simple.testUpTo")}
+            <input
+              class="field mono !w-24 text-center"
+              type="number"
+              min="100"
+              max="100000"
+              step="100"
+              bind:value={testUpTo}
+              onchange={() =>
+                (testUpTo = Math.min(
+                  100_000,
+                  Math.max(100, Math.trunc(Number(testUpTo)) || 800),
                 ))}
             />
           </label>
@@ -140,14 +160,14 @@
           >
             <Play class="size-5" />
             {starting
-              ? "Starting…"
+              ? t("simple.starting")
               : scanMode === "Warp"
-                ? "Scan WARP"
-                : "Start scan"}
+                ? t("simple.start.warp")
+                : t("simple.start.cdn")}
           </button>
         </div>
         <span class="mono text-[11px]" style="color: var(--ink-muted)">
-          usually finishes in under a minute
+          {t("simple.finishHint")} · {t("simple.overshootHint")}
         </span>
       </div>
     {/if}
@@ -159,15 +179,15 @@
         ? Math.min(100, Math.round((app.progress.scanned / app.progress.total) * 100))
         : null}
     <div class="fade-in mt-8" role="status" aria-live="polite">
-      {#if finishedIdle}
+      {#if finishedIdle && app.summary}
         <div class="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
           <p class="text-sm font-semibold">
             {app.summary.cancelled
-              ? "Stopped early — partial results kept below."
-              : `Scan complete — ${app.summary.found} working ${app.summary.found === 1 ? "endpoint" : "endpoints"} below.`}
+              ? t("done.cancelled")
+              : t("done.complete", { n: app.summary.found })}
           </p>
           <span class="mono text-xs" style="color: var(--ink-muted)">
-            done in {(app.summary.duration_ms / 1000).toFixed(1)}s
+            {t("done.in", { s: (app.summary.duration_ms / 1000).toFixed(1) })}
           </span>
         </div>
       {:else}
@@ -175,12 +195,12 @@
           <span>
             <span class="mono font-semibold" style="color: var(--accent)">
               {app.progress.found}</span>
-            <span title="passed a real TLS handshake">working</span>
-            <span style="color: var(--ink-muted)">· {app.progress.scanned} {scanMode === "Warp" ? "endpoints checked" : "checked"}{pct !== null ? ` · ${pct}%` : ""}</span>
+            <span title="passed a real TLS handshake">{t("progress.working")}</span>
+            <span style="color: var(--ink-muted)">· {app.progress.scanned} {scanMode === "Warp" ? t("progress.endpointsChecked") : t("progress.checked")}{pct !== null ? ` · ${pct}%` : ""}</span>
           </span>
           {#if pace}
             <span class="mono text-xs" style="color: var(--ink-muted)">
-              ≈{pace.rate}/s{pace.eta !== null ? ` · ~${pace.eta}s left` : ""}
+              ≈{pace.rate}/s{pace.eta !== null ? ` · ~${humanizeSeconds(pace.eta)}` : ""}
             </span>
           {/if}
         </div>
@@ -194,6 +214,11 @@
           style="width: {pct ?? 6}%; background: var(--accent);"
         ></div>
       </div>
+      {#if app.running}
+        <p class="mt-2 text-xs" style="color: var(--ink-muted)">
+          {t("simple.reassure")}
+        </p>
+      {/if}
     </div>
   {/if}
 </section>
@@ -205,57 +230,57 @@
   >
     <span class="flex items-center gap-1.5 text-xs whitespace-nowrap" style="color: var(--ink-muted)">
       <Play class="size-3.5" />
-      Scan Cloudflare's edge
+      {t("howto.scan")}
     </span>
     <span aria-hidden="true" class="h-0 w-6 sm:w-10 border-t border-dashed" style="border-color: oklch(100% 0 0 / 15%)"></span>
     <span class="flex items-center gap-1.5 text-xs whitespace-nowrap" style="color: var(--ink-muted)">
       <Gauge class="size-3.5" />
-      Rank by real latency
+      {t("howto.rank")}
     </span>
     <span aria-hidden="true" class="h-0 w-6 sm:w-10 border-t border-dashed" style="border-color: oklch(100% 0 0 / 15%)"></span>
     <span class="flex items-center gap-1.5 text-xs whitespace-nowrap" style="color: var(--ink-muted)">
       <Copy class="size-3.5" />
-      Copy what works
+      {t("howto.copy")}
     </span>
   </section>
 {/if}
 
 {#if finishedIdle && app.results.length === 0}
   <section class="card fade-in px-6 py-6" aria-label="No results guidance">
-    <h3 class="text-base font-semibold">No working endpoints found</h3>
+    <h3 class="text-base font-semibold">{t("empty.title")}</h3>
     <p class="mt-2 max-w-lg text-sm" style="color: var(--ink-muted)">
-      Your network may be blocking Cloudflare probes on these ports. Try more
-      ports (2053, 2083, 8443), a longer timeout, or the Full preset in Pro
-      mode.
+      {t("empty.body")}
     </p>
   </section>
 {/if}
 
 {#if best.length > 0}
-  <section class="fade-in flex flex-col gap-3" aria-label="Working endpoints">
+  <section class="fade-in flex flex-col gap-3" aria-label={t("results.heading")}>
     <div class="flex flex-wrap items-end justify-between gap-2 px-1">
       <div class="min-w-0">
-        <h3 class="text-sm font-semibold">Working endpoints</h3>
+        <h3 class="text-sm font-semibold">{t("results.heading")}</h3>
         <p class="mt-0.5 text-xs" style="color: var(--ink-muted)">
-          These answer real TLS handshakes fastest — paste ip:port as your
-          proxy client's server address. Working = answered a real TLS
-          handshake.
+          {t("results.sub")}
         </p>
       </div>
       <button
         class="pill shrink-0 cursor-pointer"
-        style={copiedAll
+        style={copiedAll !== null
           ? "background: oklch(30% .06 155); color: var(--good)"
           : "background: var(--paper-3); color: var(--ink-muted)"}
-        title="Copy every endpoint (ip:port, one per line)"
+        title={t("table.copyAllTitle")}
         onclick={copyAll}
       >
-        {#if copiedAll}
+        {#if copiedAll !== null}
           <Check class="size-3.5" />
-          copied
+          {copiedAll === "clipboard"
+            ? t("results.copied")
+            : copiedAll === "share"
+              ? t("results.shared")
+              : t("results.saved")}
         {:else}
           <Copy class="size-3.5" />
-          Copy all
+          {t("results.copyAll")}
         {/if}
       </button>
     </div>
@@ -263,14 +288,14 @@
       {#each best.slice(0, SHOWN) as r, i (r.ip + ":" + r.port)}
         <article class="card card-lift flex items-center justify-between gap-3 px-4 py-3">
           <div class="min-w-0">
-            <p class="mono truncate text-sm font-semibold">{r.ip}:{r.port}</p>
+            <p class="mono truncate text-sm font-semibold"><span dir="ltr">{r.ip}:{r.port}</span></p>
             <p class="text-xs" style="color: var(--ink-muted)">
-              {r.latency_ms}ms{r.country ? ` · ${r.country}` : ""}{i === 0 ? " · fastest" : ""}
+              <span dir="ltr">{r.latency_ms}ms</span>{r.country ? ` · ${r.country}` : ""}{i === 0 ? ` · ${t("card.fastest")}` : ""}
             </p>
           </div>
           <button
             class="btn btn-ghost btn-sm"
-            title="Copy this endpoint (ip:port)"
+            title={t("card.copyTitle")}
             onclick={() => navigator.clipboard.writeText(`${r.ip}:${r.port}`)}
           >
             <Copy class="size-4" />
@@ -278,14 +303,27 @@
         </article>
       {/each}
     </div>
-    {#if hiddenCount > 0}
-      <p class="mono px-1 text-[11px]" style="color: var(--ink-muted)">
-        showing fastest {Math.min(SHOWN, best.length)} of {best.length}
-      </p>
+    {#if hiddenCount > 0 || copiedAll === "download"}
+      <div class="flex flex-wrap items-center justify-between gap-2 px-1">
+        <p class="mono text-[11px]" style="color: var(--ink-muted)">
+          {hiddenCount > 0
+            ? t("results.showing", { shown: Math.min(SHOWN, best.length), total: best.length })
+            : ""}
+        </p>
+        {#if copiedAll === "download"}
+          <span class="pill fade-in" style="background: var(--paper-3); color: var(--good)">
+            <Download class="size-3.5" /> cf-scanner-endpoints.txt
+          </span>
+        {:else if copiedAll === "share"}
+          <span class="pill fade-in" style="background: var(--paper-3); color: var(--good)">
+            <Share2 class="size-3.5" />
+          </span>
+        {/if}
+      </div>
     {/if}
   </section>
 {/if}
 
 <p class="mono px-1 text-[11px]" style="color: var(--ink-muted)">
-  flip the Pro switch up top for phase-2 verification, WARP identity, profiles and exports
+  {t("pro.hint")}
 </p>

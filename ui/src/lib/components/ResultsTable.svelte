@@ -1,19 +1,25 @@
 <script lang="ts">
-  import { Check, Copy, Link2 } from "@lucide/svelte";
+  import { Check, Copy, Link2, ShieldCheck } from "@lucide/svelte";
   import { api } from "../api";
   import type { Verdict } from "../types";
   import { errorText, ui } from "../store.svelte";
+  import { t } from "../i18n.svelte";
 
   let { results }: { results: Verdict[] } = $props();
   const app = ui();
 
-  let sortKey = $state<"latency" | "ip">("latency");
+  /** Tri-state per research §7: latency-asc → latency-desc → scan order.
+   * `null` = unsorted ("scan order" is the engine's latency-sorted store). */
+  type SortCol = "latency" | "ip";
+  /** Active sort column; null = engine order (tri-state, research §7). */
+  let sortOrder = $state<SortCol | null>("latency");
+  let sortDir = $state<"asc" | "desc">("asc");
   let copiedIdx = $state<number | null>(null);
   let copiedAll = $state(false);
+  let toast = $state("");
   let copiedUriIdx = $state<number | null>(null);
   let copiedPickedIps = $state(false);
   let copiedPickedUris = $state(false);
-  const sortOptions: readonly ("latency" | "ip")[] = ["latency", "ip"];
 
   /** Latency ceiling filter; empty input = no filter, garbage = ignored.
    * Bound to a type="number" input, so Svelte hands us number | null —
@@ -26,13 +32,27 @@
    * in-place row updates during a scan keep it. */
   let selected = $state(new Set<string>());
 
-  const sorted = $derived(
-    [...results].sort((a, b) =>
-      sortKey === "latency"
-        ? (a.latency_ms ?? 9e9) - (b.latency_ms ?? 9e9)
-        : a.ip.localeCompare(b.ip),
-    ),
-  );
+  function compare(a: Verdict, b: Verdict): number {
+    if (sortOrder === null) return 0;
+    const sign = sortDir === "asc" ? 1 : -1;
+    return sortOrder === "latency"
+      ? sign * ((a.latency_ms ?? 9e9) - (b.latency_ms ?? 9e9))
+      : sign * a.ip.localeCompare(b.ip);
+  }
+
+  function cycleSort(k: SortCol): void {
+    if (sortOrder !== k) {
+      sortOrder = k;
+      sortDir = "asc";
+    } else if (sortDir === "asc") {
+      sortDir = "desc";
+    } else {
+      // Third click: back to the engine's own ordering.
+      sortOrder = null;
+    }
+  }
+
+  const sorted = $derived(sortOrder === null ? [...results] : [...results].sort(compare));
 
   /** Everything below renders/operates on this list: checkboxes, action-bar
    * copies, copy-all and the header count all respect the latency filter. */
@@ -41,6 +61,18 @@
       (r) => maxLatency === null || (r.latency_ms ?? 9e9) <= maxLatency,
     ),
   );
+
+  /** Render cap for very large scans (research §7): hundreds of DOM rows are
+   * fine; tens of thousands are not. The cap is explicit and lift-able. */
+  const RENDER_CAP = 500;
+  let renderLimit = $state(RENDER_CAP);
+  const capped = $derived(shown.length > renderLimit);
+  const visibleRows = $derived(capped ? shown.slice(0, renderLimit) : shown);
+
+  $effect(() => {
+    void shown;
+    renderLimit = Math.max(renderLimit, RENDER_CAP);
+  });
 
   function keyOf(r: Verdict): string {
     return `${r.ip}:${r.port}`;
@@ -63,6 +95,11 @@
         pickedRows.length > 0 && !allShownPicked;
   });
 
+  function announce(msg: string): void {
+    toast = msg;
+    setTimeout(() => (toast = ""), 2400);
+  }
+
   function pickRow(r: Verdict, on: boolean) {
     const next = new Set(selected);
     if (on) next.add(keyOf(r));
@@ -72,6 +109,15 @@
 
   function pickAllDisplayed(on: boolean) {
     selected = on ? new Set(shown.map(keyOf)) : new Set();
+  }
+
+  async function copyText(text: string, n: number) {
+    try {
+      await navigator.clipboard.writeText(text);
+      announce(t("toast.bulkCopied", { n }));
+    } catch {
+      /* clipboard unavailable */
+    }
   }
 
   async function copyUri(r: Verdict, i: number) {
@@ -85,14 +131,9 @@
   }
 
   async function copyAll() {
-    try {
-      const lines = shown.map((r) => `${r.ip}:${r.port}`).join("\n");
-      await navigator.clipboard.writeText(lines);
-      copiedAll = true;
-      setTimeout(() => (copiedAll = false), 1200);
-    } catch {
-      /* clipboard unavailable */
-    }
+    await copyText(shown.map((r) => `${r.ip}:${r.port}`).join("\n"), shown.length);
+    copiedAll = true;
+    setTimeout(() => (copiedAll = false), 1200);
   }
 
   /** The original config URI this row's phase 2 verified with; null when the
@@ -117,13 +158,9 @@
   }
 
   async function copyPickedIps() {
-    try {
-      await navigator.clipboard.writeText(pickedRows.map(keyOf).join("\n"));
-      copiedPickedIps = true;
-      setTimeout(() => (copiedPickedIps = false), 1200);
-    } catch {
-      /* clipboard unavailable */
-    }
+    await copyText(pickedRows.map(keyOf).join("\n"), pickedRows.length);
+    copiedPickedIps = true;
+    setTimeout(() => (copiedPickedIps = false), 1200);
   }
 
   /** Export each picked passing row through its original config; rows with
@@ -137,7 +174,7 @@
       const uris = await Promise.all(
         entries.map((e) => api.exportUri(e.config, e.r.ip, e.r.port)),
       );
-      await navigator.clipboard.writeText(uris.map((u) => u.uri).join("\n"));
+      await copyText(uris.map((u) => u.uri).join("\n"), uris.length);
       copiedPickedUris = true;
       setTimeout(() => (copiedPickedUris = false), 1200);
     } catch (e) {
@@ -151,23 +188,35 @@
     if (ms < 800) return "var(--lat-mid)";
     return "var(--lat-slow)";
   }
+
+  const SKELETON_ROWS = 6;
 </script>
 
 <section class="card fade-in overflow-hidden">
   <div class="flex flex-wrap items-center justify-between gap-x-3 gap-y-2 px-4 py-3">
     <h3 class="text-sm font-semibold">
-      Results
+      {t("table.results")}
       <span class="mono" style="color: var(--ink-muted)">
         {shown.length}{shown.length !== results.length ? ` / ${results.length}` : ""}
       </span>
+      {#if app.lastScanVerified}
+        <span
+          class="pill ms-2 align-middle"
+          style="background: oklch(30% .06 155); color: var(--good)"
+          title="Every probe ran under your wgconf private key, not a dummy key"
+        >
+          <ShieldCheck class="size-3.5" />
+          {t("table.verified")}
+        </span>
+      {/if}
     </h3>
     <div class="flex flex-wrap items-center gap-1 text-xs">
       <label
-        class="mr-1 flex items-center gap-1.5 whitespace-nowrap"
+        class="me-1 flex items-center gap-1.5 whitespace-nowrap"
         style="color: var(--ink-muted)"
-        title="Hide rows slower than this ceiling"
+        title={t("table.maxLatency.hide")}
       >
-        max latency (ms)
+        {t("table.maxLatency")}
         <input
           class="field mono !w-20 text-center"
           type="number"
@@ -176,133 +225,190 @@
           bind:value={maxLatency}
         />
       </label>
-      {#each sortOptions as k (k)}
-        <button
-          class="pill"
-          style={sortKey === k
-            ? "background: var(--paper-3); color: var(--accent)"
-            : "color: var(--ink-muted)"}
-          onclick={() => (sortKey = k)}
-        >
-          sort {k}
-        </button>
-      {/each}
+      <button
+        class="pill"
+        style={sortOrder === "latency"
+          ? "background: var(--paper-3); color: var(--accent)"
+          : "background: var(--paper-3); color: var(--ink-muted)"}
+        onclick={() => cycleSort("latency")}
+      >
+        {t("table.sort.latency")}{sortOrder === "latency" ? (sortDir === "asc" ? " ▲" : " ▼") : ""}
+      </button>
+      <button
+        class="pill"
+        style={sortOrder === "ip"
+          ? "background: var(--paper-3); color: var(--accent)"
+          : "background: var(--paper-3); color: var(--ink-muted)"}
+        onclick={() => cycleSort("ip")}
+      >
+        {t("table.sort.ip")}{sortOrder === "ip" ? (sortDir === "asc" ? " ▲" : " ▼") : ""}
+      </button>
       <button
         class="pill"
         style={copiedAll
           ? "background: var(--paper-3); color: var(--good)"
           : "background: var(--paper-3); color: var(--ink-muted)"}
-        title="Copy every displayed endpoint, one ip:port per line"
+        title={t("table.copyAllTitle")}
         onclick={copyAll}
       >
-        {copiedAll ? "copied ✓" : "copy all"}
+        {copiedAll ? `${t("results.copied")} ✓` : t("results.copyAll")}
       </button>
     </div>
   </div>
+  {#if toast}
+    <p class="fade-in border-t px-4 py-1.5 text-xs" role="status" style="border-color: oklch(100% 0 0 / 6%); color: var(--good)">
+      {toast}
+    </p>
+  {/if}
   {#if pickedRows.length > 0}
     <div
       class="fade-in flex flex-wrap items-center gap-2 border-t px-4 py-2 text-xs"
       style="border-color: oklch(100% 0 0 / 6%)"
     >
-      <span class="mono font-semibold">{pickedRows.length} selected</span>
+      <span class="mono font-semibold">{t("table.selected", { n: pickedRows.length })}</span>
       <button
         class="pill cursor-pointer"
         style="background: var(--paper-3); color: {copiedPickedIps ? "var(--good)" : "var(--ink-muted)"}"
-        title="Copy the selected endpoints, one ip:port per line"
+        title={t("table.copySelectedIps")}
         onclick={copyPickedIps}
       >
-        {copiedPickedIps ? "copied ✓" : "Copy ip:port"}
+        {copiedPickedIps ? `${t("results.copied")} ✓` : t("table.copySelectedIps")}
       </button>
       <button
         class="pill cursor-pointer"
         style="background: var(--paper-3); color: {copiedPickedUris ? "var(--good)" : "var(--ink-muted)"}"
-        title="Export each selected passing row through its original phase-2 config (rows without one are skipped)"
+        title={t("table.copySelectedUris")}
         onclick={copyPickedUris}
       >
-        {copiedPickedUris ? "copied ✓" : "Copy URIs (passing only)"}
+        {copiedPickedUris ? `${t("results.copied")} ✓` : t("table.copySelectedUris")}
       </button>
     </div>
   {/if}
-  <div class="max-h-[26rem] overflow-x-auto overflow-y-auto">
-    <table class="w-full min-w-[38rem] border-collapse text-sm">
-      <thead class="sticky top-0" style="background: var(--paper-2)">
-        <tr class="text-left text-[11px] uppercase tracking-wider" style="color: var(--ink-muted)">
-          <th class="w-8 px-2 py-2">
-            <input
-              type="checkbox"
-              class="accent-[var(--accent)]"
-              bind:this={headCheckbox}
-              checked={allShownPicked}
-              onchange={(e) => pickAllDisplayed(e.currentTarget.checked)}
-              aria-label="Select all displayed rows"
-            />
-          </th>
-          <th class="px-4 py-2 font-medium">Endpoint</th>
-          <th class="px-4 py-2 font-medium">Latency</th>
-          <th class="px-4 py-2 font-medium">Country</th>
-          <th class="px-4 py-2 font-medium">Phase 2</th>
-          <th class="px-2 py-2"></th>
-        </tr>
-      </thead>
-      <tbody>
-        {#each shown as r, i (r.ip + ":" + r.port)}
-          <tr class="border-t" style="border-color: oklch(100% 0 0 / 4%)">
-            <td class="px-2 py-2 align-middle">
-              <input
-                type="checkbox"
-                class="accent-[var(--accent)]"
-                checked={selected.has(keyOf(r))}
-                onchange={(e) => pickRow(r, e.currentTarget.checked)}
-                aria-label={`Select ${keyOf(r)}`}
-              />
-            </td>
-            <td class="mono px-4 py-2">{r.ip}<span style="color: var(--ink-muted)">:{r.port}</span></td>
-            <td class="mono px-4 py-2" style="color: {latencyClass(r.latency_ms)}">
-              {r.latency_ms}ms
-            </td>
-            <td class="px-4 py-2" style="color: var(--ink-muted)">
-              {r.country ?? "—"}{r.colo ? ` · ${r.colo}` : ""}
-            </td>
-            <td class="px-4 py-2">
-              {#if r.phase2}
-                <span class="pill" style={r.phase2.passed
-                  ? "background: oklch(30% .06 155); color: var(--good)"
-                  : "background: var(--paper-3); color: var(--ink-muted)"}>
-                  {r.phase2.passed ? `pass ${r.phase2.latency_ms ?? "?"}ms` : "fail"}
-                </span>
-              {:else}
-                <span style="color: var(--ink-muted)">—</span>
-              {/if}
-            </td>
-            <td class="px-2 py-2 text-right whitespace-nowrap">
-              <button
-                class="btn btn-ghost btn-sm"
-                title="Copy ip:port"
-                onclick={() => copyUri(r, i)}
-              >
-                {#if copiedIdx === i}
-                  <Check class="size-4" style="color: var(--good)" />
-                {:else}
-                  <Copy class="size-4" />
-                {/if}
+
+  <!-- Skeleton rows while phase 1 runs with nothing banked yet (research §7:
+       never show "no records" mid-run). -->
+  {#if results.length === 0 && app.running}
+    <div class="px-4 py-3 text-xs" aria-busy="true">
+      <p class="mono" style="color: var(--ink-muted)">{t("table.skeleton")}</p>
+      {#each Array(SKELETON_ROWS) as _, i (i)}
+        <div class="mt-2 h-6 animate-pulse rounded" style="background: var(--paper-3); width: {88 - (i % 3) * 12}%"></div>
+      {/each}
+    </div>
+  {:else if results.length > 0 && shown.length === 0 && maxLatency !== null}
+    <div class="px-4 py-5 text-sm">
+      <p class="font-semibold">{t("empty.filtered.title")}</p>
+      <p class="mt-1 text-xs" style="color: var(--ink-muted)">
+        {t("empty.filtered.body", { hidden: results.length })}
+      </p>
+      <button
+        class="btn btn-secondary btn-sm mt-2"
+        onclick={() => (maxLatency = null)}
+      >
+        {t("empty.filtered.clear")}
+      </button>
+    </div>
+  {:else if shown.length > 0}
+    <div class="max-h-[26rem] overflow-x-auto overflow-y-auto">
+      <table class="w-full min-w-[38rem] border-collapse text-sm">
+        <thead class="sticky top-0 z-10" style="background: var(--paper-2)">
+          <tr class="text-start text-[11px] uppercase tracking-wider" style="color: var(--ink-muted)">
+            <th class="w-11 px-1 py-2">
+              <label class="mx-auto grid size-8 cursor-pointer place-items-center sm:size-9">
+                <input
+                  type="checkbox"
+                  class="size-4 accent-[var(--accent)]"
+                  bind:this={headCheckbox}
+                  checked={allShownPicked}
+                  onchange={(e) => pickAllDisplayed(e.currentTarget.checked)}
+                  aria-label={t("table.select.all")}
+                />
+              </label>
+            </th>
+            <th class="px-4 py-2 font-medium" scope="col" aria-sort={sortOrder === "ip" ? (sortDir === "asc" ? "ascending" : "descending") : undefined}>
+              <button class="uppercase tracking-wider" onclick={() => cycleSort("ip")}>{t("table.col.endpoint")}<span aria-hidden="true">{sortOrder === "ip" ? (sortDir === "asc" ? " ▲" : " ▼") : ""}</span>
               </button>
-              {#if exportableConfig(r)}
+            </th>
+            <th class="px-4 py-2 font-medium" scope="col" aria-sort={sortOrder === "latency" ? (sortDir === "asc" ? "ascending" : "descending") : undefined}>
+              <button class="uppercase tracking-wider" onclick={() => cycleSort("latency")}>{t("table.col.latency")}<span aria-hidden="true">{sortOrder === "latency" ? (sortDir === "asc" ? " ▲" : " ▼") : ""}</span>
+              </button>
+            </th>
+            <th class="px-4 py-2 font-medium" scope="col">{t("table.col.country")}</th>
+            <th class="px-4 py-2 font-medium" scope="col">{t("table.col.phase2")}</th>
+            <th class="px-2 py-2"><span class="sr-only">{t("table.actions")}</span></th>
+          </tr>
+        </thead>
+        <tbody>
+          {#each visibleRows as r, i (r.ip + ":" + r.port)}
+            <tr class="border-t" style="border-color: oklch(100% 0 0 / 4%)">
+              <td class="px-1 py-2 align-middle">
+                <label class="mx-auto grid size-8 cursor-pointer place-items-center sm:size-9">
+                  <input
+                    type="checkbox"
+                    class="size-4 accent-[var(--accent)]"
+                    checked={selected.has(keyOf(r))}
+                    onchange={(e) => pickRow(r, e.currentTarget.checked)}
+                    aria-label={t("table.row.select", { ep: keyOf(r) })}
+                  />
+                </label>
+              </td>
+              <td class="mono px-4 py-2"><span dir="ltr">{r.ip}<span style="color: var(--ink-muted)">:{r.port}</span></span></td>
+              <td class="mono px-4 py-2" style="color: {latencyClass(r.latency_ms)}">
+                <span dir="ltr">{r.latency_ms}ms</span>
+              </td>
+              <td class="px-4 py-2" style="color: var(--ink-muted)">
+                {r.country ?? "—"}{r.colo ? ` · ${r.colo}` : ""}
+              </td>
+              <td class="px-4 py-2">
+                {#if r.phase2}
+                  <span class="pill" style={r.phase2.passed
+                    ? "background: oklch(30% .06 155); color: var(--good)"
+                    : "background: var(--paper-3); color: var(--ink-muted)"}>
+                    {r.phase2.passed ? t("table.phase2.pass", { ms: r.phase2.latency_ms ?? "?" }) : t("table.phase2.fail")}
+                  </span>
+                {:else}
+                  <span style="color: var(--ink-muted)">—</span>
+                {/if}
+              </td>
+              <td class="px-2 py-2 text-end whitespace-nowrap">
                 <button
                   class="btn btn-ghost btn-sm"
-                  title="Copy importable URI (config rewritten to this endpoint)"
-                  onclick={() => copyImportable(r, i)}
+                  title={t("table.copyUriTitle")}
+                  onclick={() => copyUri(r, i)}
                 >
-                  {#if copiedUriIdx === i}
+                  {#if copiedIdx === i}
                     <Check class="size-4" style="color: var(--good)" />
                   {:else}
-                    <Link2 class="size-4" />
+                    <Copy class="size-4" />
                   {/if}
                 </button>
-              {/if}
-            </td>
-          </tr>
-        {/each}
-      </tbody>
-    </table>
-  </div>
+                {#if exportableConfig(r)}
+                  <button
+                    class="btn btn-ghost btn-sm"
+                    title={t("table.copyUriExport")}
+                    onclick={() => copyImportable(r, i)}
+                  >
+                    {#if copiedUriIdx === i}
+                      <Check class="size-4" style="color: var(--good)" />
+                    {:else}
+                      <Link2 class="size-4" />
+                    {/if}
+                  </button>
+                {/if}
+              </td>
+            </tr>
+          {/each}
+        </tbody>
+      </table>
+    </div>
+  {/if}
+  {#if capped}
+    <div class="flex flex-wrap items-center justify-between gap-2 border-t px-4 py-2 text-xs" style="border-color: oklch(100% 0 0 / 6%); color: var(--ink-muted)">
+      <span class="mono">
+        {t("table.renderCap", { visible: visibleRows.length, total: shown.length })}
+      </span>
+      <button class="pill cursor-pointer" style="background: var(--paper-3); color: var(--ink)" onclick={() => (renderLimit += RENDER_CAP)}>
+        {t("table.showMore", { n: Math.min(RENDER_CAP, shown.length - visibleRows.length) })}
+      </button>
+    </div>
+  {/if}
 </section>

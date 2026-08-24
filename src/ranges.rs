@@ -664,6 +664,29 @@ mod tests {
     use crate::engine::{PlanItem, SplitMix64, plan};
     use crate::paths::test_env::{DATA_DIR_LOCK, IsolatedDataDir};
 
+    /// Shared grammar fixture: the same cases the UI's TS mirror
+    /// (ui/src/lib/validators.ts) is written against, so a server-side
+    /// grammar change that strands the frontend shows up here.
+    #[test]
+    fn grammar_fixture_cidr_cases_match_parse_cidr() {
+        let raw = include_str!("../tests/fixtures/grammar-cases.json");
+        let cases: Vec<serde_json::Value> = serde_json::from_str(raw).unwrap();
+        let checked = cases.iter().filter(|c| c["kind"] == "cidr").count();
+        assert!(
+            checked >= 15,
+            "fixture must keep cidr coverage, got {checked}"
+        );
+        for case in cases.iter().filter(|c| c["kind"] == "cidr") {
+            let input = case["input"].as_str().unwrap();
+            let expect_ok = case["expect"] == "ok";
+            assert_eq!(
+                parse_cidr(input).is_ok(),
+                expect_ok,
+                "cidr {input:?} expected {expect_ok}"
+            );
+        }
+    }
+
     #[test]
     fn parses_and_masks_cidrs() {
         assert_eq!(

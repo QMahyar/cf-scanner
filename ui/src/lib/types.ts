@@ -1,10 +1,12 @@
 export type Mode = "Cdn" | "Warp";
 export type CdnPreset = "Quick" | "Normal" | "Full";
 export type FragmentPreset = "off" | "light" | "medium" | "heavy" | "custom";
+/** Wire form (serde PascalCase) — the form keeps lowercase, buildConfig maps. */
+export type FragmentWire = "Off" | "Light" | "Medium" | "Heavy" | "Custom";
 
 export interface Phase2Config {
   configs: string[];
-  fragment: FragmentPreset;
+  fragment: FragmentWire;
   custom_fragment?: { packets: string; length: string; interval: string } | null;
   snis: string[];
   probe_url: string;
@@ -29,6 +31,9 @@ export interface ScanConfig {
   include_v6?: boolean;
   concurrency: number;
   timeout_ms: number;
+  /** Verify the LAST scan's stored candidates only, skipping phase 1
+   * (server: serde default false; requires phase2 configs). */
+  phase2_only?: boolean;
   phase2?: Phase2Config | null;
   warp?: WarpConfig | null;
 }

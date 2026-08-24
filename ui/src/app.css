@@ -1,5 +1,6 @@
 @import "tailwindcss";
 @import "@fontsource-variable/inter";
+@import "@fontsource-variable/vazirmatn";
 @import "@fontsource/jetbrains-mono/400.css";
 @import "@fontsource/jetbrains-mono/600.css";
 
@@ -7,7 +8,8 @@
  * Hallmark · component-scope app shell · genre: atmospheric
  * theme: custom (brand anchor: Cloudflare orange from the tray glyph)
  * paper oklch(14% .012 260) near-black · accent oklch(70% .15 45) warm orange
- * display+body Inter Variable · data JetBrains Mono · motion fade-in only
+ * display+body Inter Variable · fa falls through to Vazirmatn Variable ·
+ * data JetBrains Mono · motion fade-in only
  * contrast: accent on paper passes for large text/controls; body ink ≥ 7:1
  */
 
@@ -39,8 +41,24 @@ body {
 body {
   background-color: var(--paper);
   color: var(--ink);
-  font-family: "Inter Variable", system-ui, sans-serif;
+  /* Latin renders in Inter; Persian glyphs fall through to Vazirmatn */
+  font-family: "Inter Variable", "Vazirmatn Variable", system-ui, sans-serif;
   min-height: 100vh;
+}
+
+/* Arabic script needs taller leading and no tracking tricks (research §8) */
+html[lang="fa"] body {
+  line-height: 1.75;
+}
+html[lang="fa"] .tracking-wider,
+html[lang="fa"] .tracking-widest,
+html[lang="fa"] .tracking-tight {
+  letter-spacing: normal !important;
+}
+/* Technical tokens stay LTR mono even inside RTL prose */
+[dir="rtl"] .mono {
+  direction: ltr;
+  unicode-bidi: isolate;
 }
 
 /* Fixed-position layer paints the blooms once per viewport instead of

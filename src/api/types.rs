@@ -684,6 +684,36 @@ fn validate_endpoint(s: &str) -> Result<(), ConfigError> {
 mod tests {
     use super::*;
 
+    /// Shared grammar fixture (see ranges.rs cidr half): endpoint and SNI
+    /// cases the UI's TS validators mirror line-for-line.
+    #[test]
+    fn grammar_fixture_endpoint_and_sni_cases_match_server_rules() {
+        let raw = include_str!("../../tests/fixtures/grammar-cases.json");
+        let cases: Vec<serde_json::Value> = serde_json::from_str(raw).unwrap();
+        let endpoints = cases.iter().filter(|c| c["kind"] == "endpoint").count();
+        let snis = cases.iter().filter(|c| c["kind"] == "sni").count();
+        assert!(endpoints >= 10, "fixture must keep endpoint coverage");
+        assert!(snis >= 10, "fixture must keep SNI coverage");
+        for case in cases.iter().filter(|c| c["kind"] == "endpoint") {
+            let input = case["input"].as_str().unwrap();
+            let expect_ok = case["expect"] == "ok";
+            assert_eq!(
+                parse_endpoint(input).is_ok(),
+                expect_ok,
+                "endpoint {input:?} expected {expect_ok}"
+            );
+        }
+        for case in cases.iter().filter(|c| c["kind"] == "sni") {
+            let input = case["input"].as_str().unwrap();
+            let expect_ok = case["expect"] == "ok";
+            assert_eq!(
+                validate_sni(input).is_ok(),
+                expect_ok,
+                "sni {input:?} expected {expect_ok}"
+            );
+        }
+    }
+
     fn valid_config() -> ScanConfig {
         ScanConfig::default()
     }

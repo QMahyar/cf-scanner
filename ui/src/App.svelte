@@ -1,9 +1,11 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { Radar, Rocket, SlidersHorizontal } from "@lucide/svelte";
+  import { Languages, Radar, SlidersHorizontal } from "@lucide/svelte";
   import { api, subscribe, type LiveStatus } from "./lib/api";
+  import { currentLocale, setLocale, t, toggleLocale } from "./lib/i18n.svelte";
   import {
     applyResult,
+    recordTick,
     resetResults,
     setProMode,
     ui,
@@ -15,7 +17,11 @@
   let version = $state("");
   let live = $state<LiveStatus>("connecting");
   const liveLabel = $derived(
-    live === "live" ? "Live" : live === "offline" ? "Offline" : "Connecting…",
+    live === "live"
+      ? t("live.live")
+      : live === "offline"
+        ? t("live.offline")
+        : t("live.connecting"),
   );
 
   /** F5 mid-scan: the engine keeps last-scan state in memory, so pull it
@@ -40,6 +46,7 @@
     void hydrate();
     subscribe({
       onProgress: (p) => {
+        recordTick(p);
         app.progress = p;
         app.running = true;
       },
@@ -65,7 +72,7 @@
 </script>
 
 <div
-  class="mx-auto flex min-h-screen max-w-6xl flex-col pl-[max(1rem,env(safe-area-inset-left))] pr-[max(1rem,env(safe-area-inset-right))] sm:pl-[max(1.5rem,env(safe-area-inset-left))] sm:pr-[max(1.5rem,env(safe-area-inset-right))]"
+  class="mx-auto flex min-h-screen max-w-6xl flex-col ps-[max(1rem,env(safe-area-inset-left))] pe-[max(1rem,env(safe-area-inset-right))] sm:ps-[max(1.5rem,env(safe-area-inset-left))] sm:pe-[max(1.5rem,env(safe-area-inset-right))]"
 >
   <header class="flex flex-wrap items-center justify-between gap-x-4 gap-y-3 py-5">
     <div class="flex items-center gap-3">
@@ -76,22 +83,18 @@
         <Radar class="size-5" color="var(--accent-ink)" strokeWidth={2.4} />
       </div>
       <div>
-        <h1 class="text-lg font-semibold tracking-tight" style="letter-spacing:-0.03em">
+        <h1 class="text-lg font-semibold" style="letter-spacing:-0.03em">
           CF-Scanner
         </h1>
         <p class="mono hidden text-[11px] sm:block" style="color: var(--ink-muted)">
-          find working Cloudflare endpoints
+          {t("app.tagline")}
         </p>
       </div>
     </div>
     <div class="flex items-center gap-2">
       <span
         class="version-badge mono"
-        title={live === "live"
-          ? "Connected to the local scan engine — results stay on this machine"
-          : live === "offline"
-            ? "Engine unreachable — showing last known state"
-            : "Connecting to the local scan engine…"}
+        title={live === "live" ? t("app.live.liveTitle") : live === "offline" ? t("app.live.offlineTitle") : t("app.live.connectingTitle")}
       >
         <span
           class="size-1.5 rounded-full"
@@ -105,14 +108,24 @@
       </span>
       <button
         type="button"
+        class="btn btn-secondary btn-sm"
+        onclick={toggleLocale}
+        title="فارسی / English"
+        aria-label="Switch language"
+      >
+        <Languages class="size-4" />
+        {currentLocale() === "fa" ? "EN" : "فا"}
+      </button>
+      <button
+        type="button"
         class="btn btn-secondary"
         class:btn-state-on={app.proMode}
         onclick={togglePro}
         aria-pressed={app.proMode}
-        title="Reveal every control: profiles, phase-2 verification, WARP identity, exports"
+        title={t("mode.pro.title")}
       >
         <SlidersHorizontal class="size-4" />
-        Pro
+        {t("mode.pro")}
       </button>
     </div>
   </header>
@@ -120,13 +133,13 @@
   <main class="flex flex-1 flex-col gap-6 pb-10">
     {#if app.error}
       <div
-        class="fade-in card px-4 py-3 text-sm"
+        class="fade-in card flex items-start gap-2 px-4 py-3 text-sm"
         style="background: oklch(22% 0.06 25 / 40%); color: var(--bad);"
         role="alert"
       >
-        {app.error}
-        <button class="btn btn-ghost btn-sm ml-2" onclick={() => (app.error = null)}>
-          dismiss
+        <span class="flex-1">{app.error}</span>
+        <button class="btn btn-ghost btn-sm" onclick={() => (app.error = null)}>
+          {t("error.dismiss")}
         </button>
       </div>
     {/if}
@@ -142,9 +155,7 @@
     class="border-t pt-4 pb-[max(1rem,env(safe-area-inset-bottom))] text-xs"
     style="border-color: oklch(100% 0 0 / 6%); color: var(--ink-muted);"
   >
-    <span>
-      GeoIP data by
-      <a
+    <span>{t("app.footer.geo").split("db-ip.com")[0]}<a
         class="underline decoration-dotted"
         style="color: var(--accent)"
         href="https://db-ip.com"

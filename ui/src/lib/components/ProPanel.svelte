@@ -21,7 +21,7 @@
     type RangesPayload,
     type XrayStatusPayload,
   } from "../api";
-  import { errorText, startScan, stopScan, ui } from "../store.svelte";
+  import { errorText, lowYieldWindow, startScan, stopScan, ui } from "../store.svelte";
   import {
     buildConfig,
     defaultFormState,
@@ -33,6 +33,15 @@
     portCatalog,
     FormValidationError,
   } from "../formState";
+  import WgNoiseEditor from "./WgNoiseEditor.svelte";
+  import {
+    MAX_CIDRS,
+    normalizeLines,
+    parseCidr,
+    parseEndpoint,
+  } from "../validators";
+  import { t } from "../i18n.svelte";
+  import type { Mode } from "../types";
   import type { FieldIssue, FormField, FormState } from "../formState";
   import { EXCLUDE_WARP_INGRESS } from "../cidrPresets";
   import ResultsTable from "./ResultsTable.svelte";
@@ -88,7 +97,7 @@
     wgconfFileError = null;
     if (!file) return;
     if (file.size > WGCONF_MAX_BYTES) {
-      wgconfFileError = `"${file.name}" is ${Math.ceil(file.size / 1024)} KB — wgconf files must be 64 KB or smaller`;
+      wgconfFileError = t("pro.warp.wgconfSizeError", { name: file.name, kb: Math.ceil(file.size / 1024) });
       return;
     }
     try {
@@ -97,7 +106,135 @@
       wgconfFileName = file.name;
       delete serverFieldErrors.wgconf;
     } catch {
-      wgconfFileError = `Could not read "${file.name}"`;
+      wgconfFileError = t("pro.warp.wgconfReadError", { name: file.name });
+    }
+  }
+
+  /** Ranges import (plan T4 + addendum T9): one IP/CIDR per line, the
+   * standard published list format. Lines are validated with the same
+   * grammar the server enforces (validators.ts); bare IPv4s become /32s for
+   * CDN CIDR import and plain endpoints for WARP; anything unparseable is
+   * skipped and counted. Merges deduped into the caller-named textarea. */
+  const RANGES_MAX_BYTES = 256 * 1024;
+  let rangesFileInput = $state<HTMLInputElement | null>(null);
+  let rangesTarget = $state<"customCidrs" | "warpEndpoints">("customCidrs");
+  let rangesNote = $state<{ ok: boolean; text: string } | null>(null);
+
+  function importRangesFile(
+    e: Event & { currentTarget: EventTarget & HTMLInputElement },
+  ) {
+    const input = e.currentTarget;
+    const file = input.files?.[0] ?? null;
+    input.value = "";
+    rangesNote = null;
+    const field = rangesTarget;
+    if (!file) return;
+    if (file.size > RANGES_MAX_BYTES) {
+      rangesNote = {
+        ok: false,
+        text: t("pro.warp.rangesSizeError", { name: file.name, kb: Math.ceil(file.size / 1024) }),
+      };
+      return;
+    }
+    void file.text().then((raw) => {
+      const existing = form[field]
+        .split("\n")
+        .map((s) => s.trim())
+        .filter(Boolean);
+      const seen = new Set(existing);
+      const cap = field === "customCidrs" ? MAX_CIDRS : null;
+      let imported = 0;
+      let skipped = 0;
+      for (const line of raw.split(/\r?\n/).map((s) => s.trim())) {
+        if (!line || line.startsWith("#")) continue;
+        let entry: string | null = null;
+        if (field === "customCidrs") {
+          // Published dual-stack lists carry v6 CIDRs too — accept both.
+          const v = parseCidr(line);
+          if (v.ok) entry = line;
+          else if (parseEndpoint(line).ok) entry = `${line}/32`;
+        } else {
+          const v = parseEndpoint(line);
+          if (v.ok) entry = v.value;
+          else if (parseCidr(line).ok) entry = line.split("/")[0];
+        }
+        if (entry === null || (cap !== null && existing.length >= cap)) {
+          skipped += 1;
+          continue;
+        }
+        if (!seen.has(entry)) {
+          seen.add(entry);
+          existing.push(entry);
+          imported += 1;
+        }
+      }
+      form[field] = existing.join("\n");
+      touched[field] = true;
+      delete serverFieldErrors[field];
+      rangesNote = {
+        ok: imported > 0,
+        text: imported === 0 && skipped === 0 ? t("pro.warp.rangesEmpty", { name: file.name }) : skipped > 0 ? t("pro.warp.rangesImportedSkipped", { count: imported, s: imported === 1 ? "" : "s", skipped }) : t("pro.warp.rangesImported", { count: imported, s: imported === 1 ? "" : "s" }),
+      };
+    });
+  }
+
+  /** Skip-to-Phase-2 (plan T6): cancel the running phase-1 scan, then verify
+   * its banked candidates immediately via phase2_only. The engine keeps a
+   * cancelled run's candidates in the store and clears only at the start of
+   * the next full scan, so no API change is involved. */
+  let skipping = $state(false);
+
+  const configsListed = $derived(
+    form.configsText
+      .split("\n")
+      .map((s) => s.trim())
+      .filter(Boolean),
+  );
+  const canSkipToPhase2 = $derived(
+    app.running &&
+      !skipping &&
+      app.phase2 === null &&
+      form.mode === "Cdn" &&
+      form.phase2On &&
+      configsListed.length > 0,
+  );
+  const suggestSkip = $derived(canSkipToPhase2 && lowYieldWindow() === true);
+
+  function waitForIdle(timeoutMs = 20_000): Promise<boolean> {
+    const deadline = Date.now() + timeoutMs;
+    return new Promise((resolve) => {
+      const poll = () => {
+        if (!app.running) return resolve(true);
+        if (Date.now() > deadline) return resolve(false);
+        setTimeout(poll, 150);
+      };
+      poll();
+    });
+  }
+
+  async function skipToPhase2() {
+    const foundSoFar = app.progress.found;
+    if (
+      foundSoFar < 5 &&
+      !confirm(t("pro.confirm.skipLow", { found: foundSoFar, s: foundSoFar === 1 ? "" : "s" }))
+    )
+      return;
+    skipping = true;
+    try {
+      await api.cancel();
+      if (!(await waitForIdle())) {
+        app.error = t("pro.error.stopTimeout");
+        return;
+      }
+      const cfg = buildConfig(form); // may throw FormValidationError
+      cfg.phase2_only = true;
+      validationErrors = [];
+      await startScan(cfg);
+    } catch (e) {
+      if (e instanceof FormValidationError) validationErrors = e.errors;
+      else app.error = errorText(e);
+    } finally {
+      skipping = false;
     }
   }
 
@@ -138,7 +275,8 @@
   const SERVER_FIELD_MATCHERS: ReadonlyArray<readonly [RegExp, FormField]> = [
     [/wgconf|wireguard|amnezia/i, "wgconf"],
     [/probes_per_endpoint/i, "warpProbes"],
-    [/\bsnis?\b/i, "snis"],
+    [/snis?\b/i, "snis"],
+    [/fragment|unknown variant/i, "fragment"],
     [/probe[._]?url/i, "probeUrl"],
     [/cidr/i, "customCidrs"],
     [/exclude/i, "exclude"],
@@ -236,14 +374,36 @@
   }
 
   // Flipping CDN ↔ WARP swaps the chip catalog: re-default the selection so
-  // stale cross-family ports can't linger silently.
+  // stale cross-family ports can't linger silently. The guard keeps this
+  // from firing on hydration or cross-mode profile loads (either would wipe
+  // the restored selection back to defaults) — only a real user flip after
+  // hydration resets, and a profile load suppresses it once.
+  let lastMode = $state<Mode | null>(null);
+  let suppressPortReset = $state(false);
   $effect(() => {
     void form.mode;
-    if (hydrated) {
-      form.selectedPorts = defaultSelectedPorts(form.mode);
-      form.customPortsText = "";
+    if (!hydrated || lastMode === null || lastMode === form.mode) {
+      lastMode = form.mode;
+      return;
     }
+    lastMode = form.mode;
+    if (suppressPortReset) {
+      suppressPortReset = false;
+      return;
+    }
+    form.selectedPorts = defaultSelectedPorts(form.mode);
+    form.customPortsText = "";
   });
+
+  /** Blur-time cleanup for the line-based textareas: trims, drops blank and
+   * duplicate lines — a pasted bulk list can never leave ghost empties. */
+  function normalizeField(field: "customCidrs" | "exclude" | "warpEndpoints" | "configsText") {
+    const next = normalizeLines(form[field]);
+    if (next !== form[field]) {
+      form[field] = next;
+      touched[field] = true;
+    }
+  }
 
   function onFormSubmit(e: SubmitEvent) {
     e.preventDefault();
@@ -275,6 +435,9 @@
   function loadSelectedProfile() {
     const p = profiles.find((x) => x.name === selectedProfile);
     if (!p) return;
+    // The form swap may change form.mode; the port-reset effect must not
+    // clobber the profile's own port selection right after it lands.
+    suppressPortReset = true;
     form = formStateFromConfig(p.config);
     touched = {};
     serverFieldErrors = {};
@@ -284,13 +447,13 @@
   async function saveProfile() {
     const name = profileNameInput.trim();
     if (!name) {
-      profileStatus = { ok: false, text: "Enter a name to save this configuration." };
+      profileStatus = { ok: false, text: t("pro.profile.needName") };
       return;
     }
     profileBusy = true;
     try {
       await assertOk(await api.saveProfile(name, buildConfig(form)));
-      profileStatus = { ok: true, text: `Saved "${name}."` };
+      profileStatus = { ok: true, text: t("pro.profile.saved", { name }) };
       profileNameInput = "";
       await refreshProfiles();
       selectedProfile = name;
@@ -304,13 +467,13 @@
   }
 
   async function deleteSelectedProfile() {
-    if (!selectedProfile || !confirm(`Delete profile "${selectedProfile}"?`))
+    if (!selectedProfile || !confirm(t("pro.profile.deleteConfirm", { name: selectedProfile })))
       return;
     profileBusy = true;
     const deleted = selectedProfile;
     try {
       await assertOk(await api.deleteProfile(deleted));
-      profileStatus = { ok: true, text: `Deleted "${deleted}."` };
+      profileStatus = { ok: true, text: t("pro.profile.deleted", { name: deleted }) };
       await refreshProfiles();
     } catch (e) {
       profileStatus = { ok: false, text: errorText(e) };
@@ -331,7 +494,7 @@
     xrayError = null;
     try {
       const res = await api.xrayDownload();
-      if (!res.success) xrayError = res.error ?? "download failed";
+      if (!res.success) xrayError = res.error ?? t("pro.error.downloadFailed");
       await loadXray();
     } catch (e) {
       xrayError = errorText(e);
@@ -430,17 +593,17 @@
         class="flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wider"
         style="color: var(--ink-muted)"
       >
-        <FolderOpen class="size-3.5" style="color: var(--accent)" /> Profiles
+        <FolderOpen class="size-3.5" style="color: var(--accent)" /> {t("pro.profile.heading")}
       </span>
       <select
         class="field !w-auto text-xs"
         bind:value={selectedProfile}
         onchange={loadSelectedProfile}
         disabled={profiles.length === 0}
-        title="Load a saved profile into the form"
+        title={t("pro.profile.loadTitle")}
       >
         <option value="">
-          {profiles.length === 0 ? "no saved profiles yet" : "load a profile…"}
+          {profiles.length === 0 ? t("pro.profile.noSaved") : t("pro.profile.loadPlaceholder")}
         </option>
         {#each profiles as p (p.name)}
           <option value={p.name}>{p.name}</option>
@@ -448,7 +611,7 @@
       </select>
       <input
         class="field mono !w-44 text-xs"
-        placeholder="name to save as"
+        placeholder={t("pro.profile.namePlaceholder")}
         maxlength="64"
         bind:value={profileNameInput}
       />
@@ -456,17 +619,17 @@
         class="btn btn-secondary btn-sm"
         onclick={saveProfile}
         disabled={profileBusy}
-        title="Save the current form values under this name"
+        title={t("pro.profile.saveTitle")}
       >
-        <Save class="size-3.5" /> Save
+        <Save class="size-3.5" /> {t("pro.profile.save")}
       </button>
       <button
         class="btn btn-secondary btn-sm"
         onclick={deleteSelectedProfile}
         disabled={!selectedProfile || profileBusy}
-        title="Delete the selected profile"
+        title={t("pro.profile.deleteTitle")}
       >
-        <Trash2 class="size-3.5" /> Delete
+        <Trash2 class="size-3.5" /> {t("pro.profile.delete")}
       </button>
       {#if profileStatus}
         <span
@@ -484,22 +647,28 @@
     <!-- delegated touched/server-error tracking + Ctrl+Enter accelerator -->
     <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
     <form onsubmit={onFormSubmit} oninput={markTouched} onchange={markTouched} onkeydown={onFormKeydown}>
+      <!-- shared file picker for both Import-list buttons (target set at click time) -->
+      <input
+        bind:this={rangesFileInput}
+        class="hidden"
+        type="file"
+        accept=".txt,.csv,.list,.text,text/plain"
+        onchange={importRangesFile}
+      />
       <div class="flex flex-wrap items-center justify-between gap-3">
         <h3 class="flex items-center gap-2 text-sm font-semibold">
-          <Gauge class="size-4" style="color: var(--accent)" /> Scan configuration
+          <Gauge class="size-4" style="color: var(--accent)" /> {t("pro.section.scanConfig")}
         </h3>
         <div class="flex items-center gap-2">
           {#if xray}
             <span
               class="pill"
-              title={xray.found
-                ? (xray.path ?? "xray binary found")
-                : `not found — expected under ${xray.data_dir}`}
+              title={xray.found ? (xray.path ?? t("pro.xray.foundFallback")) : t("pro.xray.missingUnder", { dir: xray.data_dir ?? "" })}
               style={xray.found
                 ? "background: oklch(30% .06 155); color: var(--good)"
                 : "background: oklch(30% .09 25); color: var(--bad)"}
             >
-              xray {xray.found ? xray.version : "missing"}
+              xray {xray.found ? xray.version : t("pro.xray.missing")}
             </span>
             {#if !xray.found}
               <button
@@ -508,9 +677,9 @@
                 onclick={downloadXray}
                 disabled={xrayBusy}
                 data-state={xrayBusy ? "loading" : undefined}
-                title={`Download the pinned xray release into the data dir (${xray.data_dir})`}
+                title={t("pro.xray.downloadTitle", { dir: xray.data_dir ?? "" })}
               >
-                <Download class="size-3.5" /> Download
+                <Download class="size-3.5" /> {t("pro.xray.download")}
               </button>
             {/if}
           {/if}
@@ -518,29 +687,28 @@
             type="button"
             class="btn btn-secondary btn-sm"
             onclick={loadRangeInfo}
-            title="Show how many candidate IPs are loaded and when they were last refreshed"
+            title={t("pro.range.infoTitle")}
           >
-            <Info class="size-3.5" /> Range info
+            <Info class="size-3.5" /> {t("pro.range.button")}
           </button>
         </div>
       </div>
 
       {#if xrayError}
         <p class="fade-in mt-2 text-xs" role="alert" style="color: var(--bad)">
-          xray: {xrayError}
+          {t("pro.xray.error", { msg: xrayError })}
         </p>
       {/if}
 
       {#if rangesInfo}
         <p class="mono fade-in mt-2 text-[11px]" style="color: var(--ink-muted)">
-          {rangesInfo.host_count.toLocaleString("en-US")} hosts · updated
-          {rangesInfo.last_updated ?? "bundled"}
+          {t("pro.range.info", { count: rangesInfo.host_count.toLocaleString("en-US"), date: rangesInfo.last_updated ?? t("pro.range.bundled") })}
         </p>
       {/if}
 
       {#if validationErrors.length > 0}
         <div class="fade-in mt-3 text-xs" role="alert" style="color: var(--bad)">
-          <p class="font-semibold">Fix these before starting:</p>
+          <p class="font-semibold">{t("pro.validation.fixBefore")}</p>
           <ul class="mt-1 list-inside list-disc space-y-0.5">
             {#each validationErrors as msg (msg)}
               <li>{msg}</li>
@@ -550,41 +718,39 @@
       {/if}
 
       <div class="mt-4 grid gap-4 md:grid-cols-2 lg:grid-cols-3">
-        <label class="text-xs" style="color: var(--ink-muted)">
-          Mode
+        <label class="text-xs" style="color: var(--ink-muted)">{t("pro.field.mode")}
           <select class="field mt-1" name="mode" bind:value={form.mode}>
-            <option value="Cdn">CDN / proxy</option>
-            <option value="Warp">WARP</option>
+            <option value="Cdn">{t("pro.field.mode.cdn")}</option>
+            <option value="Warp">{t("pro.field.mode.warp")}</option>
           </select>
         </label>
 
         {#if form.mode === "Cdn"}
           <div>
             <label class="block text-xs" style="color: var(--ink-muted)">
-              Target
-              <select class="field mt-1" name="preset" bind:value={form.preset} disabled={form.useCount}>
+              {t("pro.field.target")}<select class="field mt-1" name="preset" bind:value={form.preset} disabled={form.useCount}>
                 <option>Quick</option><option>Normal</option><option>Full</option>
               </select>
             </label>
             <p class="mt-1 text-[11px]" style="color: var(--ink-muted)">
-              Quick ≈ 4K probes · Normal ≈ 12K · Full = every known CF IP
-              (~1.5M, hours)
+              {t("pro.field.target.hint")}
             </p>
           </div>
           <label class="flex items-end gap-2 pb-1 text-xs" style="color: var(--ink-muted)">
             <input type="checkbox" name="useCount" bind:checked={form.useCount} class="accent-[var(--accent)]" />
-            custom count instead
+            {t("pro.field.customCount")}
           </label>
         {/if}
 
         <label class="text-xs" style="color: var(--ink-muted)">
-          Candidates to test
+          {t("pro.field.candidates")}
           <input
             class="field mono mt-1"
             type="number"
             min="1"
             max="100000"
             name="count"
+            disabled={form.mode === "Cdn" && !form.useCount}
             aria-invalid={fieldErrors.count ? "true" : undefined}
             bind:value={form.count}
           />
@@ -594,11 +760,7 @@
         <div class="text-xs sm:col-span-2 lg:col-span-3">
           <div class="flex flex-wrap items-center justify-between gap-x-2 gap-y-1">
             <span style="color: var(--ink-muted)">
-              Cloudflare ports
-              {#if form.mode === "Warp"}
-                <span class="mono text-[10px]">(WireGuard UDP · official)</span>
-              {:else}
-                <span class="mono text-[10px]">(TLS · per Cloudflare network-ports docs)</span>
+              {t("pro.field.ports")}{#if form.mode === "Warp"}<span class="mono text-[10px]">{t("pro.field.ports.warpNote")}</span>{:else}<span class="mono text-[10px]">{t("pro.field.ports.cdnNote")}</span>
               {/if}
             </span>
             <span class="flex items-center gap-1">
@@ -606,20 +768,16 @@
                 type="button"
                 class="pill cursor-pointer"
                 style="background: var(--paper-3); color: var(--ink-muted)"
-                title="Select every catalog port for this mode (including extended)"
+                title={t("pro.field.ports.allTitle")}
                 onclick={selectAllPorts}
-              >
-                all
-              </button>
+              >{t("pro.field.ports.all")}</button>
               <button
                 type="button"
                 class="pill cursor-pointer"
                 style="background: var(--paper-3); color: var(--ink-muted)"
-                title="Clear the port selection"
+                title={t("pro.field.ports.noneTitle")}
                 onclick={clearPorts}
-              >
-                none
-              </button>
+              >{t("pro.field.ports.none")}</button>
             </span>
           </div>
           <div class="mt-1.5 flex flex-wrap gap-1.5">
@@ -640,7 +798,7 @@
           {#if form.mode === "Warp" && portCatalog(form.mode).extended.length > 0}
             <details class="mt-2">
               <summary class="cursor-pointer" style="color: var(--ink-muted)">
-                extended community ports ({portCatalog(form.mode).extended.length})
+                {t("pro.field.ports.extended", { n: portCatalog(form.mode).extended.length })}
               </summary>
               <div class="mt-1.5 flex flex-wrap gap-1.5">
                 {#each portCatalog(form.mode).extended as p (p)}
@@ -663,19 +821,18 @@
         </div>
 
         <label class="text-xs" style="color: var(--ink-muted)">
-          Custom port(s) — comma-separated
+          {t("pro.field.customPorts")}
           <input
             class="field mono mt-1"
             name="customPortsText"
-            placeholder="8443"
+            placeholder={t("pro.field.customPorts.placeholder")}
             aria-invalid={fieldErrors.customPortsText ? "true" : undefined}
             bind:value={form.customPortsText}
           />
           {@render fieldError("customPortsText")}
         </label>
 
-        <label class="text-xs" style="color: var(--ink-muted)">
-          Concurrency
+        <label class="text-xs" style="color: var(--ink-muted)">{t("pro.field.concurrency")}
           <input
             class="field mono mt-1"
             type="number"
@@ -688,8 +845,7 @@
           {@render fieldError("concurrency")}
         </label>
 
-        <label class="text-xs" style="color: var(--ink-muted)">
-          Timeout (ms)
+        <label class="text-xs" style="color: var(--ink-muted)">{t("pro.field.timeout")}
           <input
             class="field mono mt-1"
             type="number"
@@ -703,7 +859,7 @@
         </label>
 
         <label class="text-xs" style="color: var(--ink-muted)">
-          Stop after N working found
+          {t("pro.field.stopAfter")}
           <input
             class="field mono mt-1"
             type="number"
@@ -716,12 +872,12 @@
         </label>
 
         <label class="text-xs" style="color: var(--ink-muted)">
-          Hard cap on probes (blank = unlimited)
+          {t("pro.field.hardCap")}
           <input
             class="field mono mt-1"
             type="text"
             inputmode="numeric"
-            placeholder="none"
+            placeholder={t("pro.field.hardCap.placeholder")}
             name="capText"
             aria-invalid={fieldErrors.capText ? "true" : undefined}
             bind:value={form.capText}
@@ -732,34 +888,36 @@
         {#if form.mode === "Cdn"}
           <label class="flex items-end gap-2 pb-1 text-xs" style="color: var(--ink-muted)">
             <input type="checkbox" name="includeV6" bind:checked={form.includeV6} class="accent-[var(--accent)]" />
-            include IPv6 ranges
+            {t("pro.field.includeV6")}
           </label>
         {/if}
       </div>
 
       <details class="mt-4">
         <summary class="cursor-pointer text-xs font-semibold" style="color: var(--ink-muted)">
-          Custom CIDRs &amp; exclusions
+          {t("pro.section.customCidrs")}
         </summary>
         <div class="mt-3 grid gap-4 sm:grid-cols-2">
           <label class="text-xs" style="color: var(--ink-muted)">
-            Custom CIDRs (one per line)
+            {t("pro.field.customCidrs")}
             <textarea
               class="field mono mt-1"
               rows="3"
               name="customCidrs"
               aria-invalid={fieldErrors.customCidrs ? "true" : undefined}
-              bind:value={form.customCidrs}></textarea>
+              bind:value={form.customCidrs}
+              onchange={() => normalizeField("customCidrs")}></textarea>
             {@render fieldError("customCidrs")}
           </label>
           <label class="text-xs" style="color: var(--ink-muted)">
-            Exclude (one CIDR per line)
+            {t("pro.field.exclude")}
             <textarea
               class="field mono mt-1"
               rows="3"
               name="exclude"
               aria-invalid={fieldErrors.exclude ? "true" : undefined}
-              bind:value={form.exclude}></textarea>
+              bind:value={form.exclude}
+              onchange={() => normalizeField("exclude")}></textarea>
             {@render fieldError("exclude")}
           </label>
         </div>
@@ -768,31 +926,41 @@
             type="button"
             class="pill cursor-pointer"
             style="background: var(--paper-3); color: var(--ink)"
-            title="Append Cloudflare's WARP ingress ranges to the exclusion list (deduped)"
+            title={t("pro.field.excludeWarpTitle")}
             onclick={excludeWarpIngress}
-          >
-            Exclude WARP ingress
-          </button>
+          >{t("pro.field.excludeWarp")}</button>
+          {#if form.mode === "Cdn"}
+            <button
+              type="button"
+              class="pill cursor-pointer"
+              style="background: var(--paper-3); color: var(--ink)"
+              title={t("pro.field.importListTitle")}
+              onclick={() => { rangesTarget = "customCidrs"; rangesFileInput?.click(); }}
+            >{t("pro.field.importList")}</button>
+          {/if}
           <button
             type="button"
             class="pill cursor-pointer"
             style="color: var(--ink-muted)"
-            title="Empty the exclusion list"
+            title={t("pro.field.clearTitle")}
             onclick={clearExclusions}
-          >
-            clear
-          </button>
-          <span class="mono text-[10px]" style="color: var(--ink-muted)">
-            adds 162.159.192.0/24 + 162.159.193.0/24 — Cloudflare One docs list
-            these as WARP ingress; probing them in CDN mode wastes candidates
-          </span>
+          >{t("pro.field.clear")}</button>
+          {#if rangesNote}
+            <span
+              class="fade-in mono text-[10px]"
+              role="status"
+              style={rangesNote.ok ? "color: var(--good)" : "color: var(--bad)"}
+            >
+              {rangesNote.text}
+            </span>
+          {/if}
         </div>
       </details>
 
       {#if form.mode === "Warp"}
         <div class="mt-4 grid gap-4 sm:grid-cols-2">
           <label class="text-xs" style="color: var(--ink-muted)">
-            Handshake probes per endpoint (higher = stricter zero-loss bar)
+            {t("pro.warp.probes")}
             <input
               class="field mono mt-1"
               type="number"
@@ -805,15 +973,34 @@
             {@render fieldError("warpProbes")}
           </label>
           <label class="text-xs" style="color: var(--ink-muted)">
-            Custom endpoints (ip or ip:port, one per line)
+            {t("pro.warp.endpoints")}
             <textarea
               class="field mono mt-1"
               rows="2"
               name="warpEndpoints"
               aria-invalid={fieldErrors.warpEndpoints ? "true" : undefined}
-              bind:value={form.warpEndpoints}></textarea>
+              bind:value={form.warpEndpoints}
+              onchange={() => normalizeField("warpEndpoints")}></textarea>
             {@render fieldError("warpEndpoints")}
           </label>
+          <div class="flex flex-wrap items-center gap-1.5 sm:col-span-2">
+            <button
+              type="button"
+              class="pill cursor-pointer"
+              style="background: var(--paper-3); color: var(--ink)"
+              title={t("pro.warp.endpointsImportTitle")}
+              onclick={() => { rangesTarget = "warpEndpoints"; rangesFileInput?.click(); }}
+            >{t("pro.field.importList")}</button>
+            {#if rangesNote}
+              <span
+                class="fade-in mono text-[10px]"
+                role="status"
+                style={rangesNote.ok ? "color: var(--good)" : "color: var(--bad)"}
+              >
+                {rangesNote.text}
+              </span>
+            {/if}
+          </div>
           <div class="text-xs sm:col-span-2" style="color: var(--ink-muted)">
             <label class="block">
               wgconf (paste your wg:// URI, wg-quick INI, or Amnezia config — enables real-keypair verification)
@@ -822,17 +1009,26 @@
                 rows="3"
                 name="wgconf"
                 aria-invalid={fieldErrors.wgconf ? "true" : undefined}
-                bind:value={form.wgconf}></textarea>
+                bind:value={form.wgconf}
+                onchange={() => {
+                  // Mirror the file-load behavior: a pasted config implies
+                  // intent to verify — flip the checkbox on automatically.
+                  if (form.wgconf.trim()) {
+                    form.verifyWarp = true;
+                    touched.verifyWarp = true;
+                  }
+                }}
+              ></textarea>
             </label>
             {@render fieldError("wgconf")}
             <div class="mt-1.5 flex flex-wrap items-center gap-2">
               <button
                 type="button"
                 class="btn btn-secondary btn-sm"
-                title="Read a WireGuard .conf file into the field above (verification is enabled automatically)"
+                title={t("pro.warp.wgconfLoadTitle")}
                 onclick={() => wgconfFileInput?.click()}
               >
-                <FolderOpen class="size-3.5" /> Load .conf file
+                <FolderOpen class="size-3.5" /> {t("pro.warp.wgconfLoad")}
               </button>
               {#if wgconfFileName}
                 <span
@@ -847,6 +1043,16 @@
                 {wgconfFileError}
               </p>
             {/if}
+            <div class="mt-2">
+              <WgNoiseEditor
+                text={form.wgconf}
+                onchange={(next) => {
+                  form.wgconf = next;
+                  touched.wgconf = true;
+                  delete serverFieldErrors.wgconf;
+                }}
+              />
+            </div>
             <input
               bind:this={wgconfFileInput}
               class="hidden"
@@ -857,7 +1063,7 @@
           </div>
           <label class="flex items-center gap-2 text-xs" style="color: var(--ink-muted)">
             <input type="checkbox" name="verifyWarp" bind:checked={form.verifyWarp} disabled={!form.wgconf} class="accent-[var(--accent)]" />
-            verify with this identity's real keypair
+            {t("pro.warp.verify")}
           </label>
 
           <!-- WARP registration -->
@@ -867,12 +1073,12 @@
           >
             <div class="flex flex-wrap items-end gap-2">
               <label class="text-xs" style="color: var(--ink-muted)">
-                WARP+ license (optional — blank = free account)
+                {t("pro.warp.licenseLabel")}
                 <input
                   class="field mono mt-1 !w-56"
                   bind:value={licenseInput}
                   maxlength="256"
-                  placeholder="license key"
+                  placeholder={t("pro.warp.licensePlaceholder")}
                 />
               </label>
               <button
@@ -881,10 +1087,10 @@
                 onclick={() => registerWarp(false)}
                 disabled={registering}
                 data-state={registering ? "loading" : undefined}
-                title="Register a fresh WARP identity with Cloudflare (~45 s)"
+                title={t("pro.warp.registerTitle")}
               >
                 <KeyRound class="size-3.5" />
-                {registering ? "Registering…" : "Register identity"}
+                {registering ? t("pro.warp.registering") : t("pro.warp.register")}
               </button>
             </div>
 
@@ -896,9 +1102,9 @@
                     type="button"
                     class="btn btn-secondary btn-sm"
                     onclick={() => registerWarp(true)}
-                    title="Replace the previously registered identity with a new one"
+                    title={t("pro.warp.overwriteTitle")}
                   >
-                    Overwrite existing identity?
+                    {t("pro.warp.overwrite")}
                   </button>
                 {/if}
               </div>
@@ -907,7 +1113,7 @@
             {#if registeredConf}
               <div class="fade-in mt-3">
                 <p class="text-xs font-semibold" style="color: var(--good)">
-                  Identity registered — wgconf:
+                  {t("pro.warp.registeredHeading")}
                 </p>
                 <textarea
                   class="field mono mt-1 w-full"
@@ -918,18 +1124,18 @@
                 <div class="mt-2 flex flex-wrap gap-2">
                   <button type="button" class="btn btn-secondary btn-sm" onclick={copyConf}>
                     {#if confCopied}
-                      <Check class="size-3.5" style="color: var(--good)" /> Copied
+                      <Check class="size-3.5" style="color: var(--good)" /> {t("pro.warp.copied")}
                     {:else}
-                      <Copy class="size-3.5" /> Copy
+                      <Copy class="size-3.5" /> {t("pro.warp.copy")}
                     {/if}
                   </button>
                   <button
                     type="button"
                     class="btn btn-primary btn-sm"
                     onclick={useRegisteredConf}
-                    title="Paste into the wgconf field above and enable real-keypair verification"
+                    title={t("pro.warp.useInVerifyTitle")}
                   >
-                    Use in verify
+                    {t("pro.warp.useInVerify")}
                   </button>
                 </div>
               </div>
@@ -941,40 +1147,40 @@
         <label class="mt-4 flex items-center gap-2 text-xs" style="color: var(--ink-muted)">
           <input type="checkbox" name="phase2On" bind:checked={form.phase2On} class="accent-[var(--accent)]" />
           <ShieldCheck class="size-3.5" style="color: var(--accent)" />
-          verify candidates through xray (phase 2)
+          {t("pro.phase2.verifyLabel")}
         </label>
         {#if xray && !xray.found}
-          <p class="mt-1 pl-6 text-[11px]" style="color: var(--ink-muted)">
-            requires the xray binary — download it with the button above
+          <p class="mt-1 ps-6 text-[11px]" style="color: var(--ink-muted)">
+            {t("pro.phase2.xrayHint")}
           </p>
         {/if}
 
         {#if form.phase2On}
           <div class="fade-in mt-4 grid gap-4">
-            <label class="text-xs" style="color: var(--ink-muted)">
-              Configs to verify through the tunnel (vless/trojan/vmess/ss URIs or subscription URLs, one per line)
-              <textarea
-                class="field mono mt-1"
-                rows="3"
-                name="configsText"
-                aria-invalid={fieldErrors.configsText ? "true" : undefined}
-                bind:value={form.configsText}></textarea>
-              {@render fieldError("configsText")}
-            </label>
+              <label class="text-xs" style="color: var(--ink-muted)">
+                {t("pro.phase2.configsLabel")}
+                <textarea
+                  class="field mono mt-1"
+                  rows="3"
+                  name="configsText"
+                  aria-invalid={fieldErrors.configsText ? "true" : undefined}
+                  bind:value={form.configsText}
+                  onchange={() => normalizeField("configsText")}></textarea>
+                {@render fieldError("configsText")}
+              </label>
             <div class="grid gap-4 sm:grid-cols-3">
               <label class="text-xs" style="color: var(--ink-muted)">
-                DPI fragmentation
+                {t("pro.phase2.fragment")}
                 <select class="field mt-1" name="fragment" bind:value={form.fragment}>
                   <option>off</option><option>light</option><option>medium</option><option>heavy</option>
-                  <option>custom</option>
                 </select>
               </label>
               <label class="text-xs sm:col-span-2" style="color: var(--ink-muted)">
-                SNI variants (comma-separated, empty = each config's own)
+                {t("pro.phase2.sniLabel")}
                 <input
                   class="field mono mt-1"
                   name="snis"
-                  placeholder="front.example.com"
+                  placeholder={t("pro.phase2.sniPlaceholder")}
                   aria-invalid={fieldErrors.snis ? "true" : undefined}
                   bind:value={form.snis}
                 />
@@ -982,7 +1188,7 @@
               </label>
             </div>
             <label class="text-xs" style="color: var(--ink-muted)">
-              Probe URL fetched through each tunnel
+              {t("pro.phase2.probeLabel")}
               <input
                 class="field mono mt-1"
                 name="probeUrl"
@@ -1003,8 +1209,22 @@
       >
         <div class="flex flex-wrap items-center justify-end gap-2">
           {#if app.running}
+            {#if canSkipToPhase2}
+              <button
+                type="button"
+                class="btn btn-secondary btn-sm"
+                style={suggestSkip ? "box-shadow: 0 0 0 1px var(--ring)" : undefined}
+                disabled={skipping}
+                data-state={skipping ? "loading" : undefined}
+                title={t("pro.action.skipTitle")}
+                onclick={skipToPhase2}
+              >
+                <ShieldCheck class="size-3.5" />
+                {app.progress.found > 0 ? t("pro.action.skipWithCount", { n: app.progress.found }) : t("pro.action.skip")}
+              </button>
+            {/if}
             <button type="button" class="btn btn-secondary" onclick={stopScan}>
-              <Square class="size-3.5" /> Stop
+              <Square class="size-3.5" /> {t("pro.action.stop")}
             </button>
           {:else}
             <button
@@ -1013,13 +1233,13 @@
               disabled={starting}
               data-state={starting ? "loading" : undefined}
             >
-              <Play class="size-3.5" /> Start scan
+              <Play class="size-3.5" /> {t("pro.action.start")}
             </button>
           {/if}
         </div>
         {#if !form.capText.trim() && form.concurrency >= 512}
           <p class="fade-in mt-2 text-[11px]" role="note" style="color: oklch(80% 0.13 85)">
-            no cap at high concurrency can run very long
+            {t("pro.hint.noCap")}
           </p>
         {/if}
       </div>
@@ -1028,7 +1248,11 @@
 
   {#if app.phase2}
     <p class="mono fade-in px-1 text-xs" style="color: var(--accent)" role="status">
-      phase 2: {app.phase2.done}/{app.phase2.total} verified…
+      {t("pro.status.phase2Progress", { done: app.phase2.done, total: app.phase2.total })}
+    </p>
+  {:else if app.running && suggestSkip}
+    <p class="fade-in px-1 text-xs" role="status" style="color: var(--ink-muted)">
+      {t("pro.hint.skipSuggestion", { found: app.progress.found })}
     </p>
   {/if}
 
