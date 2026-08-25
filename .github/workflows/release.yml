@@ -276,12 +276,25 @@ jobs:
           echo "EOF" >> "$GITHUB_OUTPUT"
 
           cp dist-manifest.json "$BUILD_MANIFEST_NAME"
+      # ADR-012: attach an SPDX SBOM of the release crate so consumers can
+      # audit the dependency tree without building it themselves.
+      - name: Install cargo-sbom
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-sbom
+      - id: sbom
+        name: Emit cf-scanner SPDX JSON
+        shell: bash
+        run: |
+          cargo sbom --cargo-package cf-scanner > cf-scanner.spdx.json
+          echo "sbom_path=cf-scanner.spdx.json" >> "$GITHUB_OUTPUT"
       - name: "Upload artifacts"
         uses: actions/upload-artifact@v7
         with:
           name: artifacts-build-global
           path: |
             ${{ steps.cargo-dist.outputs.paths }}
+            ${{ steps.sbom.outputs.sbom_path }}
             ${{ env.BUILD_MANIFEST_NAME }}
   # Determines if we should publish/announce
   host:
