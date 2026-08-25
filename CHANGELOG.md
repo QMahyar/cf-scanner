@@ -5,6 +5,8 @@ Added / Changed / Fixed / Deprecated / Removed / Security, newest on top.
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-08-25
+
 ### Added
 - **Windows xray lifecycle on CI.** `tests/xray_lifecycle_windows.rs` mirrors
   the Unix subprocess suite with a `rustc`-compiled fake xray, so
