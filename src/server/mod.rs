@@ -3,35 +3,46 @@
 //! directly (those types ARE the wire contract); no engine type is
 //! serialized.
 
-use std::collections::HashMap;
-use std::convert::Infallible;
-use std::fs;
 use std::net::Ipv4Addr;
 use std::path::PathBuf;
-use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, RwLock};
-use std::time::{Duration, Instant};
+use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
-use axum::extract::rejection::JsonRejection;
-use axum::extract::{FromRequest, Path, Request, State};
+use axum::extract::{Path, State};
 use axum::http::{StatusCode, Uri};
-use axum::middleware::{self, Next};
-use axum::response::sse::{Event, KeepAlive, Sse};
+use axum::middleware::{self};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock as TokioRwLock;
-use tokio_stream::Stream;
-use tokio_stream::wrappers::BroadcastStream;
 
 use crate::api::types::{DEFAULT_PORT, Mode, ScanConfig, ScanEvent, ScanSummary, Verdict};
 use crate::engine::ScanController;
 use crate::paths;
-use crate::ranges::{self, CidrPool, HttpGet};
+use crate::ranges;
+#[allow(unused_imports)]
+use crate::ranges::HttpGet;
 use crate::warpgen;
 use crate::xray;
+
+mod error;
+mod guard;
+mod sse;
+mod state;
+
+#[allow(unused_imports)]
+use self::error::{ApiError, map_register_error, sanitize_truncate, status_to_code};
+#[allow(unused_imports)]
+use self::guard::{JsonBody, SECURITY_CSP, localhost_only, security_headers};
+#[allow(unused_imports)]
+use self::sse::{MAX_SSE_CONNECTIONS, TerminalBounded, events, try_acquire_sse_slot};
+#[allow(unused_imports)]
+use self::state::{
+    AppState, DEFAULT_RANGES_REFRESH_INTERVAL, MAX_PROFILES, PROFILES_FILE, ProfilePayload,
+    REGISTER_COOLDOWN, RangesState, WarpRegistrar, load_profiles, persist_profiles,
+};
 
 const EMBEDDED_INDEX: &str = "index.html";
 
@@ -42,293 +53,6 @@ const EMBEDDED_INDEX: &str = "index.html";
 #[derive(rust_embed::RustEmbed)]
 #[folder = "ui/dist"]
 struct UiAssets;
-const DEFAULT_RANGES_REFRESH_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
-/// Cap on concurrent SSE event streams so hung tabs cannot hoard broadcast
-/// receivers; the UI needs one, extras are an abuse signal.
-const MAX_SSE_CONNECTIONS: usize = 4;
-/// Cap on saved profiles so an unauthenticated local caller cannot grow the
-/// in-memory map without bound (memory-DoS guard; review Domain 7).
-const MAX_PROFILES: usize = 50;
-/// WARP registration hits Cloudflare's registration endpoint; one attempt per
-/// 60 s keeps a stuck page from hammering it (process-wide, single-user app).
-const REGISTER_COOLDOWN: Duration = Duration::from_secs(60);
-/// Persisted profiles file inside the data dir (identity.json lives
-/// alongside it); written on every mutation, loaded at serve start so saved
-/// profiles survive restarts (review Domain 2, rec 10).
-const PROFILES_FILE: &str = "profiles.json";
-
-fn load_profiles(dir: &std::path::Path) -> HashMap<String, ScanConfig> {
-    let path = dir.join(PROFILES_FILE);
-    let Ok(text) = fs::read_to_string(path) else {
-        return HashMap::new();
-    };
-    match serde_json::from_str(&text) {
-        Ok(profiles) => profiles,
-        Err(err) => {
-            tracing::warn!("profiles: ignoring unreadable {PROFILES_FILE}: {err:#}");
-            HashMap::new()
-        }
-    }
-}
-
-/// Best-effort disk write on a blocking thread; a failure is logged, never
-/// fatal (the in-memory store stays authoritative for the session).
-async fn persist_profiles(dir: &std::path::Path, profiles: &HashMap<String, ScanConfig>) {
-    let path = dir.join(PROFILES_FILE);
-    let Ok(json) = serde_json::to_string_pretty(profiles) else {
-        return;
-    };
-    let _ = tokio::task::spawn_blocking(move || {
-        let _gate = crate::paths::data_write_guard();
-        if let Some(parent) = path.parent() {
-            let _ = fs::create_dir_all(parent);
-        }
-        // tmp + rename under the write gate: a concurrent reader (or the
-        // next writer) must never observe a half-written profiles.json.
-        let tmp = path.with_extension("json.tmp");
-        if fs::write(&tmp, json).is_ok() {
-            // Profiles can hold sensitive scan configs: keep the file
-            // user-only where the filesystem supports permissions (mirrors
-            // warpgen::write_private).
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt as _;
-                let _ = fs::set_permissions(&tmp, fs::Permissions::from_mode(0o600));
-            }
-            #[cfg(not(unix))]
-            {
-                crate::paths::lock_down_to_owner(&tmp).ok();
-            }
-            let _ = fs::rename(&tmp, &path);
-        } else {
-            let _ = fs::remove_file(&tmp);
-        }
-    })
-    .await;
-}
-
-/// Host header values the API answers to. Anything else is rejected before
-/// routing (DNS-rebinding / drive-by protection); the server only ever binds
-/// IPv4 loopback, so v6 loopback hosts are not answerable and stay rejected.
-const ALLOWED_HOSTS: [&str; 2] = ["127.0.0.1", "localhost"];
-
-fn host_allowed(host: &str) -> bool {
-    let host = host.trim();
-    let host = if let Some(rest) = host.strip_prefix('[') {
-        rest.split_once(']').map(|(addr, _)| addr).unwrap_or(host)
-    } else if let Some((addr, _)) = host.rsplit_once(':') {
-        addr
-    } else {
-        host
-    };
-    ALLOWED_HOSTS
-        .iter()
-        .any(|allowed| allowed.eq_ignore_ascii_case(host))
-}
-
-fn origin_allowed(origin: &str) -> bool {
-    let host = origin
-        .split_once("://")
-        .map(|(_, rest)| rest)
-        .unwrap_or(origin);
-    host_allowed(host)
-}
-
-/// Rejects requests that are not from the local UI: a foreign Host header,
-/// a cross-origin browser request (Origin / Sec-Fetch-Site), or no Host at
-/// all. Browsers and curl always send Host; the UI is same-origin.
-async fn localhost_only(request: Request, next: Next) -> Result<Response, ApiError> {
-    let headers = request.headers();
-    let Some(host) = headers.get("host").and_then(|h| h.to_str().ok()) else {
-        return Err(ApiError::forbidden("missing Host header"));
-    };
-    if !host_allowed(host) {
-        return Err(ApiError::forbidden("Host header not allowed"));
-    }
-    if let Some(origin) = headers.get("origin").and_then(|h| h.to_str().ok()) {
-        if origin == "null" {
-            return Err(ApiError::forbidden("Origin not allowed"));
-        }
-        if !origin_allowed(origin) {
-            return Err(ApiError::forbidden("Origin not allowed"));
-        }
-    }
-    if let Some(site) = headers.get("sec-fetch-site").and_then(|h| h.to_str().ok()) {
-        if site != "same-origin" && site != "none" {
-            return Err(ApiError::forbidden("cross-site request rejected"));
-        }
-    }
-    Ok(next.run(request).await)
-}
-
-/// Json extractor with the uniform ApiError envelope on rejection, so
-/// malformed bodies answer `{"error","message"}` JSON instead of axum's
-/// plain-text default.
-struct JsonBody<T>(T);
-
-impl<S, T> FromRequest<S> for JsonBody<T>
-where
-    S: Send + Sync,
-    Json<T>: FromRequest<S, Rejection = JsonRejection>,
-{
-    type Rejection = ApiError;
-
-    async fn from_request(req: Request, state: &S) -> Result<Self, Self::Rejection> {
-        match Json::<T>::from_request(req, state).await {
-            Ok(Json(value)) => Ok(JsonBody(value)),
-            Err(rejection) => {
-                let status = rejection.status();
-                let raw = rejection.body_text();
-                let sanitized = crate::configs::sanitize_error_text(&raw);
-                let truncated: String = sanitized.chars().take(512).collect();
-                let code = status_to_code(status);
-                Err(ApiError {
-                    status,
-                    code,
-                    message: truncated,
-                })
-            }
-        }
-    }
-}
-
-/// A named ScanConfig persisted to profiles.json (wgconf stripped via
-/// sanitize_config) and held in memory for the session; loaded at serve start.
-#[derive(Serialize)]
-struct ProfilePayload {
-    name: String,
-    config: ScanConfig,
-}
-
-/// WARP registration seam: production drives warpgen::register (the
-/// Cloudflare v0a884 flow) on a blocking thread; tests inject a fake so the
-/// endpoint never touches the network (mirrors the ranges::HttpGet
-/// injectability).
-type WarpRegistrar = Arc<dyn Fn(Option<String>) -> anyhow::Result<String> + Send + Sync>;
-
-struct AppState {
-    controller: Arc<ScanController>,
-    profiles: TokioRwLock<HashMap<String, ScanConfig>>,
-    ranges: Arc<RangesState>,
-    sse_connections: Arc<AtomicUsize>,
-    warp_register: WarpRegistrar,
-    /// Where profiles.json lives; production = the data dir, tests = an
-    /// isolated temp dir so no test touches a real user's profiles.
-    profiles_dir: PathBuf,
-    /// Epoch of the latest started run; terminal events are tagged with it
-    /// so an SSE reconnect replays the current run's terminal only.
-    run_epoch: Arc<AtomicU64>,
-    /// Terminal (Finished/Failed) of the latest finished run, tagged with
-    /// its epoch; replayed to SSE clients that connect after the run ended.
-    last_terminal: Arc<Mutex<Option<(u64, ScanEvent)>>>,
-    /// Serializes WARP registrations end-to-end and carries the last
-    /// attempt for the 1-per-60s limit. The overwrite-consent check and the
-    /// registration must be ONE critical section: two concurrent first-time
-    /// registers would both see "no identity" and both clobber it. Held
-    /// across the network call; the cooldown already limits registrations to
-    /// 1/60 s, so serializing them costs nothing.
-    register_gate: tokio::sync::Mutex<Option<Instant>>,
-}
-
-/// What /api/ranges serves: the current pool plus when it was last refreshed.
-struct RangesInner {
-    pool: CidrPool,
-    last_updated: Option<String>,
-}
-
-/// Arc so the persist closure can be cloned into spawn_blocking.
-type Persist = Arc<dyn Fn(&CidrPool, &str) -> anyhow::Result<()> + Send + Sync>;
-
-struct RangesState {
-    inner: RwLock<RangesInner>,
-    persist: Persist,
-}
-
-impl RangesState {
-    /// Production state: the refreshed data-dir file when present, else the
-    /// bundled list; the embedded-list load time stands in for last_updated
-    /// until the first successful refresh.
-    fn load() -> Arc<Self> {
-        let text = paths::refreshed_ranges_path()
-            .ok()
-            .and_then(|p| fs::read_to_string(p).ok());
-        let now = ranges::rfc3339_utc(ranges::unix_now());
-        let (pool, last_updated) = match text {
-            Some(text) => (
-                CidrPool::parse(&text).unwrap_or_else(|_| CidrPool::bundled()),
-                ranges::last_updated_of(&text).or(Some(now)),
-            ),
-            None => (CidrPool::bundled(), Some(now)),
-        };
-        Arc::new(Self {
-            inner: RwLock::new(RangesInner { pool, last_updated }),
-            persist: Arc::new(ranges::write_pool),
-        })
-    }
-
-    /// Test constructor: persistence is a no-op so background-refresh tests
-    /// never touch the data dir.
-    #[cfg(test)]
-    fn load_text(text: &str, last_updated: Option<&str>) -> Arc<Self> {
-        let pool = CidrPool::parse(text).unwrap_or_else(|_| CidrPool::bundled());
-        Arc::new(Self {
-            inner: RwLock::new(RangesInner {
-                pool,
-                last_updated: last_updated.map(str::to_owned),
-            }),
-            persist: Arc::new(|_, _| Ok(())),
-        })
-    }
-
-    /// One refresh cycle: fetch + validate, persist (best-effort, logged),
-    /// then swap the in-memory snapshot. Errors leave the last good data.
-    /// The disk write runs on a blocking thread so a slow filesystem cannot
-    /// stall the async runtime.
-    async fn refresh(&self, http: &impl HttpGet) -> anyhow::Result<()> {
-        let pool = ranges::fetch_official(http).await?;
-        let last_updated = ranges::rfc3339_utc(ranges::unix_now());
-        let persist = Arc::clone(&self.persist);
-        let pool_for_disk = pool.clone();
-        let stamp = last_updated.clone();
-        tokio::task::spawn_blocking(move || {
-            if let Err(err) = persist(&pool_for_disk, &stamp) {
-                tracing::warn!("ranges refresh: could not persist to disk: {err:#}");
-            }
-        })
-        .await
-        .ok();
-        let mut inner = self
-            .inner
-            .write()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        inner.pool = pool;
-        inner.last_updated = Some(last_updated);
-        Ok(())
-    }
-
-    /// Spawns the refresh loop; `interval` overrides the 24h default (tests
-    /// use a short one). Never ends; a failed cycle is logged and the last
-    /// good data stays in place. The first tick fires immediately.
-    fn spawn_refresh<H>(self: &Arc<Self>, interval: Option<Duration>, http: Arc<H>)
-    where
-        H: HttpGet + Send + Sync + 'static,
-    {
-        let interval = interval.unwrap_or(DEFAULT_RANGES_REFRESH_INTERVAL);
-        let this = Arc::clone(self);
-        tokio::spawn(async move {
-            let mut ticker = tokio::time::interval(interval);
-            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-            loop {
-                ticker.tick().await;
-                if let Err(err) = this.refresh(http.as_ref()).await {
-                    tracing::warn!(
-                        "ranges background refresh failed (keeping last good data): {err:#}"
-                    );
-                }
-            }
-        });
-    }
-}
 
 pub fn router(controller: Arc<ScanController>) -> Router {
     let ranges = RangesState::load();
@@ -342,6 +66,7 @@ pub fn router(controller: Arc<ScanController>) -> Router {
 /// another test's profiles (and none touches a real user's data dir).
 #[cfg(test)]
 fn unique_test_profiles_dir() -> PathBuf {
+    use std::fs;
     static COUNTER: AtomicUsize = AtomicUsize::new(0);
     let dir = std::env::temp_dir().join(format!(
         "cf-scanner-server-profiles-{}-{}",
@@ -429,24 +154,6 @@ fn ui_response(file: &str) -> Option<Response> {
     headers.insert("x-content-type-options", "nosniff".parse().unwrap());
     headers.insert("referrer-policy", "no-referrer".parse().unwrap());
     Some((headers, data.data).into_response())
-}
-
-/// Directives every HTML response must carry. The compiled UI ships real
-/// asset files, so everything stays 'self' — no inline script or style.
-const SECURITY_CSP: &str = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self' data:; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'; script-src-attr 'none'";
-
-/// Adds the security headers every response should carry, leaving any header
-/// the handler already set untouched (the HTML handlers set their own CSP).
-async fn security_headers(request: Request, next: Next) -> Response {
-    let mut response = next.run(request).await;
-    let headers = response.headers_mut();
-    headers
-        .entry("referrer-policy")
-        .or_insert(axum::http::HeaderValue::from_static("no-referrer"));
-    headers
-        .entry("x-content-type-options")
-        .or_insert(axum::http::HeaderValue::from_static("nosniff"));
-    response
 }
 
 /// Wrong method on a known path: 405 with the same JSON envelope as every
@@ -579,182 +286,6 @@ fn banned_ip(ip: &std::net::IpAddr) -> bool {
     }
 }
 
-/// One concurrent SSE stream per app slot; the slot is held by the returned
-/// stream for the connection's lifetime, so a dropped connection frees it.
-async fn events(
-    State(state): State<Arc<AppState>>,
-) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, ApiError> {
-    let Some(slot) = try_acquire_sse_slot(&state.sse_connections) else {
-        return Err(ApiError::too_many("too many open event streams"));
-    };
-    // Subscribe BEFORE reading the terminal state: a finish landing between
-    // the old is_running() check and the subscribe lost the terminal for that
-    // client. With the receiver already attached, a terminal emitted after it
-    // arrives on the live stream, and one emitted before it is replayed from
-    // last_terminal — exactly-once either way. The (epoch, terminal) state is
-    // authoritative because start_scan records the terminal at emit time,
-    // before the running flag clears.
-    let rx = state.controller.subscribe();
-    let current_epoch = state.run_epoch.load(Ordering::SeqCst);
-    let replay = state
-        .last_terminal
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .clone()
-        .filter(|(epoch, _)| *epoch == current_epoch)
-        .map(|(_, ev)| ev);
-    let stream: Pin<Box<dyn Stream<Item = Result<Event, Infallible>> + Send>> =
-        Box::pin(TerminalBounded {
-            rx: BroadcastStream::new(rx),
-            _slot: slot,
-            done: false,
-            // A terminal from an ALREADY-FINISHED run is context, not an
-            // end-of-stream signal for THIS connection: closing here would
-            // make every idle browser EventSource reconnect-storm (connect ->
-            // replay -> close -> reconnect) and miss the next run's events.
-            // Deliver it once, then keep waiting for a future run's live
-            // tail — only a fresh live terminal ends the stream.
-            replay: replay.map(|ev| (ev, false)),
-            last_terminal: Arc::clone(&state.last_terminal),
-            epoch: current_epoch,
-        });
-    Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
-}
-
-/// Live SSE items off the engine's broadcast tail, optionally preceded by one
-/// replayed terminal from the previous run. Ends after a LIVE run's terminal
-/// event (Finished/Failed) so an in-flight response body cannot hold hyper's
-/// graceful shutdown open forever. On Lagged the stream stays alive and
-/// re-emits the latest terminal snapshot (if any) instead of closing, to avoid
-/// EventSource reconnect storms.
-struct TerminalBounded {
-    rx: BroadcastStream<ScanEvent>,
-    _slot: SseSlot,
-    done: bool,
-    /// `Some((event, delivered))`: the previous run's terminal until it has
-    /// been yielded.
-    replay: Option<(ScanEvent, bool)>,
-    last_terminal: Arc<Mutex<Option<(u64, ScanEvent)>>>,
-    epoch: u64,
-}
-
-impl Stream for TerminalBounded {
-    type Item = Result<Event, Infallible>;
-
-    fn poll_next(
-        mut self: Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<Option<Self::Item>> {
-        if self.done {
-            return std::task::Poll::Ready(None);
-        }
-        // The replayed terminal goes out first, exactly once; it does not
-        // end the stream (see the field docs).
-        if let Some((ev, delivered)) = &mut self.replay {
-            if !*delivered {
-                *delivered = true;
-                if let Some(event) = map_event(ev.clone()) {
-                    return std::task::Poll::Ready(Some(Ok(event)));
-                }
-            }
-        }
-        loop {
-            match Pin::new(&mut self.rx).poll_next(cx) {
-                std::task::Poll::Ready(Some(Ok(ev))) => {
-                    let terminal = matches!(ev, ScanEvent::Finished(_) | ScanEvent::Failed(_));
-                    match map_event(ev) {
-                        Some(event) => {
-                            self.done = terminal;
-                            return std::task::Poll::Ready(Some(Ok(event)));
-                        }
-                        None => {
-                            // Unserializable payload (never expected): drop
-                            // silently; a terminal still ends the stream.
-                            if terminal {
-                                self.done = true;
-                                return std::task::Poll::Ready(None);
-                            }
-                        }
-                    }
-                }
-                // Lagged: avoid closing the stream (reconnect storm). Emit a
-                // fresh terminal snapshot if one exists for this epoch, then
-                // keep listening for live events.
-                std::task::Poll::Ready(Some(Err(_lagged))) => {
-                    if let Some(ev) = self
-                        .last_terminal
-                        .lock()
-                        .unwrap_or_else(|p| p.into_inner())
-                        .clone()
-                        .filter(|(epoch, _)| *epoch == self.epoch)
-                        .map(|(_, ev)| ev)
-                    {
-                        if let Some(event) = map_event(ev) {
-                            return std::task::Poll::Ready(Some(Ok(event)));
-                        }
-                    }
-                    // No terminal to replay; stay alive and wait for next live event.
-                    continue;
-                }
-                std::task::Poll::Ready(None) => return std::task::Poll::Ready(None),
-                std::task::Poll::Pending => return std::task::Poll::Pending,
-            }
-        }
-    }
-}
-
-/// Maps an engine-domain event onto the SSE wire shape; None when the
-/// payload cannot serialize (never expected; the live path drops silently).
-fn map_event(ev: ScanEvent) -> Option<Event> {
-    let retry = Duration::from_secs(3);
-    match ev {
-        ScanEvent::Progress(p) => Event::default()
-            .retry(retry)
-            .event("progress")
-            .json_data(p)
-            .ok(),
-        ScanEvent::Result(v) => Event::default()
-            .retry(retry)
-            .event("result")
-            .json_data(*v)
-            .ok(),
-        ScanEvent::Finished(s) => Event::default()
-            .retry(retry)
-            .event("finished")
-            .json_data(s)
-            .ok(),
-        ScanEvent::Phase2Progress(p) => Event::default()
-            .retry(retry)
-            .event("phase2-progress")
-            .json_data(p)
-            .ok(),
-        ScanEvent::Failed(msg) => Event::default()
-            .retry(retry)
-            .event("failed")
-            .json_data(msg)
-            .ok(),
-    }
-}
-
-/// RAII SSE slot: acquire bumps the counter, drop releases it. The caller
-/// moves the guard into the event stream so release happens when the
-/// connection dies, not when the handler returns.
-fn try_acquire_sse_slot(total: &Arc<AtomicUsize>) -> Option<SseSlot> {
-    if total.fetch_add(1, Ordering::SeqCst) >= MAX_SSE_CONNECTIONS {
-        total.fetch_sub(1, Ordering::SeqCst);
-        return None;
-    }
-    Some(SseSlot(Arc::clone(total)))
-}
-
-struct SseSlot(Arc<AtomicUsize>);
-
-impl Drop for SseSlot {
-    fn drop(&mut self) {
-        self.0.fetch_sub(1, Ordering::SeqCst);
-    }
-}
-
 #[derive(Serialize)]
 struct ResultsPayload {
     results: Vec<Verdict>,
@@ -850,43 +381,6 @@ async fn warp_register(
         .map_err(|_| ApiError::internal("registration task panicked"))?
         .map_err(map_register_error)?;
     Ok(Json(RegisterResponse { wgconf }))
-}
-
-fn sanitize_truncate(text: &str) -> String {
-    let sanitized = crate::configs::sanitize_error_text(text);
-    sanitized.chars().take(512).collect()
-}
-
-fn map_register_error(err: anyhow::Error) -> ApiError {
-    for cause in err.chain() {
-        if let Some(warp_err) = cause.downcast_ref::<crate::warpgen::WarpRegisterError>() {
-            match warp_err {
-                crate::warpgen::WarpRegisterError::Timeout => {
-                    return ApiError::gateway_timeout("registration timed out");
-                }
-                crate::warpgen::WarpRegisterError::RateLimited => {
-                    return ApiError::too_many(
-                        "registration rate-limited by Cloudflare, try again later",
-                    );
-                }
-                crate::warpgen::WarpRegisterError::Unauthorized { status } => {
-                    return ApiError::bad_gateway(format!(
-                        "Cloudflare rejected the registration (HTTP {status})"
-                    ));
-                }
-                crate::warpgen::WarpRegisterError::Server { status, detail } => {
-                    let detail = sanitize_truncate(detail);
-                    return ApiError::bad_gateway(format!(
-                        "registration failed (HTTP {status}): {detail}"
-                    ));
-                }
-            }
-        }
-    }
-    ApiError::bad_gateway(format!(
-        "registration failed: {}",
-        sanitize_truncate(&format!("{err:#}"))
-    ))
 }
 
 /// `POST /api/config/export` body: one of the user's ORIGINAL config URIs as
@@ -1015,14 +509,10 @@ struct RangesPayload {
 }
 
 async fn ranges(State(state): State<Arc<AppState>>) -> Json<RangesPayload> {
-    let inner = state
-        .ranges
-        .inner
-        .read()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let (pool, last_updated) = state.ranges.snapshot();
     Json(RangesPayload {
-        host_count: inner.pool.host_count().min(u64::MAX as u128) as u64,
-        last_updated: inner.last_updated.clone(),
+        host_count: pool.host_count().min(u64::MAX as u128) as u64,
+        last_updated,
     })
 }
 
@@ -1140,144 +630,15 @@ async fn index() -> Response {
     ui_response(EMBEDDED_INDEX).expect("ui/dist/index.html is embedded at compile time")
 }
 
-struct ApiError {
-    status: StatusCode,
-    code: &'static str,
-    message: String,
-}
-
-#[derive(Serialize)]
-struct ErrorResponse {
-    error: String,
-    message: String,
-    code: &'static str,
-}
-
-fn status_to_code(status: StatusCode) -> &'static str {
-    match status {
-        StatusCode::BAD_REQUEST => "bad_request",
-        StatusCode::PAYLOAD_TOO_LARGE => "payload_too_large",
-        StatusCode::UNPROCESSABLE_ENTITY => "invalid_config",
-        StatusCode::NOT_FOUND => "not_found",
-        StatusCode::METHOD_NOT_ALLOWED => "method_not_allowed",
-        StatusCode::FORBIDDEN => "forbidden",
-        StatusCode::CONFLICT => "conflict",
-        StatusCode::TOO_MANY_REQUESTS => "rate_limited",
-        StatusCode::BAD_GATEWAY => "upstream_error",
-        StatusCode::GATEWAY_TIMEOUT => "gateway_timeout",
-        StatusCode::INTERNAL_SERVER_ERROR => "internal",
-        _ => "internal",
-    }
-}
-
-impl ApiError {
-    fn bad_request(err: impl std::fmt::Display) -> Self {
-        Self {
-            status: StatusCode::BAD_REQUEST,
-            code: "bad_request",
-            message: err.to_string(),
-        }
-    }
-
-    fn invalid_config(err: impl std::fmt::Display) -> Self {
-        Self {
-            status: StatusCode::BAD_REQUEST,
-            code: "invalid_config",
-            message: err.to_string(),
-        }
-    }
-
-    fn bad_gateway(message: impl Into<String>) -> Self {
-        Self {
-            status: StatusCode::BAD_GATEWAY,
-            code: "upstream_error",
-            message: message.into(),
-        }
-    }
-
-    fn gateway_timeout(message: impl Into<String>) -> Self {
-        Self {
-            status: StatusCode::GATEWAY_TIMEOUT,
-            code: "gateway_timeout",
-            message: message.into(),
-        }
-    }
-
-    fn internal(message: impl Into<String>) -> Self {
-        Self {
-            status: StatusCode::INTERNAL_SERVER_ERROR,
-            code: "internal",
-            message: message.into(),
-        }
-    }
-
-    fn payload_too_large(message: impl Into<String>) -> Self {
-        Self {
-            status: StatusCode::PAYLOAD_TOO_LARGE,
-            code: "payload_too_large",
-            message: message.into(),
-        }
-    }
-
-    fn conflict(message: impl Into<String>) -> Self {
-        Self {
-            status: StatusCode::CONFLICT,
-            code: "conflict",
-            message: message.into(),
-        }
-    }
-
-    fn not_found(message: impl Into<String>) -> Self {
-        Self {
-            status: StatusCode::NOT_FOUND,
-            code: "not_found",
-            message: message.into(),
-        }
-    }
-
-    fn method_not_allowed(message: impl Into<String>) -> Self {
-        Self {
-            status: StatusCode::METHOD_NOT_ALLOWED,
-            code: "method_not_allowed",
-            message: message.into(),
-        }
-    }
-
-    fn forbidden(message: impl Into<String>) -> Self {
-        Self {
-            status: StatusCode::FORBIDDEN,
-            code: "forbidden",
-            message: message.into(),
-        }
-    }
-
-    fn too_many(message: impl Into<String>) -> Self {
-        Self {
-            status: StatusCode::TOO_MANY_REQUESTS,
-            code: "rate_limited",
-            message: message.into(),
-        }
-    }
-}
-
-impl IntoResponse for ApiError {
-    fn into_response(self) -> Response {
-        let body = Json(ErrorResponse {
-            error: self.status.canonical_reason().unwrap_or("Error").to_owned(),
-            message: self.message,
-            code: self.code,
-        });
-        (self.status, body).into_response()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
     use std::net::SocketAddr;
     use std::sync::Mutex;
     use std::time::Duration;
     use tokio_stream::StreamExt as _;
+    use tokio_stream::wrappers::BroadcastStream;
 
     use crate::api::types::{DEFAULT_WARP_PORTS, MAX_STOP_VALUE};
     use crate::api::types::{Mode, Phase2Config, ScanTarget, StopCondition, WarpConfig};

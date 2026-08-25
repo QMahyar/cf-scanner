@@ -4,7 +4,7 @@
 use std::path::PathBuf;
 use std::sync::{Mutex, MutexGuard};
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 
 /// Single-writer gate for every managed data-dir file (profiles.json,
 /// refreshed ranges, identity.json, xray binary + sidecar). These writes are
@@ -66,18 +66,18 @@ pub fn xray_binary_path() -> Result<PathBuf> {
 #[cfg(windows)]
 pub fn lock_down_to_owner(path: &std::path::Path) -> std::io::Result<()> {
     use std::os::windows::ffi::OsStrExt as _;
-    use windows::core::{PCWSTR, PWSTR};
     use windows::Win32::Foundation::ERROR_INSUFFICIENT_BUFFER;
     use windows::Win32::Foundation::{CloseHandle, GENERIC_ALL, HANDLE, NO_ERROR, WIN32_ERROR};
     use windows::Win32::Security::Authorization::{
-        SetEntriesInAclW, SetNamedSecurityInfoW, EXPLICIT_ACCESS_W, GRANT_ACCESS, SE_FILE_OBJECT,
+        EXPLICIT_ACCESS_W, GRANT_ACCESS, SE_FILE_OBJECT, SetEntriesInAclW, SetNamedSecurityInfoW,
         TRUSTEE_IS_SID, TRUSTEE_IS_USER, TRUSTEE_W,
     };
     use windows::Win32::Security::{
-        GetTokenInformation, TokenUser, ACL, DACL_SECURITY_INFORMATION, NO_INHERITANCE,
-        PROTECTED_DACL_SECURITY_INFORMATION, PSID, TOKEN_QUERY, TOKEN_USER,
+        ACL, DACL_SECURITY_INFORMATION, GetTokenInformation, NO_INHERITANCE,
+        PROTECTED_DACL_SECURITY_INFORMATION, PSID, TOKEN_QUERY, TOKEN_USER, TokenUser,
     };
     use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+    use windows::core::{PCWSTR, PWSTR};
 
     fn win_err(err: WIN32_ERROR) -> std::io::Error {
         std::io::Error::from_raw_os_error(err.0 as i32)
@@ -222,7 +222,7 @@ pub(crate) mod test_env {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::paths::test_env::{IsolatedDataDir, DATA_DIR_LOCK};
+    use crate::paths::test_env::{DATA_DIR_LOCK, IsolatedDataDir};
 
     #[cfg(windows)]
     #[test]
