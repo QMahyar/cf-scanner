@@ -65,6 +65,22 @@ ui build, cargo gates, and Playwright visual QA (EN+FA, 375/768/1440).
    1440/768/375 in EN+FA covering: two cards side-by-side desktop, tabs
    mobile, independent copies, tunnel summary line, Verify banked idle flow.
 
+## Shipped
+
+## Shipped
+
+All tickets above implemented and verified in-session: svelte-check 0/0,
+ui build ok, cargo gates green (test/clippy/fmt), Playwright self-QA
+passed - two cards at 1440, tabs at 900, chips filter+counts, independent
+copies, FA strings render, RTL correct, mobile 375 no horizontal scroll,
+backdrop-filter on header only.
+
+Predecessor effort closed under this tracker (v0.8.0 remediation and
+follow-through): data-write gate + library facade, server god-file split
+into src/server/{mod,state,error,guard,sse}.rs, Windows xray lifecycle
+suite, ADR-012 + best-effort SBOM, CI toolchain ref fix, and the v0.9.0
+release (GitHub Release + npm latest).
+
 ## Not yet specified (fog)
 
 - Whether profiles should persist the phase-2 card separately from the
