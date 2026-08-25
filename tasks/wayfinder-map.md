@@ -1,120 +1,80 @@
-# Wayfinder Map — v0.7.0 Review Remediation → Release v0.8.0
+# Wayfinder Map - Phase separation: two lists, independently copyable (Hybrid)
 
 ## Destination
 
-All deduplicated findings from the 2026-08-24 ten-agent review implemented,
-tested (cargo test/clippy/fmt + UI build), visually verified (Playwright +
-visual-qa subagent), and shipped as **v0.8.0** via the standard tag→CI→Release→npm
-pipeline. Follow-through refinements (server split, data-write gate,
-library facade, Windows xray coverage, SBOM) landed on `main` post-release
-as `0.8.x` unreleased work.
+Pro UI renders phase-1 (handshake) and phase-2 (tunnel test) results as two
+visually distinct lists - side-by-side cards at lg+, tabs below - each
+independently sortable and copyable. Phase-2 knobs live in their own card;
+a banked-candidates verify works while idle. Shipped behind svelte-check,
+ui build, cargo gates, and Playwright visual QA (EN+FA, 375/768/1440).
 
 ## Notes
 
-- Rust work per AGENTS.md. No new dependencies (std/tokio primitives only).
-- API contract changes authorized by user for this effort (additive/tightening only).
-- Tracker = local markdown (this file). Claims recorded in "Decisions so far".
-- Contradiction rulings are decisions, listed here once.
+- Svelte 5 runes only; no new deps; existing Ethereal Glass tokens.
+- Single source array app.results; split at READ side via ResultsView.
+  Never duplicate rows or tag the store (5-critic consensus).
+- UI changes commit ui/dist together with ui/src (AGENTS.md).
+- Tracker = local markdown (this file). Blocking = frontier order below.
+- Naming: CDN tier = "Tunnel test"; "Verified" stays WARP-keypair-only.
 
 ## Decisions so far
 
-- [D1 Engine uses api types directly](#d1): KEEP per ADR-011 — intentional
-  boundary, documented; no domain-split refactor.
-- [D2 probe_url http:// vs validate_fetch_url mismatch](#d2): INTENTIONAL —
-  probe_urls are fetched *through the tunnel* (not SSRF surface); ranges fetches
-  are direct. Document in both sites, change nothing.
-- [D3 serde(other) on Mode/Preset enums](#d3): SKIP — serde's "unknown variant"
-  error is strictly more informative than a silent fallback variant. Locked by
-  ADR-012.
-- [D4 SBOM/cosign](#d4): PARTIAL — SBOM shipped via `cargo-sbom` in
-  `release.yml:build-global-artifacts` (ADR-012). Cosign remains out of scope:
-  XTLS publishes checksums, not signatures.
-- [D5 AppState split / DataDir single-writer / lib.rs pub(crate)](#d5):
-  IMPLEMENTED 2026-08-25 as `src/server/{mod,state,error,guard,sse}.rs`,
-  `paths::data_write_guard()` serializing all managed data-dir writes,
-  and `src/lib.rs` hiding `geo`/`socks`/`inline_verify`. See commits
-  `7246037`, `8d701f9` (all gates green).
-- [D6 Windows xray lifecycle](#d6): IMPLEMENTED 2026-08-25 as
-  `tests/xray_lifecycle_windows.rs` — `rustc`-compiled fake xray, kill
-  verification, trial-dir cleanup, stable across 3 runs. Closes the
-  `xray_lifecycle.rs` Unix-only gap.
-- [D7 CI toolchain selection](#d7): IMPLEMENTED 2026-08-25 — action ref
-  `dtolnay/rust-toolchain@1.88` with explicit `rustup component add` steps;
-  `env.TOOLCHAIN` indirection removed after it broke the windows leg.
+- Layout: Hybrid - bento two-column at >=lg (1024px), tabs below. User
+  choice; critics ranked bento best desktop clarity, tabs best cost/mobile.
+- Store: read-side split - one ResultsView class per column over stable
+  app.results; per-view sort/filter/selection; shared filter object deleted.
+- Naming: Tunnel test (mechanism nouns over outcome adjectives); keys move
+  to table.tunnel.* plus a persistent {passed} of {total} summary line.
+- Workflow: verify banked while idle - has_candidates on /api/status; idle
+  Verify-banked button reuses phase2_only; preserveResults freezes the
+  phase-1 list during that run instead of wiping it.
+- Config: separate card - configs textarea stays visible; fragment/SNI/
+  probe URLs collapse into a details card with a non-default summary;
+  routed field errors force it open.
+- Simple mode unchanged (user likes it); optional ResultsView adoption only.
 
-## Tickets (scored 10 = must-ship now, 1 = cosmetic) — all shipped
+## Tickets (frontier order; blocked-by in parentheses)
 
-### Stream A — Rust core (owner: main session) ✓
-
-| # | Ticket | Score | Files |
-|---|--------|-------|-------|
-| A1 | Cap wgconf file read at MAX_WGCONF_BYTES before parse | 9 | main.rs |
-| A2 | Zip-bomb guard: cap xray zip entry size (64 MiB) pre-extract | 9 | xray.rs |
-| A3 | merge_sorted O(found²) → dirty-flag sort-on-read | 8 | engine/mod.rs |
-| A4 | Cache WARP server_public_key per scan + warn on corrupt identity fallback | 9 | warp.rs, engine/warp.rs |
-| A5 | Kill await-under-Mutex socket cache: inject SocketCache, lock never across .await | 8 | warp.rs, engine/warp.rs |
-| A6 | Per-worker task queues (drop Arc<Mutex<Receiver>>), producer send().await, hoist RNG | 7 | engine/cdn.rs, engine/warp.rs |
-| A7 | Unify cancel signal (warp reuses controller channel); select! cancel over in-flight probes | 7 | engine/* |
-| A8 | SSE resilience: broadcast 1024→4096, replay missed results on Lagged instead of closing | 7 | engine/mod.rs, server.rs |
-| A9 | Origin "null" denied; JsonBody rejection sanitized+truncated | 8 | server.rs |
-| A10 | Validation tightening: custom_endpoints cap, fragment Custom requires params, raw-array precheck, profile-name traversal, sip002 uid cap, wgconf endpoint host grammar | 7 | api/types.rs, server.rs, configs.rs, wgconf.rs |
-| A11 | Panic-safety: ctrl_c Err logged, inline_verify expects→Err, bundled-parse try_fallback, GetTokenInformation buffer check | 6 | main.rs, cli_wizard.rs, inline_verify.rs, ranges.rs, warp.rs, paths.rs |
-| A12 | Error mapping: WarpRegisterError typed (502/429/504), sanitize reg body, phase2 empty-reason fix, port-kind context, errno debug log | 6 | warpgen.rs, server.rs, engine/phase2.rs, verify.rs, probe.rs |
-| A13 | Boundary validation unify: delete dup checks in main/server, keep cfg.validate() single source | 5 | main.rs, server.rs |
-| A14 | HTTP stack: LazyLock reqwest Client shared, ranges fetch via reqwest w/ validating redirect policy, drop hand-rolled TLS fetch, drop blocking feature (tray test-only → gate) | 6 | ranges.rs, xray.rs, tray.rs, Cargo.toml |
-| A15 | Blocking-IO hygiene: effective_pool cached/spawn_blocking, tokio fs feature, trial-dir sweep once per phase, TrialDirGuard drop off-thread, wait_for_socks backoff, TCP_NODELAY | 6 | ranges.rs, verify.rs, xray.rs, Cargo.toml, Cargo.lock |
-| A16 | Micro-perf: BATCH_FLUSH 256, channel ×4, verdict clone reduction, xray memo invalidation on spawn failure | 5 | engine/mod.rs, cdn.rs, xray.rs |
-| A17 | API polish: ErrorResponse.code field, xray/download envelope, SSE phase2-progress rename, retry field | 6 | server.rs, api/types.rs |
-| A18 | deny_unknown_fields on ScanConfig/Phase2/Warp payloads | 6 | api/types.rs |
-| A19 | CLI UX: help_heading groups, --cap/--target aliases, serve --open, wizard summary+spawn_blocking, TTY progress ticker, after_help examples, --warp-wgconf alias, --json-errors | 6 | main.rs, cli_wizard.rs, tray.rs |
-| A20 | dgst strict line parse + edge tests | 4 | dgst.rs |
-
-### Stream B — Frontend (owner: subagent B) ✓
-
-| # | Ticket | Score |
-|---|--------|-------|
-| B1 | EventSource lifecycle: store/close handle, onDestroy, re-hydrate status/results on reconnect + offline banner | 8 |
-| B2 | Font subsets: import latin-only variable subsets | 4 |
-| B3 | A11y: aria-describedby field errors + focus-first-invalid, aria-sort on buttons, checkbox focus ring, copy role=status, sticky-bar safe-area | 6 |
-| B4 | UX: pace wall-clock tick, Copy-all respects filters | 4 |
-| B5 | tsconfig strict:true — attempt, timeboxed; revert if error count > 25 | 4 |
-
-### Stream C — Build/CI/npm/docs (owner: subagent C) ✓
-
-| # | Ticket | Score |
-|---|--------|-------|
-| C1 | npm install.js: sha256 verification, spawnSync argv (no shell strings), engines >=14.14, download retry ×2, repo casing | 9 |
-| C2 | build.rs: curl --retry + tls1.2 proto parity, unknown-xray-target warn→exit(1) | 7 |
-| C3 | rust-toolchain.toml pin 1.88 (=CI); Cargo.toml rust-version stays 1.85 floor | 5 |
-| C4 | CI: DRY toolchain env, cargo-audit cached install, curl retry on xray-parity, version-parity job (Cargo.toml == package.json == RELEASE_TAG) | 6 |
-| C5 | Docs: CHANGELOG newest-top + dedupe Fixed headings; spec/intent frontend+language drift notes; stale comments (server.rs profiles, api/mod.rs, warp.rs pool comment) | 6 |
-
-### Verification & Release (main session) ✓
-
-| # | Ticket | Score |
-|---|--------|-------|
-| V1 | Full gates: cargo test + clippy -D warnings + fmt --check + ui build | 10 |
-| V2 | New tests for every tightened validation + perf invariants (sorted store, queue equivalence, cancel latency, register mapping, dgst edges, SocketCache eviction) | 7 |
-| V3 | Visual QA: serve + Playwright self-check + visual-qa subagent pass | 8 |
-| V4 | Release: bump 0.7.0→0.8.0 (Cargo.toml, npm package.json, RELEASE_TAG), CHANGELOG section, commit, tag v0.8.0, push, watch CI → GitHub Release → npm publish | 10 |
-
-### Follow-through after v0.8.0 (2026-08-25, unreleased on main) ✓
-
-| # | Ticket | Files |
-|---|--------|-------|
-| F1 | Data-write gate + library facade | `src/paths.rs`, `src/lib.rs`, `src/server/state.rs`, `src/ranges.rs`, `src/warpgen.rs`, `src/xray.rs` |
-| F2 | Server god-file split | `src/server/{mod,state,error,guard,sse}.rs` |
-| F3 | Windows xray lifecycle (`rustc`-compiled fake) | `tests/xray_lifecycle_windows.rs` |
-| F4 | ADR-012 + SBOM in release | `docs/decisions/ADR-012-*`, `.github/workflows/release.yml` |
-| F5 | CI toolchain ref fix (env→@1.88, components via rustup) | `.github/workflows/{checks,release}.yml` |
+1. T1 Store + status seam [task, AFK] - blocked by nothing.
+   resultsView.svelte.ts (ResultsView class: sort/filter/selection/copy
+   pipeline per column, predicate "candidates" | "verified"); delete shared
+   filter + resultFilter; /api/status gains has_candidates:boolean;
+   startScan(cfg,{preserveResults}) freezes prior rows on phase2_only.
+   Files: ui/src/lib/store.svelte.ts, ui/src/lib/resultsView.svelte.ts (new),
+   src/server/mod.rs (status payload ~line 97).
+2. T3 i18n tunnel rename [task, AFK] - blocked by nothing.
+   Rename table.col.phase2->table.tunnel.col ("Tunnel test"/"آزمون تونل"),
+   table.phase2.pass->table.tunnel.pass, .fail->table.tunnel.fail,
+   pro.phase2.verifyLabel->pro.tunnel.toggle, pro.status.phase2Progress->
+   pro.tunnel.progress; add table.tunnel.summary, table.filter.passingOnly,
+   table.copyAll.passingTitle, pro.section.tunnelAdvanced. Both locales.
+   Keep old keys as aliases during transition so check stays green before
+   T4 lands.
+3. T4 ProPanel hybrid layout + components [task, AFK] - blocked by T1+T3.
+   ResultsTable becomes view-prop renderer (heading prop, filter chips
+   All/Verified/Candidates scoped to view, Copy verified button, fail-pill
+   title=phase2.error, tunnel summary line under heading). ProPanel:
+   two-card bento at lg+ / tab bar below; Verify banked (N) idle button
+   gated on has_candidates && configs>=1; phase-2 card split with details
+   collapse for expert knobs (force-open on routed errors); preserveResults
+   wiring for phase2_only runs. Files: ProPanel.svelte, ResultsTable.svelte,
+   SimpleStart.svelte (adopt ResultsView for its best-list), App.svelte if
+   props change. Rebuild ui/dist.
+4. V1 Gates + visual QA [task, main session] - blocked by T4.
+   cargo fmt/clippy/test; npm run check && build; Playwright pass at
+   1440/768/375 in EN+FA covering: two cards side-by-side desktop, tabs
+   mobile, independent copies, tunnel summary line, Verify banked idle flow.
 
 ## Not yet specified (fog)
 
-None — every ticket from this map has been specified, implemented, and
-verified. New work starts a fresh map.
+- Whether profiles should persist the phase-2 card separately from the
+  phase-1 form (credential-bearing configsText client-side) - decide during
+  T4; default = reuse existing server-side profile persistence only.
+- Numeric IP comparator + p2-latency-primary display (nice tier from QA
+  critic) - fold into V1 polish only if trivial.
 
 ## Out of scope
 
-- Domain/engine type split (ADR-011 intentional, re-locked by ADR-012).
-- serde(other) enum fallbacks (ADR-012).
-- Cosign verification of XTLS `.dgst` (no signatures to verify).
+- Backend ScanConfig shape changes (ADR-011); new dependencies; Simple-mode
+  visual redesign; ports-validation relaxation for phase2_only (ask-first,
+  not needed for this slice).

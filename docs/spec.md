@@ -105,7 +105,7 @@ build.rs             xray download + .dgst verify for release bundles; geoip
                      OUT_DIR embed
 tests/               integration tests (engine + API)
 docs/                intent, spec, ADRs, review, README
-tasks/               plan.md, todo.md
+tasks/               wayfinder-map.md (effort tracker)
 Cargo.toml           app manifest
 dist-workspace.toml  dist (cargo-dist) workspace config
 wix/                 MSI installer source

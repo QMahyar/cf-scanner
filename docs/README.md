@@ -42,9 +42,7 @@ Titles below match the files exactly.
 - [tasks/wayfinder-map.md](../tasks/wayfinder-map.md): the v0.8.0 ten-agent
   review remediation ledger with consolidated findings, scores, and
   decisions, including what was deliberately not done and why
-- [tasks/plan.md](../tasks/plan.md): the historical implementation plan,
-  superseded by todo.md and the review report
-- [tasks/todo.md](../tasks/todo.md): the shipped task list
+- [tasks/wayfinder-map.md](../tasks/wayfinder-map.md): the active effort map
 - [CHANGELOG.md](../CHANGELOG.md): the change log, newest on top
 
 ## Quality
