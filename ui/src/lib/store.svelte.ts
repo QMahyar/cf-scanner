@@ -1,4 +1,5 @@
 import { ApiError, api } from "./api";
+import { phase2Only } from "./resultsView.svelte";
 import type { Mode, ScanConfig, ScanSummary, Verdict } from "./types";
 
 export interface UiState {
@@ -16,6 +17,14 @@ export interface UiState {
   /** True when the last WARP scan probed under the user's real keypair
    * (verify_with_wgconf) — results are then labeled as verified. */
   lastScanVerified: boolean;
+  /** Phase-1 rows snapshotted when a banked-candidates verify
+   * (phase2_only + preserveResults) started, so a frozen candidates list can
+   * keep showing what was banked while applyResult upserts tunnel-test
+   * verdicts over the live rows. Null on every other scan. */
+  frozenPhase1: Verdict[] | null;
+  /** Hydrated by App from /api/status has_candidates (banked candidates
+   * survive a page reload server-side); false until that hydration runs. */
+  statusHasCandidates: boolean;
 }
 
 const app = $state<UiState>({
@@ -29,6 +38,8 @@ const app = $state<UiState>({
   proMode: localStorage.getItem("cf-pro-mode") === "1",
   lastScanConfigs: [],
   lastScanVerified: false,
+  frozenPhase1: null,
+  statusHasCandidates: false,
 });
 
 export function ui(): UiState {
@@ -56,6 +67,7 @@ export function resetResults() {
   app.startedAt = null;
   app.lastScanConfigs = [];
   app.lastScanVerified = false;
+  app.frozenPhase1 = null;
   resetTicks();
 }
 
@@ -63,7 +75,8 @@ export function errorText(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
 }
 
-/** The one place a scan starts: resets last-scan results, POSTs the config,
+/** The one place a scan starts: resets last-scan results (unless the caller
+ * asks to preserve them for a banked-candidates verify), POSTs the config,
  * flips the running flag, and surfaces failures — callers never duplicate
  * that sequence. Never throws; check ui().error, and use the returned
  * rejection to route 400/422 messages into per-field errors. */
@@ -73,8 +86,19 @@ export interface StartOutcome {
   rejected: { status: number; detail: string } | null;
 }
 
-export async function startScan(cfg: ScanConfig): Promise<StartOutcome> {
-  resetResults();
+export async function startScan(
+  cfg: ScanConfig,
+  opts?: { preserveResults?: boolean },
+): Promise<StartOutcome> {
+  // A banked-candidates verify keeps the phase-1 list alive instead of
+  // wiping it: snapshot the rows into frozenPhase1 and let applyResult's
+  // upsert-by-ip:port refill the live list with tunnel-test verdicts.
+  // Any other scan behaves exactly as before (full reset).
+  if (opts?.preserveResults === true && cfg.phase2_only === true) {
+    app.frozenPhase1 = app.results.slice();
+  } else {
+    resetResults();
+  }
   app.lastScanConfigs = cfg.phase2?.configs ?? [];
   app.lastScanVerified = cfg.mode === "Warp" && cfg.warp?.verify_with_wgconf === true;
   try {
@@ -177,17 +201,20 @@ export function simpleConfig(
   };
 }
 
-/** Export chain from research §7: clipboard first (localhost is a secure
- * context), then the mobile share sheet when present, then an unconditional
- * Blob .txt download as the final fallback. Returns how it resolved so the
- * caller can show honest feedback. */
+/** Read-side phase splits over the one results store (never duplicate rows):
+ * candidates = everything banked, verified = rows the tunnel test touched.
+ * hasCandidates also trusts the server's /api/status flag so an F5 mid-run
+ * still knows banked candidates exist before hydration finishes. */
+export function allCandidates(): readonly Verdict[] {
+  return app.results;
+}
 
-/** Shared result filter used by ResultsTable and SimpleStart so Copy-all
- * respects the same active latency filter. Filter lives here, not inside a
- * single view, so both UIs stay in sync without prop drilling. */
-const sharedFilter = $state<{ maxLatency: number | null }>({ maxLatency: null });
-export function resultFilter(): { maxLatency: number | null } {
-  return sharedFilter;
+export function verifiedOnly(): Verdict[] {
+  return app.results.filter(phase2Only);
+}
+
+export function hasCandidates(): boolean {
+  return app.results.length > 0 || app.statusHasCandidates;
 }
 
 export function filteredEndpoints(results: Verdict[], maxLatency: number | null): string {
@@ -198,6 +225,10 @@ export function filteredEndpoints(results: Verdict[], maxLatency: number | null)
 }
 export type ExportHow = "clipboard" | "share" | "download";
 
+/** Export chain from research §7: clipboard first (localhost is a secure
+ * context), then the mobile share sheet when present, then an unconditional
+ * Blob .txt download as the final fallback. Returns how it resolved so the
+ * caller can show honest feedback. */
 export async function exportText(text: string, filename: string): Promise<ExportHow> {
   try {
     await navigator.clipboard.writeText(text);

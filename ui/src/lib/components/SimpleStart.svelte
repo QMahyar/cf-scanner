@@ -3,16 +3,16 @@
   import {
     exportText,
     filteredEndpoints,
-    resultFilter,
     simpleConfig,
     startScan,
     stopScan,
     ui,
     type ExportHow,
   } from "../store.svelte";
+  import { ResultsView } from "../resultsView.svelte";
   import { t } from "../i18n.svelte";
   import { humanizeSeconds } from "../validators";
-  import type { Mode } from "../types";
+  import type { Mode, Verdict } from "../types";
 
   const app = ui();
   let scanMode = $state<Mode>("Cdn");
@@ -22,6 +22,25 @@
   let copiedAll = $state<ExportHow | null>(null);
   let tick = $state(0);
 
+  // Preset sample sizes; CDN samples candidates on 443, WARP sweeps
+  // endpoints across the official port set. Custom reveals one field.
+  type SizeKey = "quick" | "normal" | "big" | "custom";
+  const SIZES: Record<SizeKey, { cdn: number; warp: number }> = {
+    quick: { cdn: 4_000, warp: 2_000 },
+    normal: { cdn: 12_000, warp: 3_500 },
+    big: { cdn: 50_000, warp: 5_000 },
+    custom: { cdn: 0, warp: 0 },
+  };
+  let sizeChoice = $state<SizeKey>("normal");
+  const kFmt = (n: number) => (n >= 1000 ? `${Math.round(n / 1000)}K` : `${n}`);
+  const effectiveTest = $derived(
+    sizeChoice === "custom"
+      ? testUpTo
+      : scanMode === "Warp"
+        ? SIZES[sizeChoice].warp
+        : SIZES[sizeChoice].cdn,
+  );
+
   $effect(() => {
     if (!app.running) return;
     const id = setInterval(() => tick++, 1000);
@@ -30,17 +49,19 @@
 
   async function start() {
     starting = true;
-    await startScan(simpleConfig(findUpTo, scanMode, testUpTo));
+    await startScan(simpleConfig(findUpTo, scanMode, effectiveTest));
     starting = false;
   }
 
-  const filter = resultFilter();
+  /** Simple mode's "best" bar, unchanged: passed the tunnel test or never
+   * had one to run. Lives here (not resultsView.ts) because T4 may not edit
+   * that file; ResultsView still owns sort/latency-filter/cap semantics. */
+  const passOrUntested = (r: Verdict) => (r.phase2 ? r.phase2.passed : true);
 
-  const best = $derived(
-    [...app.results]
-      .filter((r) => (r.phase2 ? r.phase2.passed : true))
-      .sort((a, b) => (a.latency_ms ?? 9e9) - (b.latency_ms ?? 9e9)),
-  );
+  const unfilteredBest = $derived(app.results.filter(passOrUntested));
+  const bestView = new ResultsView(() => unfilteredBest, "candidates");
+
+  const best = $derived(bestView.rows);
 
   const SHOWN = 9;
   const hiddenCount = $derived(Math.max(0, best.length - SHOWN));
@@ -70,8 +91,7 @@
   const finishedIdle = $derived(!app.running && app.summary !== null);
 
   async function copyAll() {
-    const visible = best.filter((r) => filter.maxLatency === null || (r.latency_ms ?? 9e9) <= filter.maxLatency);
-    const lines = filteredEndpoints(visible, null);
+    const lines = filteredEndpoints(unfilteredBest, bestView.maxLatency);
     copiedAll = await exportText(lines, "cf-scanner-endpoints.txt");
     setTimeout(() => (copiedAll = null), 1600);
   }
@@ -116,6 +136,51 @@
         <p class="mt-3 max-w-md text-sm" style="color: var(--ink-muted)">
           {t("simple.intro")}
         </p>
+        <div
+          class="mt-4 inline-flex flex-wrap items-center gap-1 rounded-full p-1"
+          style="background: var(--paper-3)"
+          role="group"
+          aria-label={t("simple.target")}
+        >
+          {#each Object.entries(SIZES) as [key, amounts] (key)}
+            {@const sKey = key as SizeKey}
+            <button
+              type="button"
+              class="btn btn-sm btn-secondary"
+              class:btn-state-on={sizeChoice === sKey}
+              aria-pressed={sizeChoice === sKey}
+              onclick={() => (sizeChoice = sKey)}
+            >
+              {t(`simple.size.${sKey}`)}
+              {#if sKey !== "custom"}
+                <span class="mono text-[10px]" style="color: var(--ink-muted)">
+                  ~{kFmt(scanMode === "Warp" ? amounts.warp : amounts.cdn)}
+                </span>
+              {/if}
+            </button>
+          {/each}
+          {#if sizeChoice === "custom"}
+            <input
+              class="field mono !w-24 text-center"
+              type="number"
+              min={scanMode === "Warp" ? 100 : 100}
+              max={100000}
+              step={scanMode === "Warp" ? 50 : 500}
+              bind:value={testUpTo}
+              onchange={() =>
+                (testUpTo = Math.min(
+                  100_000,
+                  Math.max(100, Math.trunc(Number(testUpTo)) || 800),
+                ))}
+              aria-label={t("simple.testUpTo")}
+            />
+            <span class="mono text-[10px]" style="color: var(--ink-muted)">
+              {scanMode === "Warp"
+                ? t("simple.size.endpointsShort")
+                : t("simple.size.candidatesShort")}
+            </span>
+          {/if}
+        </div>
       </div>
     {#if app.running}
       <button class="btn btn-secondary btn-lg" onclick={stopScan}>
@@ -141,26 +206,6 @@
                 (findUpTo = Math.min(
                   100,
                   Math.max(5, Math.trunc(Number(findUpTo)) || 20),
-                ))}
-            />
-          </label>
-          <label
-            class="flex items-center gap-2 text-xs whitespace-nowrap"
-            style="color: var(--ink-muted)"
-            title={t("simple.testUpTo.hint")}
-          >
-            {t("simple.testUpTo")}
-            <input
-              class="field mono !w-24 text-center"
-              type="number"
-              min="100"
-              max="100000"
-              step="100"
-              bind:value={testUpTo}
-              onchange={() =>
-                (testUpTo = Math.min(
-                  100_000,
-                  Math.max(100, Math.trunc(Number(testUpTo)) || 800),
                 ))}
             />
           </label>

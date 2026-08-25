@@ -21,7 +21,15 @@
     type RangesPayload,
     type XrayStatusPayload,
   } from "../api";
-  import { errorText, lowYieldWindow, startScan, stopScan, ui } from "../store.svelte";
+  import {
+    errorText,
+    hasCandidates,
+    lowYieldWindow,
+    startScan,
+    stopScan,
+    ui,
+  } from "../store.svelte";
+  import { ResultsView } from "../resultsView.svelte";
   import {
     buildConfig,
     defaultFormState,
@@ -41,7 +49,7 @@
     parseEndpoint,
   } from "../validators";
   import { t } from "../i18n.svelte";
-  import type { Mode } from "../types";
+  import type { CdnPreset, Mode } from "../types";
   import type { FieldIssue, FormField, FormState } from "../formState";
   import { EXCLUDE_WARP_INGRESS } from "../cidrPresets";
   import ResultsTable from "./ResultsTable.svelte";
@@ -179,9 +187,10 @@
   }
 
   /** Skip-to-Phase-2 (plan T6): cancel the running phase-1 scan, then verify
-   * its banked candidates immediately via phase2_only. The engine keeps a
-   * cancelled run's candidates in the store and clears only at the start of
-   * the next full scan, so no API change is involved. */
+   * its banked candidates immediately via phase2_only. preserveResults
+   * freezes the current rows into frozenPhase1 instead of wiping them, so
+   * the candidates list keeps its content while tunnel verdicts upsert over
+   * the live rows. */
   let skipping = $state(false);
 
   const configsListed = $derived(
@@ -229,7 +238,7 @@
       const cfg = buildConfig(form); // may throw FormValidationError
       cfg.phase2_only = true;
       validationErrors = [];
-      await startScan(cfg);
+      await startScan(cfg, { preserveResults: true });
     } catch (e) {
       if (e instanceof FormValidationError) {
         validationErrors = e.errors;
@@ -242,6 +251,106 @@
       skipping = false;
     }
   }
+
+  /** Verify banked while idle (wayfinder T4): same phase2_only path as
+   * skip-to-phase-2 but with no cancel step — nothing is running. The form
+   * is the config source so profile/persisted values apply unchanged. */
+  let verifyingBanked = $state(false);
+  const canVerifyBanked = $derived(
+    !app.running &&
+      !verifyingBanked &&
+      form.mode === "Cdn" &&
+      form.phase2On &&
+      configsListed.length > 0 &&
+      hasCandidates(),
+  );
+
+  async function verifyBanked() {
+    verifyingBanked = true;
+    try {
+      const cfg = buildConfig(form); // may throw FormValidationError
+      // phase2_only never dials phase-1 targets, but the wire contract still
+      // demands at least one port — pin the CDN default rather than shipping
+      // the scan form's whole port list.
+      cfg.ports = [443];
+      cfg.phase2_only = true;
+      validationErrors = [];
+      app.error = null;
+      const outcome = await startScan(cfg, { preserveResults: true });
+      if (!outcome.ok && outcome.rejected) {
+        const routed = routeServerDetail(outcome.rejected.detail);
+        if (Object.keys(routed).length > 0) {
+          app.error = null; // routed to the fields; keep the banner quiet
+          serverFieldErrors = { ...serverFieldErrors, ...routed };
+        }
+      }
+    } catch (e) {
+      if (e instanceof FormValidationError) {
+        validationErrors = e.errors;
+        queueMicrotask(() => {
+          const el = document.querySelector('[aria-invalid="true"]') as HTMLElement | null;
+          el?.focus();
+        });
+      } else app.error = errorText(e);
+    }
+    verifyingBanked = false;
+  }
+
+  // --- Two-list phase separation (wayfinder T4) ---
+  // Read-side split over ONE store array, never duplicated: candidates shows
+  // the frozen pre-verify snapshot when one exists (frozen rows all lack
+  // phase2 — freeze only happens on phase2_only+preserveResults starts), so
+  // it can never double-count rows that also appear as verified.
+  const candidatesView = new ResultsView(
+    () => app.frozenPhase1 ?? app.results,
+    "candidates",
+  );
+  const verifiedView = new ResultsView(() => app.results, "verified");
+
+  /** lg breakpoint mirror for JS-side card switching; CSS still owns layout
+   * via grid-cols-2 so a missed event can only affect which cards render. */
+  let wide = $state(false);
+  $effect(() => {
+    const mq = window.matchMedia("(min-width: 1024px)");
+    wide = mq.matches;
+    const onChange = (e: MediaQueryListEvent) => (wide = e.matches);
+    mq.addEventListener("change", onChange);
+    return () => mq.removeEventListener("change", onChange);
+  });
+
+  /** Which list renders below lg; ignored at lg+ where both cards show. */
+  let activeList = $state<"all" | "verified">("all");
+
+  const showCandidatesCard = $derived(app.results.length > 0 || app.running);
+  const showVerifiedCard = $derived(
+    app.frozenPhase1 !== null || (form.mode === "Cdn" && form.phase2On),
+  );
+
+  let tunnelAdvancedOpen = $state(false);
+
+  const DEFAULT_PROBE_URL = defaultFormState().probeUrl;
+
+  /** Digest for the collapsed expert-knob summary: only deviations from
+     defaults appear, as raw technical tokens (preset ids / hosts) that need
+     no translation. */
+  const tunnelAdvancedSummary = $derived.by(() => {
+    const bits: string[] = [];
+    if (form.fragment !== "off") bits.push(form.fragment);
+    const sniList = form.snis.split(",").map((s) => s.trim()).filter(Boolean);
+    if (sniList.length > 0)
+      bits.push(sniList[0] + (sniList.length > 1 ? ` +${sniList.length - 1}` : ""));
+    const probe = form.probeUrl.trim();
+    if (probe && probe !== DEFAULT_PROBE_URL)
+      bits.push(probe.length > 28 ? `${probe.slice(0, 28)}…` : probe);
+    return bits.join(" · ");
+  });
+
+  // A routed error on any collapsed knob pops the disclosure open so its
+  // inline message is never hidden inside it.
+  $effect(() => {
+    if (fieldErrors.snis || fieldErrors.fragment || fieldErrors.probeUrl)
+      tunnelAdvancedOpen = true;
+  });
 
   const allIssues = $derived.by(() => {
     try {
@@ -737,37 +846,75 @@
         </label>
 
         {#if form.mode === "Cdn"}
-          <div>
-            <label class="block text-xs" style="color: var(--ink-muted)">
-              {t("pro.field.target")}<select class="field mt-1" name="preset" bind:value={form.preset} disabled={form.useCount}>
-                <option>Quick</option><option>Normal</option><option>Full</option>
-              </select>
-            </label>
-            <p class="mt-1 text-[11px]" style="color: var(--ink-muted)">
-              {t("pro.field.target.hint")}
-            </p>
+          <div class="text-xs md:col-span-2 lg:col-span-3">
+            <span class="mb-1 block" style="color: var(--ink-muted)">
+              {t("pro.field.target")}
+            </span>
+            <!-- Amounts live in the labels; no separate hint line, no
+                 custom-count checkbox — Custom reveals the field itself. -->
+            <div
+              class="flex flex-wrap items-center gap-1 rounded-full p-1"
+              style="background: var(--paper-3)"
+              role="group"
+              aria-label={t("pro.field.target")}
+            >
+              {#each [["Quick", "~4K"], ["Normal", "~12K"], ["Full", "1.5M"]] as [preset, amount] (preset)}
+                <button
+                  type="button"
+                  class="btn btn-sm btn-secondary"
+                  class:btn-state-on={form.preset === (preset as CdnPreset) && !form.useCount}
+                  aria-pressed={form.preset === (preset as CdnPreset) && !form.useCount}
+                  onclick={() => {
+                    form.preset = preset as CdnPreset;
+                    form.useCount = false;
+                  }}
+                >
+                  {preset}
+                  <span class="mono text-[10px]" style="color: var(--ink-muted)">{amount}</span>
+                </button>
+              {/each}
+              <button
+                type="button"
+                class="btn btn-sm btn-secondary"
+                class:btn-state-on={form.useCount}
+                aria-pressed={form.useCount}
+                onclick={() => (form.useCount = true)}
+              >
+                {t("simple.size.custom")}
+              </button>
+              {#if form.useCount}
+                <input
+                  class="field mono !w-28 text-center"
+                  type="number"
+                  min="1"
+                  max="100000"
+                  name="count"
+                  aria-invalid={fieldErrors.count ? "true" : undefined}
+                  aria-describedby={fieldErrors.count ? "err-count" : undefined}
+                  bind:value={form.count}
+                />
+                {@render fieldError("count")}
+              {/if}
+            </div>
           </div>
-          <label class="flex items-end gap-2 pb-1 text-xs" style="color: var(--ink-muted)">
-            <input type="checkbox" name="useCount" bind:checked={form.useCount} class="accent-[var(--accent)]" />
-            {t("pro.field.customCount")}
-          </label>
         {/if}
 
-        <label class="text-xs" style="color: var(--ink-muted)">
-          {t("pro.field.candidates")}
-          <input
-            class="field mono mt-1"
-            type="number"
-            min="1"
-            max="100000"
-            name="count"
-            disabled={form.mode === "Cdn" && !form.useCount}
-            aria-invalid={fieldErrors.count ? "true" : undefined}
-            aria-describedby={fieldErrors.count ? "err-count" : undefined}
-            bind:value={form.count}
-          />
-          {@render fieldError("count")}
-        </label>
+        {#if form.mode === "Warp"}
+          <label class="text-xs" style="color: var(--ink-muted)">
+            {t("pro.field.candidates")}
+            <input
+              class="field mono mt-1"
+              type="number"
+              min="1"
+              max="100000"
+              name="count"
+              aria-invalid={fieldErrors.count ? "true" : undefined}
+              aria-describedby={fieldErrors.count ? "err-count" : undefined}
+              bind:value={form.count}
+            />
+            {@render fieldError("count")}
+          </label>
+        {/if}
 
         <div class="text-xs sm:col-span-2 lg:col-span-3">
           <div class="flex flex-wrap items-center justify-between gap-x-2 gap-y-1">
@@ -1169,7 +1316,7 @@
         <label class="mt-4 flex items-center gap-2 text-xs" style="color: var(--ink-muted)">
           <input type="checkbox" name="phase2On" bind:checked={form.phase2On} class="accent-[var(--accent)]" />
           <ShieldCheck class="size-3.5" style="color: var(--accent)" />
-          {t("pro.phase2.verifyLabel")}
+          {t("pro.tunnel.toggle")}
         </label>
         {#if xray && !xray.found}
           <p class="mt-1 ps-6 text-[11px]" style="color: var(--ink-muted)">
@@ -1178,50 +1325,67 @@
         {/if}
 
         {#if form.phase2On}
-          <div class="fade-in mt-4 grid gap-4">
-              <label class="text-xs" style="color: var(--ink-muted)">
-                {t("pro.phase2.configsLabel")}
-                <textarea
-                  class="field mono mt-1"
-                  rows="3"
-                  name="configsText"
-                  aria-invalid={fieldErrors.configsText ? "true" : undefined}
-                  aria-describedby={fieldErrors.configsText ? "err-configsText" : undefined}
-                  bind:value={form.configsText}
-                  onchange={() => normalizeField("configsText")}></textarea>
-                {@render fieldError("configsText")}
-              </label>
-            <div class="grid gap-4 sm:grid-cols-3">
-              <label class="text-xs" style="color: var(--ink-muted)">
-                {t("pro.phase2.fragment")}
-                <select class="field mt-1" name="fragment" bind:value={form.fragment}>
-                  <option>off</option><option>light</option><option>medium</option><option>heavy</option>
-                </select>
-              </label>
-              <label class="text-xs sm:col-span-2" style="color: var(--ink-muted)">
-                {t("pro.phase2.sniLabel")}
-                <input
-                  class="field mono mt-1"
-                  name="snis"
-                  placeholder={t("pro.phase2.sniPlaceholder")}
-                  aria-invalid={fieldErrors.snis ? "true" : undefined}
-                  aria-describedby={fieldErrors.snis ? "err-snis" : undefined}
-                  bind:value={form.snis}
-                />
-                {@render fieldError("snis")}
-              </label>
-            </div>
+          <!-- Tunnel-test card: configs stay visible; expert knobs collapse
+               into a details whose summary lists non-default choices. -->
+          <div
+            class="fade-in mt-4 rounded-md border px-4 py-4"
+            style="border-color: oklch(100% 0 0 / 8%)"
+          >
+            <span class="eyebrow mb-3">{t("table.tunnel.col")}</span>
             <label class="text-xs" style="color: var(--ink-muted)">
-              {t("pro.phase2.probeLabel")}
-              <input
+              {t("pro.phase2.configsLabel")}
+              <textarea
                 class="field mono mt-1"
-                name="probeUrl"
-                aria-invalid={fieldErrors.probeUrl ? "true" : undefined}
-                aria-describedby={fieldErrors.probeUrl ? "err-probeUrl" : undefined}
-                bind:value={form.probeUrl}
-              />
-              {@render fieldError("probeUrl")}
+                rows="3"
+                name="configsText"
+                aria-invalid={fieldErrors.configsText ? "true" : undefined}
+                aria-describedby={fieldErrors.configsText ? "err-configsText" : undefined}
+                bind:value={form.configsText}
+                onchange={() => normalizeField("configsText")}></textarea>
+              {@render fieldError("configsText")}
             </label>
+            <details class="mt-3" bind:open={tunnelAdvancedOpen}>
+              <summary class="cursor-pointer text-xs font-semibold" style="color: var(--ink-muted)">
+                {t("pro.section.tunnelAdvanced")}
+                {#if tunnelAdvancedSummary}
+                  <span class="mono font-normal" style="color: var(--accent)">
+                    · {tunnelAdvancedSummary}
+                  </span>
+                {/if}
+              </summary>
+              <div class="mt-3 grid gap-4 sm:grid-cols-3">
+                <label class="text-xs" style="color: var(--ink-muted)">
+                  {t("pro.phase2.fragment")}
+                  <select class="field mt-1" name="fragment" bind:value={form.fragment}>
+                    <option>off</option><option>light</option><option>medium</option><option>heavy</option>
+                  </select>
+                  {@render fieldError("fragment")}
+                </label>
+                <label class="text-xs sm:col-span-2" style="color: var(--ink-muted)">
+                  {t("pro.phase2.sniLabel")}
+                  <input
+                    class="field mono mt-1"
+                    name="snis"
+                    placeholder={t("pro.phase2.sniPlaceholder")}
+                    aria-invalid={fieldErrors.snis ? "true" : undefined}
+                    aria-describedby={fieldErrors.snis ? "err-snis" : undefined}
+                    bind:value={form.snis}
+                  />
+                  {@render fieldError("snis")}
+                </label>
+                <label class="text-xs sm:col-span-2 lg:col-span-3" style="color: var(--ink-muted)">
+                  {t("pro.phase2.probeLabel")}
+                  <input
+                    class="field mono mt-1"
+                    name="probeUrl"
+                    aria-invalid={fieldErrors.probeUrl ? "true" : undefined}
+                    aria-describedby={fieldErrors.probeUrl ? "err-probeUrl" : undefined}
+                    bind:value={form.probeUrl}
+                  />
+                  {@render fieldError("probeUrl")}
+                </label>
+              </div>
+            </details>
           </div>
         {/if}
       {/if}
@@ -1252,6 +1416,21 @@
               <Square class="size-3.5" /> {t("pro.action.stop")}
             </button>
           {:else}
+            {#if form.mode === "Cdn" && hasCandidates()}
+              <button
+                type="button"
+                class="btn btn-secondary btn-sm"
+                disabled={!canVerifyBanked}
+                data-state={verifyingBanked ? "loading" : undefined}
+                title={form.phase2On && configsListed.length > 0
+                  ? t("pro.action.skipTitle")
+                  : t("pro.phase2.configsLabel")}
+                onclick={verifyBanked}
+              >
+                <ShieldCheck class="size-3.5" />
+                {t("pro.action.verifyBanked", { n: app.results.length })}
+              </button>
+            {/if}
             <button
               type="submit"
               class="btn btn-primary group"
@@ -1277,7 +1456,7 @@
 
   {#if app.phase2}
     <p class="mono fade-in px-1 text-xs" style="color: var(--accent)" role="status">
-      {t("pro.status.phase2Progress", { done: app.phase2.done, total: app.phase2.total })}
+      {t("pro.tunnel.progress", { done: app.phase2.done, total: app.phase2.total })}
     </p>
   {:else if app.running && suggestSkip}
     <p class="fade-in px-1 text-xs" role="status" style="color: var(--ink-muted)">
@@ -1285,7 +1464,70 @@
     </p>
   {/if}
 
-  {#if app.results.length > 0}
-    <ResultsTable results={app.results} />
+  {#if showCandidatesCard || showVerifiedCard}
+    {#if wide}
+      <!-- lg+: bento — both lists side by side, each independently
+           sortable/copyable via its own ResultsView. -->
+      <div class="grid items-start gap-4 lg:grid-cols-2">
+        {#if showCandidatesCard}
+          <ResultsTable
+            view={candidatesView}
+            headingKey="results.candidatesHeading"
+            emptyKind="candidates"
+          />
+        {/if}
+        {#if showVerifiedCard}
+          <ResultsTable
+            view={verifiedView}
+            headingKey="results.verifiedHeading"
+            emptyKind="verified"
+          />
+        {/if}
+      </div>
+    {:else}
+      {#if showCandidatesCard && showVerifiedCard}
+        <div class="flex justify-center">
+          <!-- Same segmented pattern as the simple-mode CDN/WARP switch. -->
+          <div
+            class="inline-flex items-center rounded-full p-1"
+            style="background: var(--paper-3)"
+            role="group"
+            aria-label={t("results.heading")}
+          >
+            <button
+              type="button"
+              class="btn btn-sm btn-secondary"
+              class:btn-state-on={activeList === "all"}
+              aria-pressed={activeList === "all"}
+              onclick={() => (activeList = "all")}
+            >
+              {t("results.candidatesHeading")}
+            </button>
+            <button
+              type="button"
+              class="btn btn-sm btn-secondary"
+              class:btn-state-on={activeList === "verified"}
+              aria-pressed={activeList === "verified"}
+              onclick={() => (activeList = "verified")}
+            >
+              {t("results.verifiedHeading")}
+            </button>
+          </div>
+        </div>
+      {/if}
+      {#if showCandidatesCard && (activeList === "all" || !showVerifiedCard)}
+        <ResultsTable
+          view={candidatesView}
+          headingKey="results.candidatesHeading"
+          emptyKind="candidates"
+        />
+      {:else if showVerifiedCard && (activeList === "verified" || !showCandidatesCard)}
+        <ResultsTable
+          view={verifiedView}
+          headingKey="results.verifiedHeading"
+          emptyKind="verified"
+        />
+      {/if}
+    {/if}
   {/if}
 </div>

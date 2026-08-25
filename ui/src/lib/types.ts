@@ -83,4 +83,7 @@ export interface ResultsPayload {
 export interface StatusPayload {
   version: string;
   is_running: boolean;
+  /** Banked phase-1 candidates survive server-side between runs; lets the
+   * idle Verify-banked button appear after an F5 before results hydrate. */
+  has_candidates?: boolean;
 }

@@ -27,6 +27,13 @@ const EN = {
   "simple.starting": "Starting…",
   "simple.stop": "Stop",
   "simple.finishHint": "usually finishes in under a minute",
+  "simple.size.quick": "Quick",
+  "simple.size.normal": "Normal",
+  "simple.size.big": "Large",
+  "simple.size.custom": "Custom",
+  "simple.size.candidatesShort": "cands",
+  "simple.size.endpointsShort": "eps",
+  "table.filter.untested": "untested",
   "simple.overshootHint":
     "stopping is not instant — a few extra working IPs may land after the target",
   "simple.reassure":
@@ -175,6 +182,28 @@ const EN = {
   "pro.confirm.skipLow": "Only {found} working endpoint{s} so far — verifying now may find nothing. Skip to Phase 2 anyway?",
   "pro.error.stopTimeout": "Couldn't stop phase 1 in time — press Stop and start Phase 2 from the form.",
   "pro.error.downloadFailed": "download failed",
+  // --- Tunnel-test keys (map ticket T3, phase separation): the CDN tier is
+  // renamed "Phase 2" → "Tunnel test" (mechanism nouns over outcome
+  // adjectives) and renders as its own independently copyable list. These
+  // sit alongside the old table.phase2.* / pro.phase2.* /
+  // pro.status.phase2Progress keys, which stay as aliases until T4
+  // migrates call sites. UI decision recorded in tasks/wayfinder-map.md,
+  // intentionally without an ADR.
+  "results.candidatesHeading": "Candidates",
+  "results.verifiedHeading": "Tunnel test",
+  "table.copyAll.passingTitle": "Copy only tunnel-passing endpoints",
+  "table.filter.passingOnly": "passing only",
+  "table.tunnel.col": "Tunnel test",
+  "table.tunnel.fail": "unusable",
+  "table.tunnel.pass": "pass {ms}ms",
+  "table.tunnel.summary":
+    "{passed} of {total} passed the real tunnel — copy the passing list separately",
+  "pro.section.tunnelAdvanced":
+    "Advanced tunnel settings (fragmentation · SNI · probe URL)",
+  "pro.action.verifyBanked": "Verify banked ({n})",
+  "pro.tunnel.toggle":
+    "Verify with a real tunnel: each config is tried through found endpoints",
+  "pro.tunnel.progress": "tunnel tests: {done}/{total}…",
   // ResultsTable extended
   "table.col.endpoint": "Endpoint",
   "table.col.latency": "Latency",
@@ -224,6 +253,13 @@ const FA: Record<keyof typeof EN, string> = {
   "simple.starting": "در حال شروع…",
   "simple.stop": "توقف",
   "simple.finishHint": "معمولاً زیر یک دقیقه تمام می‌شود",
+  "simple.size.quick": "سریع",
+  "simple.size.normal": "معمولی",
+  "simple.size.big": "بزرگ",
+  "simple.size.custom": "سفارشی",
+  "simple.size.candidatesShort": "کاندید",
+  "simple.size.endpointsShort": "اندپوینت",
+  "table.filter.untested": "تست‌نشده",
   "simple.overshootHint":
     "توقف بی‌درنگ نیست — ممکن است چند IP سالم اضافه بعد از رسیدن به هدف پیدا شود",
   "simple.reassure":
@@ -371,6 +407,28 @@ const FA: Record<keyof typeof EN, string> = {
   "pro.confirm.skipLow": "تاکنون فقط {found} اندپوینت سالم — ممکن است تأیید چیزی پیدا نکند. باز هم به مرحله ۲ برویم؟",
   "pro.error.stopTimeout": "توقف مرحله ۱ به‌موقع ممکن نشد — «توقف» را بزنید و مرحله ۲ را از فرم شروع کنید.",
   "pro.error.downloadFailed": "دانلود ناموفق بود",
+  // --- Tunnel-test keys (map ticket T3, phase separation): the CDN tier is
+  // renamed "Phase 2" → "Tunnel test" (mechanism nouns over outcome
+  // adjectives) and renders as its own independently copyable list. These
+  // sit alongside the old table.phase2.* / pro.phase2.* /
+  // pro.status.phase2Progress keys, which stay as aliases until T4
+  // migrates call sites. UI decision recorded in tasks/wayfinder-map.md,
+  // intentionally without an ADR.
+  "results.candidatesHeading": "کاندیدها",
+  "results.verifiedHeading": "آزمون تونل",
+  "table.copyAll.passingTitle": "کپی فقط اندپوینت‌های قبول‌شده از تونل",
+  "table.filter.passingOnly": "فقط قبول‌شده‌ها",
+  "table.tunnel.col": "آزمون تونل",
+  "table.tunnel.fail": "بی‌استفاده",
+  "table.tunnel.pass": "قبول {ms}ms",
+  "table.tunnel.summary":
+    "{passed} از {total} از تونل واقعی عبور کرد — فهرست قبول‌شده‌ها را جداگانه کپی کنید",
+  "pro.section.tunnelAdvanced":
+    "تنظیمات پیشرفته تونل (قطعه‌قطعه‌سازی · SNI · آدرس تست)",
+  "pro.action.verifyBanked": "آزمایش ذخیره‌شده‌ها ({n})",
+  "pro.tunnel.toggle":
+    "تأیید با تونل واقعی: هر کانفیگ از روی اندپوینت‌های یافته‌شده آزمایش می‌شود",
+  "pro.tunnel.progress": "آزمون تونل: {done}/{total}…",
   "table.col.endpoint": "اندپوینت",
   "table.col.latency": "تأخیر",
   "table.col.country": "کشور",

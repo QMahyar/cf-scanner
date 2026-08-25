@@ -25,6 +25,7 @@
     try {
       const [s, r] = await Promise.all([api.status(), api.results()]);
       version = s.version;
+      app.statusHasCandidates = s.has_candidates ?? false;
       for (const v of r.results) applyResult(v);
       if (r.summary) {
         app.summary = r.summary;
