@@ -278,15 +278,30 @@ jobs:
           cp dist-manifest.json "$BUILD_MANIFEST_NAME"
       # ADR-012: attach an SPDX SBOM of the release crate so consumers can
       # audit the dependency tree without building it themselves.
+      # cargo-sbom's prebuilt binary currently needs GLIBC_2.39 (ubuntu-24.04),
+      # but the release matrix runs on 22.04 — keep it best-effort so a runner
+      # lib mismatch never blocks the release.
       - name: Install cargo-sbom
         uses: taiki-e/install-action@v2
         with:
           tool: cargo-sbom
+        continue-on-error: true
       - id: sbom
         name: Emit cf-scanner SPDX JSON
         shell: bash
+        continue-on-error: true
         run: |
-          cargo sbom --cargo-package cf-scanner > cf-scanner.spdx.json
+          if ! command -v cargo-sbom >/dev/null 2>&1; then
+            echo "cargo-sbom not available — skipping SBOM" >&2
+            echo "sbom_path=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if ! cargo sbom --cargo-package cf-scanner > cf-scanner.spdx.json 2>sbom.err; then
+            cat sbom.err >&2
+            echo "cargo sbom failed — skipping SBOM (see ADR-012)" >&2
+            echo "sbom_path=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           echo "sbom_path=cf-scanner.spdx.json" >> "$GITHUB_OUTPUT"
       - name: "Upload artifacts"
         uses: actions/upload-artifact@v7
