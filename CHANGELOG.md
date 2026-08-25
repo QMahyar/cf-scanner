@@ -5,6 +5,31 @@ Added / Changed / Fixed / Deprecated / Removed / Security, newest on top.
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-08-25
+
+### Added
+- **Phase-separated results (Pro).** Candidates and Tunnel-test results
+  render as two independently sortable, filterable, and copyable lists —
+  side-by-side cards at ≥1024px, tabs below. Chip filters
+  (all / passing only / untested) with live counts; a dedicated
+  Copy-passing affordance; fail pills expose the redacted phase-2 error on
+  hover; a persistent "{passed} of {total} passed the real tunnel" summary.
+  Renamed the CDN verification tier to "Tunnel test" (آزمون تونل) so
+  "Verified" unambiguously means WARP keypair verification.
+- **Verify banked while idle.** `/api/status` gains `has_candidates`; Pro
+  shows a "Verify banked (N)" action when candidates exist and tunnel
+  configs are set, running a `phase2_only` pass that PRESERVES the phase-1
+  list instead of wiping it (preserveResults freeze).
+- **Compact targets.** Preset amounts moved into the button labels
+  (Quick ~4K · Normal ~12K · Full 1.5M in Pro; per-mode amounts in Simple);
+  Custom reveals a single inline field replacing always-visible inputs and
+  hint paragraphs on both surfaces.
+
+### Changed
+- Phase-2 expert knobs (fragment / SNI / probe URLs) collapse into an
+  "Advanced tunnel settings" details card that force-opens when the server
+  routes errors to those fields; non-default choices show in the summary.
+
 ## [0.9.0] - 2026-08-25
 
 ### Added
