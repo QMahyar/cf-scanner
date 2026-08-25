@@ -5,6 +5,21 @@ Added / Changed / Fixed / Deprecated / Removed / Security, newest on top.
 
 ## [Unreleased]
 
+### Changed
+- **Frontend redesign ("Ethereal Glass").** OLED near-black paper with
+  violet/emerald mesh orbs; display font Space Grotesk Variable, body Plus
+  Jakarta Sans Variable (Inter removed); ultra-light 1.5px icon strokes;
+  double-bezel cards (outer shell + inset core) across Simple, Pro, results
+  tiles, and the results table; floating sticky glass header; button-in-
+  button CTAs with spring hover physics; scroll-entry reveals via
+  IntersectionObserver; progress bar animates `scaleX` (RTL-aware) instead
+  of width. Latin-only font subsets keep dist lean.
+
+### Fixed
+- CI: `dtolnay/rust-toolchain@master` drift broke the windows leg and then
+  ignored component inputs — toolchain is now selected by action ref
+  (`@1.88`) with explicit `rustup component add` steps.
+
 ## [0.8.0] - 2026-08-24
 
 Ten-agent full-product review remediation: security hardening, engine
