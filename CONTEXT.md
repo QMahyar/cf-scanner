@@ -29,7 +29,7 @@ Read next (pick by task, not wholesale):
 |---|---|---|---|
 | API contract | `src/api/types.rs` | ScanConfig/Verdict/StopCondition/events, validation caps (`MAX_*`), `deny_unknown_fields` payloads | ADR-005, ADR-011 |
 | Engine | `src/engine/{mod,cdn,warp,phase2,plan}.rs` | Orchestration, stop conditions, per-worker queues, cancellation (`select!` over probes), verdict store (push + lazy `sort_if_dirty`), SSE event broadcast (4096) | spec §6 tests |
-| HTTP server | `src/server.rs` | Routes, localhost-only middleware (Host/Origin/Sec-Fetch-Site), error envelopes with machine `code`, SSE `TerminalBounded` (survives Lagged), profiles/ranges persistence | ADR-010 |
+| HTTP server | `src/server/{mod,state,error,guard,sse}.rs` | Routes, localhost-only middleware (Host/Origin/Sec-Fetch-Site), error envelopes with machine `code`, SSE `TerminalBounded` (survives Lagged), profiles/ranges persistence | ADR-010 |
 | Probe (phase 1) | `src/probe.rs` | TLS handshake probe + latency; injectable `Transport`; `no_verify_client_config` (probe/tunnel use ONLY) | intent correction #3 |
 | Phase-2 verify | `src/verify.rs`, `src/inline_verify.rs`, `src/xray.rs`, `src/socks.rs` | Inline VLESS/Trojan wire protocol vs xray subprocess paths; trial-dir hygiene; xray binary lifecycle (`.dgst` verify, zip caps, memo re-stat); fragment/SNI config builder | ADR-001, ADR-004 |
 | WARP probe | `src/warp.rs` | Pools, boringtun Init probe, shape-only open classification, full-session wgconf verification, per-controller `SocketCache` | ADR-002 |

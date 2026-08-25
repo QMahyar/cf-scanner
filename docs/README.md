@@ -28,6 +28,7 @@ Titles below match the files exactly.
 - [ADR-009: Drop macOS release targets](decisions/ADR-009-drop-macos-release-targets.md)
 - [ADR-010: API hardening — localhost-only, register rate limit, overwrite guard](decisions/ADR-010-api-hardening.md)
 - [ADR-011: Contract boundary — shared API types are the contract](decisions/ADR-011-contract-boundary.md)
+- [ADR-012: Review-scope decisions](decisions/ADR-012-review-scope-decisions.md)
 
 ## Engineering
 

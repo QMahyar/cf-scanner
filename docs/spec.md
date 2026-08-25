@@ -45,7 +45,7 @@ copy/save working IPs one-per-line — all in one binary, no external services.
 - Logging: `tracing` + `tracing-subscriber`; `anyhow` (errors)
 - Frontend: one embedded HTML file, vanilla JS + native EventSource, custom
   design system (0.3.0) — see docs/review/product-review-2026-08-13.md
-  - Shipped reality (v0.7+): Svelte 5 SPA in `ui/` compiled to committed `ui/dist`, embedded via `rust-embed` (`src/server.rs`), bilingual EN/FA.
+  - Shipped reality (v0.7+): Svelte 5 SPA in `ui/` compiled to committed `ui/dist`, embedded via `rust-embed` (`src/server/mod.rs`), bilingual EN/FA.
 - Configuration: hand-rolled JSON in the platform data dir (`profiles.json`,
   `identity.json`, refreshed ranges); no config crate, no TOML
 
@@ -71,7 +71,7 @@ Release:          dist build --output-format=json "--artifacts=global" ... (CI o
 src/
   main.rs            CLI entry (clap): serve | scan | ranges | wizard |
                      warp-config
-  server.rs          axum app: API routes, SSE, static frontend
+  server/{mod,state,error,guard,sse}.rs  axum app: API routes, SSE, static frontend (split from single file in v0.8.x)
   engine/            ScanController: orchestration, stop conditions, progress
     mod.rs           controller, event stream re-sync, pool planning/sampling
     cdn.rs           CDN phase-1 probe loop + phase-2 handoff

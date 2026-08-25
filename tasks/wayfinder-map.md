@@ -5,7 +5,9 @@
 All deduplicated findings from the 2026-08-24 ten-agent review implemented,
 tested (cargo test/clippy/fmt + UI build), visually verified (Playwright +
 visual-qa subagent), and shipped as **v0.8.0** via the standard tag→CI→Release→npm
-pipeline.
+pipeline. Follow-through refinements (server split, data-write gate,
+library facade, Windows xray coverage, SBOM) landed on `main` post-release
+as `0.8.x` unreleased work.
 
 ## Notes
 
@@ -22,16 +24,27 @@ pipeline.
   probe_urls are fetched *through the tunnel* (not SSRF surface); ranges fetches
   are direct. Document in both sites, change nothing.
 - [D3 serde(other) on Mode/Preset enums](#d3): SKIP — serde's "unknown variant"
-  error is strictly more informative than a silent fallback variant.
-- [D4 SBOM/cosign](#d4): OUT OF SCOPE this release — new tooling (ask-first);
-  `.dgst`+attestations already cover integrity.
+  error is strictly more informative than a silent fallback variant. Locked by
+  ADR-012.
+- [D4 SBOM/cosign](#d4): PARTIAL — SBOM shipped via `cargo-sbom` in
+  `release.yml:build-global-artifacts` (ADR-012). Cosign remains out of scope:
+  XTLS publishes checksums, not signatures.
 - [D5 AppState split / DataDir single-writer / lib.rs pub(crate)](#d5):
-  DEFERRED to follow-up tickets (large mechanical churn, zero behavior gain,
-  high regression risk late in cycle). Recorded as fog below.
+  IMPLEMENTED 2026-08-25 as `src/server/{mod,state,error,guard,sse}.rs`,
+  `paths::data_write_guard()` serializing all managed data-dir writes,
+  and `src/lib.rs` hiding `geo`/`socks`/`inline_verify`. See commits
+  `7246037`, `8d701f9` (all gates green).
+- [D6 Windows xray lifecycle](#d6): IMPLEMENTED 2026-08-25 as
+  `tests/xray_lifecycle_windows.rs` — `rustc`-compiled fake xray, kill
+  verification, trial-dir cleanup, stable across 3 runs. Closes the
+  `xray_lifecycle.rs` Unix-only gap.
+- [D7 CI toolchain selection](#d7): IMPLEMENTED 2026-08-25 — action ref
+  `dtolnay/rust-toolchain@1.88` with explicit `rustup component add` steps;
+  `env.TOOLCHAIN` indirection removed after it broke the windows leg.
 
-## Tickets (scored 10 = must-ship now, 1 = cosmetic)
+## Tickets (scored 10 = must-ship now, 1 = cosmetic) — all shipped
 
-### Stream A — Rust core (owner: main session)
+### Stream A — Rust core (owner: main session) ✓
 
 | # | Ticket | Score | Files |
 |---|--------|-------|-------|
@@ -56,7 +69,7 @@ pipeline.
 | A19 | CLI UX: help_heading groups, --cap/--target aliases, serve --open, wizard summary+spawn_blocking, TTY progress ticker, after_help examples, --warp-wgconf alias, --json-errors | 6 | main.rs, cli_wizard.rs, tray.rs |
 | A20 | dgst strict line parse + edge tests | 4 | dgst.rs |
 
-### Stream B — Frontend (owner: subagent B)
+### Stream B — Frontend (owner: subagent B) ✓
 
 | # | Ticket | Score |
 |---|--------|-------|
@@ -66,7 +79,7 @@ pipeline.
 | B4 | UX: pace wall-clock tick, Copy-all respects filters | 4 |
 | B5 | tsconfig strict:true — attempt, timeboxed; revert if error count > 25 | 4 |
 
-### Stream C — Build/CI/npm/docs (owner: subagent C)
+### Stream C — Build/CI/npm/docs (owner: subagent C) ✓
 
 | # | Ticket | Score |
 |---|--------|-------|
@@ -76,7 +89,7 @@ pipeline.
 | C4 | CI: DRY toolchain env, cargo-audit cached install, curl retry on xray-parity, version-parity job (Cargo.toml == package.json == RELEASE_TAG) | 6 |
 | C5 | Docs: CHANGELOG newest-top + dedupe Fixed headings; spec/intent frontend+language drift notes; stale comments (server.rs profiles, api/mod.rs, warp.rs pool comment) | 6 |
 
-### Verification & Release (main session)
+### Verification & Release (main session) ✓
 
 | # | Ticket | Score |
 |---|--------|-------|
@@ -85,14 +98,23 @@ pipeline.
 | V3 | Visual QA: serve + Playwright self-check + visual-qa subagent pass | 8 |
 | V4 | Release: bump 0.7.0→0.8.0 (Cargo.toml, npm package.json, RELEASE_TAG), CHANGELOG section, commit, tag v0.8.0, push, watch CI → GitHub Release → npm publish | 10 |
 
+### Follow-through after v0.8.0 (2026-08-25, unreleased on main) ✓
+
+| # | Ticket | Files |
+|---|--------|-------|
+| F1 | Data-write gate + library facade | `src/paths.rs`, `src/lib.rs`, `src/server/state.rs`, `src/ranges.rs`, `src/warpgen.rs`, `src/xray.rs` |
+| F2 | Server god-file split | `src/server/{mod,state,error,guard,sse}.rs` |
+| F3 | Windows xray lifecycle (`rustc`-compiled fake) | `tests/xray_lifecycle_windows.rs` |
+| F4 | ADR-012 + SBOM in release | `docs/decisions/ADR-012-*`, `.github/workflows/release.yml` |
+| F5 | CI toolchain ref fix (env→@1.88, components via rustup) | `.github/workflows/{checks,release}.yml` |
+
 ## Not yet specified (fog)
 
-- AppState god-struct split into server/{state,routes,middleware,sse} — schedule next cycle.
-- paths::DataDir single-writer owner — needs design pass (journal vs per-file mutex).
-- lib.rs facade encapsulation — depends on integration-test import audit.
+None — every ticket from this map has been specified, implemented, and
+verified. New work starts a fresh map.
 
 ## Out of scope
 
-- Domain/engine type split (ADR-011 intentional).
-- serde(other) enum fallbacks.
-- SBOM/cosign tooling.
+- Domain/engine type split (ADR-011 intentional, re-locked by ADR-012).
+- serde(other) enum fallbacks (ADR-012).
+- Cosign verification of XTLS `.dgst` (no signatures to verify).

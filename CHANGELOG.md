@@ -5,6 +5,16 @@ Added / Changed / Fixed / Deprecated / Removed / Security, newest on top.
 
 ## [Unreleased]
 
+### Added
+- **Windows xray lifecycle on CI.** `tests/xray_lifecycle_windows.rs` mirrors
+  the Unix subprocess suite with a `rustc`-compiled fake xray, so
+  `xray::spawn` readiness, `stop()` kill, and trial-dir cleanup are now
+  covered on `windows-latest` as well as `ubuntu-latest`.
+- **ADR-012 + SBOM.** ADR-012 locks the review-scope calls (engine stays on
+  `api::types` per ADR-011, `serde(other)` stays rejected). Release builds
+  now emit `cf-scanner.spdx.json` via `cargo-sbom` and upload it with the
+  global artifacts.
+
 ### Changed
 - **Frontend redesign ("Ethereal Glass").** OLED near-black paper with
   violet/emerald mesh orbs; display font Space Grotesk Variable, body Plus
@@ -14,11 +24,23 @@ Added / Changed / Fixed / Deprecated / Removed / Security, newest on top.
   button CTAs with spring hover physics; scroll-entry reveals via
   IntersectionObserver; progress bar animates `scaleX` (RTL-aware) instead
   of width. Latin-only font subsets keep dist lean.
+- **Server god-file split.** `src/server.rs` (3.2k lines) is now
+  `src/server/{mod,state,error,guard,sse}.rs` — router + handlers stay in
+  `mod.rs`; state/Ranges, error envelope, guard/middleware, and SSE remain
+  isolated. No behavior change.
+- **Data-dir single writer.** `paths::data_write_guard()` serializes every
+  managed write (`profiles.json` now tmp+rename with 0o600 on the tmp file,
+  `ranges` pool, `identity.json`, xray binary + sidecar). The gate is held
+  across the whole atomic write.
+- **Library facade.** `src/lib.rs` hides `geo`, `socks`, `inline_verify` as
+  `mod` (crate-private); the public surface is exactly what the binary and
+  the integration tests import.
 
 ### Fixed
 - CI: `dtolnay/rust-toolchain@master` drift broke the windows leg and then
   ignored component inputs — toolchain is now selected by action ref
-  (`@1.88`) with explicit `rustup component add` steps.
+  (`@1.88`) with explicit `rustup component add` steps. A bare `env:` that
+  broke `release.yml` parsing was removed.
 
 ## [0.8.0] - 2026-08-24
 
