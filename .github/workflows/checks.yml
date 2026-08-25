@@ -19,8 +19,8 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@1.88
-- name: Add rustfmt + clippy
-          run: rustup component add rustfmt clippy
+      - name: Add rustfmt + clippy
+        run: rustup component add rustfmt clippy
       - uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
@@ -44,8 +44,8 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@1.88
-- name: Add llvm-tools-preview
-          run: rustup component add llvm-tools-preview
+      - name: Add llvm-tools-preview
+        run: rustup component add llvm-tools-preview
       - uses: taiki-e/install-action@cargo-llvm-cov
       - uses: Swatinem/rust-cache@v2
         with:
