@@ -446,12 +446,19 @@ async fn export_config(
 struct StatusPayload {
     version: &'static str,
     is_running: bool,
+    /// True while banked candidates exist server-side; lets the UI offer a
+    /// phase-2-only verify after a page reload, when the client store is
+    /// empty but the controller still holds last-scan results.
+    has_candidates: bool,
 }
 
 async fn status_handler(State(state): State<Arc<AppState>>) -> Json<StatusPayload> {
     Json(StatusPayload {
         version: env!("CARGO_PKG_VERSION"),
         is_running: state.controller.is_running(),
+        // /api/status is fetched once per page load (not polled), so the
+        // snapshot clone in results() is cheap enough here.
+        has_candidates: !state.controller.results().is_empty(),
     })
 }
 
