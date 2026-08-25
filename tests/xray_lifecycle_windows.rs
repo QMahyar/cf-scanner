@@ -119,6 +119,7 @@ fn pick_ephemeral_port() -> u16 {
 }
 
 #[tokio::test]
+#[allow(clippy::await_holding_lock)]
 async fn spawn_launches_fake_xray_and_stop_kills_it() {
     // The fake reads its marker path from inherited env; hold the same lock
     // as the probe test so parallel env mutation cannot redirect the child.
@@ -154,7 +155,10 @@ async fn spawn_launches_fake_xray_and_stop_kills_it() {
     // a tick; poll briefly so the assertion tests refusal, not timing.
     let mut refused = false;
     for _ in 0..50 {
-        if tokio::net::TcpStream::connect(proc.socks_addr).await.is_err() {
+        if tokio::net::TcpStream::connect(proc.socks_addr)
+            .await
+            .is_err()
+        {
             refused = true;
             break;
         }
