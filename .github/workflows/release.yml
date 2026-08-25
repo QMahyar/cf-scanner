@@ -432,6 +432,9 @@ jobs:
           registry-url: "https://registry.npmjs.org"
       - name: Publish npm package
         working-directory: npm/cf-scanner
-        run: npm publish --access public
+        # --provenance publishes a signed provenance statement (OIDC via the
+        # workflow-level id-token permission) so npmjs.com shows the exact
+        # repo + commit + build source for this release.
+        run: npm publish --access public --provenance
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
