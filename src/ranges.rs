@@ -400,6 +400,7 @@ pub fn write_pool(pool: &CidrPool, last_updated: &str) -> Result<()> {
 /// the `last_updated` header that CLI refreshes and the server's background
 /// refresh share as one timestamp source.
 pub fn write_pool_to(path: &std::path::Path, pool: &CidrPool, last_updated: &str) -> Result<()> {
+    let _gate = paths::data_write_guard();
     let dir = paths::data_dir()?;
     fs::create_dir_all(&dir).context("create data dir")?;
     let mut text = format!("{LAST_UPDATED_PREFIX}{last_updated}\n");

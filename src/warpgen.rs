@@ -302,6 +302,7 @@ fn identity_path() -> Result<PathBuf> {
 fn save_identity(identity: &Identity) -> Result<()> {
     let path = identity_path()?;
     let json = serde_json::to_string_pretty(identity)?;
+    let _gate = crate::paths::data_write_guard();
     write_private_replace(&path, &json).with_context(|| format!("writing {}", path.display()))
 }
 

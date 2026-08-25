@@ -580,6 +580,7 @@ pub async fn download_binary(fetch: &impl BinaryFetch) -> Result<PathBuf> {
         ));
         extract_xray_from_zip(&zip, &tmp)?;
         make_executable(&tmp)?;
+        let _gate = crate::paths::data_write_guard();
         std::fs::rename(&tmp, &install_dest)?;
         let digest = hex_lower(&Sha256::digest(&std::fs::read(&install_dest)?));
         std::fs::write(dgst_dest, format!("SHA2-256= {digest}\n"))?;

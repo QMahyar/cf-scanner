@@ -79,22 +79,29 @@ async fn persist_profiles(dir: &std::path::Path, profiles: &HashMap<String, Scan
         return;
     };
     let _ = tokio::task::spawn_blocking(move || {
+        let _gate = crate::paths::data_write_guard();
         if let Some(parent) = path.parent() {
             let _ = fs::create_dir_all(parent);
         }
-        if fs::write(&path, json).is_ok() {
+        // tmp + rename under the write gate: a concurrent reader (or the
+        // next writer) must never observe a half-written profiles.json.
+        let tmp = path.with_extension("json.tmp");
+        if fs::write(&tmp, json).is_ok() {
             // Profiles can hold sensitive scan configs: keep the file
             // user-only where the filesystem supports permissions (mirrors
             // warpgen::write_private).
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt as _;
-                let _ = fs::set_permissions(&path, fs::Permissions::from_mode(0o600));
+                let _ = fs::set_permissions(&tmp, fs::Permissions::from_mode(0o600));
             }
             #[cfg(not(unix))]
             {
-                crate::paths::lock_down_to_owner(&path).ok();
+                crate::paths::lock_down_to_owner(&tmp).ok();
             }
+            let _ = fs::rename(&tmp, &path);
+        } else {
+            let _ = fs::remove_file(&tmp);
         }
     })
     .await;

@@ -2,8 +2,20 @@
 //! embedding flows redirect the whole data dir via `CF_SCANNER_DATA_DIR`.
 
 use std::path::PathBuf;
+use std::sync::{Mutex, MutexGuard};
 
-use anyhow::{Result, anyhow};
+use anyhow::{anyhow, Result};
+
+/// Single-writer gate for every managed data-dir file (profiles.json,
+/// refreshed ranges, identity.json, xray binary + sidecar). These writes are
+/// rare and small; one process-wide lock is cheaper and easier to reason
+/// about than per-file locks, and it closes the interleaved/torn-write race
+/// between concurrent scans, refreshes, and profile saves. Holders must keep
+/// their write atomic (tmp + rename) so a crash mid-write cannot corrupt.
+pub fn data_write_guard() -> MutexGuard<'static, ()> {
+    static WRITE_GATE: Mutex<()> = Mutex::new(());
+    WRITE_GATE.lock().unwrap_or_else(|e| e.into_inner())
+}
 
 pub fn data_dir() -> Result<PathBuf> {
     // Redirects the whole data directory (tests, embedding flows); the
@@ -54,18 +66,18 @@ pub fn xray_binary_path() -> Result<PathBuf> {
 #[cfg(windows)]
 pub fn lock_down_to_owner(path: &std::path::Path) -> std::io::Result<()> {
     use std::os::windows::ffi::OsStrExt as _;
+    use windows::core::{PCWSTR, PWSTR};
     use windows::Win32::Foundation::ERROR_INSUFFICIENT_BUFFER;
     use windows::Win32::Foundation::{CloseHandle, GENERIC_ALL, HANDLE, NO_ERROR, WIN32_ERROR};
     use windows::Win32::Security::Authorization::{
-        EXPLICIT_ACCESS_W, GRANT_ACCESS, SE_FILE_OBJECT, SetEntriesInAclW, SetNamedSecurityInfoW,
+        SetEntriesInAclW, SetNamedSecurityInfoW, EXPLICIT_ACCESS_W, GRANT_ACCESS, SE_FILE_OBJECT,
         TRUSTEE_IS_SID, TRUSTEE_IS_USER, TRUSTEE_W,
     };
     use windows::Win32::Security::{
-        ACL, DACL_SECURITY_INFORMATION, GetTokenInformation, NO_INHERITANCE,
-        PROTECTED_DACL_SECURITY_INFORMATION, PSID, TOKEN_QUERY, TOKEN_USER, TokenUser,
+        GetTokenInformation, TokenUser, ACL, DACL_SECURITY_INFORMATION, NO_INHERITANCE,
+        PROTECTED_DACL_SECURITY_INFORMATION, PSID, TOKEN_QUERY, TOKEN_USER,
     };
     use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
-    use windows::core::{PCWSTR, PWSTR};
 
     fn win_err(err: WIN32_ERROR) -> std::io::Error {
         std::io::Error::from_raw_os_error(err.0 as i32)
@@ -210,7 +222,7 @@ pub(crate) mod test_env {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::paths::test_env::{DATA_DIR_LOCK, IsolatedDataDir};
+    use crate::paths::test_env::{IsolatedDataDir, DATA_DIR_LOCK};
 
     #[cfg(windows)]
     #[test]
