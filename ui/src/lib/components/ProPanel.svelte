@@ -1226,7 +1226,7 @@
           <div class="mt-3 grid gap-4 grid-form">
           <div class="text-xs span-all" style="color: var(--ink-muted)">
             <label class="block">
-              wgconf (paste your wg:// URI, wg-quick INI, or Amnezia config — enables real-keypair verification)
+              {t("pro.warp.wgconfLabel")}
               <textarea
                 class="field mono mt-1"
                 rows="3"
@@ -1289,6 +1289,7 @@
             <input type="checkbox" name="verifyWarp" bind:checked={form.verifyWarp} disabled={!form.wgconf} class="accent-[var(--accent)]" />
             {t("pro.warp.verify")}
           </label>
+          <p class="mt-1 text-[11px] span-all" style="color: var(--ink-muted)">{t("pro.warp.verifyHint")}</p>
 
           <!-- WARP registration -->
           <div
