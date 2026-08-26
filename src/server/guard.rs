@@ -3,7 +3,7 @@
 
 use axum::Json;
 use axum::extract::rejection::JsonRejection;
-use axum::extract::{FromRequest, Request};
+use axum::extract::{FromRequest, Request, State};
 use axum::middleware::Next;
 use axum::response::Response;
 
@@ -29,30 +29,47 @@ pub(crate) fn host_allowed(host: &str) -> bool {
         .any(|allowed| allowed.eq_ignore_ascii_case(host))
 }
 
-pub(crate) fn origin_allowed(origin: &str) -> bool {
-    let host = origin
-        .split_once("://")
-        .map(|(_, rest)| rest)
-        .unwrap_or(origin);
-    host_allowed(host)
+/// The served port, threaded into the Origin check so "first-party" means
+/// this process's UI and not any other loopback listener (for IP hosts,
+/// browsers classify a different port as same-site, so only the port match
+/// can tell them apart).
+#[derive(Clone, Copy)]
+pub(crate) struct GuardConfig {
+    pub(crate) port: u16,
+}
+
+pub(crate) fn origin_allowed(origin: &str, cfg: GuardConfig) -> bool {
+    let Ok(parsed) = url::Url::parse(origin) else {
+        return false;
+    };
+    let Some(host) = parsed.host_str() else {
+        return false;
+    };
+    // Browsers omit the scheme-default port (http 80 / https 443); normalize
+    // so a server pinned to such a port still matches its own UI's origin.
+    host_allowed(host) && parsed.port_or_known_default() == Some(cfg.port)
 }
 
 /// Rejects requests that are not from the local UI: a foreign Host header,
 /// a cross-origin browser request (Origin / Sec-Fetch-Site), or no Host at
 /// all. Browsers and curl always send Host; the UI is same-origin.
-pub(crate) async fn localhost_only(request: Request, next: Next) -> Result<Response, ApiError> {
+pub(crate) async fn localhost_only(
+    State(cfg): State<GuardConfig>,
+    request: Request,
+    next: Next,
+) -> Result<Response, ApiError> {
     let headers = request.headers();
     let Some(host) = headers.get("host").and_then(|h| h.to_str().ok()) else {
         return Err(ApiError::forbidden("missing Host header"));
     };
+    // The Host header keeps its bare-host comparison: it legitimately omits
+    // or varies the port (curl, proxies), so over-tightening it would break
+    // callers the Origin pin below does not affect.
     if !host_allowed(host) {
         return Err(ApiError::forbidden("Host header not allowed"));
     }
     if let Some(origin) = headers.get("origin").and_then(|h| h.to_str().ok()) {
-        if origin == "null" {
-            return Err(ApiError::forbidden("Origin not allowed"));
-        }
-        if !origin_allowed(origin) {
+        if origin == "null" || !origin_allowed(origin, cfg) {
             return Err(ApiError::forbidden("Origin not allowed"));
         }
     }

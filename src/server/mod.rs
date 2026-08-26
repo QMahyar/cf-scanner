@@ -35,7 +35,7 @@ mod state;
 #[allow(unused_imports)]
 use self::error::{ApiError, map_register_error, sanitize_truncate, status_to_code};
 #[allow(unused_imports)]
-use self::guard::{JsonBody, SECURITY_CSP, localhost_only, security_headers};
+use self::guard::{GuardConfig, JsonBody, SECURITY_CSP, localhost_only, security_headers};
 #[allow(unused_imports)]
 use self::sse::{MAX_SSE_CONNECTIONS, TerminalBounded, events, try_acquire_sse_slot};
 #[allow(unused_imports)]
@@ -54,12 +54,18 @@ const EMBEDDED_INDEX: &str = "index.html";
 #[folder = "ui/dist"]
 struct UiAssets;
 
-pub fn router(controller: Arc<ScanController>) -> Router {
+pub fn router(controller: Arc<ScanController>, bound_port: u16) -> Router {
     let ranges = RangesState::load();
     ranges.spawn_refresh(None, Arc::new(ranges::RealHttp));
     let profiles_dir =
         paths::data_dir().unwrap_or_else(|_| std::env::temp_dir().join("cf-scanner-profiles"));
-    router_with_dir(controller, ranges, default_registrar(), profiles_dir)
+    router_with_dir(
+        controller,
+        ranges,
+        default_registrar(),
+        profiles_dir,
+        bound_port,
+    )
 }
 
 /// Every test server persists to its own throwaway dir, so no test can read
@@ -82,6 +88,7 @@ fn router_with_dir(
     ranges_state: Arc<RangesState>,
     registrar: WarpRegistrar,
     profiles_dir: PathBuf,
+    bound_port: u16,
 ) -> Router {
     let state = Arc::new(AppState {
         controller,
@@ -116,7 +123,10 @@ fn router_with_dir(
         .fallback(fallback)
         .method_not_allowed_fallback(method_not_allowed)
         .layer(middleware::from_fn(security_headers))
-        .layer(middleware::from_fn(localhost_only))
+        .layer(middleware::from_fn_with_state(
+            guard::GuardConfig { port: bound_port },
+            localhost_only,
+        ))
 }
 
 /// Unmatched paths serve the embedded Svelte UI: `/` and `/index.html` the
@@ -727,7 +737,14 @@ mod tests {
         tokio::spawn(async move {
             axum::serve(
                 listener,
-                router_with_dir(controller, ranges, registrar, profiles_dir),
+                router_with_dir(
+                    controller,
+                    ranges,
+                    registrar,
+                    profiles_dir,
+                    // Ephemeral test port; guard tests derive origins from it.
+                    addr.port(),
+                ),
             )
             .await
             .unwrap();
@@ -1599,6 +1616,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn origin_must_carry_the_served_port() {
+        let addr = serve(FakeTransport::new()).await;
+        let req_for = |origin: &str| {
+            format!("GET /api/status HTTP/1.1\r\nHost: 127.0.0.1\r\nOrigin: {origin}\r\nConnection: close\r\n\r\n")
+        };
+        // Same origin as the served UI: allowed.
+        let own = format!("http://127.0.0.1:{}", addr.port());
+        let (status, text) = request(addr, &req_for(&own), None).await;
+        assert_eq!(status, 200, "{text}");
+        // Another local process's port is same-site but NOT first-party.
+        let (status, text) = request(addr, &req_for("http://127.0.0.1:9999"), None).await;
+        assert_eq!(status, 403, "{text}");
+        let (status, text) = request(addr, &req_for("http://localhost:9999"), None).await;
+        assert_eq!(status, 403, "{text}");
+        // No Origin header (curl, same-origin GETs): accepted exactly as before.
+        let (status, text) = request(
+            addr,
+            "GET /api/status HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n",
+            None,
+        )
+        .await;
+        assert_eq!(status, 200, "{text}");
+    }
+
+    #[tokio::test]
     async fn rejects_cross_site_fetch() {
         let addr = serve(FakeTransport::new()).await;
         let (status, _) = request(
@@ -2388,12 +2430,11 @@ mod tests {
         .await;
         assert_eq!(status, 200);
         // normal same-origin still allowed
-        let (status, _) = request(
-            addr,
-            "GET /api/status HTTP/1.1\r\nHost: 127.0.0.1\r\nOrigin: http://127.0.0.1:8765\r\nConnection: close\r\n\r\n",
-            None,
-        )
-        .await;
+        let own_origin = format!("http://127.0.0.1:{}", addr.port());
+        let req = format!(
+            "GET /api/status HTTP/1.1\r\nHost: 127.0.0.1\r\nOrigin: {own_origin}\r\nConnection: close\r\n\r\n"
+        );
+        let (status, _) = request(addr, &req, None).await;
         assert_eq!(status, 200);
     }
 

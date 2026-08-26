@@ -752,7 +752,8 @@ async fn serve(
         Ok(listener) => listener,
         Err(err) => return Err(anyhow!("{}", bind_error(port, &err))),
     };
-    let url = serve_url(listener.local_addr()?);
+    let bind_addr = listener.local_addr()?;
+    let url = serve_url(bind_addr);
     // Unconditional stderr print: the user must see where the server is even
     // without --verbose (info-level logs are hidden by default).
     eprintln!("CF-Scanner running at {url}");
@@ -783,7 +784,10 @@ async fn serve(
     const SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
     let (shutdown_fired_tx, mut shutdown_fired) = tokio::sync::watch::channel(false);
     let mut server = tokio::spawn(async move {
-        axum::serve(listener, server::router(controller.clone()))
+        axum::serve(
+            listener,
+            server::router(controller.clone(), bind_addr.port()),
+        )
             .with_graceful_shutdown(async move {
                 shutdown_signal(controller, tray_enabled).await;
                 let _ = shutdown_fired_tx.send(true);
