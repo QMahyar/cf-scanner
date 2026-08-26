@@ -223,17 +223,20 @@ impl Target {
 
 fn parse_target(url: &str) -> Result<Target> {
     let parsed = url::Url::parse(url).context("bad probe URL")?;
+    // The request line must exercise the resource as given: dropping the
+    // query would verify a different endpoint than the user asked for.
+    let mut path = parsed.path().to_owned();
+    if let Some(q) = parsed.query() {
+        path.push('?');
+        path.push_str(q);
+    }
     Ok(Target {
         host: parsed
             .host_str()
             .ok_or_else(|| anyhow!("probe URL has no host"))?
             .to_owned(),
         port: parsed.port_or_known_default().unwrap_or(80),
-        path: if parsed.path().is_empty() {
-            "/".to_owned()
-        } else {
-            parsed.path().to_owned()
-        },
+        path: if path.is_empty() { "/".to_owned() } else { path },
         https: parsed.scheme() == "https",
     })
 }
@@ -1343,7 +1346,7 @@ mod tests {
     #[tokio::test]
     async fn close_delimited_body_over_the_cap_fails_the_probe() {
         let body = vec![7u8; MAX_PROBE_BODY_BYTES + 1];
-        let mut resp = close_delimited_response(&body);
+        let resp = close_delimited_response(&body);
         let err = read_http_response(&mut &resp[..])
             .await
             .expect_err("an over-cap close-delimited body must fail explicitly");
@@ -1356,9 +1359,29 @@ mod tests {
     #[tokio::test]
     async fn close_delimited_body_at_the_cap_parses() {
         let body = vec![7u8; MAX_PROBE_BODY_BYTES];
-        let mut resp = close_delimited_response(&body);
+        let resp = close_delimited_response(&body);
         let (status, got) = read_http_response(&mut &resp[..]).await.unwrap();
         assert_eq!(status, 200);
         assert_eq!(got.len(), MAX_PROBE_BODY_BYTES);
+    }
+
+    // --- probe target query strings (plan 014) -------------------------------
+
+    #[test]
+    fn parse_target_keeps_the_query_string_in_the_request_line() {
+        let target = parse_target("http://probe.test/cdn-cgi/trace?flag=1").unwrap();
+        assert_eq!(target.path, "/cdn-cgi/trace?flag=1");
+        let request =
+            socks::http_request_keepalive(&target.host, &target.path, "Accept: */*");
+        assert!(
+            request.starts_with("GET /cdn-cgi/trace?flag=1 HTTP/1.1\r\n"),
+            "{request}"
+        );
+        // A query-less URL is unchanged.
+        let target = parse_target("http://probe.test/cdn-cgi/trace").unwrap();
+        assert_eq!(target.path, "/cdn-cgi/trace");
+        // An empty path with a query still yields a requestable target.
+        let target = parse_target("http://probe.test?flag=1").unwrap();
+        assert_eq!(target.path, "/?flag=1");
     }
 }

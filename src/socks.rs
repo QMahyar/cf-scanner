@@ -150,11 +150,14 @@ async fn get_via_socks_inner(url: &str, socks: SocketAddr) -> Result<Vec<u8>> {
         .ok_or_else(|| anyhow!("probe URL has no host"))?
         .to_owned();
     let port = parsed.port_or_known_default().unwrap_or(80);
-    let path = if parsed.path().is_empty() {
-        "/".to_owned()
-    } else {
-        parsed.path().to_owned()
-    };
+    // The request line must exercise the resource as given: dropping the
+    // query would verify a different endpoint than the user asked for.
+    let mut path = parsed.path().to_owned();
+    if let Some(q) = parsed.query() {
+        path.push('?');
+        path.push_str(q);
+    }
+    let path = if path.is_empty() { "/".to_owned() } else { path };
 
     let mut stream = TcpStream::connect(socks).await?;
     socks5_connect(&mut stream, &host, port).await?;
@@ -257,6 +260,48 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(body, b"ok");
+    }
+
+    /// The probe URL's query must reach the wire: the request line the fake
+    /// socks server receives carries the path AND its query string.
+    #[tokio::test]
+    async fn tunnel_probe_request_line_keeps_the_query_string() {
+        use tokio::io::AsyncWriteExt as _;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let socks = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut greeting = [0u8; 3];
+            sock.read_exact(&mut greeting).await.unwrap();
+            sock.write_all(&[0x05, 0x00]).await.unwrap();
+            let mut req = Vec::new();
+            loop {
+                let mut byte = [0u8; 1];
+                sock.read_exact(&mut byte).await.unwrap();
+                req.push(byte[0]);
+                if req.len() >= 5 && req[3] == 0x03 && req.len() >= 5 + req[4] as usize + 2 {
+                    break;
+                }
+            }
+            sock.write_all(&[0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0])
+                .await
+                .unwrap();
+            let mut http = Vec::new();
+            while !http.ends_with(b"\r\n\r\n") {
+                let mut byte = [0u8; 1];
+                sock.read_exact(&mut byte).await.unwrap();
+                http.push(byte[0]);
+            }
+            String::from_utf8_lossy(&http).into_owned()
+        });
+        get_via_socks("http://example.test/cdn-cgi/trace?flag=1", socks, 5_000)
+            .await
+            .unwrap_or_default();
+        let request = server.await.unwrap();
+        assert!(
+            request.starts_with("GET /cdn-cgi/trace?flag=1 HTTP/1.1\r\n"),
+            "{request}"
+        );
     }
 
     #[tokio::test]
