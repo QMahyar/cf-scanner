@@ -41,14 +41,20 @@ impl Geo {
 
 /// Defensive parse of a /cdn-cgi/trace body: `colo=XXX` on its own line.
 /// The endpoint is community-documented, so unknown keys are ignored and any
-/// malformed body yields `None`.
+/// malformed body yields `None`. The value must look like an airport code —
+/// at most 4 ASCII alphanumerics — so trace junk cannot flow into results.
 pub fn parse_colo(body: &[u8]) -> Option<String> {
     let text = std::str::from_utf8(body).ok()?;
     // First matching `colo=` line wins; the community endpoint returns at
     // most one per body, but a defensive first-match is the documented pick.
     text.lines().find_map(|line| {
         let (key, value) = line.split_once('=')?;
-        (key.trim() == "colo" && !value.trim().is_empty()).then(|| value.trim().to_owned())
+        let value = value.trim();
+        let plausible = key.trim() == "colo"
+            && !value.is_empty()
+            && value.len() <= 4
+            && value.bytes().all(|b| b.is_ascii_alphanumeric());
+        plausible.then(|| value.to_owned())
     })
 }
 
@@ -69,6 +75,20 @@ mod tests {
         assert_eq!(parse_colo(b"loc=GB\nhttp=http/2\n"), None);
         assert_eq!(parse_colo(b"colo=\n"), None);
         assert_eq!(parse_colo(b"\xff\xfe\x00 binary"), None);
+    }
+
+    #[test]
+    fn colo_parse_accepts_only_iata_style_codes() {
+        assert_eq!(parse_colo(b"colo=SJO").as_deref(), Some("SJO"));
+        // 4 characters is the accepted ceiling.
+        assert_eq!(parse_colo(b"colo=LHRA").as_deref(), Some("LHRA"));
+        // Punctuation, symbols, and over-length junk are rejected.
+        assert_eq!(parse_colo(b"colo=sjoo!"), None);
+        assert_eq!(parse_colo(b"colo=SJ OO"), None);
+        let long_junk = format!("colo={}", "x".repeat(100));
+        assert_eq!(parse_colo(long_junk.as_bytes()), None);
+        // Non-alphanumeric bytes are rejected even when short.
+        assert_eq!(parse_colo(b"colo=a-b"), None);
     }
 
     #[test]
