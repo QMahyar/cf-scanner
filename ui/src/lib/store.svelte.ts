@@ -93,16 +93,17 @@ export async function startScan(
   // A banked-candidates verify keeps the phase-1 list alive instead of
   // wiping it: snapshot the rows into frozenPhase1 and let applyResult's
   // upsert-by-ip:port refill the live list with tunnel-test verdicts.
-  // Any other scan behaves exactly as before (full reset).
-  if (opts?.preserveResults === true && cfg.phase2_only === true) {
-    app.frozenPhase1 = app.results.slice();
-  } else {
-    resetResults();
-  }
-  app.lastScanConfigs = cfg.phase2?.configs ?? [];
-  app.lastScanVerified = cfg.mode === "Warp" && cfg.warp?.verify_with_wgconf === true;
+  // Banked-verify snapshots the phase-1 list instead of wiping it.
+  const preserve = opts?.preserveResults === true && cfg.phase2_only === true;
+  if (preserve) app.frozenPhase1 = app.results.slice();
+  // Do not wipe previous results before the server accepts the scan — a 400
+  // or network error would otherwise erase a completed scan from the UI.
   try {
     await api.scan(cfg);
+    // api.scan resolved (HTTP 200 before the first Result event) — now reset.
+    if (!preserve) resetResults();
+    app.lastScanConfigs = cfg.phase2?.configs ?? [];
+    app.lastScanVerified = cfg.mode === "Warp" && cfg.warp?.verify_with_wgconf === true;
     app.running = true;
     app.startedAt = Date.now();
     return { ok: true, rejected: null };

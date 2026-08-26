@@ -95,7 +95,7 @@
   }
 
   async function copyAll() {
-    await copyText(filteredEndpoints(chipRows, null), chipRows.length);
+    await copyText(filteredEndpoints(chipRows, view.maxLatency), chipRows.length);
     copiedAll = true;
     setTimeout(() => (copiedAll = false), 1200);
   }
