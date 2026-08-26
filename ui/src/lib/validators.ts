@@ -64,7 +64,9 @@ export function parseEndpoint(line: string): Verdict<string> {
   if (!isIpv4(host)) {
     return { ok: false, message: `${line}: not an IPv4 address` };
   }
-  if (portStr !== null && portStr !== "") {
+  if (portStr !== null) {
+    // Empty port ("1.2.3.4:") must mirror the server's rejection — the
+    // fixture pins it as err.
     if (!DECIMAL.test(portStr)) {
       return { ok: false, message: `${line}: port is not a number` };
     }

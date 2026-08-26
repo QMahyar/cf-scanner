@@ -57,6 +57,33 @@ jobs:
           name: lcov.info
           path: lcov.info
 
+  ui:
+    name: ui (check + test + build + dist drift)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+      - name: Install
+        run: npm ci
+        working-directory: ui
+      - name: Check
+        run: npm run check
+        working-directory: ui
+      - name: Test
+        run: npm test
+        working-directory: ui
+      - name: Build
+        run: npm run build
+        working-directory: ui
+      - name: Fail on un-rebuilt dist
+        # rust-embed serves the committed ui/dist; src changes without a
+        # rebuild would silently ship the stale embedded UI.
+        run: git diff --exit-code ui/dist
+
   placeholder-guard:
     name: no tracked file > 1MB
     runs-on: ubuntu-latest
