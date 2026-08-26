@@ -47,6 +47,11 @@ pub const MAX_SNI_HOSTNAME_CHARS: usize = 253;
 /// Custom WARP endpoint lines allowed in one scan; bounds the UDP fan-out
 /// (`warp_groups` materializes one task per endpoint × port).
 pub const MAX_ENDPOINTS: usize = 2048;
+/// Subscription-expanded specs allowed per entry (prevents a hostile URL
+/// from expanding into an unbounded spec vector on the user's machine).
+pub const MAX_SUBSCRIPTION_SPECS: usize = 2048;
+/// Total specs allowed across all phase-2 entries in one scan (fan-out bound).
+pub const MAX_PHASE2_TOTAL_SPECS: usize = 4096;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Mode {

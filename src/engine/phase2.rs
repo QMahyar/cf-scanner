@@ -300,7 +300,21 @@ impl ScanController {
                 .map(|spec| vec![spec])
             };
             match result {
-                Ok(parsed) => specs.extend(parsed.into_iter().map(|spec| (spec, idx as u32))),
+                Ok(parsed) => {
+                    if parsed.len() > crate::api::types::MAX_SUBSCRIPTION_SPECS {
+                        anyhow::bail!(
+                            "subscription expands to more than {} configs",
+                            crate::api::types::MAX_SUBSCRIPTION_SPECS
+                        );
+                    }
+                    if specs.len() + parsed.len() > crate::api::types::MAX_PHASE2_TOTAL_SPECS {
+                        anyhow::bail!(
+                            "phase 2: too many expanded configs (limit {})",
+                            crate::api::types::MAX_PHASE2_TOTAL_SPECS
+                        );
+                    }
+                    specs.extend(parsed.into_iter().map(|spec| (spec, idx as u32)));
+                },
                 Err(err) => {
                     skipped += 1;
                     tracing::warn!("phase-2 config skipped: {err:#}");
