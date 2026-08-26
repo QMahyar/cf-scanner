@@ -33,10 +33,12 @@ pub enum WarpRegisterError {
     #[error("registration server error ({status})")]
     Server { status: u16, detail: String },
 }
-/// Registration is one-shot and rare; api.cloudflareclient.com resolves to
-/// several IPs and ISPs commonly blackhole some of them, so a single attempt
-/// can stall. Retrying with a fresh client (fresh DNS + connection) makes the
-/// flow succeed unless every path is broken.
+/// Idempotent registration calls (GET/PATCH/PUT) are rare;
+/// api.cloudflareclient.com resolves to several IPs and ISPs commonly
+/// blackhole some of them, so a single attempt can stall. Retrying with a
+/// fresh client (fresh DNS + connection) makes those flows succeed unless
+/// every path is broken. POST /reg never retries: it is not idempotent and a
+/// transport-level failure leaves its server-side outcome unknown.
 const MAX_ATTEMPTS: u32 = 3;
 const RETRY_SLEEP: Duration = Duration::from_millis(300);
 const DNS: &str = "1.1.1.1, 1.0.0.1";
@@ -101,8 +103,9 @@ struct PeerEndpoint {
 /// Small v0a884 client. The base URL is injectable so tests run against a
 /// loopback mock; production uses the Cloudflare client API directly and
 /// never the system proxy (registration must work even when routing is
-/// broken). Every call carries a timeout and retries with a fresh client per
-/// attempt (see MAX_ATTEMPTS).
+/// broken). Every call is bounded by a builder-level timeout covering
+/// connect through end-of-body; idempotent endpoints retry with a fresh
+/// client per attempt, POST /reg does not retry at all (see MAX_ATTEMPTS).
 struct WarpClient {
     base: String,
     timeout: Duration,
@@ -113,44 +116,84 @@ impl WarpClient {
         Self { base, timeout }
     }
 
-    /// One request with retries. A fresh reqwest::Client per attempt means
-    /// each retry re-resolves DNS, so a blackholed IP from a previous
-    /// resolution cannot poison subsequent attempts. Transport failures and
-    /// 5xx/429 are retried; 4xx is deterministic and reported as-is.
+    /// Per-attempt HTTP client: fresh DNS resolution per attempt, the whole
+    /// request lifecycle (connect + send + body read) inside one timeout, and
+    /// per-hop redirect validation matching ranges::HTTP_CLIENT (AGENTS.md:
+    /// every direct HTTPS fetch validates each hop; registration also needs
+    /// `.no_proxy()`).
+    fn http_client(timeout: Duration) -> Result<reqwest::Client> {
+        Ok(reqwest::Client::builder()
+            .use_rustls_tls()
+            .no_proxy()
+            .timeout(timeout)
+            .redirect(reqwest::redirect::Policy::custom(|attempt| {
+                if attempt.previous().len() >= 5 {
+                    return attempt.error("too many redirects");
+                }
+                if let Err(err) = crate::ranges::validate_fetch_url(attempt.url().as_str()) {
+                    return attempt.error(err.to_string());
+                }
+                attempt.follow()
+            }))
+            .build()?)
+    }
+
+    /// One request. A fresh reqwest::Client per attempt means each retry
+    /// re-resolves DNS, so a blackholed IP from a previous resolution cannot
+    /// poison subsequent attempts.
+    ///
+    /// Retry policy: 429/5xx are retried for every endpoint — the server
+    /// answered, so nothing was processed. Transport-level failures (send
+    /// error, timeout anywhere in the request lifecycle, broken body read)
+    /// leave the server-side outcome unknown, so they are retried only when
+    /// `retryable_transport` is set; POST /reg passes false and fails after
+    /// one attempt. Other 4xx is deterministic and reported as-is.
     async fn attempt(
         &self,
         label: &str,
+        retryable_transport: bool,
         build: impl Fn(reqwest::Client) -> reqwest::RequestBuilder,
     ) -> Result<String> {
         let mut last: Option<WarpRegisterError> = None;
-        for n in 0..MAX_ATTEMPTS {
-            if n > 0 {
-                tokio::time::sleep(RETRY_SLEEP).await;
+        let mut next_delay = RETRY_SLEEP;
+        let mut tried = 0u32;
+        for _ in 0..MAX_ATTEMPTS {
+            if tried > 0 {
+                tokio::time::sleep(next_delay).await;
+                next_delay = RETRY_SLEEP;
             }
-            let http = reqwest::Client::builder()
-                .use_rustls_tls()
-                .no_proxy()
-                .build()?;
-            let result = tokio::time::timeout(self.timeout, build(http).send()).await;
+            tried += 1;
+            let result = build(Self::http_client(self.timeout)?).send().await;
             let resp = match result {
-                Ok(Ok(resp)) => resp,
-                Ok(Err(err)) => {
-                    let detail = crate::configs::sanitize_error_text(&format!("{err}"));
-                    last = Some(WarpRegisterError::Server { status: 0, detail });
-                    continue;
-                }
-                Err(_) => {
-                    last = Some(WarpRegisterError::Timeout);
+                Ok(resp) => resp,
+                Err(err) => {
+                    last = Some(if err.is_timeout() {
+                        WarpRegisterError::Timeout
+                    } else {
+                        let detail = crate::configs::sanitize_error_text(&format!("{err}"));
+                        WarpRegisterError::Server { status: 0, detail }
+                    });
+                    if !retryable_transport {
+                        break;
+                    }
                     continue;
                 }
             };
             let status_code = resp.status();
             let status = status_code.as_u16();
+            let retry_after = parse_retry_after(resp.headers());
             let text = match resp.text().await {
                 Ok(t) => t,
                 Err(err) => {
-                    let detail = crate::configs::sanitize_error_text(&format!("{err}"));
-                    last = Some(WarpRegisterError::Server { status, detail });
+                    last = Some(if err.is_timeout() {
+                        WarpRegisterError::Timeout
+                    } else {
+                        let detail = crate::configs::sanitize_error_text(&format!("{err}"));
+                        WarpRegisterError::Server { status, detail }
+                    });
+                    if !retryable_transport {
+                        break;
+                    }
                     continue;
                 }
             };
@@ -160,6 +203,7 @@ impl WarpClient {
             let sanitized = crate::configs::sanitize_error_text(&text);
             if status == 429 {
                 last = Some(WarpRegisterError::RateLimited);
+                next_delay = retry_delay(retry_after, RETRY_SLEEP, self.timeout);
                 continue;
             }
             if status == 401 || status == 403 {
@@ -179,14 +223,14 @@ impl WarpClient {
             .into());
         }
         let err = last.unwrap_or(WarpRegisterError::Timeout);
-        Err(err).context(format!(
-            "v0a884 {label} failed after {MAX_ATTEMPTS} attempts"
-        ))
+        Err(err).context(format!("v0a884 {label} failed after {tried} attempt(s)"))
     }
 
     async fn post_json(&self, path: &str, body: impl Serialize) -> Result<String> {
         let body = serde_json::to_value(body)?;
-        self.attempt(path, |http| {
+        // Only /reg flows through here: non-idempotent, so transport-level
+        // uncertainty fails immediately instead of re-registering.
+        self.attempt(path, false, |http| {
             http.post(format!("{}/{}", self.base, path))
                 .header("User-Agent", "okhttp/3.12.1")
                 .json(&body)
@@ -202,7 +246,8 @@ impl WarpClient {
         body: Option<serde_json::Value>,
     ) -> Result<String> {
         let url = format!("{}/{}", self.base, path);
-        self.attempt(&path, |http| {
+        // GET/PATCH/PUT on an existing device are idempotent and may retry.
+        self.attempt(&path, true, |http| {
             let mut req = http
                 .request(method.clone(), url.clone())
                 .header("User-Agent", "okhttp/3.12.1")
@@ -267,6 +312,20 @@ impl WarpClient {
             .await?;
         serde_json::from_str(&text).context("malformed config response")
     }
+}
+
+/// Delay before the next attempt: honor the server's Retry-After when
+/// present, otherwise the fixed fallback; capped so a hostile value cannot
+/// stretch the overall request bound.
+fn retry_delay(retry_after: Option<Duration>, fallback: Duration, cap: Duration) -> Duration {
+    retry_after.unwrap_or(fallback).min(cap)
+}
+
+/// Retry-After in seconds form only; absent, unparsable, or date-form values
+/// yield None and callers fall back to their fixed delay.
+fn parse_retry_after(headers: &reqwest::header::HeaderMap) -> Option<Duration> {
+    let raw = headers.get(reqwest::header::RETRY_AFTER)?.to_str().ok()?;
+    Some(Duration::from_secs(raw.trim().parse().ok()?))
 }
 
 // --- identity persistence ----------------------------------------------------
@@ -382,15 +441,8 @@ fn write_private_replace(dest: &Path, text: &str) -> Result<()> {
         random_u32()
     ));
     write_private(&tmp, text)?;
-    match fs::rename(&tmp, dest) {
-        Ok(()) => Ok(()),
-        Err(_err) if cfg!(windows) => {
-            // Windows rename does not replace an existing file.
-            let _ = fs::remove_file(dest);
-            fs::rename(&tmp, dest).map_err(Into::into)
-        }
-        Err(err) => Err(err.into()),
-    }
+    fs::rename(&tmp, dest)?;
+    Ok(())
 }
 
 fn random_u32() -> u32 {
@@ -1122,5 +1174,83 @@ pub(crate) mod tests {
             )),
             "{err:#}"
         );
+    }
+
+    /// Transport-level failure on POST /reg must surface after exactly one
+    /// attempt: the server may have processed the registration, and a retry
+    /// would orphan a second Cloudflare device on the same key material.
+    /// A TCP peer that accepts and immediately resets (SO_LINGER 0) yields a
+    /// deterministic send-level failure — the request died mid-flight, no
+    /// response ever existed.
+    #[tokio::test]
+    async fn reg_is_never_retried_on_transport_errors() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            while let Ok((sock, _)) = listener.accept().await {
+                drop(sock);
+            }
+        });
+        let client = WarpClient::new(format!("http://{addr}"), Duration::from_secs(2));
+        let (_, public) = keygen();
+        let public_b64 = base64::engine::general_purpose::STANDARD.encode(public.as_bytes());
+        let err = client.register(&public_b64).await.unwrap_err();
+        assert!(
+            err.to_string().contains("after 1 attempt"),
+            "exactly one attempt expected, got {err:#}"
+        );
+        assert!(
+            err.chain().any(|e| matches!(
+                e.downcast_ref::<WarpRegisterError>(),
+                Some(WarpRegisterError::Server { status: 0, .. })
+            )),
+            "transport error must map to Server {{ status: 0 }}, got {err:#}"
+        );
+    }
+
+    #[test]
+    fn retry_after_is_honored() {
+        const FALLBACK: Duration = Duration::from_millis(300);
+        const CAP: Duration = Duration::from_secs(15);
+        assert_eq!(
+            retry_delay(Some(Duration::from_secs(2)), FALLBACK, CAP),
+            Duration::from_secs(2)
+        );
+        assert_eq!(
+            retry_delay(None, FALLBACK, CAP),
+            FALLBACK,
+            "absent header falls back to the fixed delay"
+        );
+        assert_eq!(
+            retry_delay(Some(Duration::from_secs(3_600)), FALLBACK, CAP),
+            CAP,
+            "a hostile Retry-After is capped at the request timeout"
+        );
+    }
+
+    /// Regression for the removed Windows delete-then-rename fallback: the
+    /// second save must replace the first through the plain rename path,
+    /// leaving exactly the new content behind.
+    #[test]
+    fn save_replaces_existing_identity() {
+        let _guard = IDENTITY_LOCK.lock().unwrap();
+        isolated_identity_dir();
+        let enc = |b: &[u8]| base64::Engine::encode(&base64::engine::general_purpose::STANDARD, b);
+        let identity = |id: &str, key: &[u8; 32]| Identity {
+            id: id.into(),
+            token: "t".into(),
+            private_key: enc(key),
+            client_id: "c".into(),
+            account_type: "free".into(),
+            license: None,
+            created_at: 1,
+            peer_public_key: None,
+        };
+        save_identity(&identity("id-a", &[1u8; 32])).unwrap();
+        save_identity(&identity("id-b", &[2u8; 32])).unwrap();
+        let loaded = load_identity().unwrap();
+        assert_eq!(loaded.id, "id-b");
+        assert_eq!(loaded.private_key, enc(&[2u8; 32]));
+        let _ = fs::remove_file(identity_path().unwrap());
     }
 }

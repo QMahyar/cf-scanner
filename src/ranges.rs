@@ -611,7 +611,7 @@ fn sanitize_url_for_error(url: &str) -> String {
 /// allowed (GitHub, CDNs, subscription hosts); the API binds 127.0.0.1, so
 /// only local code could have crafted a hostile URL in the first place, and
 /// private LAN ranges are kept working for self-hosted subscription feeds.
-fn validate_fetch_url(url: &str) -> Result<()> {
+pub(crate) fn validate_fetch_url(url: &str) -> Result<()> {
     let parsed = url::Url::parse(url).context("bad URL")?;
     if parsed.scheme() != "https" {
         bail!("only https:// URLs supported (got {}://)", parsed.scheme());
