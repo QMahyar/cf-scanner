@@ -19,6 +19,7 @@ const EN = {
   "simple.intro":
     "Scans Cloudflare's edge from your network and ranks what actually answers. Results never leave this machine — scans talk only to Cloudflare. Working = answered a real TLS handshake.",
   "simple.target": "Scan target",
+  "simple.sizeGroup": "Sample size",
   "simple.findUpTo": "Find up to",
   "simple.testUpTo": "Test up to",
   "simple.testUpTo.hint": "candidate IPs tried — more is slower",
@@ -247,6 +248,7 @@ const FA: Record<keyof typeof EN, string> = {
   "simple.intro":
     "لبه شبکهٔ کلادفلر را از اینترنتِ شما اسکن می‌کند و پاسخ‌های واقعی را رتبه‌بندی می‌کند. نتایج هرگز از این دستگاه بیرون نمی‌روند — اسکن فقط با کلادفلر حرف می‌زند. «سالم» یعنی به یک TLS handshake واقعی پاسخ داده است.",
   "simple.target": "هدف اسکن",
+  "simple.sizeGroup": "اندازه نمونه",
   "simple.findUpTo": "حداکثر یافتن",
   "simple.testUpTo": "حداکثر آزمون",
   "simple.testUpTo.hint": "تعداد IP کاندید — بیشتر یعنی کندتر",

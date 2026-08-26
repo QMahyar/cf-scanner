@@ -140,7 +140,7 @@
           class="mt-4 inline-flex flex-wrap items-center gap-1 rounded-full p-1"
           style="background: var(--paper-3)"
           role="group"
-          aria-label={t("simple.target")}
+          aria-label={t("simple.sizeGroup")}
         >
           {#each Object.entries(SIZES) as [key, amounts] (key)}
             {@const sKey = key as SizeKey}
@@ -161,7 +161,7 @@
           {/each}
           {#if sizeChoice === "custom"}
             <input
-              class="field mono !w-24 text-center"
+              class="field mono field-num"
               type="number"
               min={scanMode === "Warp" ? 100 : 100}
               max={100000}
@@ -196,7 +196,7 @@
           >
             {t("simple.findUpTo")}
             <input
-              class="field mono !w-20 text-center"
+              class="field mono field-num"
               type="number"
               min="5"
               max="100"

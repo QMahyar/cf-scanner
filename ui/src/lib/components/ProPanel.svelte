@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount } from "svelte";
+  import Segmented from "./Segmented.svelte";
   import {
     Check,
     Copy,
@@ -852,16 +853,19 @@
         </div>
       {/if}
 
-      <div class="mt-4 grid gap-4 md:grid-cols-2 lg:grid-cols-3">
-        <label class="text-xs" style="color: var(--ink-muted)">{t("pro.field.mode")}
-          <select class="field mt-1" name="mode" bind:value={form.mode}>
-            <option value="Cdn">{t("pro.field.mode.cdn")}</option>
-            <option value="Warp">{t("pro.field.mode.warp")}</option>
-          </select>
-        </label>
+      <div class="mt-4 grid-form">
+        <div class="text-xs" style="color: var(--ink-muted)">
+          <span class="mb-1 block">{t("pro.field.mode")}</span>
+          <Segmented
+            options={[{ value: "Cdn", label: t("pro.field.mode.cdn") }, { value: "Warp", label: t("pro.field.mode.warp") }]}
+            value={form.mode}
+            label={t("pro.field.mode")}
+            onchange={(v) => (form.mode = v as typeof form.mode)}
+          />
+        </div>
 
         {#if form.mode === "Cdn"}
-          <div class="text-xs md:col-span-2 lg:col-span-3">
+          <div class="text-xs span-all">
             <span class="mb-1 block" style="color: var(--ink-muted)">
               {t("pro.field.target")}
             </span>
@@ -899,7 +903,7 @@
               </button>
               {#if form.useCount}
                 <input
-                  class="field mono !w-28 text-center"
+                  class="field mono field-num"
                   type="number"
                   min="1"
                   max="100000"
@@ -931,7 +935,7 @@
           </label>
         {/if}
 
-        <div class="text-xs sm:col-span-2 lg:col-span-3">
+        <div class="text-xs span-all">
           <div class="flex flex-wrap items-center justify-between gap-x-2 gap-y-1">
             <span style="color: var(--ink-muted)">
               {t("pro.field.ports")}{#if form.mode === "Warp"}<span class="mono text-[10px]">{t("pro.field.ports.warpNote")}</span>{:else}<span class="mono text-[10px]">{t("pro.field.ports.cdnNote")}</span>
@@ -1019,26 +1023,13 @@
           {@render fieldError("selectedPorts")}
         </div>
 
-        <label class="text-xs" style="color: var(--ink-muted)">
-          {t("pro.field.customPorts")}
-          <input
-            class="field mono mt-1"
-            name="customPortsText"
-            placeholder={t("pro.field.customPorts.placeholder")}
-            aria-invalid={fieldErrors.customPortsText ? "true" : undefined}
-            aria-describedby={fieldErrors.customPortsText ? "err-customPortsText" : undefined}
-            bind:value={form.customPortsText}
-          />
-          {@render fieldError("customPortsText")}
-        </label>
-
         <label
-          class="text-xs md:col-span-2 lg:col-span-3"
+          class="text-xs"
           style="color: var(--ink-muted)"
         >
           {t("pro.field.stopAfter")}
           <input
-            class="field mono mt-1 max-w-40"
+            class="field mono mt-1 field-num"
             type="number"
             min="1"
             name="stopFound"
@@ -1052,12 +1043,12 @@
         <!-- Tuning knobs live behind one disclosure: concurrency is how many
              probes run at once, the cap is a run-wide probe budget. Related
              but rarely touched together with target/ports selection. -->
-        <div class="md:col-span-2 lg:col-span-3">
+        <div class="span-all">
           <details bind:open={scanAdvancedOpen}>
             <summary class="cursor-pointer text-xs font-semibold" style="color: var(--ink-muted)">
               {t("pro.section.scanAdvanced")}
             </summary>
-            <div class="mt-3 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+            <div class="mt-3 grid gap-4 grid-form">
               <label class="text-xs" style="color: var(--ink-muted)">{t("pro.field.concurrency")}
                 <input
                   class="field mono mt-1"
@@ -1116,7 +1107,7 @@
         <summary class="cursor-pointer text-xs font-semibold" style="color: var(--ink-muted)">
           {t("pro.section.customCidrs")}
         </summary>
-        <div class="mt-3 grid gap-4 sm:grid-cols-2">
+        <div class="mt-3 grid gap-4 grid-form">
           <label class="text-xs" style="color: var(--ink-muted)">
             {t("pro.field.customCidrs")}
             <textarea
@@ -1184,7 +1175,7 @@
             <summary class="cursor-pointer text-xs font-semibold" style="color: var(--ink-muted)">
               {t("pro.section.warpAdvanced")}
             </summary>
-            <div class="mt-3 grid gap-4 sm:grid-cols-2">
+            <div class="mt-3 grid gap-4 grid-form">
               <label class="text-xs" style="color: var(--ink-muted)">
                 {t("pro.warp.probes")}
                 <input
@@ -1211,7 +1202,7 @@
                   onchange={() => normalizeField("warpEndpoints")}></textarea>
                 {@render fieldError("warpEndpoints")}
               </label>
-              <div class="flex flex-wrap items-center gap-1.5 sm:col-span-2">
+              <div class="flex flex-wrap items-center gap-1.5 span-all">
                 <button
                   type="button"
                   class="pill cursor-pointer"
@@ -1232,8 +1223,8 @@
             </div>
           </details>
 
-          <div class="mt-3 grid gap-4 sm:grid-cols-2">
-          <div class="text-xs sm:col-span-2" style="color: var(--ink-muted)">
+          <div class="mt-3 grid gap-4 grid-form">
+          <div class="text-xs span-all" style="color: var(--ink-muted)">
             <label class="block">
               wgconf (paste your wg:// URI, wg-quick INI, or Amnezia config — enables real-keypair verification)
               <textarea
@@ -1301,7 +1292,7 @@
 
           <!-- WARP registration -->
           <div
-            class="fade-in rounded-md border px-3 py-3 sm:col-span-2"
+            class="fade-in rounded-md border px-3 py-3 span-all"
             style="border-color: oklch(100% 0 0 / 8%)"
           >
             <div class="flex flex-wrap items-end gap-2">
@@ -1418,7 +1409,7 @@
                   </span>
                 {/if}
               </summary>
-              <div class="mt-3 grid gap-4 sm:grid-cols-3">
+              <div class="mt-3 grid gap-4 grid-form">
                 <label class="text-xs" style="color: var(--ink-muted)">
                   {t("pro.phase2.fragment")}
                   <select class="field mt-1" name="fragment" bind:value={form.fragment}>
@@ -1426,7 +1417,7 @@
                   </select>
                   {@render fieldError("fragment")}
                 </label>
-                <label class="text-xs sm:col-span-2" style="color: var(--ink-muted)">
+                <label class="text-xs span-all" style="color: var(--ink-muted)">
                   {t("pro.phase2.sniLabel")}
                   <input
                     class="field mono mt-1"
@@ -1438,7 +1429,7 @@
                   />
                   {@render fieldError("snis")}
                 </label>
-                <label class="text-xs sm:col-span-2 lg:col-span-3" style="color: var(--ink-muted)">
+                <label class="text-xs span-all" style="color: var(--ink-muted)">
                   {t("pro.phase2.probeLabel")}
                   <input
                     class="field mono mt-1"
@@ -1458,7 +1449,7 @@
       <!-- sticky actions: one canonical Start/Stop pair, visible even with
            phase-2/WARP textareas expanded -->
       <div
-        class="sticky bottom-0 z-10 -mx-6 -mb-6 mt-5 rounded-b-2xl px-6 pt-3 backdrop-blur-md"
+        class="sticky bottom-0 z-10 -mx-6 sm:-mx-8 -mb-8 sm:-mb-10 mt-5 rounded-b-2xl px-6 sm:px-8 pt-3 backdrop-blur-md"
         style="background: color-mix(in oklab, var(--paper-2) 88%, transparent); box-shadow: 0 -12px 24px oklch(0% 0 0 / 25%); padding-bottom: max(1rem, env(safe-area-inset-bottom));"
       >
         <div class="flex flex-wrap items-center justify-end gap-2">
