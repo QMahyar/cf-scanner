@@ -23,6 +23,23 @@ locally here should be exercised before pushing.
   The binaries are `dist` and `cargo dist`. If your shell doesn't have
   `~/.cargo/bin` on PATH, call it by full path.
 
+## Frontend
+
+The browser UI lives in `ui/` (Svelte 5 runes-only + Tailwind 4 + Vite).
+After changes there, always run:
+
+```
+cd ui && npm run check   # svelte-check (type errors)
+cd ui && npm run build   # vite build — rewrites ui/dist
+```
+
+Commit `ui/src` together with the rebuilt `ui/dist` (rust-embed serves the
+committed dist). There is a dist-drift CI gate that fails when src changed
+without a rebuild.
+
+Prerequisites: Node ≥ 22, npm. Setup: `cd ui && npm ci` (first time or when
+`package-lock.json` changed).
+
 ## Daily loop
 
 ```

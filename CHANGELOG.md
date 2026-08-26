@@ -5,6 +5,12 @@ Added / Changed / Fixed / Deprecated / Removed / Security, newest on top.
 
 ## [Unreleased]
 
+- **On-demand Custom ports.** The Custom chip in the ports picker now reveals a
+  single inline field replacing always-visible inputs. Affected code landed
+  across tag 0.10.0; the Pro half shipped after the tag.
+- **Advanced disclosures.** Scan WARP options now collapse behind
+  "Advanced scan settings" and "Advanced WARP options" details cards.
+
 ## [0.10.0] - 2026-08-25
 
 ### Added
@@ -23,7 +29,7 @@ Added / Changed / Fixed / Deprecated / Removed / Security, newest on top.
 - **Compact targets.** Preset amounts moved into the button labels
   (Quick ~4K · Normal ~12K · Full 1.5M in Pro; per-mode amounts in Simple);
   Custom reveals a single inline field replacing always-visible inputs and
-  hint paragraphs on both surfaces.
+   hint paragraphs on both surfaces (Simple half in 0.10.0).
 
 ### Changed
 - Phase-2 expert knobs (fragment / SNI / probe URLs) collapse into an
@@ -39,8 +45,9 @@ Added / Changed / Fixed / Deprecated / Removed / Security, newest on top.
   covered on `windows-latest` as well as `ubuntu-latest`.
 - **ADR-012 + SBOM.** ADR-012 locks the review-scope calls (engine stays on
   `api::types` per ADR-011, `serde(other)` stays rejected). Release builds
-  now emit `cf-scanner.spdx.json` via `cargo-sbom` and upload it with the
-  global artifacts.
+   emit `cf-scanner.spdx.json` on a best-effort basis via `cargo-sbom` and
+   upload it with the global artifacts when available (skipped if the SBOM
+   tooling cannot run on the release runner).
 
 ### Changed
 - **Frontend redesign ("Ethereal Glass").** OLED near-black paper with
@@ -596,6 +603,12 @@ Changes merged by the `review/*` branches land here.
 - `custom_cidrs` now REPLACE the bundled ranges (was: merged in addition);
   exclusions still apply to custom ranges.
 
+[0.10.0]: https://github.com/QMahyar/cf-scanner/releases/tag/v0.10.0
+[0.9.0]: https://github.com/QMahyar/cf-scanner/releases/tag/v0.9.0
+[0.8.0]: https://github.com/QMahyar/cf-scanner/releases/tag/v0.8.0
+[0.7.0]: https://github.com/QMahyar/cf-scanner/releases/tag/v0.7.0
+[0.6.0]: https://github.com/QMahyar/cf-scanner/releases/tag/v0.6.0
+[0.5.0]: https://github.com/QMahyar/cf-scanner/releases/tag/v0.5.0
 [0.4.0]: https://github.com/QMahyar/cf-scanner/releases/tag/v0.4.0
 [0.3.0]: https://github.com/QMahyar/cf-scanner/releases/tag/v0.3.0
 [0.2.0]: https://github.com/QMahyar/cf-scanner/releases/tag/v0.2.0

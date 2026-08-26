@@ -33,8 +33,7 @@ jobs:
       - name: Clippy
         run: cargo clippy --all-targets --locked -- -D warnings
       - name: Format
-        # fmt is platform-independent; the windows leg is skipped so a CRLF
-        # working tree (no .gitattributes) cannot produce a spurious diff.
+        # fmt is workspace-wide; rustfmt honors .gitattributes so Windows CI now matches.
         if: ${{ runner.os != 'Windows' }}
         run: cargo fmt --check
 

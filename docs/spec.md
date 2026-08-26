@@ -70,7 +70,7 @@ Release:          dist build --output-format=json "--artifacts=global" ... (CI o
 ```
 src/
   main.rs            CLI entry (clap): serve | scan | ranges | wizard |
-                     warp-config
+                     warp-config | export-config
   server/{mod,state,error,guard,sse}.rs  axum app: API routes, SSE, static frontend (split from single file in v0.8.x)
   engine/            ScanController: orchestration, stop conditions, progress
     mod.rs           controller, event stream re-sync, pool planning/sampling

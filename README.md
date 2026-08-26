@@ -85,7 +85,7 @@ With an installed binary, use `cf-scanner`. From source, replace
 | `cf-scanner warp-config generate` | Opt-in WARP registration through the v0a884 API, then wgconf build |
 | `cf-scanner warp-config export` | Export the registered WARP config as text or a .conf file |
 | `cf-scanner export-config --config vless://… --ip 1.2.3.4 --port 443` | Re-render a vless/trojan link against a scanned endpoint. The UI Export button and `POST /api/config/export` do the same. |
-| `cf-scanner ranges refresh` | Refresh bundled Cloudflare ranges over a verified HTTPS fetch |
+| `cf-scanner ranges refresh [--ipv6]` | Refresh bundled Cloudflare ranges over a verified HTTPS fetch (`--ipv6` includes the v6 pool) |
 | `cargo test` | Unit + integration tests |
 | `cargo clippy --all-targets -- -D warnings` | Lint |
 | `cargo fmt --check` | Format check |

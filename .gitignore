@@ -13,3 +13,5 @@ cargo-dist/
 ui/node_modules/
 ui/.svelte-check*
 vite-dev.log
+
+.ruff_cache/
