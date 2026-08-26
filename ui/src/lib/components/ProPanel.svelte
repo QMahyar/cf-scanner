@@ -1224,9 +1224,14 @@
           </details>
 
           <div class="mt-3 grid gap-4 grid-form">
-          <div class="text-xs span-all" style="color: var(--ink-muted)">
-            <label class="block">
-              {t("pro.warp.wgconfLabel")}
+          <div
+            class="rounded-md border px-3 py-3 span-all"
+            style="border-color: oklch(100% 0 0 / 8%); background: oklch(100% 0 0 / 2%)"
+          >
+            <p class="mb-2 text-xs font-semibold" style="color: var(--ink)">{t("pro.warp.identityGroup")}</p>
+            <div class="text-xs" style="color: var(--ink-muted)">
+              <label class="block">
+                {t("pro.warp.wgconfLabel")}
               <textarea
                 class="field mono mt-1"
                 rows="3"
@@ -1289,7 +1294,8 @@
             <input type="checkbox" name="verifyWarp" bind:checked={form.verifyWarp} disabled={!form.wgconf} class="accent-[var(--accent)]" />
             {t("pro.warp.verify")}
           </label>
-          <p class="mt-1 text-[11px] span-all" style="color: var(--ink-muted)">{t("pro.warp.verifyHint")}</p>
+          <p class="mt-1 text-[11px]" style="color: var(--ink-muted)">{t("pro.warp.verifyHint")}</p>
+          </div>
 
           <!-- WARP registration -->
           <div
