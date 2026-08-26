@@ -84,6 +84,12 @@ fn plan_preset(pool: &CidrPool, per: u64, _rng: &mut SplitMix64) -> Vec<PlanItem
             });
             continue;
         }
+        // Dense sampling skips network+broadcast, so /31-/32 would draw from
+        // an empty space and silently probe nothing; walk them host by host.
+        if cidr.host_count() <= 2 {
+            items.push(PlanItem::Every { cidr });
+            continue;
+        }
         if cidr.prefix >= 24 {
             items.push(PlanItem::Sample {
                 cidr,
@@ -163,5 +169,50 @@ fn ipv4(addr: IpAddr) -> Ipv4Addr {
     match addr {
         IpAddr::V4(a) => a,
         IpAddr::V6(_) => unreachable!("v6 ranges are handled separately"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ranges::parse_cidr;
+
+    #[test]
+    fn preset_routes_tiny_cidrs_to_every() {
+        for preset in [CdnPreset::Quick, CdnPreset::Normal] {
+            let pool = CidrPool::parse("203.0.113.5/32").unwrap();
+            let plan = plan(
+                &pool,
+                &ScanTarget::Preset(preset.clone()),
+                &mut SplitMix64::new(1),
+            );
+            assert_eq!(
+                plan,
+                vec![PlanItem::Every {
+                    cidr: parse_cidr("203.0.113.5/32").unwrap()
+                }],
+                "{preset:?} must walk a /32 host-by-host"
+            );
+            let hosts: Vec<IpAddr> =
+                super::super::plan_hosts_iter(&plan[0], &mut SplitMix64::new(1)).collect();
+            assert_eq!(hosts, vec![IpAddr::V4("203.0.113.5".parse().unwrap())]);
+        }
+    }
+
+    #[test]
+    fn preset_still_samples_dense_blocks() {
+        let pool = CidrPool::parse("203.0.113.0/24").unwrap();
+        let plan = plan(
+            &pool,
+            &ScanTarget::Preset(CdnPreset::Quick),
+            &mut SplitMix64::new(1),
+        );
+        assert_eq!(
+            plan,
+            vec![PlanItem::Sample {
+                cidr: parse_cidr("203.0.113.0/24").unwrap(),
+                count: 1,
+            }]
+        );
     }
 }
