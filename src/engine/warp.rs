@@ -228,8 +228,11 @@ impl ScanController {
                 .collect::<Result<Vec<_>>>()?;
             let pool = crate::warp::bundled_pool().excluding(&excluded);
             let plan = plan(&pool, &cfg.target, &mut SplitMix64::new(seed));
+            // One RNG across items: reseeding per item made every block
+            // sample the same offsets (cdn.rs hoists for the same reason).
+            let mut rng = SplitMix64::new(seed);
             for item in &plan {
-                for host in plan_hosts_iter(item, &mut SplitMix64::new(seed)) {
+                for host in plan_hosts_iter(item, &mut rng) {
                     match host {
                         IpAddr::V4(ip) => groups.push((ip, ports.clone())),
                         IpAddr::V6(_) => bail!("WARP pools must stay IPv4"),
@@ -276,7 +279,8 @@ fn parse_endpoint(s: &str) -> Result<(std::net::Ipv4Addr, Option<u16>)> {
 mod tests {
     use super::*;
     use crate::api::types::{
-        MAX_SCAN_COUNT, Mode, ScanConfig, ScanEvent, ScanTarget, StopCondition, WarpConfig,
+        CdnPreset, MAX_SCAN_COUNT, Mode, ScanConfig, ScanEvent, ScanTarget, StopCondition,
+        WarpConfig,
     };
     use crate::engine::tests::run_local;
     use crate::probe::{FakeTransport, ProbeError};
@@ -383,6 +387,35 @@ mod tests {
         let summary = run_local(&c, cfg, 1).await.unwrap();
         assert_eq!(summary.scanned, 8 * 256, "all bundled pool hosts");
         assert_eq!(summary.found, 0);
+    }
+
+    #[test]
+    fn warp_plan_shares_rng_across_items() {
+        let pool = crate::warp::bundled_pool();
+        let blocks = pool.ranges().to_vec();
+        assert!(
+            blocks.len() >= 2,
+            "bundled pool must decompose to >=2 items"
+        );
+        assert!(
+            blocks.iter().all(|b| b.prefix >= 24),
+            "test assumes per-block /24 sampling"
+        );
+        let (c, _) = warp_controller(FakeTransport::new());
+        let mut cfg = warp_cfg(1, &[]);
+        cfg.target = ScanTarget::Preset(CdnPreset::Quick);
+        let groups = c.warp_groups(&cfg, cfg.warp.as_ref().unwrap(), 42).unwrap();
+        assert_eq!(groups.len(), blocks.len(), "one sampled host per block");
+        // Per-item reseeding made every block draw the same relative offset;
+        // one shared stream must not.
+        let offsets: HashSet<u8> = groups
+            .iter()
+            .map(|(ip, _)| (u32::from(*ip) & 0xff) as u8)
+            .collect();
+        assert!(
+            offsets.len() > 1,
+            "sampled offsets must differ across items: {offsets:?}"
+        );
     }
 
     #[test]
