@@ -93,28 +93,38 @@ pub fn sanitize_error_text(text: &str) -> String {
         .join("\n")
 }
 
-/// One line of error text: if it carries a `scheme://`, the query/fragment
-/// is cut first (a stray '@' inside the query must not defeat the userinfo
-/// mask), then the userinfo up to the first '@' — raw or percent-encoded
-/// `%40` — is replaced. An '@' that sits after a space is prose, not
-/// userinfo, and is left alone.
+/// One line of error text: every `scheme://` occurrence starts a segment
+/// that gets the single-URL treatment — the query/fragment is cut first (a
+/// stray '@' inside the query must not defeat the userinfo mask), then the
+/// userinfo up to the first '@' — raw or percent-encoded `%40` — is
+/// replaced. An '@' that sits after a space is prose, not userinfo, and is
+/// left alone.
 fn redact_line(line: &str) -> String {
-    let Some(scheme_end) = line.find("://") else {
-        return line.to_owned();
-    };
-    let rest = &line[scheme_end + 3..];
-    let cut = rest.find(['?', '#']).unwrap_or(rest.len());
-    let head = &rest[..cut];
-    let at = head.find('@').or_else(|| head.find("%40"));
     let mut out = String::with_capacity(line.len());
-    out.push_str(&line[..scheme_end + 3]);
-    match at.filter(|at| !head[..*at].contains(' ')) {
-        Some(at) => {
-            let sep_len = if head[at..].starts_with('@') { 1 } else { 4 };
-            out.push_str("***@");
-            out.push_str(&head[at + sep_len..]);
+    let mut rest = line;
+    loop {
+        let Some(scheme_end) = rest.find("://") else {
+            out.push_str(rest);
+            break;
+        };
+        // Literal text plus the scheme itself stay verbatim; the URL's
+        // segment runs to the next scheme marker (or end of line).
+        out.push_str(&rest[..scheme_end + 3]);
+        let seg = &rest[scheme_end + 3..];
+        let seg_end = seg.find("://").unwrap_or(seg.len());
+        let seg = &seg[..seg_end];
+        let cut = seg.find(['?', '#']).unwrap_or(seg.len());
+        let head = &seg[..cut];
+        let at = head.find('@').or_else(|| head.find("%40"));
+        match at.filter(|at| !head[..*at].contains(' ')) {
+            Some(at) => {
+                let sep_len = if head[at..].starts_with('@') { 1 } else { 4 };
+                out.push_str("***@");
+                out.push_str(&head[at + sep_len..]);
+            }
+            None => out.push_str(head),
         }
-        None => out.push_str(head),
+        rest = &rest[scheme_end + 3 + seg_end..];
     }
     out
 }
@@ -1125,6 +1135,26 @@ mod tests {
                 "input {input:?} must redact to {want:?}"
             );
         }
+    }
+
+    #[test]
+    fn redact_line_masks_every_url_on_a_line() {
+        let input = "dial failed: vless://user:pass@host1/x retry vless://user:pass@host2/y";
+        let out = sanitize_error_text(input);
+        assert!(!out.contains("user:pass"), "credentials leaked: {out}");
+        assert_eq!(
+            out,
+            "dial failed: vless://***@host1/x retry vless://***@host2/y"
+        );
+        // Query/fragment cutting applies per segment too.
+        let input = "https://u:p@a.com/x?q=1 and https://u:p@b.com/y#frag";
+        let out = sanitize_error_text(input);
+        assert!(!out.contains("u:p"), "credentials leaked: {out}");
+        // Prose between URLs survives when no query/fragment intervenes.
+        let input = "see https://a.com/p then mail admin@x.com or vless://u2:p2@b.com/q";
+        let out = sanitize_error_text(input);
+        assert!(out.contains("then mail admin@x.com or "), "{out}");
+        assert!(!out.contains("u2:p2"), "{out}");
     }
 
     #[test]
