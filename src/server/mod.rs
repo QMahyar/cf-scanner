@@ -280,6 +280,16 @@ fn banned_ip(ip: &std::net::IpAddr) -> bool {
     match ip {
         std::net::IpAddr::V4(v4) => v4.is_private() || v4.is_link_local() || v4.octets()[0] == 0,
         std::net::IpAddr::V6(v6) => {
+            // Mapped-v6 spellings (::ffff:a.b.c.d) of v4 specials must not
+            // pass this gate by hiding behind their v6 form: they connect
+            // as the embedded v4 address.
+            if let Some(v4) = v6.to_ipv4_mapped() {
+                return v4.is_loopback()
+                    || v4.is_unspecified()
+                    || v4.is_private()
+                    || v4.is_link_local()
+                    || v4.octets()[0] == 0;
+            }
             // ULA is fc00::/7 = first segment 0xfc00..=0xfdff.
             v6.is_unicast_link_local() || matches!(v6.segments()[0], 0xfc00..=0xfdff)
         }
@@ -2001,6 +2011,12 @@ mod tests {
             "::/128",         // unspecified v6
             "fc00::/7",       // ULA
             "fe80::/10",      // link-local v6
+            // IPv4-mapped IPv6 spellings of the same specials must fail
+            // exactly like their v4 forms.
+            "::ffff:127.0.0.1/128",   // loopback, mapped
+            "::ffff:169.254.0.1/128", // link-local, mapped
+            "::ffff:10.0.0.0/104",    // RFC1918 10/8, mapped
+            "::ffff:192.168.1.0/120", // RFC1918 /24, mapped
         ] {
             let mut c = cfg(1, 1);
             c.custom_cidrs = vec![cidr.to_owned()];
