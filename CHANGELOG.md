@@ -5,11 +5,93 @@ Added / Changed / Fixed / Deprecated / Removed / Security, newest on top.
 
 ## [Unreleased]
 
+### Fixed
+- **Duplicate Custom-ports field.** The F7 consolidation left an orphaned
+  always-visible Custom-ports input alongside the new on-demand one; both
+  bound to the same state with duplicate DOM ids. Removed the orphan.
+- **Scattered form layout.** The Pro scan-config grid mixed breakpoint
+  prefixes and full-span rows for tiny fields, leaving empty cells. Added
+  canonical `.grid-form`/`.span-all`/`.field-num` utilities; all scan
+  sections now share one responsive system and numeric fields no longer float
+  in whitespace.
+- **Mode widget inconsistency.** Pro mode used a `<select>` while Simple mode
+  used segmented pills for the same CDN/WARP choice. Pro now uses the same
+  `Segmented.svelte` pills; muscle memory works across surfaces.
+- **Sticky action bar misalignment.** Negative margins now mirror the
+  parent's responsive padding (`sm:-mx-8` etc.) so the CTA row sits flush at
+  `≥sm`.
+- **WARP verification UX.** The verify checkbox gave no hint it requires a
+  wgconf; a persistent hint line now names the dependency, and the hardcoded
+  wgconf label is routed through its existing i18n key.
+- **Start wiping prior results.** A failed scan start (400/422/network)
+  erased the last completed scan's visible results. The wipe now happens
+  only after the server accepts the scan.
+- **Copy-all ignoring latency filter.** `copyAll` passed `null` for the
+  latency ceiling, pasting rows the tooltip promised were excluded. It now
+  honors `view.maxLatency`.
+- **VMess builds with wrong cipher key.** The xray outbound builder emitted
+  `encryption: none` (VLESS) for VMess users and dropped `alterId`/`security`
+  entirely. VMess rows now carry `alterId` and the correct `security` field.
+- **WARP sampling collapse.** A fresh `SplitMix64` per plan item made every
+  `/24` sample the same offsets. One RNG is now shared across items.
+- **`/31`/`/32` presets probing nothing.** Tiny custom CIDRs were routed to
+  `Sample` with a zero-draw sampler. They now route to `Every`.
+- **Progress events by modulo.** Concurrent workers skipped/duplicated
+  milestones; broadcast delivered out of order. A `compare_exchange` milestone
+  gate now ensures exactly one emission per threshold.
+- **Cancel ignored during config parse.** Up to 64 subscription fetches ran
+  before cancellation was checked. The parse loop now races each fetch
+  against the cancel signal.
+- **WARP registration robustness.** Response body reads are now inside the
+  builder-level timeout; `POST /reg` never retries on transport uncertainty;
+  429 honors `Retry-After` (capped at the request timeout); the Windows
+  delete-then-rename identity fallback is removed; per-hop redirect guard
+  (matching `HTTP_CLIENT`) is attached to the registration client.
+- **Five protocol fixes.** Multi-URL error redaction now masks every URL on
+  a line; decoded-credential caps cover all parsers via one `finish_spec`
+  gate; close-delimited bodies over the cap fail explicitly; probe URLs keep
+  their query strings; colo codes are constrained to `≤4` alphanumerics.
+- **Loopback guard bypass.** `::ffff:127.0.0.1`-style IPv4-mapped literals
+  bypassed both the custom-CIDR admission gate and the fetch SSRF guard.
+  Both normalize `to_ipv4_mapped()` first.
+- **Origin spoof from any loopback port.** `Origin: http://127.0.0.1:<other-port>`
+  passed the localhost check. `Origin` now must carry the served port;
+  requests without `Origin` (curl, tray) remain allowed.
+- **Dead-code subscriptions.** A hostile subscription could expand into an
+  unbounded spec vector after one 64 MiB body had already been buffered.
+  `Content-Length` is rejected early, per-entry specs are capped at 2048,
+  and the total across a phase-2 config at 4096.
+- **Oversized subscription ingestion.** (Same as above; see limits.)
+- **npm installer.** Redirects capped at 5 and forced `https:` per hop;
+  PowerShell paths travel via env vars instead of string interpolation;
+  checksum parsing is line-anchored and poison-on-junk; `tar` gets
+  `--no-same-owner` and assets are asserted as regular files before `chmod`.
+- **UI results O(n²).** `applyResult` used `findIndex` with template-string
+  compares per row; a `Map<string, number>` + `setResults` bulk helper
+  makes it O(1) per tick and keeps the hydrate path consistent.
+- **Error borders + heading level.** `field[aria-invalid]` now mirrors
+  `:user-invalid`'s red border; WgNoiseEditor drops its inline style;
+  ProPanel section heading `h3 → h2` so the outline no longer skips a level.
+
+### Changed
 - **On-demand Custom ports.** The Custom chip in the ports picker now reveals a
   single inline field replacing always-visible inputs. Affected code landed
   across tag 0.10.0; the Pro half shipped after the tag.
 - **Advanced disclosures.** Scan WARP options now collapse behind
   "Advanced scan settings" and "Advanced WARP options" details cards.
+- **Results perf.** `applyResult`/`setResults` carry a `Map` alongside the
+  verdict store; hydration after F5 rebuilds it.
+- **Subscription bounds.** Two new constants in `api::types`
+  (`MAX_SUBSCRIPTION_SPECS`, `MAX_PHASE2_TOTAL_SPECS`) bound ingestion fan-out.
+- **Dead font dep removed.** `@fontsource-variable/inter` (replaced by Plus
+  Jakarta Sans in 0.9.0) dropped.
+
+### Security
+- The fixes above tagged as guard/bypass/SSRF/installer hardening are
+  defense-in-depth on the localhost trust boundary and the npm supply chain.
+  No remote vulnerability existed — the server binds 127.0.0.1 and the guards
+  already rejected raw IPv4 literals; the gaps were mapped-literal and
+  cross-port `Origin` variants.
 
 ## [0.10.0] - 2026-08-25
 
