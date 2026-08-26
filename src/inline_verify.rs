@@ -236,7 +236,11 @@ fn parse_target(url: &str) -> Result<Target> {
             .ok_or_else(|| anyhow!("probe URL has no host"))?
             .to_owned(),
         port: parsed.port_or_known_default().unwrap_or(80),
-        path: if path.is_empty() { "/".to_owned() } else { path },
+        path: if path.is_empty() {
+            "/".to_owned()
+        } else {
+            path
+        },
         https: parsed.scheme() == "https",
     })
 }
@@ -1350,10 +1354,7 @@ mod tests {
         let err = read_http_response(&mut &resp[..])
             .await
             .expect_err("an over-cap close-delimited body must fail explicitly");
-        assert!(
-            err.to_string().contains("exceeded"),
-            "wrong failure: {err}"
-        );
+        assert!(err.to_string().contains("exceeded"), "wrong failure: {err}");
     }
 
     #[tokio::test]
@@ -1371,8 +1372,7 @@ mod tests {
     fn parse_target_keeps_the_query_string_in_the_request_line() {
         let target = parse_target("http://probe.test/cdn-cgi/trace?flag=1").unwrap();
         assert_eq!(target.path, "/cdn-cgi/trace?flag=1");
-        let request =
-            socks::http_request_keepalive(&target.host, &target.path, "Accept: */*");
+        let request = socks::http_request_keepalive(&target.host, &target.path, "Accept: */*");
         assert!(
             request.starts_with("GET /cdn-cgi/trace?flag=1 HTTP/1.1\r\n"),
             "{request}"

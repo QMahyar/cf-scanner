@@ -157,7 +157,11 @@ async fn get_via_socks_inner(url: &str, socks: SocketAddr) -> Result<Vec<u8>> {
         path.push('?');
         path.push_str(q);
     }
-    let path = if path.is_empty() { "/".to_owned() } else { path };
+    let path = if path.is_empty() {
+        "/".to_owned()
+    } else {
+        path
+    };
 
     let mut stream = TcpStream::connect(socks).await?;
     socks5_connect(&mut stream, &host, port).await?;

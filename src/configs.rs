@@ -385,7 +385,7 @@ fn parse_sip002(entry: &str) -> Result<OutboundSpec> {
         _ => None,
     };
 
-    Ok(finish_spec(OutboundSpec {
+    finish_spec(OutboundSpec {
         protocol,
         server: host,
         port,
@@ -398,7 +398,7 @@ fn parse_sip002(entry: &str) -> Result<OutboundSpec> {
         tag: url.fragment().map(percent_decode),
         alter_id: 0,
         vmess_security: None,
-    })?)
+    })
 }
 
 /// vmess://BASE64(JSON) where the JSON carries everything, e.g.
@@ -441,7 +441,7 @@ fn parse_vmess(entry: &str) -> Result<OutboundSpec> {
         }),
         _ => None,
     };
-    Ok(finish_spec(OutboundSpec {
+    finish_spec(OutboundSpec {
         protocol: Protocol::Vmess,
         server: server.to_owned(),
         port,
@@ -454,7 +454,7 @@ fn parse_vmess(entry: &str) -> Result<OutboundSpec> {
         tag: tag.as_deref().map(percent_decode),
         alter_id,
         vmess_security,
-    })?)
+    })
 }
 
 /// Shadowsocks URIs come in two forms:
@@ -490,7 +490,7 @@ fn parse_ss(entry: &str) -> Result<OutboundSpec> {
         split_host_port(&host_port).ok_or_else(|| anyhow!("ss missing host:port"))?;
     let port: u16 = port.parse().map_err(|_| anyhow!("ss bad port"))?;
 
-    Ok(finish_spec(OutboundSpec {
+    finish_spec(OutboundSpec {
         protocol: Protocol::Shadowsocks,
         server: host.to_owned(),
         port,
@@ -503,7 +503,7 @@ fn parse_ss(entry: &str) -> Result<OutboundSpec> {
         tag: tag.as_deref().map(percent_decode),
         alter_id: 0,
         vmess_security: None,
-    })?)
+    })
 }
 
 /// Extracts one usable outbound from xray-style JSON:
@@ -1040,7 +1040,8 @@ mod tests {
         };
         // The ÿ pair forces a '/' sextet and the length a '=' pad, so all
         // four engine outputs are distinct inputs.
-        let json = r#"{"v":"2","z":"ÿÿ","add":"5.6.7.8","port":"443","id":"u","net":"tcp","tls":"none"}"#;
+        let json =
+            r#"{"v":"2","z":"ÿÿ","add":"5.6.7.8","port":"443","id":"u","net":"tcp","tls":"none"}"#;
         let variants = [
             STANDARD.encode(json),
             STANDARD_NO_PAD.encode(json),
@@ -1048,7 +1049,10 @@ mod tests {
             URL_SAFE_NO_PAD.encode(json),
         ];
         assert_eq!(
-            variants.iter().collect::<std::collections::BTreeSet<_>>().len(),
+            variants
+                .iter()
+                .collect::<std::collections::BTreeSet<_>>()
+                .len(),
             4,
             "the four encodings must be distinct inputs"
         );
