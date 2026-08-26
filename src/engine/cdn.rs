@@ -83,6 +83,7 @@ impl ScanController {
             stop: cfg.stop.clone(),
             scanned: Arc::new(AtomicU64::new(0)),
             found: Arc::new(AtomicU64::new(0)),
+            last_milestone: AtomicU64::new(0),
             cadence,
             total,
             store: self.store.clone(),
@@ -182,7 +183,7 @@ impl ScanController {
                     }
                     // Timeouts and refusals are counted in `scanned` only.
                     let scanned = ctx.scanned.load(Ordering::Relaxed);
-                    if scanned % ctx.cadence == 0 {
+                    if ctx.milestone_due(scanned) {
                         ctx.progress(scanned, ctx.found.load(Ordering::Relaxed));
                     }
                 }
@@ -248,6 +249,43 @@ mod tests {
         }
         assert!(matches!(events.last(), Some(ScanEvent::Finished(_))));
         assert!(events.iter().any(|e| matches!(e, ScanEvent::Result(_))));
+    }
+
+    #[tokio::test]
+    async fn progress_milestones_are_monotonic_and_unique() {
+        // Concurrent workers racing the shared counter: every Progress event
+        // must carry a strictly increasing scanned value (no duplicates, no
+        // regressions), which the modulo emission could not guarantee.
+        let t = FakeTransport::new();
+        for i in 0..1024u32 {
+            t.insert(
+                format!("10.0.{}.{}", i / 256, i % 256).parse().unwrap(),
+                443,
+                Ok(i % 97),
+            );
+        }
+        let (c, mut rx) = controller(Arc::new(t));
+        let mut cfg = ok_cfg(1024, None);
+        cfg.custom_cidrs = vec!["10.0.0.0/22".to_owned()];
+        cfg.target = ScanTarget::Count(1024);
+        cfg.concurrency = 16;
+        let pool = ranges::CidrPool::parse("10.0.0.0/22").unwrap();
+        let summary = c.run_seeded_with_pool(cfg, 1, pool).await.unwrap();
+        assert_eq!(summary.scanned, 1024);
+        let mut progress = Vec::new();
+        while let Ok(e) = rx.try_recv() {
+            if let ScanEvent::Progress(p) = e {
+                progress.push(p.scanned);
+            }
+        }
+        assert!(
+            progress.len() >= 2,
+            "several milestones expected: {progress:?}"
+        );
+        assert!(
+            progress.windows(2).all(|w| w[0] < w[1]),
+            "scanned values must strictly increase: {progress:?}"
+        );
     }
 
     #[tokio::test]

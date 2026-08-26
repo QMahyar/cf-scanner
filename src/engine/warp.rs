@@ -77,6 +77,7 @@ impl ScanController {
             stop: cfg.stop.clone(),
             scanned: Arc::new(AtomicU64::new(0)),
             found: Arc::new(AtomicU64::new(0)),
+            last_milestone: AtomicU64::new(0),
             cadence,
             total,
             store: self.store.clone(),
@@ -181,7 +182,7 @@ impl ScanController {
                         let _ = ctx.events.send(ScanEvent::Result(Box::new(verdict)));
                     }
                     let scanned = ctx.scanned.load(Ordering::Relaxed);
-                    if scanned % ctx.cadence == 0 {
+                    if ctx.milestone_due(scanned) {
                         ctx.progress(scanned, ctx.found.load(Ordering::Relaxed));
                     }
                 }

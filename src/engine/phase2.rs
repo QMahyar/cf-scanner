@@ -4,13 +4,13 @@
 
 use std::collections::HashSet;
 use std::net::{IpAddr, Ipv4Addr};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context as _, Result, anyhow, bail};
 use tokio::task::JoinSet;
 
-use super::{ScanController, Store};
+use super::{ScanController, Store, claim_milestone};
 use crate::api::types::{
     FragmentPreset, Phase2Config, Phase2Progress, Phase2Verdict, ScanConfig, ScanEvent, Verdict,
 };
@@ -68,6 +68,8 @@ impl ScanController {
         let passed: Arc<Mutex<HashSet<(Ipv4Addr, u16)>>> = Arc::new(Mutex::new(HashSet::new()));
         let attempts = Arc::new(AtomicU64::new(0));
         let completed = Arc::new(AtomicU64::new(0));
+        let milestones = Arc::new(AtomicU64::new(0));
+        let terminal_sent = Arc::new(AtomicBool::new(false));
         let first_error: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
         let cap = cfg.stop.cap;
 
@@ -84,6 +86,8 @@ impl ScanController {
             let passed = passed.clone();
             let attempts = attempts.clone();
             let completed = completed.clone();
+            let milestones = milestones.clone();
+            let terminal_sent = terminal_sent.clone();
             let first_error = first_error.clone();
             let next = next.clone();
             let candidates = v4_candidates.clone();
@@ -178,7 +182,14 @@ impl ScanController {
                         }
                     }
                     let done = completed.load(Ordering::Relaxed);
-                    if done % PROGRESS_EVERY_P2 == 0 || done == total {
+                    let terminal = done == total;
+                    // The terminal event is claimed once (a worker that saw
+                    // `done == total` beats the post-loop emit); intermediate
+                    // milestones go through the shared single-winner gate so
+                    // concurrent completions cannot duplicate or regress.
+                    if (terminal && !terminal_sent.swap(true, Ordering::Relaxed))
+                        || (!terminal && claim_milestone(&milestones, done, PROGRESS_EVERY_P2))
+                    {
                         let _ =
                             events.send(ScanEvent::Phase2Progress(Phase2Progress { done, total }));
                     }
@@ -192,8 +203,11 @@ impl ScanController {
         // Terminal progress: workers short-circuit combos of already-passed
         // candidates, so `done` can land below `total`; emit the final
         // numbers regardless so clients always resolve to a final event.
+        // Suppressed when a worker already claimed the terminal event.
         let done = completed.load(Ordering::Relaxed);
-        if done > 0 || attempts.load(Ordering::Relaxed) > 0 {
+        if (done > 0 || attempts.load(Ordering::Relaxed) > 0)
+            && !terminal_sent.swap(true, Ordering::Relaxed)
+        {
             let _ = self
                 .events
                 .send(ScanEvent::Phase2Progress(Phase2Progress { done, total }));
@@ -796,6 +810,29 @@ mod tests {
             "phase-2 workers must see the phase-1 cancel signal"
         );
         assert!(summary.cancelled, "summary must report the cancel");
+    }
+
+    #[tokio::test]
+    async fn phase2_terminal_progress_emitted_once() {
+        // Nothing passes, so every combo completes and `done` reaches
+        // `total`: the winning worker and the post-loop emit must yield
+        // exactly one terminal Phase2Progress, not two.
+        let t = FakeTransport::new().ok("10.0.0.1".parse().unwrap(), 443, 50);
+        let probe = FakeTunnelProbe::new();
+        let c = p2_controller(t, FakeSub(""), probe);
+        let mut rx = c.subscribe();
+        let mut cfg = ok_cfg(1, None);
+        cfg.phase2 = Some(p2_cfg(&[VLESS], &["a.me", "b.me"]));
+        run_local(&c, cfg, 1).await.unwrap();
+        let mut terminal = 0u32;
+        while let Ok(e) = rx.try_recv() {
+            if let ScanEvent::Phase2Progress(p) = e {
+                if p.done == p.total {
+                    terminal += 1;
+                }
+            }
+        }
+        assert_eq!(terminal, 1, "terminal progress must fire exactly once");
     }
 
     #[tokio::test]

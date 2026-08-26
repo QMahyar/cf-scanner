@@ -122,9 +122,32 @@ impl ScanController {
     }
 
     /// Snapshot of the last scan's working endpoints, sorted by latency.
+    /// The only legitimate full-snapshot read: prefer [`Self::has_results`]
+    /// for emptiness checks, [`Self::for_each_result`] for iteration.
     pub fn results(&self) -> Vec<Verdict> {
         sort_if_dirty(&self.store, &self.store_dirty);
         self.store.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    /// True once the last scan produced at least one working endpoint.
+    pub fn has_results(&self) -> bool {
+        sort_if_dirty(&self.store, &self.store_dirty);
+        !self
+            .store
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_empty()
+    }
+
+    /// Iterate sorted results under the lock without cloning the store. The
+    /// callback runs while the store mutex is held: it must stay bounded and
+    /// must not call back into the controller.
+    pub fn for_each_result(&self, mut f: impl FnMut(&Verdict)) {
+        sort_if_dirty(&self.store, &self.store_dirty);
+        let store = self.store.lock().unwrap_or_else(|e| e.into_inner());
+        for v in store.iter() {
+            f(v);
+        }
     }
 
     /// Rows that passed phase-2 verification (phase2_only summary semantics).
@@ -285,11 +308,11 @@ impl ScanController {
                     // broadcast window overflowed are in the store, not the
                     // stream: re-emit any row the consumer never saw (deduped
                     // by (ip, port)) so a lagging consumer never loses one.
-                    for verdict in self.results() {
-                        if seen.insert((verdict.ip, verdict.port)) {
-                            on_event(ScanEvent::Result(Box::new(verdict)));
+                    self.for_each_result(|v| {
+                        if seen.insert((v.ip, v.port)) {
+                            on_event(ScanEvent::Result(Box::new(v.clone())));
                         }
-                    }
+                    });
                     return result;
                 }
                 recv = rx.recv() => match recv {
@@ -299,11 +322,11 @@ impl ScanController {
                         // branch: rows dropped from the broadcast window (and
                         // not covered by an earlier re-sync) must still reach
                         // the consumer exactly once.
-                        for verdict in self.results() {
-                            if seen.insert((verdict.ip, verdict.port)) {
-                                on_event(ScanEvent::Result(Box::new(verdict)));
+                        self.for_each_result(|v| {
+                            if seen.insert((v.ip, v.port)) {
+                                on_event(ScanEvent::Result(Box::new(v.clone())));
                             }
-                        }
+                        });
                         return handle.await?;
                     }
                     Ok(event) => {
@@ -320,11 +343,11 @@ impl ScanController {
                         // under-report mid-run verdicts, never over-report).
                         // Duplicate rows are possible after a re-sync;
                         // consumers keyed on (ip, port) dedupe naturally.
-                        for verdict in self.results() {
-                            if seen.insert((verdict.ip, verdict.port)) {
-                                on_event(ScanEvent::Result(Box::new(verdict)));
+                        self.for_each_result(|v| {
+                            if seen.insert((v.ip, v.port)) {
+                                on_event(ScanEvent::Result(Box::new(v.clone())));
                             }
-                        }
+                        });
                     }
                 },
             }
@@ -507,6 +530,29 @@ fn plan_probe_count(plan: &[PlanItem], ports: &[u16]) -> u64 {
 /// store lock is taken once per batch instead of once per verdict.
 const BATCH_FLUSH: usize = 256;
 
+/// Claims the cadence threshold crossed by `observed` for exactly one of the
+/// concurrent workers that saw it: the CAS on the highest claimed threshold
+/// makes every milestone single-winner and strictly increasing, so progress
+/// never duplicates or regresses no matter how workers interleave.
+fn claim_milestone(last: &AtomicU64, observed: u64, cadence: u64) -> bool {
+    let threshold = observed / cadence;
+    let claimed = last.load(Ordering::Relaxed);
+    threshold > claimed
+        && last
+            .compare_exchange(claimed, threshold, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok()
+}
+
+/// Resolves once the run's cancel flag flips; parks forever if the sender
+/// dropped without a flip (the reset guard only clears it after `finish`).
+async fn cancelled_signal(mut rx: watch::Receiver<bool>) {
+    while !*rx.borrow() {
+        if rx.changed().await.is_err() {
+            std::future::pending::<()>().await;
+        }
+    }
+}
+
 /// Shared state for one probe phase: stop conditions, counters, and the
 /// event/store handles every worker needs. `Arc`-shared between the producer
 /// and all workers of a phase.
@@ -515,6 +561,7 @@ struct ProbeContext {
     stop: StopCondition,
     scanned: Arc<AtomicU64>,
     found: Arc<AtomicU64>,
+    last_milestone: AtomicU64,
     cadence: u64,
     total: u64,
     store: Store,
@@ -537,15 +584,14 @@ impl ProbeContext {
     }
 
     async fn cancelled(&self) {
-        let mut rx = self.cancel.clone();
-        loop {
-            if *rx.borrow() {
-                return;
-            }
-            if rx.changed().await.is_err() {
-                return;
-            }
-        }
+        cancelled_signal(self.cancel.clone()).await;
+    }
+
+    /// Single-winner progress gate: true only for the worker that claims the
+    /// next cadence threshold, so exactly one Progress event fires per
+    /// milestone regardless of how many workers raced past it.
+    fn milestone_due(&self, observed: u64) -> bool {
+        claim_milestone(&self.last_milestone, observed, self.cadence)
     }
 
     fn progress(&self, scanned: u64, found: u64) {
@@ -585,6 +631,57 @@ mod tests {
     use crate::api::types::{ScanConfig, ScanTarget, StopCondition};
     use crate::probe::FakeTransport;
     use std::time::Duration;
+
+    #[test]
+    fn milestone_claims_are_single_winner_and_monotonic() {
+        let last = AtomicU64::new(0);
+        let solo: Vec<u64> = (1..=16000u64)
+            .filter(|v| claim_milestone(&last, *v, 100))
+            .collect();
+        assert_eq!(
+            solo.len(),
+            160,
+            "sequential runs claim every threshold once"
+        );
+
+        let last = Arc::new(AtomicU64::new(0));
+        let counter = Arc::new(AtomicU64::new(0));
+        let winners = Arc::new(Mutex::new(Vec::<u64>::new()));
+        std::thread::scope(|s| {
+            for _ in 0..8 {
+                let last = &last;
+                let counter = &counter;
+                let winners = &winners;
+                s.spawn(move || {
+                    for _ in 0..2000 {
+                        let observed = counter.fetch_add(1, Ordering::Relaxed) + 1;
+                        if claim_milestone(last, observed, 100) {
+                            winners
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .push(observed);
+                        }
+                    }
+                });
+            }
+        });
+        let claimed = winners.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        // Push order reflects thread scheduling, not claim order, so the
+        // assertions must be set-shaped: the CAS guarantees one winner per
+        // threshold and increasing claims, not ordered Vec appends.
+        let mut seen = claimed.clone();
+        seen.sort_unstable();
+        seen.dedup();
+        assert_eq!(seen.len(), claimed.len(), "observed values must be unique");
+        let mut thresholds: Vec<u64> = claimed.iter().map(|v| v / 100).collect();
+        thresholds.sort_unstable();
+        thresholds.dedup();
+        assert_eq!(thresholds.len(), claimed.len(), "one winner per threshold");
+        assert!(
+            thresholds.iter().all(|t| (1..=160).contains(t)),
+            "claims must land on crossed thresholds: {thresholds:?}"
+        );
+    }
 
     pub(crate) fn ok_cfg(found: u32, cap: Option<u32>) -> ScanConfig {
         // Serial probing keeps stop/cap semantics exact in tests.
