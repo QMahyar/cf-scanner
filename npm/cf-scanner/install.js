@@ -16,7 +16,6 @@ const { spawnSync } = require("child_process");
 const crypto = require("crypto");
 const fs = require("fs");
 const https = require("https");
-const http = require("http");
 const path = require("path");
 
 // ---------------------------------------------------------------------------
@@ -82,13 +81,26 @@ function getDownloadUrl(target) {
   return `https://github.com/${REPO}/releases/download/${RELEASE_TAG}/${filename}`;
 }
 
-function downloadOnce(url) {
+// Mirrors the fetcher guarantees in src/ranges.rs (HTTP_CLIENT redirect
+// policy + validate_fetch_url): https on EVERY hop, and a hard cap of 5
+// redirects so a hijacked or looping Location chain can neither hang the
+// install nor walk the binary download onto plain http.
+function downloadOnce(url, hops = 0) {
   return new Promise((resolve, reject) => {
-    const mod = url.startsWith("https") ? https : http;
-    const request = mod.get(url, { headers: { "User-Agent": "cf-scanner-npm" } }, (res) => {
+    if (!url.startsWith("https:")) {
+      const scheme = url.slice(0, url.indexOf(":") + 1) || "(no scheme)";
+      reject(new Error(`insecure download url: ${scheme}`));
+      return;
+    }
+    if (hops > 5) {
+      reject(new Error("too many redirects"));
+      return;
+    }
+    const request = https.get(url, { headers: { "User-Agent": "cf-scanner-npm" } }, (res) => {
       // Follow redirects (302, 301)
       if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
-        return downloadOnce(res.headers.location).then(resolve, reject);
+        downloadOnce(res.headers.location, hops + 1).then(resolve, reject);
+        return;
       }
       if (res.statusCode !== 200) {
         reject(new Error(`HTTP ${res.statusCode} downloading ${url}`));
@@ -107,13 +119,14 @@ function downloadOnce(url) {
   });
 }
 
-function download(url) {
+function download(url, hops = 0) {
   // Retry once on failure (2 attempts total, small delay), keep redirect following.
-  // downloadOnce handles redirects recursively; we wrap the top-level call.
-  return downloadOnce(url).catch((err) => {
+  // Retries restart the SAME top-level url with the SAME hop budget; per-hop
+  // counting lives inside downloadOnce.
+  return downloadOnce(url, hops).catch(() => {
     return new Promise((resolve, reject) => {
       setTimeout(() => {
-        downloadOnce(url).then(resolve, reject);
+        downloadOnce(url, hops).then(resolve, reject);
       }, 500);
     });
   });
