@@ -346,7 +346,9 @@ fn parse_sip002(entry: &str) -> Result<OutboundSpec> {
         .trim_start_matches('[')
         .trim_end_matches(']')
         .to_owned();
-    let port = url.port().ok_or_else(|| anyhow!("missing port"))?;
+    // Share links commonly omit the default port; 443 is universal for
+    // vless/trojan.
+    let port = url.port().unwrap_or(443);
     let q = query_map(&url);
 
     let userinfo = percent_decode(url.username());
@@ -411,11 +413,13 @@ fn parse_vmess(entry: &str) -> Result<OutboundSpec> {
         .as_object()
         .ok_or_else(|| anyhow!("vmess payload is not an object"))?;
     let get = |k: &str| o.get(k).and_then(|v| v.as_str());
+    // Generators emit port/aid either quoted or as JSON numbers.
+    let get_flex = |k: &str| o.get(k).and_then(value_to_string);
 
     let server = get("add")
         .filter(|s| !s.is_empty())
         .ok_or_else(|| anyhow!("vmess missing add"))?;
-    let port: u16 = get("port")
+    let port: u16 = get_flex("port")
         .and_then(|p| p.parse().ok())
         .ok_or_else(|| anyhow!("vmess missing/invalid port"))?;
     let user_id = get("id")
@@ -423,7 +427,7 @@ fn parse_vmess(entry: &str) -> Result<OutboundSpec> {
         .ok_or_else(|| anyhow!("vmess missing id"))?;
     let security = get("tls").unwrap_or("none").to_owned();
     reject_unsupported_security(&security)?;
-    let alter_id: u16 = get("aid").and_then(|a| a.parse().ok()).unwrap_or(0);
+    let alter_id: u16 = get_flex("aid").and_then(|a| a.parse().ok()).unwrap_or(0);
     let vmess_security = get("scy").filter(|s| !s.is_empty()).map(str::to_owned);
     let ws = match get("net") {
         Some(WS) => Some(WsSettings {
@@ -627,9 +631,11 @@ fn percent_decode(s: &str) -> String {
 }
 
 fn base64_any(s: &str) -> Result<Vec<u8>> {
-    use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
+    use base64::engine::general_purpose::{STANDARD, STANDARD_NO_PAD, URL_SAFE, URL_SAFE_NO_PAD};
     STANDARD
         .decode(s)
+        .or_else(|_| STANDARD_NO_PAD.decode(s))
+        .or_else(|_| URL_SAFE.decode(s))
         .or_else(|_| URL_SAFE_NO_PAD.decode(s))
         .map_err(|_| anyhow!("invalid base64"))
 }
@@ -857,6 +863,17 @@ mod tests {
     }
 
     #[test]
+    fn sip002_defaults_port_to_443() {
+        let spec = parse_uri("vless://aaaaaaaa-bbbb-cccc-dddd-eeeeffff0000@example.com").unwrap();
+        assert_eq!(spec.port, 443);
+        let trojan = parse_uri("trojan://secret@example.com").unwrap();
+        assert_eq!(trojan.port, 443);
+        let explicit =
+            parse_uri("vless://aaaaaaaa-bbbb-cccc-dddd-eeeeffff0000@host.example:8443").unwrap();
+        assert_eq!(explicit.port, 8443);
+    }
+
+    #[test]
     fn subscription_text_skips_comments_and_bad_lines() {
         let body = format!(
             "{FIXTURE}\n\n# a comment\nnot-a-uri\nvless://aaaaaaaa-bbbb-cccc-dddd-eeeeffff0000@1.2.3.4:443"
@@ -938,7 +955,9 @@ mod tests {
             "",
             "garbage",
             "ftp://x",
-            "vless://aaaaaaaa-bbbb-cccc-dddd-eeeeffff0000@1.2.3.4",
+            // A missing port no longer rejects (defaults to 443); a missing
+            // host still must.
+            "vless://aaaaaaaa-bbbb-cccc-dddd-eeeeffff0000@",
             "vless://@1.2.3.4:443",
             "vmess://!!!not-base64!!!",
             "vmess://",
@@ -997,6 +1016,43 @@ mod tests {
         let spec = parse_uri(&format!("vmess://{b64}")).unwrap();
         assert_eq!(spec.server, "5.6.7.8");
         assert_eq!(spec.port, 8443);
+    }
+
+    #[test]
+    fn base64_accepts_all_variants() {
+        use base64::engine::general_purpose::{
+            STANDARD, STANDARD_NO_PAD, URL_SAFE, URL_SAFE_NO_PAD,
+        };
+        // The ÿ pair forces a '/' sextet and the length a '=' pad, so all
+        // four engine outputs are distinct inputs.
+        let json = r#"{"v":"2","z":"ÿÿ","add":"5.6.7.8","port":"443","id":"u","net":"tcp","tls":"none"}"#;
+        let variants = [
+            STANDARD.encode(json),
+            STANDARD_NO_PAD.encode(json),
+            URL_SAFE.encode(json),
+            URL_SAFE_NO_PAD.encode(json),
+        ];
+        assert_eq!(
+            variants.iter().collect::<std::collections::BTreeSet<_>>().len(),
+            4,
+            "the four encodings must be distinct inputs"
+        );
+        for b64 in &variants {
+            let spec = parse_uri(&format!("vmess://{b64}")).unwrap();
+            assert_eq!(spec.server, "5.6.7.8");
+            assert_eq!(spec.port, 443);
+            assert_eq!(spec.user_id, "u");
+        }
+    }
+
+    #[test]
+    fn vmess_accepts_numeric_port_and_aid() {
+        let json = r#"{"v":"2","ps":"t","add":"h","port":8443,"id":"u","aid":64,"scy":"auto"}"#;
+        let b64 = base64::engine::general_purpose::STANDARD.encode(json);
+        let spec = parse_uri(&format!("vmess://{b64}")).unwrap();
+        assert_eq!(spec.port, 8443);
+        assert_eq!(spec.alter_id, 64);
+        assert_eq!(spec.vmess_security.as_deref(), Some("auto"));
     }
 
     #[test]

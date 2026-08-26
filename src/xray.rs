@@ -88,12 +88,24 @@ pub fn build_outbound(spec: &OutboundSpec, dial_ip: Ipv4Addr, sni_override: Opti
     }
 
     let mut outbound = match spec.protocol {
-        Protocol::Vless | Protocol::Vmess => json!({
+        Protocol::Vless => json!({
             "tag": "proxy",
             "protocol": spec.protocol.as_str(),
             "settings": {"vnext": [{
                 "address": dial_ip.to_string(), "port": spec.port,
                 "users": [{"id": spec.user_id, "encryption": "none"}],
+            }]},
+        }),
+        Protocol::Vmess => json!({
+            "tag": "proxy",
+            "protocol": spec.protocol.as_str(),
+            "settings": {"vnext": [{
+                "address": dial_ip.to_string(), "port": spec.port,
+                "users": [{
+                    "id": spec.user_id,
+                    "alterId": spec.alter_id,
+                    "security": spec.vmess_security.as_deref().unwrap_or("auto"),
+                }],
             }]},
         }),
         Protocol::Trojan => json!({
@@ -815,6 +827,29 @@ mod tests {
         assert_eq!(stream["network"], "tcp");
         assert_eq!(stream["security"], "none");
         assert!(stream.get("tlsSettings").is_none());
+    }
+
+    #[test]
+    fn vmess_build_emits_alterid_and_security() {
+        // xray's vmess user schema carries alterId/security; `encryption` is
+        // a vless-user key and must stay out of the vmess object.
+        let mut s = spec();
+        s.protocol = Protocol::Vmess;
+        s.alter_id = 64;
+        s.vmess_security = Some("aes-128-gcm".to_owned());
+        let out = build_outbound(&s, dial(), None);
+        let user = &out["settings"]["vnext"][0]["users"][0];
+        assert_eq!(user["alterId"], 64);
+        assert_eq!(user["security"], "aes-128-gcm");
+        assert!(user.get("encryption").is_none());
+    }
+
+    #[test]
+    fn vless_build_keeps_encryption_none() {
+        let out = build_outbound(&spec(), dial(), None);
+        let user = &out["settings"]["vnext"][0]["users"][0];
+        assert_eq!(user["encryption"], "none");
+        assert!(user.get("security").is_none());
     }
 
     #[test]
