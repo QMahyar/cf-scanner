@@ -132,12 +132,37 @@ function download(url, hops = 0) {
   });
 }
 
-function verifyChecksum(buffer, sha256Text, url) {
-  const match = sha256Text.match(/[0-9a-fA-F]{64}/);
-  if (!match) {
-    throw new Error(`Invalid sha256 file for ${url}: no 64-hex digest found`);
+// Strict checksum extraction mirroring src/dgst.rs's `.dgst` line grammar
+// (`SHA2-256= <64 hex>[ <filename>]`), extended with dist's shasum-style
+// `.sha256` line (`<64 hex>[  <filename>]`, two spaces). First accepted line
+// wins; a near-miss line — junk after an otherwise-matching hex run, or a
+// labeled line whose token is not a clean 64-hex digest — rejects the whole
+// file instead of falling through to a later line.
+function parseChecksum(text) {
+  for (const raw of String(text).split(/\r?\n/)) {
+    const line = raw.trim().toLowerCase();
+    if (!line) continue;
+    const match =
+      line.match(/^sha2-256= *([0-9a-f]{64})(?: (.+))?$/) ||
+      line.match(/^([0-9a-f]{64})(?:  (.+))?$/);
+    if (match) {
+      return match[1];
+    }
+    const token = line.replace(/^sha2-256= */, "").split(/\s+/)[0];
+    if (/^[0-9a-f]{64,}$/.test(token) || line.startsWith("sha2-256=")) {
+      return null;
+    }
   }
-  const expected = match[0].toLowerCase();
+  return null;
+}
+
+function verifyChecksum(buffer, sha256Text, url) {
+  // Fail closed: loose "first 64-hex substring" scans could grab a fragment
+  // of a longer digest (see src/dgst.rs); require the strict grammar above.
+  const expected = parseChecksum(sha256Text);
+  if (!expected) {
+    throw new Error(`Invalid sha256 file for ${url}: no strict SHA2-256 digest found`);
+  }
   const actual = crypto.createHash("sha256").update(buffer).digest("hex").toLowerCase();
   if (actual !== expected) {
     throw new Error(`Checksum mismatch for ${url}: expected ${expected}, got ${actual}`);
@@ -274,4 +299,4 @@ if (require.main === module) {
 }
 
 // Exposed for verification harnesses only; the wrapper has no test runner.
-module.exports = { extractZip };
+module.exports = { extractZip, parseChecksum };
