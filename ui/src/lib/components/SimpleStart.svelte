@@ -164,14 +164,13 @@
               class="field mono field-num"
               type="number"
               min={scanMode === "Warp" ? 100 : 100}
-              max={100000}
+              max={scanMode === "Warp" ? 5000 : 100000}
               step={scanMode === "Warp" ? 50 : 500}
               bind:value={testUpTo}
-              onchange={() =>
-                (testUpTo = Math.min(
-                  100_000,
-                  Math.max(100, Math.trunc(Number(testUpTo)) || 800),
-                ))}
+              onchange={() => {
+                const cap = scanMode === "Warp" ? 5000 : 100_000;
+                testUpTo = Math.min(cap, Math.max(100, Math.trunc(Number(testUpTo)) || 800));
+              }}
               aria-label={t("simple.testUpTo")}
             />
             <span class="mono text-[10px]" style="color: var(--ink-muted)">
@@ -181,6 +180,9 @@
             </span>
           {/if}
         </div>
+        {#if scanMode === "Warp" && testUpTo >= 5000}
+          <p class="mt-1 text-[11px]" style="color: var(--ink-muted)">{t("simple.warpCapHint")}</p>
+        {/if}
       </div>
     {#if app.running}
       <button class="btn btn-secondary btn-lg" onclick={stopScan}>

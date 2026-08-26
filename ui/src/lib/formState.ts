@@ -22,6 +22,7 @@ import {
   MAX_SNI_BYTES,
   MAX_SCAN_COUNT,
   MAX_STOP_VALUE,
+  MAX_ENDPOINTS,
   MAX_WGCONF_BYTES,
   isRoutableIpv4,
   parseCidr,
@@ -355,7 +356,7 @@ export function buildConfig(f: FormState): ScanConfig {
       "Custom endpoints",
       parseEndpoint,
       true,
-      null,
+      MAX_ENDPOINTS,
       issues,
     );
   }

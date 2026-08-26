@@ -14,6 +14,10 @@ export const MAX_CONFIG_ENTRY_BYTES = 8 * 1024;
 export const MAX_SNI_BYTES = 256;
 export const MAX_PROBE_URL_BYTES = 2 * 1024;
 export const MAX_WGCONF_BYTES = 64 * 1024;
+export const MAX_ENDPOINTS = 2048;
+// WARP sweep cap: the engine silently caps testCount to this (store.svelte.ts
+// simpleConfig). Mirrors the server-side sweep bound; surface it in the UI.
+export const WARP_SWEEP_CAP = 5000;
 
 export type Verdict<T> = { ok: true; value: T } | { ok: false; message: string };
 
