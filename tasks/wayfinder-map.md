@@ -61,7 +61,7 @@ ui build, cargo gates, and Playwright visual QA (EN+FA, 375/768/1440).
    SimpleStart.svelte (adopt ResultsView for its best-list), App.svelte if
    props change. Rebuild ui/dist.
 4. V1 Gates + visual QA [task, main session] - blocked by T4.
-   cargo fmt/clippy/test; npm run check && build; Playwright pass at
+5. F7 Pro-form consolidation [done] - Custom-ports pill (field on demand), Advanced scan settings + Advanced WARP options disclosures, force-open on routed errors. Files: ProPanel.svelte, i18n.svelte.ts.   cargo fmt/clippy/test; npm run check && build; Playwright pass at
    1440/768/375 in EN+FA covering: two cards side-by-side desktop, tabs
    mobile, independent copies, tunnel summary line, Verify banked idle flow.
 
