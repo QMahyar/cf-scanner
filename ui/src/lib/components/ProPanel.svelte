@@ -327,6 +327,11 @@
   );
 
   let tunnelAdvancedOpen = $state(false);
+  let scanAdvancedOpen = $state(false);
+  let warpAdvancedOpen = $state(false);
+  /** Custom-ports field renders only on demand; a restored form that
+      already carries custom ports reopens it automatically. */
+  let customPortsOpen = $state(false);
 
   const DEFAULT_PROBE_URL = defaultFormState().probeUrl;
 
@@ -350,6 +355,16 @@
   $effect(() => {
     if (fieldErrors.snis || fieldErrors.fragment || fieldErrors.probeUrl)
       tunnelAdvancedOpen = true;
+  });
+  $effect(() => {
+    if (fieldErrors.concurrency || fieldErrors.timeoutMs || fieldErrors.capText)
+      scanAdvancedOpen = true;
+  });
+  $effect(() => {
+    if (fieldErrors.warpProbes || fieldErrors.warpEndpoints) warpAdvancedOpen = true;
+  });
+  $effect(() => {
+    if (form.customPortsText.trim()) customPortsOpen = true;
   });
 
   const allIssues = $derived.by(() => {
@@ -953,7 +968,32 @@
                 {p}
               </button>
             {/each}
+            <button
+              type="button"
+              class="pill"
+              style={customPortsOpen
+                ? "background: var(--accent); color: var(--accent-ink)"
+                : "background: var(--paper-3); color: var(--ink)"}
+              aria-pressed={customPortsOpen}
+              onclick={() => (customPortsOpen = !customPortsOpen)}
+            >
+              {t("simple.size.custom")}
+            </button>
           </div>
+          {#if customPortsOpen}
+            <label class="mt-1.5 block text-xs" style="color: var(--ink-muted)">
+              {t("pro.field.customPorts")}
+              <input
+                class="field mono mt-1"
+                name="customPortsText"
+                placeholder={t("pro.field.customPorts.placeholder")}
+                aria-invalid={fieldErrors.customPortsText ? "true" : undefined}
+                aria-describedby={fieldErrors.customPortsText ? "err-customPortsText" : undefined}
+                bind:value={form.customPortsText}
+              />
+              {@render fieldError("customPortsText")}
+            </label>
+          {/if}
           {#if form.mode === "Warp" && portCatalog(form.mode).extended.length > 0}
             <details class="mt-2">
               <summary class="cursor-pointer" style="color: var(--ink-muted)">
@@ -992,38 +1032,13 @@
           {@render fieldError("customPortsText")}
         </label>
 
-        <label class="text-xs" style="color: var(--ink-muted)">{t("pro.field.concurrency")}
-          <input
-            class="field mono mt-1"
-            type="number"
-            min="1"
-            max="1000"
-            name="concurrency"
-            aria-invalid={fieldErrors.concurrency ? "true" : undefined}
-            aria-describedby={fieldErrors.concurrency ? "err-concurrency" : undefined}
-            bind:value={form.concurrency}
-          />
-          {@render fieldError("concurrency")}
-        </label>
-
-        <label class="text-xs" style="color: var(--ink-muted)">{t("pro.field.timeout")}
-          <input
-            class="field mono mt-1"
-            type="number"
-            min="100"
-            max="30000"
-            name="timeoutMs"
-            aria-invalid={fieldErrors.timeoutMs ? "true" : undefined}
-            aria-describedby={fieldErrors.timeoutMs ? "err-timeoutMs" : undefined}
-            bind:value={form.timeoutMs}
-          />
-          {@render fieldError("timeoutMs")}
-        </label>
-
-        <label class="text-xs" style="color: var(--ink-muted)">
+        <label
+          class="text-xs md:col-span-2 lg:col-span-3"
+          style="color: var(--ink-muted)"
+        >
           {t("pro.field.stopAfter")}
           <input
-            class="field mono mt-1"
+            class="field mono mt-1 max-w-40"
             type="number"
             min="1"
             name="stopFound"
@@ -1034,27 +1049,67 @@
           {@render fieldError("stopFound")}
         </label>
 
-        <label class="text-xs" style="color: var(--ink-muted)">
-          {t("pro.field.hardCap")}
-          <input
-            class="field mono mt-1"
-            type="text"
-            inputmode="numeric"
-            placeholder={t("pro.field.hardCap.placeholder")}
-            name="capText"
-            aria-invalid={fieldErrors.capText ? "true" : undefined}
-            aria-describedby={fieldErrors.capText ? "err-capText" : undefined}
-            bind:value={form.capText}
-          />
-          {@render fieldError("capText")}
-        </label>
+        <!-- Tuning knobs live behind one disclosure: concurrency is how many
+             probes run at once, the cap is a run-wide probe budget. Related
+             but rarely touched together with target/ports selection. -->
+        <div class="md:col-span-2 lg:col-span-3">
+          <details bind:open={scanAdvancedOpen}>
+            <summary class="cursor-pointer text-xs font-semibold" style="color: var(--ink-muted)">
+              {t("pro.section.scanAdvanced")}
+            </summary>
+            <div class="mt-3 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+              <label class="text-xs" style="color: var(--ink-muted)">{t("pro.field.concurrency")}
+                <input
+                  class="field mono mt-1"
+                  type="number"
+                  min="1"
+                  max="1000"
+                  name="concurrency"
+                  aria-invalid={fieldErrors.concurrency ? "true" : undefined}
+                  aria-describedby={fieldErrors.concurrency ? "err-concurrency" : undefined}
+                  bind:value={form.concurrency}
+                />
+                {@render fieldError("concurrency")}
+              </label>
 
-        {#if form.mode === "Cdn"}
-          <label class="flex items-end gap-2 pb-1 text-xs" style="color: var(--ink-muted)">
-            <input type="checkbox" name="includeV6" bind:checked={form.includeV6} class="accent-[var(--accent)]" />
-            {t("pro.field.includeV6")}
-          </label>
-        {/if}
+              <label class="text-xs" style="color: var(--ink-muted)">{t("pro.field.timeout")}
+                <input
+                  class="field mono mt-1"
+                  type="number"
+                  min="100"
+                  max="30000"
+                  name="timeoutMs"
+                  aria-invalid={fieldErrors.timeoutMs ? "true" : undefined}
+                  aria-describedby={fieldErrors.timeoutMs ? "err-timeoutMs" : undefined}
+                  bind:value={form.timeoutMs}
+                />
+                {@render fieldError("timeoutMs")}
+              </label>
+
+              <label class="text-xs" style="color: var(--ink-muted)">
+                {t("pro.field.hardCap")}
+                <input
+                  class="field mono mt-1"
+                  type="text"
+                  inputmode="numeric"
+                  placeholder={t("pro.field.hardCap.placeholder")}
+                  name="capText"
+                  aria-invalid={fieldErrors.capText ? "true" : undefined}
+                  aria-describedby={fieldErrors.capText ? "err-capText" : undefined}
+                  bind:value={form.capText}
+                />
+                {@render fieldError("capText")}
+              </label>
+
+              {#if form.mode === "Cdn"}
+                <label class="flex items-end gap-2 pb-1 text-xs" style="color: var(--ink-muted)">
+                  <input type="checkbox" name="includeV6" bind:checked={form.includeV6} class="accent-[var(--accent)]" />
+                  {t("pro.field.includeV6")}
+                </label>
+              {/if}
+            </div>
+          </details>
+        </div>
       </div>
 
       <details class="mt-4">
@@ -1124,51 +1179,60 @@
       </details>
 
       {#if form.mode === "Warp"}
-        <div class="mt-4 grid gap-4 sm:grid-cols-2">
-          <label class="text-xs" style="color: var(--ink-muted)">
-            {t("pro.warp.probes")}
-            <input
-              class="field mono mt-1"
-              type="number"
-              min="1"
-              max="10"
-              name="warpProbes"
-              aria-invalid={fieldErrors.warpProbes ? "true" : undefined}
-              aria-describedby={fieldErrors.warpProbes ? "err-warpProbes" : undefined}
-              bind:value={form.warpProbes}
-            />
-            {@render fieldError("warpProbes")}
-          </label>
-          <label class="text-xs" style="color: var(--ink-muted)">
-            {t("pro.warp.endpoints")}
-            <textarea
-              class="field mono mt-1"
-              rows="2"
-              name="warpEndpoints"
-              aria-invalid={fieldErrors.warpEndpoints ? "true" : undefined}
-              aria-describedby={fieldErrors.warpEndpoints ? "err-warpEndpoints" : undefined}
-              bind:value={form.warpEndpoints}
-              onchange={() => normalizeField("warpEndpoints")}></textarea>
-            {@render fieldError("warpEndpoints")}
-          </label>
-          <div class="flex flex-wrap items-center gap-1.5 sm:col-span-2">
-            <button
-              type="button"
-              class="pill cursor-pointer"
-              style="background: var(--paper-3); color: var(--ink)"
-              title={t("pro.warp.endpointsImportTitle")}
-              onclick={() => { rangesTarget = "warpEndpoints"; rangesFileInput?.click(); }}
-            >{t("pro.field.importList")}</button>
-            {#if rangesNote}
-              <span
-                class="fade-in mono text-[10px]"
-                role="status"
-                style={rangesNote.ok ? "color: var(--good)" : "color: var(--bad)"}
-              >
-                {rangesNote.text}
-              </span>
-            {/if}
-          </div>
+        <div class="mt-4">
+          <details bind:open={warpAdvancedOpen}>
+            <summary class="cursor-pointer text-xs font-semibold" style="color: var(--ink-muted)">
+              {t("pro.section.warpAdvanced")}
+            </summary>
+            <div class="mt-3 grid gap-4 sm:grid-cols-2">
+              <label class="text-xs" style="color: var(--ink-muted)">
+                {t("pro.warp.probes")}
+                <input
+                  class="field mono mt-1"
+                  type="number"
+                  min="1"
+                  max="10"
+                  name="warpProbes"
+                  aria-invalid={fieldErrors.warpProbes ? "true" : undefined}
+                  aria-describedby={fieldErrors.warpProbes ? "err-warpProbes" : undefined}
+                  bind:value={form.warpProbes}
+                />
+                {@render fieldError("warpProbes")}
+              </label>
+              <label class="text-xs" style="color: var(--ink-muted)">
+                {t("pro.warp.endpoints")}
+                <textarea
+                  class="field mono mt-1"
+                  rows="2"
+                  name="warpEndpoints"
+                  aria-invalid={fieldErrors.warpEndpoints ? "true" : undefined}
+                  aria-describedby={fieldErrors.warpEndpoints ? "err-warpEndpoints" : undefined}
+                  bind:value={form.warpEndpoints}
+                  onchange={() => normalizeField("warpEndpoints")}></textarea>
+                {@render fieldError("warpEndpoints")}
+              </label>
+              <div class="flex flex-wrap items-center gap-1.5 sm:col-span-2">
+                <button
+                  type="button"
+                  class="pill cursor-pointer"
+                  style="background: var(--paper-3); color: var(--ink)"
+                  title={t("pro.warp.endpointsImportTitle")}
+                  onclick={() => { rangesTarget = "warpEndpoints"; rangesFileInput?.click(); }}
+                >{t("pro.field.importList")}</button>
+                {#if rangesNote}
+                  <span
+                    class="fade-in mono text-[10px]"
+                    role="status"
+                    style={rangesNote.ok ? "color: var(--good)" : "color: var(--bad)"}
+                  >
+                    {rangesNote.text}
+                  </span>
+                {/if}
+              </div>
+            </div>
+          </details>
+
+          <div class="mt-3 grid gap-4 sm:grid-cols-2">
           <div class="text-xs sm:col-span-2" style="color: var(--ink-muted)">
             <label class="block">
               wgconf (paste your wg:// URI, wg-quick INI, or Amnezia config — enables real-keypair verification)
@@ -1309,6 +1373,7 @@
                 </div>
               </div>
             {/if}
+            </div>
           </div>
         </div>
       {:else}
