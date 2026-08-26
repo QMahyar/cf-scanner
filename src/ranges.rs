@@ -627,7 +627,16 @@ fn validate_fetch_url(url: &str) -> Result<()> {
                 v4.is_loopback() || v4.is_unspecified() || (a == 169 && b == 254)
             }
             url::Host::Ipv6(v6) => {
-                v6.is_loopback() || v6.is_unspecified() || v6.segments()[0] & 0xffc0 == 0xfe80
+                // Mapped-v6 literals connect as their embedded v4 address,
+                // so judge them by the v4 rules instead of the v6 ones.
+                if let Some(v4) = v6.to_ipv4_mapped() {
+                    let [a, b, _, _] = v4.octets();
+                    v4.is_loopback() || v4.is_unspecified() || (a == 169 && b == 254)
+                } else {
+                    v6.is_loopback()
+                        || v6.is_unspecified()
+                        || v6.segments()[0] & 0xffc0 == 0xfe80
+                }
             }
             url::Host::Domain(_) => false,
         };
@@ -698,6 +707,11 @@ mod tests {
         assert!(validate_fetch_url("file:///etc/passwd").is_err());
         assert!(validate_fetch_url("https://127.0.0.1:8765/x").is_err());
         assert!(validate_fetch_url("https://[::1]/x").is_err());
+        // Mapped-v6 literals must be judged by their embedded v4 address.
+        assert!(validate_fetch_url("https://[::ffff:127.0.0.1]/x").is_err());
+        assert!(validate_fetch_url("https://[::ffff:169.254.0.1]/x").is_err());
+        // Real v6 globals stay allowed.
+        assert!(validate_fetch_url("https://[2001:db8::1]/x").is_ok());
         assert!(validate_fetch_url("https://169.254.0.1/x").is_err());
         assert!(validate_fetch_url("https://0.0.0.0/x").is_err());
         assert!(validate_fetch_url("not a url").is_err());
