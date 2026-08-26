@@ -367,12 +367,6 @@ fn parse_sip002(entry: &str) -> Result<OutboundSpec> {
         _ if userinfo.is_empty() => bail!("missing user id or password"),
         _ => userinfo,
     };
-    // The id lands verbatim in generated xray configs: a percent-encoded
-    // megabyte in one query param would slip past whole-entry length checks
-    // counted elsewhere, so bound the decoded value itself.
-    if user_id.len() > MAX_USER_ID_BYTES {
-        bail!("user id exceeds {MAX_USER_ID_BYTES} bytes");
-    }
 
     let security = q.get("security").cloned().unwrap_or_else(|| {
         if protocol == Protocol::Trojan {
@@ -391,7 +385,7 @@ fn parse_sip002(entry: &str) -> Result<OutboundSpec> {
         _ => None,
     };
 
-    Ok(OutboundSpec {
+    Ok(finish_spec(OutboundSpec {
         protocol,
         server: host,
         port,
@@ -404,7 +398,7 @@ fn parse_sip002(entry: &str) -> Result<OutboundSpec> {
         tag: url.fragment().map(percent_decode),
         alter_id: 0,
         vmess_security: None,
-    })
+    })?)
 }
 
 /// vmess://BASE64(JSON) where the JSON carries everything, e.g.
@@ -447,7 +441,7 @@ fn parse_vmess(entry: &str) -> Result<OutboundSpec> {
         }),
         _ => None,
     };
-    Ok(OutboundSpec {
+    Ok(finish_spec(OutboundSpec {
         protocol: Protocol::Vmess,
         server: server.to_owned(),
         port,
@@ -460,7 +454,7 @@ fn parse_vmess(entry: &str) -> Result<OutboundSpec> {
         tag: tag.as_deref().map(percent_decode),
         alter_id,
         vmess_security,
-    })
+    })?)
 }
 
 /// Shadowsocks URIs come in two forms:
@@ -496,7 +490,7 @@ fn parse_ss(entry: &str) -> Result<OutboundSpec> {
         split_host_port(&host_port).ok_or_else(|| anyhow!("ss missing host:port"))?;
     let port: u16 = port.parse().map_err(|_| anyhow!("ss bad port"))?;
 
-    Ok(OutboundSpec {
+    Ok(finish_spec(OutboundSpec {
         protocol: Protocol::Shadowsocks,
         server: host.to_owned(),
         port,
@@ -509,7 +503,7 @@ fn parse_ss(entry: &str) -> Result<OutboundSpec> {
         tag: tag.as_deref().map(percent_decode),
         alter_id: 0,
         vmess_security: None,
-    })
+    })?)
 }
 
 /// Extracts one usable outbound from xray-style JSON:
@@ -585,7 +579,7 @@ pub fn parse_xray_json(text: &str) -> Result<OutboundSpec> {
             None
         };
 
-        return Ok(OutboundSpec {
+        return finish_spec(OutboundSpec {
             protocol,
             server,
             port,
@@ -608,6 +602,17 @@ pub fn parse_xray_json(text: &str) -> Result<OutboundSpec> {
 }
 
 // --- helpers ---------------------------------------------------------------
+
+/// Single exit point every parser passes through before returning a spec:
+/// the id lands verbatim in generated xray configs, so a percent-encoded or
+/// base64 megabyte in one field would slip past whole-entry length checks
+/// counted elsewhere — bound the decoded value itself here, once.
+fn finish_spec(spec: OutboundSpec) -> Result<OutboundSpec> {
+    if spec.user_id.len() > MAX_USER_ID_BYTES {
+        bail!("user id exceeds {MAX_USER_ID_BYTES} bytes");
+    }
+    Ok(spec)
+}
 
 /// Case-insensitive `scheme://` prefix strip, mirroring the lowercase scheme
 /// dispatch in `parse_uri` (vmess/ss payloads are case-sensitive base64, so
@@ -1096,6 +1101,41 @@ mod tests {
         let json = r#"{"add":"1.2.3.4","port":"abc","id":"u"}"#;
         let b64 = base64::engine::general_purpose::STANDARD.encode(json);
         assert!(parse_uri(&format!("vmess://{b64}")).is_err());
+    }
+
+    #[test]
+    fn every_parser_caps_the_decoded_credential_with_one_error() {
+        let oversized = "x".repeat(MAX_USER_ID_BYTES + 1);
+        let want = format!("user id exceeds {MAX_USER_ID_BYTES} bytes");
+        let std = base64::engine::general_purpose::STANDARD;
+        // SIP002 userinfo.
+        let err = parse_uri(&format!("vless://{oversized}@1.2.3.4:443")).unwrap_err();
+        assert_eq!(err.to_string(), want);
+        // vmess decoded JSON id.
+        let json = format!(r#"{{"add":"h","port":"443","id":"{oversized}","net":"tcp"}}"#);
+        let err = parse_uri(&format!("vmess://{}", std.encode(json))).unwrap_err();
+        assert_eq!(err.to_string(), want);
+        // ss decoded password (SIP002 userinfo form).
+        let creds = std.encode(format!("aes-128-gcm:{oversized}"));
+        let err = parse_uri(&format!("ss://{creds}@1.2.3.4:8388")).unwrap_err();
+        assert_eq!(err.to_string(), want);
+        // xray JSON user id.
+        let json = format!(
+            r#"{{"outbounds":[{{"protocol":"vless","settings":{{"vnext":[{{"address":"1.2.3.4","port":443,"users":[{{"id":"{oversized}"}}]}}]}}}}]}}"#
+        );
+        let err = parse_xray_json(&json).unwrap_err();
+        assert_eq!(err.to_string(), want);
+        // At exactly the cap the credential passes on every path.
+        let at_cap = "x".repeat(MAX_USER_ID_BYTES);
+        assert!(
+            parse_uri(&format!("vless://{at_cap}@1.2.3.4:443"))
+                .unwrap()
+                .user_id
+                .len()
+                == MAX_USER_ID_BYTES
+        );
+        let creds = std.encode(format!("aes-128-gcm:{at_cap}"));
+        assert!(parse_uri(&format!("ss://{creds}@1.2.3.4:8388")).is_ok());
     }
 
     // --- sanitize_error_text / redact_line table (review r6) -----------------
