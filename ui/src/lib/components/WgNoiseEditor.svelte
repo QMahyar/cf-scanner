@@ -216,7 +216,6 @@
           {k}
           <input
             class="field mono mt-0.5 !px-2 text-center text-xs"
-            style={bad ? "border-color: var(--bad)" : undefined}
             value={values[k]}
             placeholder={H_KEYS.includes(k) ? t("wgnoise.placeholder.lohi") : t("wgnoise.placeholder.dash")}
             oninput={(e) => setField(k, e.currentTarget.value)}

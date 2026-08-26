@@ -792,9 +792,9 @@
         onchange={importRangesFile}
       />
       <div class="flex flex-wrap items-center justify-between gap-3">
-        <h3 class="flex items-center gap-2 text-sm font-semibold">
+        <h2 class="flex items-center gap-2 text-sm font-semibold">
           <Gauge class="size-4" style="color: var(--accent)" /> {t("pro.section.scanConfig")}
-        </h3>
+        </h2>
         <div class="flex items-center gap-2">
           {#if xray}
             <span

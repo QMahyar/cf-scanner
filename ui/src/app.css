@@ -342,8 +342,13 @@ body::before {
   border-color: var(--accent);
   box-shadow: 0 0 0 3px var(--ring);
 }
-.field:user-invalid {
+.field:user-invalid,
+.field[aria-invalid="true"] {
   border-color: var(--bad);
+}
+.field[aria-invalid="true"]:focus-visible {
+  outline-color: var(--bad);
+  box-shadow: 0 0 0 3px oklch(66% 0.19 25 / 40%);
 }
 
 /* iOS Safari zooms the viewport when focusing inputs under 16px */
