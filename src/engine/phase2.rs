@@ -8,9 +8,10 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context as _, Result, anyhow, bail};
+use tokio::sync::watch;
 use tokio::task::JoinSet;
 
-use super::{ScanController, Store, claim_milestone};
+use super::{ScanController, Store, cancelled_signal, claim_milestone};
 use crate::api::types::{
     FragmentPreset, Phase2Config, Phase2Progress, Phase2Verdict, ScanConfig, ScanEvent, Verdict,
 };
@@ -31,7 +32,17 @@ impl ScanController {
     /// regardless of candidates × configs × SNIs, and stop conditions
     /// (cancel, hard cap) are honored before every attempt.
     pub(super) async fn verify_phase(&self, cfg: &ScanConfig, p2: &Phase2Config) -> Result<()> {
-        let specs = self.parse_phase2_configs(p2).await?;
+        // One cancel signal per run, shared by parsing and the workers below:
+        // when phase 2 follows a phase 1 this is the same channel phase 1
+        // used, so a cancel fired during phase 1 (or mid-parse) stops
+        // verification immediately.
+        let cancel_rx = self.cancel_signal();
+        let (specs, parse_cancelled) = self.parse_phase2_configs(p2, &cancel_rx).await?;
+        if parse_cancelled {
+            // The normal cancelled-summary path: `finish` reports the cancel,
+            // so a mid-parse abort must not surface as a config error.
+            return Ok(());
+        }
         if specs.is_empty() {
             bail!("phase 2: no usable configs (every entry failed to parse)");
         }
@@ -58,10 +69,6 @@ impl ScanController {
             return Ok(());
         }
 
-        // Subscribe to the run's cancel signal: when phase 2 follows a phase
-        // 1, this is the same channel phase 1 used, so a cancel fired during
-        // phase 1 (or in the gap) stops verification immediately.
-        let cancel_rx = self.cancel_signal();
         let combos_per_candidate = (specs.len() * snis.len()) as u64;
         let total = v4_candidates.len() as u64 * combos_per_candidate;
         let next = Arc::new(AtomicU64::new(0));
@@ -240,8 +247,14 @@ impl ScanController {
     /// with zero usable entries aborts the phase. Each spec carries the
     /// index of the config entry it came from, so verdicts can name the
     /// submitted config that produced them (a subscription expands to many
-    /// specs sharing one entry index).
-    async fn parse_phase2_configs(&self, p2: &Phase2Config) -> Result<Vec<(OutboundSpec, u32)>> {
+    /// specs sharing one entry index). A cancel stops the loop between
+    /// entries and aborts an in-flight subscription fetch; the returned
+    /// flag marks the batch partial and unusable.
+    async fn parse_phase2_configs(
+        &self,
+        p2: &Phase2Config,
+        cancel: &watch::Receiver<bool>,
+    ) -> Result<(Vec<(OutboundSpec, u32)>, bool)> {
         let mut specs = Vec::new();
         let mut skipped = 0u32;
         for (idx, entry) in p2.configs.iter().enumerate() {
@@ -249,12 +262,15 @@ impl ScanController {
             if entry.is_empty() {
                 continue;
             }
+            if *cancel.borrow() {
+                return Ok((specs, true));
+            }
             let result = if entry.starts_with("http://") || entry.starts_with("https://") {
-                let body = self
-                    .sub_fetch
-                    .fetch(entry)
-                    .await
-                    .with_context(|| format!("subscription {} failed", redact_entry(entry)));
+                let body = tokio::select! {
+                    body = self.sub_fetch.fetch(entry) => body,
+                    _ = cancelled_signal(cancel.clone()) => return Ok((specs, true)),
+                }
+                .with_context(|| format!("subscription {} failed", redact_entry(entry)));
                 body.map(|body| {
                     let parsed = parse_subscription(&body);
                     tracing::debug!(
@@ -300,7 +316,7 @@ impl ScanController {
             }
             bail!("phase 2: no configs to verify with");
         }
-        Ok(specs)
+        Ok((specs, false))
     }
 }
 
@@ -488,7 +504,7 @@ mod tests {
 
     fn p2_controller(
         transport: FakeTransport,
-        sub: FakeSub,
+        sub: impl SubFetch + 'static,
         probe: FakeTunnelProbe,
     ) -> Arc<ScanController> {
         Arc::new(ScanController::with_probes(
@@ -496,6 +512,16 @@ mod tests {
             Arc::new(sub),
             Arc::new(probe),
         ))
+    }
+
+    /// Subscription fetch that never resolves: stands in for a
+    /// never-responding subscription endpoint.
+    struct HangingSub;
+
+    impl SubFetch for HangingSub {
+        fn fetch(&self, _url: &str) -> Pin<Box<dyn Future<Output = Result<String>> + Send + '_>> {
+            Box::pin(async { std::future::pending::<Result<String>>().await })
+        }
     }
 
     const VLESS: &str = "vless://aaaaaaaa-bbbb-cccc-dddd-eeeeffff0000@1.2.3.4:443";
@@ -833,6 +859,35 @@ mod tests {
             }
         }
         assert_eq!(terminal, 1, "terminal progress must fire exactly once");
+    }
+
+    #[tokio::test]
+    async fn cancel_during_config_parse_aborts_promptly() {
+        // The first entry hangs forever on its subscription fetch; a cancel
+        // fired mid-parse must abort the fetch and finish as a cancelled run
+        // without touching the remaining entries or any tunnel probe.
+        let t = FakeTransport::new();
+        let probe = FakeTunnelProbe::new();
+        let c = p2_controller(t, HangingSub, probe.clone());
+        let mut cfg = ok_cfg(1, None);
+        cfg.phase2 = Some(p2_cfg(&["https://hang.example.com/sub", VLESS], &[]));
+        let handle = tokio::spawn({
+            let c = c.clone();
+            async move { run_local(&c, cfg, 1).await }
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        c.cancel();
+        let summary = tokio::time::timeout(std::time::Duration::from_secs(5), handle)
+            .await
+            .expect("cancel must abort the hanging subscription fetch")
+            .unwrap()
+            .unwrap();
+        assert!(summary.cancelled, "summary must report the cancel");
+        assert_eq!(
+            probe.attempts.load(Ordering::Relaxed),
+            0,
+            "verification must not start with a partial config batch"
+        );
     }
 
     #[tokio::test]
