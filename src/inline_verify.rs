@@ -594,13 +594,18 @@ async fn read_http_body<S: AsyncRead + Unpin + ?Sized>(
             .context("reading content-length body")?;
         Ok(body)
     } else {
-        // No framing: the connection closes the response.
+        // No framing: the connection closes the response. Read one byte
+        // past the cap so an over-cap body fails the probe explicitly
+        // instead of cropping into something that could parse as success.
         let mut body = Vec::new();
         stream
-            .take(MAX_PROBE_BODY_BYTES as u64)
+            .take(MAX_PROBE_BODY_BYTES as u64 + 1)
             .read_to_end(&mut body)
             .await
             .context("reading close-delimited body")?;
+        if body.len() > MAX_PROBE_BODY_BYTES {
+            bail!("response body exceeded the {MAX_PROBE_BODY_BYTES} byte cap");
+        }
         Ok(body)
     }
 }
@@ -1325,5 +1330,35 @@ mod tests {
             parse_uri("vless://not-a-uuid@127.0.0.1:443?security=tls").unwrap(),
             P::Off
         ));
+    }
+
+    // --- close-delimited body cap (plan 014) ---------------------------------
+
+    fn close_delimited_response(body: &[u8]) -> Vec<u8> {
+        let mut resp = b"HTTP/1.1 200 OK\r\n\r\n".to_vec();
+        resp.extend_from_slice(body);
+        resp
+    }
+
+    #[tokio::test]
+    async fn close_delimited_body_over_the_cap_fails_the_probe() {
+        let body = vec![7u8; MAX_PROBE_BODY_BYTES + 1];
+        let mut resp = close_delimited_response(&body);
+        let err = read_http_response(&mut &resp[..])
+            .await
+            .expect_err("an over-cap close-delimited body must fail explicitly");
+        assert!(
+            err.to_string().contains("exceeded"),
+            "wrong failure: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn close_delimited_body_at_the_cap_parses() {
+        let body = vec![7u8; MAX_PROBE_BODY_BYTES];
+        let mut resp = close_delimited_response(&body);
+        let (status, got) = read_http_response(&mut &resp[..]).await.unwrap();
+        assert_eq!(status, 200);
+        assert_eq!(got.len(), MAX_PROBE_BODY_BYTES);
     }
 }
