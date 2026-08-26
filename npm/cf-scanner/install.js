@@ -174,7 +174,13 @@ function extractTarXz(buffer, destDir) {
   const tmpFile = path.join(destDir, "_cf-scanner-dl.tar.xz");
   fs.writeFileSync(tmpFile, buffer);
   try {
-    const result = spawnSync("tar", ["-xJf", tmpFile, "-C", destDir], { stdio: "inherit" });
+    // --no-same-owner/--no-same-permissions: never adopt ownership or mode
+    // bits recorded inside a downloaded archive (GNU and bsdtar both accept).
+    const result = spawnSync(
+      "tar",
+      ["--no-same-owner", "--no-same-permissions", "-xJf", tmpFile, "-C", destDir],
+      { stdio: "inherit" }
+    );
     if (result.status !== 0) {
       throw new Error(`tar extraction failed with code ${result.status}`);
     }
@@ -208,6 +214,27 @@ function extractZip(buffer, destDir) {
   }
 }
 
+// Fail closed on non-regular entries from the archive: a symlink (or device
+// node) planted in a tampered tarball must abort the install loudly instead
+// of being chmod'ed through or shipped.
+function assertRegularFile(p) {
+  const st = fs.lstatSync(p);
+  if (!st.isFile()) {
+    throw new Error(`refusing non-regular file extracted from archive: ${p}`);
+  }
+}
+
+function assertRegularTree(dir) {
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    const p = path.join(dir, entry.name);
+    if (entry.isDirectory()) {
+      assertRegularTree(p);
+    } else {
+      assertRegularFile(p);
+    }
+  }
+}
+
 // Move the binary (and its bundled xray sibling) out of the scratch dir
 // into bin/. dist tar archives nest everything under a `cf-scanner-{target}/`
 /// folder while zip archives are flat; find_bundled() (src/xray.rs) expects
@@ -222,6 +249,7 @@ function relocateExtracted(scratchDir, binDir, target) {
   if (fs.existsSync(bundled)) {
     rmRecursive(path.join(binDir, "bundled"));
     fs.renameSync(bundled, path.join(binDir, "bundled"));
+    assertRegularTree(path.join(binDir, "bundled"));
   }
 }
 
@@ -276,6 +304,7 @@ async function main() {
 
     // Ensure the binary is executable (Linux/macOS)
     const binaryPath = path.join(binDir, BINARY_NAME);
+    assertRegularFile(binaryPath);
     if (!isWindows) {
       fs.chmodSync(binaryPath, 0o755);
     }
