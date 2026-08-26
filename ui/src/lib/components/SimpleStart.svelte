@@ -364,7 +364,18 @@
             <button
               class="btn btn-ghost btn-sm shrink-0"
               title={t("card.copyTitle")}
-              onclick={() => navigator.clipboard.writeText(`${r.ip}:${r.port}`)}
+              onclick={async () => {
+                try {
+                  await navigator.clipboard.writeText(`${r.ip}:${r.port}`);
+                } catch {
+                  // Clipboard API can fail (e.g. insecure context); the
+                  // bulk export path has a download fallback, but per-card
+                  // copy has no fallback — surface it via the existing toast.
+                  const { ui } = await import("../store.svelte");
+                  ui().error = t("simple.copyFailed");
+                  setTimeout(() => { if (ui().error === t("simple.copyFailed")) ui().error = null; }, 3000);
+                }
+              }}
             >
               <Copy class="size-4" />
             </button>
