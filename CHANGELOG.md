@@ -83,6 +83,12 @@ Added / Changed / Fixed / Deprecated / Removed / Security, newest on top.
   verdict store; hydration after F5 rebuilds it.
 - **Subscription bounds.** Two new constants in `api::types`
   (`MAX_SUBSCRIPTION_SPECS`, `MAX_PHASE2_TOTAL_SPECS`) bound ingestion fan-out.
+- **WARP sweep cap now visible.** Simple mode's custom-count input
+  advertised `max=100000` while `simpleConfig` silently clamped WARP sweeps
+  to 5,000. The input now clamps to 5,000 in WARP mode with a hint.
+- **Missing endpoint ceiling.** `warpEndpoints` had `maxLines: null` while
+  every sibling list mirrored its server cap; pasting thousands of endpoints
+  only failed as a server 400. It now enforces `MAX_ENDPOINTS=2048` inline.
 - **Dead font dep removed.** `@fontsource-variable/inter` (replaced by Plus
   Jakarta Sans in 0.9.0) dropped.
 

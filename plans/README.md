@@ -11,7 +11,7 @@ Audited at `51c4711` (v0.10.0 + F7). 10 parallel audits → ~92 findings → 26 
 | 003 | Pro form layout repair (dup field, grids, widths, segmented mode) | DONE | 3787011 — delete orphan customPorts duplicate, .grid-form/.span-all/.field-num, Segmented.svelte, sticky bar inset, SimpleStart widths+aria |
 | 004 | WARP regroup + i18n hint (partial) | DONE (partial) | 8d50372 + follow-ups — wgconf label i18n'd, verifyHint key+paragraph (full identity grouping wrapper deferred) |
 | 005 | Error affordances + heading hierarchy | DONE (partial) | field[aria-invalid] CSS, WgNoise inline drop, ProPanel h3→h2 |
-| 006 | Behavior bugs (results wipe + copyAll) | DONE (partial) | e9005b9 — startScan reset after accept, copyAll honors latency filter (WARP 5000 cap, endpoints cap, clipboard announce deferred) |
+| 006 | Behavior bugs (results wipe + copyAll + WARP cap + endpoint ceiling) | DONE | e9005b9 + latest — startScan reset after accept, copyAll honors filter, WARP 5000 hint, MAX_ENDPOINTS inline |
 | 007 | Results store O(1) per verdict | DONE | Map-backed applyResult + setResults helper, App.svelte hydrate via setResults |
 | 008 | Font bundle slimming (partial) | DONE (partial) | 61aa83d — drop dead @fontsource-variable/inter (jetbrains woff2 + vazirmatn subset deferred) |
 | 010 | Config parsing (VMess/base64/ports) | DONE | a429b66 — 4 commits: VMess alterId/security, 4 base64 variants, numeric port/aid, SIP002 default 443 |
@@ -29,7 +29,7 @@ Audited at `51c4711` (v0.10.0 + F7). 10 parallel audits → ~92 findings → 26 
 |---|---|---|---|
 | 004 (remaining) | Identity grouping wrapper + xray/range relocation + disabled reasons | Nesting error on first attempt; minimal shipped, full wrapper needs careful grid re-parenting | Re-attempt the bordered identity-group wrap + move xray chip to tunnel card + ranges info into CIDRs disclosure |
 | 005 (remaining) | Validation messages → i18n keys + live-region throttle + hardcoded English sweep | Needs FieldIssue → {key,params} refactor (M) | plan 005 Steps 2+4 |
-| 006 (remaining) | WARP 5k cap surface + endpoints cap + clipboard announce | S each, was batched but not reached | plan 006 Steps 3–5 |
+| 006 (remaining) | Clipboard failure announce | S, low stakes | plan 006 Step 5 — route copy failures through announce() |
 | 007 (remaining) | Batch view recomputation (dirty-flag / rAF) | Map shipped; view batch still pending | plan 007 Step 3 |
 | 008 (remaining) | JetBrains woff2-only faces + Vazirmatn arabic subset | Visual verification of FA needed | plan 008 Steps 2–3 |
 | 009 | ProPanel decomposition (6 new components) | L, must come last (after all UI fixes stable) | leaf-first extraction per plan |
