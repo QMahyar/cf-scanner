@@ -163,10 +163,17 @@ function extractZip(buffer, destDir) {
   const tmpFile = path.join(destDir, "_cf-scanner-dl.zip");
   fs.writeFileSync(tmpFile, buffer);
   try {
+    // Paths travel as env vars instead of being interpolated into the
+    // -Command string: quotes/apostrophes in the install path would break
+    // or alter a quoted command line.
+    const ps = [
+      "$e = $env:CFSCANNER_TMP; $d = $env:CFSCANNER_DEST;",
+      "Expand-Archive -Path $e -DestinationPath $d -Force;",
+    ].join(" ");
     const result = spawnSync(
       "powershell",
-      ["-NoProfile", "-Command", `Expand-Archive -Path '${tmpFile}' -DestinationPath '${destDir}' -Force`],
-      { stdio: "inherit" }
+      ["-NoProfile", "-NonInteractive", "-Command", ps],
+      { stdio: "inherit", env: { ...process.env, CFSCANNER_TMP: tmpFile, CFSCANNER_DEST: destDir } }
     );
     if (result.status !== 0) {
       throw new Error(`PowerShell Expand-Archive failed with code ${result.status}`);
@@ -265,3 +272,6 @@ async function main() {
 if (require.main === module) {
   main();
 }
+
+// Exposed for verification harnesses only; the wrapper has no test runner.
+module.exports = { extractZip };
