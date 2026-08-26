@@ -3,7 +3,7 @@
   import { Languages, Radar, SlidersHorizontal } from "@lucide/svelte";
   import { api, subscribe, type LiveStatus } from "./lib/api";
   import { currentLocale, t, toggleLocale } from "./lib/i18n.svelte";
-  import { applyResult, recordTick, setProMode, ui } from "./lib/store.svelte";
+  import { applyResult, recordTick, setProMode, setResults, ui } from "./lib/store.svelte";
   import { reveal } from "./lib/reveal";
   import SimpleStart from "./lib/components/SimpleStart.svelte";
   import ProPanel from "./lib/components/ProPanel.svelte";
@@ -60,7 +60,7 @@
         app.summary = s;
         app.running = false;
         app.phase2 = null;
-        api.results().then((r) => (app.results = r.results)).catch(() => {});
+        api.results().then((r) => setResults(r.results)).catch(() => {});
       },
       onFailed: (msg) => {
         app.error = msg;

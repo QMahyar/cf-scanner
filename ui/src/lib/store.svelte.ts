@@ -51,14 +51,27 @@ export function setProMode(on: boolean) {
   localStorage.setItem("cf-pro-mode", on ? "1" : "0");
 }
 
+const resultIndexByKey = new Map<string, number>();
+
 export function applyResult(verdict: Verdict) {
   const key = `${verdict.ip}:${verdict.port}`;
-  const idx = app.results.findIndex((r) => `${r.ip}:${r.port}` === key);
-  if (idx >= 0) app.results[idx] = verdict;
-  else app.results.push(verdict);
+  const idx = resultIndexByKey.get(key);
+  if (idx !== undefined) {
+    app.results[idx] = verdict;
+  } else {
+    resultIndexByKey.set(key, app.results.length);
+    app.results.push(verdict);
+  }
+}
+
+export function setResults(rows: Verdict[]) {
+  resultIndexByKey.clear();
+  for (let i = 0; i < rows.length; i++) resultIndexByKey.set(`${rows[i].ip}:${rows[i].port}`, i);
+  app.results = rows;
 }
 
 export function resetResults() {
+  resultIndexByKey.clear();
   app.results = [];
   app.summary = null;
   app.progress = { scanned: 0, found: 0, total: null };
