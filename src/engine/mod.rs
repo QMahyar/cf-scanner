@@ -632,6 +632,17 @@ mod tests {
     use crate::probe::FakeTransport;
     use std::time::Duration;
 
+    async fn wait_until(timeout: Duration, mut pred: impl FnMut() -> bool) {
+        let deadline = tokio::time::Instant::now() + timeout;
+        while !pred() {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "condition not met in {timeout:?}"
+            );
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+    }
+
     #[test]
     fn milestone_claims_are_single_winner_and_monotonic() {
         let last = AtomicU64::new(0);
@@ -696,13 +707,13 @@ mod tests {
     }
 
     /// Runs a scan over a scripted /29 pool: deterministic hosts
-    /// 10.0.0.0-10.0.0.7, independent of the filesystem and bundled ranges.
+    /// 203.0.113.0-203.0.113.7, independent of the filesystem and bundled ranges.
     pub(crate) async fn run_local(
         c: &Arc<ScanController>,
         cfg: ScanConfig,
         seed: u64,
     ) -> Result<ScanSummary> {
-        let pool = ranges::CidrPool::parse("10.0.0.0/29")?;
+        let pool = ranges::CidrPool::parse("203.0.113.0/29")?;
         c.run_seeded_with_pool(cfg, seed, pool).await
     }
 
@@ -720,12 +731,12 @@ mod tests {
     #[tokio::test]
     async fn run_streaming_delivers_every_event_and_summary() {
         let t = FakeTransport::new()
-            .ok("10.0.0.1".parse().unwrap(), 443, 50)
-            .ok("10.0.0.2".parse().unwrap(), 443, 10);
+            .ok("203.0.113.1".parse().unwrap(), 443, 50)
+            .ok("203.0.113.2".parse().unwrap(), 443, 10);
         let c = Arc::new(ScanController::new(Arc::new(t)));
         // custom_cidrs keeps the scan on the scripted /29, off the filesystem.
         let mut cfg = ok_cfg(2, None);
-        cfg.custom_cidrs = vec!["10.0.0.0/29".to_owned()];
+        cfg.custom_cidrs = vec!["203.0.113.0/29".to_owned()];
         let mut events = vec![];
         let summary = c.run_streaming(cfg, |e| events.push(e)).await.unwrap();
         assert_eq!(summary.found, 2);
@@ -759,18 +770,18 @@ mod tests {
         // second run is attempted (the count-sampled plan may draw any host).
         let mut t = FakeTransport::new();
         for i in 0..8u8 {
-            t = t.ok_slow(format!("10.0.0.{i}").parse().unwrap(), 443, 25, 150);
+            t = t.ok_slow(format!("203.0.113.{i}").parse().unwrap(), 443, 25, 150);
         }
         let c = Arc::new(ScanController::new(Arc::new(t)));
         let mut events = c.subscribe();
         let mut cfg = ok_cfg(8, None);
-        cfg.custom_cidrs = vec!["10.0.0.0/29".to_owned()];
+        cfg.custom_cidrs = vec!["203.0.113.0/29".to_owned()];
         let first = tokio::spawn({
             let c = c.clone();
             let cfg = cfg.clone();
             async move { c.run(cfg).await.unwrap() }
         });
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        wait_until(Duration::from_secs(2), || c.is_running()).await;
         assert!(c.is_running());
 
         let err = c.run(cfg.clone()).await.unwrap_err();
@@ -805,17 +816,17 @@ mod tests {
     async fn reset_while_running_is_a_noop() {
         let mut t = FakeTransport::new();
         for i in 0..8u8 {
-            t = t.ok_slow(format!("10.0.0.{i}").parse().unwrap(), 443, 25, 150);
+            t = t.ok_slow(format!("203.0.113.{i}").parse().unwrap(), 443, 25, 150);
         }
         let c = Arc::new(ScanController::new(Arc::new(t)));
         let mut cfg = ok_cfg(8, None);
-        cfg.custom_cidrs = vec!["10.0.0.0/29".to_owned()];
+        cfg.custom_cidrs = vec!["203.0.113.0/29".to_owned()];
         let first = tokio::spawn({
             let c = c.clone();
             let cfg = cfg.clone();
             async move { c.run(cfg).await.unwrap() }
         });
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        wait_until(Duration::from_secs(2), || c.is_running()).await;
         c.reset();
         let summary = first.await.unwrap();
         assert_eq!(summary.found, 8);
@@ -827,9 +838,9 @@ mod tests {
         // A pool emptied by exclusions yields zero probes: the run must end
         // cleanly with a 0/0 summary and no probes (no fake scripting needed).
         let (c, _) = controller(Arc::new(FakeTransport::new()));
-        let pool = ranges::CidrPool::parse("10.0.0.0/29")
+        let pool = ranges::CidrPool::parse("203.0.113.0/29")
             .unwrap()
-            .excluding(&[ranges::parse_cidr("10.0.0.0/29").unwrap()]);
+            .excluding(&[ranges::parse_cidr("203.0.113.0/29").unwrap()]);
         let summary = c
             .run_seeded_with_pool(ok_cfg(1, None), 1, pool)
             .await
@@ -845,9 +856,9 @@ mod tests {
         // must end up with the same found set as the summary, even if they
         // missed every live event (the store is flushed before Finished).
         let t = FakeTransport::new()
-            .ok("10.0.0.1".parse().unwrap(), 443, 50)
-            .ok("10.0.0.2".parse().unwrap(), 443, 10)
-            .ok("10.0.0.3".parse().unwrap(), 443, 30);
+            .ok("203.0.113.1".parse().unwrap(), 443, 50)
+            .ok("203.0.113.2".parse().unwrap(), 443, 10)
+            .ok("203.0.113.3".parse().unwrap(), 443, 30);
         let (c, mut rx) = controller(Arc::new(t));
         let summary = run_local(&c, ok_cfg(3, None), 1).await.unwrap();
         let results = c.results();
@@ -865,27 +876,27 @@ mod tests {
     #[test]
     fn sampling_skips_network_and_broadcast_for_dense_v4_blocks() {
         let mut rng = SplitMix64::new(1);
-        // /25: network 10.0.0.0, broadcast 10.0.0.127; a count beyond the
+        // /25: network 203.0.113.0, broadcast 203.0.113.127; a count beyond the
         // usable space must draw every usable host and neither edge.
         let item = PlanItem::Sample {
-            cidr: ranges::parse_cidr("10.0.0.0/25").unwrap(),
+            cidr: ranges::parse_cidr("203.0.113.0/25").unwrap(),
             count: 200,
         };
         let hosts: Vec<IpAddr> = plan_hosts_iter(&item, &mut rng).collect();
         assert_eq!(hosts.len(), 126, "all usable /25 hosts must be drawn");
-        assert!(!hosts.contains(&"10.0.0.0".parse::<IpAddr>().unwrap()));
-        assert!(!hosts.contains(&"10.0.0.127".parse::<IpAddr>().unwrap()));
+        assert!(!hosts.contains(&"203.0.113.0".parse::<IpAddr>().unwrap()));
+        assert!(!hosts.contains(&"203.0.113.127".parse::<IpAddr>().unwrap()));
 
         // /24 keeps its existing 254-usable-host behavior.
         let item = PlanItem::Sample {
-            cidr: ranges::parse_cidr("10.0.0.0/24").unwrap(),
+            cidr: ranges::parse_cidr("203.0.113.0/24").unwrap(),
             count: 300,
         };
         let hosts: Vec<IpAddr> = plan_hosts_iter(&item, &mut rng).collect();
         assert_eq!(hosts.len(), 254);
 
         // /31 and /32 have no usable host left once both edges are skipped.
-        for dense in ["10.0.0.0/31", "10.0.0.0/32"] {
+        for dense in ["203.0.113.0/31", "203.0.113.0/32"] {
             let item = PlanItem::Sample {
                 cidr: ranges::parse_cidr(dense).unwrap(),
                 count: 4,
@@ -907,14 +918,16 @@ mod tests {
         let t = FakeTransport::new();
         for i in 0..1024u32 {
             t.insert(
-                format!("10.0.{}.{}", i / 256, i % 256).parse().unwrap(),
+                format!("203.0.{}.{}", 112 + i / 256, i % 256)
+                    .parse()
+                    .unwrap(),
                 443,
                 Ok(i % 100),
             );
         }
         let c = Arc::new(ScanController::new(Arc::new(t)));
         let mut cfg = ok_cfg(1024, None);
-        cfg.custom_cidrs = vec!["10.0.0.0/22".to_owned()];
+        cfg.custom_cidrs = vec!["203.0.112.0/22".to_owned()];
         cfg.target = ScanTarget::Count(1024 + 100);
         cfg.concurrency = 500;
 
@@ -943,9 +956,7 @@ mod tests {
                 (summary, events)
             }
         });
-        while c.is_running() {
-            tokio::time::sleep(Duration::from_millis(2)).await;
-        }
+        wait_until(Duration::from_secs(2), || !c.is_running()).await;
         // The scan finished (store fully flushed, Finished emitted); release
         // the parked consumer and let the end-of-run drain + store re-sync run.
         let _ = park_tx.send(());
@@ -973,7 +984,7 @@ mod tests {
     fn store_lazy_sort_orders_by_latency_then_ip_port() {
         let c = Arc::new(ScanController::new(Arc::new(FakeTransport::new())));
         let v1 = Verdict {
-            ip: "10.0.0.3".parse().unwrap(),
+            ip: "203.0.113.3".parse().unwrap(),
             port: 443,
             latency_ms: Some(50),
             country: None,
@@ -981,7 +992,7 @@ mod tests {
             phase2: None,
         };
         let v2 = Verdict {
-            ip: "10.0.0.1".parse().unwrap(),
+            ip: "203.0.113.1".parse().unwrap(),
             port: 443,
             latency_ms: Some(10),
             country: None,
@@ -989,7 +1000,7 @@ mod tests {
             phase2: None,
         };
         let v3 = Verdict {
-            ip: "10.0.0.2".parse().unwrap(),
+            ip: "203.0.113.2".parse().unwrap(),
             port: 80,
             latency_ms: Some(10),
             country: None,
@@ -1003,15 +1014,15 @@ mod tests {
         );
         let results = c.results();
         assert_eq!(results.len(), 3);
-        // Sorted by latency, then ip, then port: 10@10.0.0.1:443, 10@10.0.0.2:80, 50@10.0.0.3:443
-        assert_eq!(results[0].ip, "10.0.0.1".parse::<IpAddr>().unwrap());
+        // Sorted by latency, then ip, then port: 10@203.0.113.1:443, 10@203.0.113.2:80, 50@203.0.113.3:443
+        assert_eq!(results[0].ip, "203.0.113.1".parse::<IpAddr>().unwrap());
         assert_eq!(results[0].port, 443);
-        assert_eq!(results[1].ip, "10.0.0.2".parse::<IpAddr>().unwrap());
+        assert_eq!(results[1].ip, "203.0.113.2".parse::<IpAddr>().unwrap());
         assert_eq!(results[1].port, 80);
-        assert_eq!(results[2].ip, "10.0.0.3".parse::<IpAddr>().unwrap());
+        assert_eq!(results[2].ip, "203.0.113.3".parse::<IpAddr>().unwrap());
         // push after read dirties again
         let v4 = Verdict {
-            ip: "10.0.0.4".parse().unwrap(),
+            ip: "203.0.113.4".parse().unwrap(),
             port: 443,
             latency_ms: Some(5),
             country: None,
@@ -1022,6 +1033,56 @@ mod tests {
         let results2 = c.results();
         assert_eq!(results2.len(), 4);
         assert_eq!(results2[0].latency_ms, Some(5));
-        assert_eq!(results2[0].ip, "10.0.0.4".parse::<IpAddr>().unwrap());
+        assert_eq!(results2[0].ip, "203.0.113.4".parse::<IpAddr>().unwrap());
+    }
+
+    #[test]
+    fn results_accessors_avoid_full_clone() {
+        let c = Arc::new(ScanController::new(Arc::new(FakeTransport::new())));
+        // Empty store: has_results is false.
+        assert!(!c.has_results());
+
+        let v1 = Verdict {
+            ip: "203.0.113.3".parse().unwrap(),
+            port: 443,
+            latency_ms: Some(50),
+            country: None,
+            colo: None,
+            phase2: None,
+        };
+        let v2 = Verdict {
+            ip: "203.0.113.1".parse().unwrap(),
+            port: 443,
+            latency_ms: Some(10),
+            country: None,
+            colo: None,
+            phase2: None,
+        };
+        let v3 = Verdict {
+            ip: "203.0.113.2".parse().unwrap(),
+            port: 80,
+            latency_ms: Some(10),
+            country: None,
+            colo: None,
+            phase2: None,
+        };
+        merge_sorted(
+            &c.store,
+            &c.store_dirty,
+            vec![v1.clone(), v2.clone(), v3.clone()],
+        );
+
+        // Non-empty store: has_results is true.
+        assert!(c.has_results());
+
+        // for_each_result iterates in sorted order matching results().
+        let snapshot = c.results();
+        let mut collected = Vec::new();
+        c.for_each_result(|v| collected.push((v.ip, v.port)));
+        let expected: Vec<(IpAddr, u16)> = snapshot.iter().map(|v| (v.ip, v.port)).collect();
+        assert_eq!(
+            collected, expected,
+            "for_each_result must match results() order"
+        );
     }
 }

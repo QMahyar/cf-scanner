@@ -314,7 +314,7 @@ impl ScanController {
                         );
                     }
                     specs.extend(parsed.into_iter().map(|spec| (spec, idx as u32)));
-                },
+                }
                 Err(err) => {
                     skipped += 1;
                     tracing::warn!("phase-2 config skipped: {err:#}");
@@ -546,12 +546,12 @@ mod tests {
         let t = FakeTransport::new()
             .ok("2606:4700::1".parse().unwrap(), 443, 20)
             .ok("2606:4700::2".parse().unwrap(), 443, 30)
-            .ok("10.0.0.1".parse().unwrap(), 443, 40);
-        let probe = FakeTunnelProbe::new().pass("10.0.0.1".parse().unwrap());
+            .ok("203.0.113.1".parse().unwrap(), 443, 40);
+        let probe = FakeTunnelProbe::new().pass("203.0.113.1".parse().unwrap());
         let c = p2_controller(t, FakeSub(""), probe.clone());
         let mut cfg = ok_cfg(100, None);
         cfg.phase2 = Some(p2_cfg(&[VLESS], &[]));
-        let pool = ranges::CidrPool::parse("2606:4700::/126\n10.0.0.0/30").unwrap();
+        let pool = ranges::CidrPool::parse("2606:4700::/126\n203.0.113.0/30").unwrap();
         c.run_seeded_with_pool(cfg, 1, pool).await.unwrap();
         // Only the v4 candidate went through the tunnel probe.
         assert_eq!(probe.attempts.load(Ordering::Relaxed), 1);
@@ -570,11 +570,11 @@ mod tests {
     #[tokio::test]
     async fn phase2_attaches_verdicts_and_reemits_results() {
         let t = FakeTransport::new()
-            .ok("10.0.0.1".parse().unwrap(), 443, 50)
-            .ok("10.0.0.2".parse().unwrap(), 443, 10);
+            .ok("203.0.113.1".parse().unwrap(), 443, 50)
+            .ok("203.0.113.2".parse().unwrap(), 443, 10);
         let probe = FakeTunnelProbe::new()
-            .pass("10.0.0.1".parse().unwrap())
-            .pass("10.0.0.2".parse().unwrap());
+            .pass("203.0.113.1".parse().unwrap())
+            .pass("203.0.113.2".parse().unwrap());
         let c = p2_controller(t, FakeSub(""), probe.clone());
         let mut rx = c.subscribe();
         let mut cfg = ok_cfg(2, None);
@@ -605,7 +605,7 @@ mod tests {
 
     #[tokio::test]
     async fn phase2_marks_failed_attempts_without_aborting() {
-        let t = FakeTransport::new().ok("10.0.0.1".parse().unwrap(), 443, 50);
+        let t = FakeTransport::new().ok("203.0.113.1".parse().unwrap(), 443, 50);
         let probe = FakeTunnelProbe::new(); // nothing passes
         let c = p2_controller(t, FakeSub(""), probe.clone());
         let mut cfg = ok_cfg(1, None);
@@ -620,8 +620,8 @@ mod tests {
 
     #[tokio::test]
     async fn phase2_tries_sni_combos_until_one_passes() {
-        let t = FakeTransport::new().ok("10.0.0.1".parse().unwrap(), 443, 50);
-        let mut probe = FakeTunnelProbe::new().pass("10.0.0.1".parse().unwrap());
+        let t = FakeTransport::new().ok("203.0.113.1".parse().unwrap(), 443, 50);
+        let mut probe = FakeTunnelProbe::new().pass("203.0.113.1".parse().unwrap());
         probe.sni_pass = Some("b.me");
         let c = p2_controller(t, FakeSub(""), probe.clone());
         let mut cfg = ok_cfg(1, None);
@@ -637,8 +637,8 @@ mod tests {
 
     #[tokio::test]
     async fn phase2_fetches_subscriptions_through_the_seam() {
-        let t = FakeTransport::new().ok("10.0.0.1".parse().unwrap(), 443, 50);
-        let probe = FakeTunnelProbe::new().pass("10.0.0.1".parse().unwrap());
+        let t = FakeTransport::new().ok("203.0.113.1".parse().unwrap(), 443, 50);
+        let probe = FakeTunnelProbe::new().pass("203.0.113.1".parse().unwrap());
         let sub = FakeSub("vless://aaaaaaaa-bbbb-cccc-dddd-eeeeffff0000@1.2.3.4:443\nnot-a-uri\n");
         let c = p2_controller(t, sub, probe);
         let mut cfg = ok_cfg(1, None);
@@ -657,11 +657,11 @@ mod tests {
         // preset, sni) combo: attempts stay at candidate count and every
         // probe call carries the full URL list.
         let t = FakeTransport::new()
-            .ok("10.0.0.1".parse().unwrap(), 443, 50)
-            .ok("10.0.0.2".parse().unwrap(), 443, 10);
+            .ok("203.0.113.1".parse().unwrap(), 443, 50)
+            .ok("203.0.113.2".parse().unwrap(), 443, 10);
         let probe = FakeTunnelProbe::new()
-            .pass("10.0.0.1".parse().unwrap())
-            .pass("10.0.0.2".parse().unwrap());
+            .pass("203.0.113.1".parse().unwrap())
+            .pass("203.0.113.2".parse().unwrap());
         let c = p2_controller(t, FakeSub(""), probe.clone());
         let mut cfg = ok_cfg(2, None);
         cfg.phase2 = Some(Phase2Config {
@@ -703,7 +703,7 @@ mod tests {
 
     #[tokio::test]
     async fn phase2_bad_config_aborts_the_run() {
-        let t = FakeTransport::new().ok("10.0.0.1".parse().unwrap(), 443, 50);
+        let t = FakeTransport::new().ok("203.0.113.1".parse().unwrap(), 443, 50);
         let c = p2_controller(t, FakeSub(""), FakeTunnelProbe::new());
         let mut cfg = ok_cfg(1, None);
         cfg.phase2 = Some(p2_cfg(&["ftp://nope"], &[]));
@@ -714,8 +714,8 @@ mod tests {
     #[tokio::test]
     async fn phase2_local_failures_abort_with_a_reason() {
         let t = FakeTransport::new()
-            .ok("10.0.0.1".parse().unwrap(), 443, 50)
-            .ok("10.0.0.2".parse().unwrap(), 443, 50);
+            .ok("203.0.113.1".parse().unwrap(), 443, 50)
+            .ok("203.0.113.2".parse().unwrap(), 443, 50);
         let probe = FakeTunnelProbe::new();
         probe
             .always_err
@@ -758,8 +758,8 @@ mod tests {
 
     #[tokio::test]
     async fn phase2_one_bad_config_entry_is_skipped_not_fatal() {
-        let t = FakeTransport::new().ok("10.0.0.1".parse().unwrap(), 443, 50);
-        let probe = FakeTunnelProbe::new().pass("10.0.0.1".parse().unwrap());
+        let t = FakeTransport::new().ok("203.0.113.1".parse().unwrap(), 443, 50);
+        let probe = FakeTunnelProbe::new().pass("203.0.113.1".parse().unwrap());
         let c = p2_controller(t, FakeSub(""), probe.clone());
         let mut cfg = ok_cfg(1, None);
         cfg.phase2 = Some(p2_cfg(&["ftp://nope", VLESS], &[]));
@@ -770,7 +770,7 @@ mod tests {
 
     #[tokio::test]
     async fn phase2_all_config_entries_bad_aborts_with_count() {
-        let t = FakeTransport::new().ok("10.0.0.1".parse().unwrap(), 443, 50);
+        let t = FakeTransport::new().ok("203.0.113.1".parse().unwrap(), 443, 50);
         let c = p2_controller(t, FakeSub(""), FakeTunnelProbe::new());
         let mut cfg = ok_cfg(1, None);
         cfg.phase2 = Some(p2_cfg(&["ftp://nope"], &[]));
@@ -781,7 +781,7 @@ mod tests {
     #[test]
     fn update_verdict_phase2_never_downgrades_a_pass() {
         let store: Store = Arc::new(Mutex::new(vec![Verdict {
-            ip: "10.0.0.1".parse().unwrap(),
+            ip: "203.0.113.1".parse().unwrap(),
             port: 443,
             latency_ms: Some(5),
             country: None,
@@ -806,7 +806,8 @@ mod tests {
             config_index: None,
             verifier: None,
         };
-        let updated = update_verdict_phase2(&store, "10.0.0.1".parse().unwrap(), 443, failed, None);
+        let updated =
+            update_verdict_phase2(&store, "203.0.113.1".parse().unwrap(), 443, failed, None);
         assert!(updated.is_none(), "a pass must never be downgraded");
         let row = &store.lock().unwrap_or_else(|e| e.into_inner())[0];
         assert!(row.phase2.as_ref().unwrap().passed);
@@ -819,9 +820,9 @@ mod tests {
         // visible to phase-2 workers: verification runs zero tunnel probes
         // and the summary reports the cancel.
         let t = FakeTransport::new()
-            .ok_slow("10.0.0.1".parse().unwrap(), 443, 50, 200)
-            .ok_slow("10.0.0.2".parse().unwrap(), 443, 50, 200);
-        let probe = FakeTunnelProbe::new().pass("10.0.0.1".parse().unwrap());
+            .ok_slow("203.0.113.1".parse().unwrap(), 443, 50, 200)
+            .ok_slow("203.0.113.2".parse().unwrap(), 443, 50, 200);
+        let probe = FakeTunnelProbe::new().pass("203.0.113.1".parse().unwrap());
         let c = p2_controller(t, FakeSub(""), probe.clone());
         let mut rx = c.subscribe();
         let mut cfg = ok_cfg(2, None);
@@ -857,7 +858,7 @@ mod tests {
         // Nothing passes, so every combo completes and `done` reaches
         // `total`: the winning worker and the post-loop emit must yield
         // exactly one terminal Phase2Progress, not two.
-        let t = FakeTransport::new().ok("10.0.0.1".parse().unwrap(), 443, 50);
+        let t = FakeTransport::new().ok("203.0.113.1".parse().unwrap(), 443, 50);
         let probe = FakeTunnelProbe::new();
         let c = p2_controller(t, FakeSub(""), probe);
         let mut rx = c.subscribe();
@@ -907,11 +908,11 @@ mod tests {
     #[tokio::test]
     async fn phase2_progress_events_track_attempts() {
         let t = FakeTransport::new()
-            .ok("10.0.0.1".parse().unwrap(), 443, 50)
-            .ok("10.0.0.2".parse().unwrap(), 443, 10);
+            .ok("203.0.113.1".parse().unwrap(), 443, 50)
+            .ok("203.0.113.2".parse().unwrap(), 443, 10);
         let probe = FakeTunnelProbe::new()
-            .pass("10.0.0.1".parse().unwrap())
-            .pass("10.0.0.2".parse().unwrap());
+            .pass("203.0.113.1".parse().unwrap())
+            .pass("203.0.113.2".parse().unwrap());
         let c = p2_controller(t, FakeSub(""), probe);
         let mut rx = c.subscribe();
         let mut cfg = ok_cfg(2, None);

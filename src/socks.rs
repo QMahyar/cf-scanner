@@ -2,7 +2,6 @@
 //! inbound, then the same TLS+HTTP GET leg as a direct fetch. Used for the
 //! phase-2 tunnel probes (verify.rs); not a general-purpose client.
 
-use std::io;
 use std::net::SocketAddr;
 use std::time::Duration;
 
@@ -20,6 +19,10 @@ pub(crate) fn http_request(host: &str, path: &str, extra_headers: &str) -> Strin
 /// at [`MAX_BODY_BYTES`] so untrusted responses can't exhaust memory.
 const MAX_BODY_BYTES: usize = 64 * 1024 * 1024;
 
+/// Maximum HTTP head (status + headers) size. Anything larger is a protocol
+/// failure, not a real response.
+const MAX_HEADER_BYTES: usize = 64 * 1024;
+
 /// Same shape as [`http_request`] but without `Connection: close`, so one
 /// tunneled connection can serve several probe URLs (the inline verifier's
 /// keep-alive multi-URL loop). `http_request` itself stays close-delimited
@@ -28,47 +31,36 @@ pub(crate) fn http_request_keepalive(host: &str, path: &str, extra_headers: &str
     format!("GET {path} HTTP/1.1\r\nHost: {host}\r\n{extra_headers}\r\n\r\n")
 }
 
-pub(crate) async fn send_http<S>(stream: S, request: &str) -> Result<(u16, Vec<String>, Vec<u8>)>
-where
-    S: AsyncRead + AsyncWrite + Unpin,
-{
-    let (rd, mut wr) = tokio::io::split(stream);
-    wr.write_all(request.as_bytes()).await?;
+/// Parsed HTTP/1.1 response.
+pub(crate) struct ParsedResponse {
+    pub status: u16,
+    pub headers: Vec<String>,
+    pub body: Vec<u8>,
+}
 
-    let bytes: Vec<u8> = {
-        let mut buf = Vec::new();
-        let mut rd = rd.take(MAX_BODY_BYTES as u64 + 64 * 1024);
-        let mut chunk = [0u8; 8192];
-        loop {
-            match rd.read(&mut chunk).await {
-                Ok(0) => break,
-                Ok(n) => {
-                    buf.extend_from_slice(&chunk[..n]);
-                    // An explicit failure, not a silent truncation: a caller
-                    // judging a probe by the body must never see a cropped
-                    // response that parses as success.
-                    if buf.len() > MAX_BODY_BYTES {
-                        bail!("response body exceeded the {MAX_BODY_BYTES} byte cap");
-                    }
-                }
-                // HTTP/1.1 `Connection: close` ends the body at EOF; some
-                // servers (and every tunneled hop that drops TLS close_notify,
-                // e.g. Cloudflare Workers proxying) close without the TLS
-                // goodbye. rustls reports that as UnexpectedEof; keep the
-                // bytes already delivered instead of failing the fetch.
-                Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => break,
-                Err(e) => return Err(e).context("failed reading HTTP response"),
-            }
+/// Generic HTTP/1.1 response reader over any `AsyncRead` stream. Reads the
+/// status line and headers (CRLF-terminated, capped at `MAX_HEADER_BYTES`),
+/// then the body sized by Content-Length / chunked / close-delimited. The
+/// body is capped at `max_body` bytes so untrusted responses can't exhaust
+/// memory.
+pub(crate) async fn read_response<S: AsyncRead + Unpin + ?Sized>(
+    stream: &mut S,
+    max_body: usize,
+) -> Result<ParsedResponse> {
+    let mut head = Vec::new();
+    let mut byte = [0u8; 1];
+    while !head.ends_with(b"\r\n\r\n") {
+        if head.len() >= MAX_HEADER_BYTES {
+            bail!("response headers exceed the {MAX_HEADER_BYTES} cap");
         }
-        buf
-    };
-    let split = bytes
-        .windows(4)
-        .position(|w| w == b"\r\n\r\n")
-        .context("malformed HTTP response")?;
-    let (head, body) = bytes.split_at(split);
-    let head = String::from_utf8_lossy(head);
-    let mut lines = head.lines();
+        stream
+            .read_exact(&mut byte)
+            .await
+            .context("reading response headers")?;
+        head.push(byte[0]);
+    }
+    let head_str = std::str::from_utf8(&head).context("response headers are not utf-8")?;
+    let mut lines = head_str.lines();
     let status_line = lines.next().context("empty HTTP response")?;
     let status = status_line
         .split_whitespace()
@@ -76,16 +68,117 @@ where
         .and_then(|s| s.parse().ok())
         .context("malformed status line")?;
     let headers: Vec<String> = lines.map(str::to_owned).collect();
-    let body = body[4..].to_vec();
-    let body = if headers.iter().any(|h| {
-        h.to_ascii_lowercase()
-            .starts_with("transfer-encoding: chunked")
-    }) {
-        decode_chunked(&body)?
-    } else {
-        body
+    let body = read_body(stream, &headers, max_body).await?;
+    Ok(ParsedResponse {
+        status,
+        headers,
+        body,
+    })
+}
+
+async fn read_body<S: AsyncRead + Unpin + ?Sized>(
+    stream: &mut S,
+    headers: &[String],
+    max_body: usize,
+) -> Result<Vec<u8>> {
+    let contains = |needle: &str| {
+        headers
+            .iter()
+            .any(|h| h.to_ascii_lowercase().starts_with(needle))
     };
-    Ok((status, headers, body))
+    if contains("transfer-encoding: chunked") {
+        let mut raw = Vec::new();
+        loop {
+            let size_line = read_line(stream, 256).await.context("reading chunk size")?;
+            let text = std::str::from_utf8(&size_line).context("chunk size not utf-8")?;
+            let size = usize::from_str_radix(text.split(';').next().unwrap_or("").trim(), 16)
+                .context("malformed chunk size")?;
+            if size == 0 {
+                loop {
+                    let line = read_line(stream, 4096).await?;
+                    if line.is_empty() {
+                        break;
+                    }
+                }
+                raw.extend_from_slice(b"0\r\n\r\n");
+                break;
+            }
+            if size > max_body.saturating_sub(raw.len()) {
+                bail!("chunked body exceeds the {max_body} cap");
+            }
+            raw.extend_from_slice(format!("{size:x}\r\n").as_bytes());
+            let mut data = vec![0u8; size];
+            stream
+                .read_exact(&mut data)
+                .await
+                .context("reading chunk data")?;
+            raw.extend_from_slice(&data);
+            let mut crlf = [0u8; 2];
+            stream.read_exact(&mut crlf).await?;
+            if crlf != *b"\r\n" {
+                bail!("malformed chunk terminator");
+            }
+            raw.extend_from_slice(b"\r\n");
+        }
+        decode_chunked(&raw)
+    } else if let Some(cl) = headers
+        .iter()
+        .find(|h| h.to_ascii_lowercase().starts_with("content-length:"))
+    {
+        let n: usize = cl
+            .split(':')
+            .nth(1)
+            .and_then(|s| s.trim().parse().ok())
+            .context("malformed content-length")?;
+        if n > max_body {
+            bail!("response body exceeds the {max_body} cap");
+        }
+        let mut body = vec![0u8; n];
+        stream
+            .read_exact(&mut body)
+            .await
+            .context("reading content-length body")?;
+        Ok(body)
+    } else {
+        let mut body = Vec::new();
+        stream
+            .take(max_body as u64 + 1)
+            .read_to_end(&mut body)
+            .await
+            .context("reading close-delimited body")?;
+        if body.len() > max_body {
+            bail!("response body exceeded the {max_body} byte cap");
+        }
+        Ok(body)
+    }
+}
+
+/// Reads one CRLF-terminated line (the CRLF stripped), capped so a hostile
+/// server cannot feed an unbounded line.
+async fn read_line<S: AsyncRead + Unpin + ?Sized>(stream: &mut S, cap: usize) -> Result<Vec<u8>> {
+    let mut line = Vec::new();
+    let mut byte = [0u8; 1];
+    loop {
+        if line.len() >= cap {
+            bail!("line exceeds the {cap} cap");
+        }
+        stream.read_exact(&mut byte).await?;
+        line.push(byte[0]);
+        if line.ends_with(b"\r\n") {
+            line.truncate(line.len() - 2);
+            return Ok(line);
+        }
+    }
+}
+
+pub(crate) async fn send_http<S>(stream: S, request: &str) -> Result<(u16, Vec<String>, Vec<u8>)>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let (mut rd, mut wr) = tokio::io::split(stream);
+    wr.write_all(request.as_bytes()).await?;
+    let resp = read_response(&mut rd, MAX_BODY_BYTES).await?;
+    Ok((resp.status, resp.headers, resp.body))
 }
 
 /// Minimal HTTP/1.1 chunked decoder: `size\r\n data \r\n ... 0\r\n\r\n`.
@@ -220,6 +313,7 @@ async fn socks5_connect(stream: &mut TcpStream, host: &str, port: u16) -> Result
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
 
     /// Plays a minimal no-auth socks server that answers CONNECT and serves
     /// one `200 OK` body — enough to prove the client's wire format.
@@ -444,6 +538,72 @@ mod tests {
         #[test]
         fn decode_chunked_never_panics_on_arbitrary_bytes(data in proptest::collection::vec(proptest::prelude::any::<u8>(), 0..512)) {
             let _ = decode_chunked(&data);
+        }
+
+        #[test]
+        fn shared_read_response_agrees_with_inline_verifier(
+            status in 200u16..599u16,
+            body in proptest::collection::vec(proptest::prelude::any::<u8>(), 0..2048),
+            framing in prop_oneof![
+                Just(0usize),  // Content-Length
+                Just(1usize),  // chunked
+                Just(2usize),  // close-delimited
+            ]
+        ) {
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            rt.block_on(async {
+                let resp_bytes = match framing {
+                    0 => {
+                        format!("HTTP/1.1 {status} X\r\nContent-Length: {}\r\n\r\n", body.len())
+                            .into_bytes()
+                            .into_iter()
+                            .chain(body)
+                            .collect::<Vec<u8>>()
+                    }
+                    1 => {
+                        let mut raw = Vec::new();
+                        for chunk in body.chunks(64) {
+                            raw.extend_from_slice(format!("{:x}\r\n", chunk.len()).as_bytes());
+                            raw.extend_from_slice(chunk);
+                            raw.extend_from_slice(b"\r\n");
+                        }
+                        raw.extend_from_slice(b"0\r\n\r\n");
+                        let encoded = decode_chunked(&raw).unwrap();
+                        format!("HTTP/1.1 {status} X\r\nTransfer-Encoding: chunked\r\n\r\n")
+                            .into_bytes()
+                            .into_iter()
+                            .chain(encoded)
+                            .collect::<Vec<u8>>()
+                    }
+                    _ => {
+                        format!("HTTP/1.1 {status} X\r\n\r\n")
+                            .into_bytes()
+                            .into_iter()
+                            .chain(body)
+                            .collect::<Vec<u8>>()
+                    }
+                };
+
+                let socks_result = read_response(&mut &resp_bytes[..], MAX_BODY_BYTES).await;
+                let inline_result = crate::inline_verify::read_http_response(&mut &resp_bytes[..]).await;
+
+                match (&socks_result, &inline_result) {
+                    (Ok(s), Ok((i_status, i_body))) => {
+                        prop_assert_eq!(s.status, *i_status, "status mismatch");
+                        prop_assert_eq!(&s.body, i_body, "body mismatch");
+                    }
+                    (Err(_), Err(_)) => {}
+                    _ => {
+                        prop_assert!(
+                            false,
+                            "disagreement: socks={:?}, inline={:?}",
+                            socks_result.map(|r| (r.status, r.body.len())),
+                            inline_result.map(|r| (r.0, r.1.len()))
+                        );
+                    }
+                }
+                Ok::<(), proptest::test_runner::TestCaseError>(())
+            }).unwrap();
         }
     }
 }

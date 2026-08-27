@@ -231,18 +231,18 @@ mod tests {
     #[tokio::test]
     async fn collects_verdicts_until_found_stop() {
         let t = FakeTransport::new()
-            .ok("10.0.0.1".parse().unwrap(), 443, 50)
-            .ok("10.0.0.2".parse().unwrap(), 443, 10)
-            .ok("10.0.0.3".parse().unwrap(), 443, 30);
+            .ok("203.0.113.1".parse().unwrap(), 443, 50)
+            .ok("203.0.113.2".parse().unwrap(), 443, 10)
+            .ok("203.0.113.3".parse().unwrap(), 443, 30);
         let (c, mut rx) = controller(Arc::new(t));
         let summary = run_local(&c, ok_cfg(2, None), 1).await.unwrap();
         assert_eq!(summary.found, 2);
-        // 3 probes: 10.0.0.0 (refused) + two hits; the 4th task sees found == 2.
+        // 3 probes: 203.0.113.0 (refused) + two hits; the 4th task sees found == 2.
         assert_eq!(summary.scanned, 3);
         let results = c.results();
         assert_eq!(results.len(), 2);
-        assert_eq!(results[0].ip, "10.0.0.2".parse::<Ipv4Addr>().unwrap());
-        assert_eq!(results[1].ip, "10.0.0.1".parse::<Ipv4Addr>().unwrap());
+        assert_eq!(results[0].ip, "203.0.113.2".parse::<Ipv4Addr>().unwrap());
+        assert_eq!(results[1].ip, "203.0.113.1".parse::<Ipv4Addr>().unwrap());
         let mut events = vec![];
         while let Ok(e) = rx.try_recv() {
             events.push(e);
@@ -259,17 +259,19 @@ mod tests {
         let t = FakeTransport::new();
         for i in 0..1024u32 {
             t.insert(
-                format!("10.0.{}.{}", i / 256, i % 256).parse().unwrap(),
+                format!("203.0.{}.{}", 113 + i / 256, i % 256)
+                    .parse()
+                    .unwrap(),
                 443,
                 Ok(i % 97),
             );
         }
         let (c, mut rx) = controller(Arc::new(t));
         let mut cfg = ok_cfg(1024, None);
-        cfg.custom_cidrs = vec!["10.0.0.0/22".to_owned()];
+        cfg.custom_cidrs = vec!["203.0.113.0/22".to_owned()];
         cfg.target = ScanTarget::Count(1024);
         cfg.concurrency = 16;
-        let pool = ranges::CidrPool::parse("10.0.0.0/22").unwrap();
+        let pool = ranges::CidrPool::parse("203.0.113.0/22").unwrap();
         let summary = c.run_seeded_with_pool(cfg, 1, pool).await.unwrap();
         assert_eq!(summary.scanned, 1024);
         let mut progress = Vec::new();
@@ -292,8 +294,8 @@ mod tests {
     async fn cap_limits_probes() {
         // found is unreachable; the hard cap must stop the scan.
         let t = FakeTransport::new()
-            .ok("10.0.0.1".parse().unwrap(), 443, 1)
-            .ok("10.0.0.2".parse().unwrap(), 443, 1);
+            .ok("203.0.113.1".parse().unwrap(), 443, 1)
+            .ok("203.0.113.2".parse().unwrap(), 443, 1);
         let (c, _) = controller(Arc::new(t));
         let summary = run_local(&c, ok_cfg(100, Some(3)), 1).await.unwrap();
         assert_eq!(summary.scanned, 3);
@@ -302,7 +304,7 @@ mod tests {
 
     #[tokio::test]
     async fn exhausts_pool_when_found_unreachable() {
-        let t = FakeTransport::new().ok("10.0.0.1".parse().unwrap(), 443, 5);
+        let t = FakeTransport::new().ok("203.0.113.1".parse().unwrap(), 443, 5);
         let (c, _) = controller(Arc::new(t));
         let summary = run_local(&c, ok_cfg(10, None), 1).await.unwrap();
         assert_eq!(summary.found, 1);
@@ -334,8 +336,8 @@ mod tests {
     #[tokio::test]
     async fn multiplies_ports_per_host() {
         let t = FakeTransport::new()
-            .ok("10.0.0.1".parse().unwrap(), 443, 1)
-            .ok("10.0.0.1".parse().unwrap(), 8443, 1);
+            .ok("203.0.113.1".parse().unwrap(), 443, 1)
+            .ok("203.0.113.1".parse().unwrap(), 8443, 1);
         let mut cfg = ok_cfg(2, None);
         cfg.ports = vec![443, 8443];
         let (c, _) = controller(Arc::new(t));
@@ -346,8 +348,8 @@ mod tests {
     #[tokio::test]
     async fn cancel_without_active_run_is_noop() {
         let t = FakeTransport::new()
-            .ok("10.0.0.1".parse().unwrap(), 443, 1)
-            .ok("10.0.0.2".parse().unwrap(), 443, 1);
+            .ok("203.0.113.1".parse().unwrap(), 443, 1)
+            .ok("203.0.113.2".parse().unwrap(), 443, 1);
         let (c, _) = controller(Arc::new(t));
         c.cancel();
         let summary = run_local(&c, ok_cfg(5, None), 1).await.unwrap();
@@ -363,8 +365,8 @@ mod tests {
         // into the store, so `results()` only catches up at flush/scan end.
         let t = Arc::new(
             FakeTransport::new()
-                .ok_slow("10.0.0.1".parse().unwrap(), 443, 60, 200)
-                .ok_slow("10.0.0.2".parse().unwrap(), 443, 60, 200),
+                .ok_slow("203.0.113.1".parse().unwrap(), 443, 60, 200)
+                .ok_slow("203.0.113.2".parse().unwrap(), 443, 60, 200),
         );
         let (c, mut rx) = controller(t.clone());
         let cfg = ok_cfg(10, None);
@@ -415,10 +417,10 @@ mod tests {
         // last probe finishing; cancel lands inside it. The summary must
         // agree with the store and end with Finished, not Failed.
         let mut t = FakeTransport::new();
-        // The run_local /29 pool is hosts 10.0.0.0..=10.0.0.7: script every
+        // The run_local /29 pool is hosts 203.0.113.0..=203.0.113.7: script every
         // one so the last probe is still in flight when the test cancels.
         for i in 0..=7u8 {
-            t = t.ok_slow(format!("10.0.0.{i}").parse().unwrap(), 443, 60, 60);
+            t = t.ok_slow(format!("203.0.113.{i}").parse().unwrap(), 443, 60, 60);
         }
         let t = Arc::new(t);
         let (c, mut rx) = controller(t.clone());
@@ -489,7 +491,7 @@ mod tests {
 
         let c = Arc::new(ScanController::new(Arc::new(PanicTransport)));
         let mut cfg = ok_cfg(1, None);
-        cfg.custom_cidrs = vec!["10.0.0.0/29".to_owned()];
+        cfg.custom_cidrs = vec!["203.0.113.0/29".to_owned()];
         let err = c.run(cfg).await.unwrap_err();
         assert!(err.to_string().contains("panicked"), "{err:#}");
         assert!(!c.is_running(), "the reset guard must clear the busy flag");
@@ -510,7 +512,7 @@ mod tests {
         // host makes the sample fully deterministic.
         for i in 1..=254u8 {
             t.insert(
-                format!("10.0.0.{i}").parse().unwrap(),
+                format!("203.0.113.{i}").parse().unwrap(),
                 443,
                 Ok((i % 50) as u32),
             );
@@ -518,7 +520,7 @@ mod tests {
         let mut cfg = ok_cfg(100, None);
         cfg.target = ScanTarget::Count(60);
         let (c, mut rx) = controller(Arc::new(t));
-        let pool = ranges::CidrPool::parse("10.0.0.0/24").unwrap();
+        let pool = ranges::CidrPool::parse("203.0.113.0/24").unwrap();
         let summary = c.run_seeded_with_pool(cfg, 1, pool).await.unwrap();
         assert_eq!(summary.found, 60);
         let mut saw_progress = false;
@@ -533,7 +535,7 @@ mod tests {
 
     #[tokio::test]
     async fn new_run_replaces_previous_results() {
-        let t = Arc::new(FakeTransport::new().ok("10.0.0.1".parse().unwrap(), 443, 5));
+        let t = Arc::new(FakeTransport::new().ok("203.0.113.1".parse().unwrap(), 443, 5));
         let (c, _) = controller(t.clone());
         let _ = run_local(&c, ok_cfg(1, None), 1).await.unwrap();
         assert_eq!(c.results().len(), 1);

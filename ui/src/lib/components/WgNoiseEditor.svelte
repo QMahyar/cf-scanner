@@ -193,7 +193,7 @@
   >
     <div class="flex flex-wrap items-center justify-between gap-2">
       <span class="mono text-[11px] font-semibold uppercase tracking-wider" style="color: var(--ink-muted)">
-        AmneziaWG noise {container.scheme ? `(${container.scheme}:// · base64 INI)` : "(INI)"}
+        {container.scheme ? t("wgnoise.headingScheme", { scheme: container.scheme }) : t("wgnoise.headingIni")}
       </span>
       <span class="flex items-center gap-1">
         {#each Object.keys(PRESETS) as p (p)}
@@ -230,7 +230,7 @@
       </p>
     {:else}
       <p class="mt-2 text-[11px]" style="color: var(--ink-muted)">
-        Jc 0–128 · Jmin&lt;Jmax&lt;1280 · S1≤1132, S2≤1188, S1+56≠S2 · H 5–2147483647 unique
+        {t("wgnoise.limits")}
       </p>
     {/if}
   </div>

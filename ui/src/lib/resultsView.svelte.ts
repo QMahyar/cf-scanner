@@ -11,6 +11,14 @@ export const phase2Only = (r: Verdict) => r.phase2 != null;
 
 const DEFAULT_RENDER_CAP = 500;
 
+// Module-level dirty flag: set by store mutations (applyResult, resetResults,
+// setResults) and view parameter changes (cycleSort, setMaxLatency); cleared
+// by ResultsView lazy getters on recompute. Avoids O(n) filter+sort per tick.
+let _dirty = true;
+export function markDirty(): void {
+  _dirty = true;
+}
+
 export interface ResultsViewOptions {
   /** Overrides the default render cap; ResultsTable keeps owning its
    * RENDER_CAP constant and passes it in. */
@@ -57,6 +65,10 @@ export class ResultsView {
   readonly #source: () => readonly Verdict[];
   readonly #predicate: (r: Verdict) => boolean;
   readonly #renderCap: number;
+  #matchedCache: Verdict[] = [];
+  #rowsCache: Verdict[] = [];
+  #visibleCache: Verdict[] = [];
+  #cappedCache = false;
 
   constructor(
     source: () => readonly Verdict[],
@@ -67,40 +79,76 @@ export class ResultsView {
     this.#predicate = PHASE_PREDICATE[phase];
     this.#renderCap = opts?.renderCap ?? DEFAULT_RENDER_CAP;
     this.renderLimit = this.#renderCap;
+    // Eagerly populate caches so the instance is valid before the first
+    // _dirty cycle — avoids stale reads when the module-level flag is
+    // already false (e.g. a second ResultsView in the same test suite).
+    this.#matchedCache = this.#source().filter(
+      (r) =>
+        this.#predicate(r) &&
+        (this.maxLatency === null || (r.latency_ms ?? 9e9) <= this.maxLatency),
+    );
+    this.#rowsCache =
+      this.sortCol === null
+        ? [...this.#matchedCache]
+        : [...this.#matchedCache].sort((a, b) => this.#compare(a, b));
+    this.#visibleCache = this.#rowsCache.slice(0, this.renderLimit);
+    this.#cappedCache = this.#rowsCache.length > this.renderLimit;
   }
 
   get renderCap(): number {
     return this.#renderCap;
   }
 
-  // WHY .by with a thunk: a direct `this.#source()` call in a field
-  // initializer trips TS2729 ("used before initialization") under plain-TS
-  // checking of .svelte.ts modules; deferring through the arrow is the same
-  // derivation, just lazy.
+  // total is cheap and drives component skeleton/empty-state switching —
+  // keep it $derived so the component re-renders when items arrive.
   total = $derived.by(() => this.#source().length);
 
-  matched = $derived.by(() =>
-    this.#source().filter(
-      (r) =>
-        this.#predicate(r) &&
-        (this.maxLatency === null || (r.latency_ms ?? 9e9) <= this.maxLatency),
-    ),
-  );
+  // Lazy cached fields: recomputed only when _dirty is set. Avoids O(n)
+  // filter+sort on every applyResult tick during live scans.
 
-  rows = $derived.by(() => {
-    if (this.sortCol === null) return [...this.matched];
-    return [...this.matched].sort((a, b) => this.#compare(a, b));
-  });
+  get matched(): Verdict[] {
+    if (_dirty) {
+      this.#matchedCache = this.#source().filter(
+        (r) =>
+          this.#predicate(r) &&
+          (this.maxLatency === null || (r.latency_ms ?? 9e9) <= this.maxLatency),
+      );
+      this.#rowsCache =
+        this.sortCol === null
+          ? [...this.#matchedCache]
+          : [...this.#matchedCache].sort((a, b) => this.#compare(a, b));
+      this.#visibleCache = this.#rowsCache.slice(0, this.renderLimit);
+      this.#cappedCache = this.#rowsCache.length > this.renderLimit;
+      _dirty = false;
+    }
+    return this.#matchedCache;
+  }
 
-  visible = $derived(this.rows.slice(0, this.renderLimit));
+  get rows(): Verdict[] {
+    // Recomputed together with matched above.
+    if (_dirty) void this.matched;
+    return this.#rowsCache;
+  }
 
-  capped = $derived(this.rows.length > this.renderLimit);
+  get visible(): Verdict[] {
+    if (_dirty) void this.matched;
+    return this.#visibleCache;
+  }
 
-  picked = $derived(this.matched.filter((r) => this.selected.has(keyOf(r))));
+  get capped(): boolean {
+    if (_dirty) void this.matched;
+    return this.#cappedCache;
+  }
 
-  allPicked = $derived(
-    this.matched.length > 0 && this.picked.length === this.matched.length,
-  );
+  // picked/allPicked depend on selection ($state), not on data mutations,
+  // so they recompute on every read — cheap Set lookup over matched.
+  get picked(): Verdict[] {
+    return this.matched.filter((r) => this.selected.has(keyOf(r)));
+  }
+
+  get allPicked(): boolean {
+    return this.matched.length > 0 && this.picked.length === this.matched.length;
+  }
 
   #compare(a: Verdict, b: Verdict): number {
     const dir = this.sortDir === "asc" ? 1 : -1;
@@ -120,10 +168,12 @@ export class ResultsView {
     } else {
       this.sortCol = null;
     }
+    markDirty();
   }
 
   setMaxLatency(n: number | null): void {
     this.maxLatency = n;
+    markDirty();
   }
 
   toggleRow(r: Verdict, on: boolean): void {

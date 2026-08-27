@@ -468,12 +468,7 @@ fn parse_ports(s: &str) -> Result<Vec<u16>> {
                 .map_err(|_| anyhow!("port '{p}' is not a number"))
         })
         .collect::<Result<_>>()?;
-    if ports.is_empty() {
-        return Err(anyhow!("at least one port required"));
-    }
-    if ports.contains(&0) {
-        return Err(anyhow!("port 0 is not allowed"));
-    }
+    crate::api::types::validate_ports(&ports).map_err(|e| anyhow!("{e}"))?;
     Ok(ports)
 }
 

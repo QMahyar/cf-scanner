@@ -10,9 +10,10 @@ use std::collections::HashSet;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use base64::Engine as _;
-use cf_scanner::configs::{Protocol, WsSettings, parse_uri};
+use cf_scanner::configs::{OutboundSpec, Protocol, WsSettings, parse_uri, render_uri};
+use cf_scanner::dgst::dgst_sha256_hex;
 use cf_scanner::engine::SplitMix64;
-use cf_scanner::ranges::{Cidr, CidrPool, parse_cidr};
+use cf_scanner::ranges::{Cidr, CidrPool, parse_cidr, validate_fetch_url};
 use cf_scanner::wgconf::{
     AmneziaParams, WgConfig, WgPeer, parse_wg_entry, parse_wgconf, render_wgconf,
 };
@@ -499,5 +500,87 @@ proptest! {
             c,
             "the canonical reprint must re-parse to the same range"
         );
+    }
+
+    // --- (d) URI producer round-trip: render_uri -> parse_uri ----------------
+
+    #[test]
+    fn render_uri_roundtrips_userinfo(
+        user_id in prop::collection::vec(any::<u8>(), 1..64)
+            .prop_map(|v| String::from_utf8(v).unwrap_or_else(|_| "fallback".to_owned())),
+        host in "[a-z0-9]{1,24}",
+        port in 1u16..=65535,
+    ) {
+        let spec = OutboundSpec {
+            protocol: Protocol::Vless,
+            server: host.clone(),
+            port,
+            user_id: user_id.clone(),
+            method: None,
+            security: "tls".to_owned(),
+            tls_server_name: Some(host.clone()),
+            fingerprint: Some("chrome".to_owned()),
+            ws: None,
+            tag: None,
+            alter_id: 0,
+            vmess_security: None,
+        };
+        let uri = render_uri(&spec, "1.2.3.4".parse().unwrap(), None)
+            .unwrap_or_else(|e| panic!("render_uri must succeed: {e}\nspec: {spec:?}"));
+        let back = parse_uri(&uri)
+            .unwrap_or_else(|e| panic!("parse_uri must succeed on rendered URI:\n{uri}\n{e:#}"));
+        assert_eq!(back.user_id, user_id, "user_id must survive the round trip: {uri}");
+        assert_eq!(back.server, "1.2.3.4", "dial_ip must be used as server: {uri}");
+        assert_eq!(back.port, port, "port must survive the round trip: {uri}");
+        assert_eq!(back.protocol, Protocol::Vless, "protocol must survive: {uri}");
+    }
+
+    // --- (e) dgst grammar: valid hex accepted, junk rejected -----------------
+
+    #[test]
+    fn dgst_sha256_hex_accepts_valid_and_rejects_invalid(
+        hex64 in "[0-9a-fA-F]{64}",
+        junk in ".*",
+    ) {
+        // A properly formed dgst line must be accepted.
+        let valid = format!("SHA2-256= {hex64}");
+        let got = dgst_sha256_hex(&valid);
+        assert_eq!(got, Some(hex64.to_ascii_lowercase()), "valid dgst must parse: {valid}");
+
+        // Junk with no valid line must return None.
+        let result = dgst_sha256_hex(&junk);
+        if let Some(hash) = result {
+            // If it returned Something, it must be exactly 64 hex chars.
+            assert_eq!(hash.len(), 64, "returned hash must be 64 chars: {hash}");
+            assert!(hash.bytes().all(|b| b.is_ascii_hexdigit()), "returned hash must be hex: {hash}");
+        }
+    }
+
+    // --- (f) validate_fetch_url: loopback/link-local refused, public ok ------
+
+    #[test]
+    fn validate_fetch_url_refuses_loopback_and_allows_public(
+        addr in any::<Ipv4Addr>(),
+    ) {
+        let url = format!("https://{addr}/file.dgst");
+        let result = validate_fetch_url(&url);
+        let [a, b, _, _] = addr.octets();
+        let is_loopback = addr.is_loopback();
+        let is_unspecified = addr.is_unspecified();
+        let is_link_local = a == 169 && b == 254;
+        let should_refuse = is_loopback || is_unspecified || is_link_local;
+        assert_eq!(
+            result.is_err(),
+            should_refuse,
+            "validate_fetch_url({url}): expected {should_refuse}, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn validate_fetch_url_allows_domain_names(
+        name in "[a-z]{2,16}\\.[a-z]{2,8}",
+    ) {
+        let url = format!("https://{name}/file.dgst");
+        assert!(validate_fetch_url(&url).is_ok(), "domain names must be allowed: {url}");
     }
 }

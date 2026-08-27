@@ -28,18 +28,17 @@ Audited at `51c4711` (v0.10.0 + F7). 10 parallel audits → ~92 findings → 26 
 | 020 | Store accessors (Rust) | DONE | status handler swapped to has_results(); new results_accessors_avoid_full_clone test; all gates green |
 | 021 | De-flake async tests + property tests | DONE | wait_until helper + proptest render URI roundtrip + dgst grammar + validate_fetch_url properties |
 | 022 | Server split (tests → server/tests.rs) | DONE | 2122-line test module moved; import band-aids cleaned; clippy never_loop fix |
+| 023 | api/types.rs split (limits/error/validate) | DONE | limits.rs (44L), error.rs (88L), validate.rs (278L), types.rs facade (346L), types_tests.rs (912L) |
 | 024 | ranges.rs split (pool/http/official) | DONE | directory module: pool.rs (CIDR, CidrPool, persistence, time utils), http.rs (HTTP_CLIENT, SSRF guard, fetch_tls), official.rs (fetch/parse/refresh); 49 tests preserved, HTTP_CLIENT timeout audit clean |
 | 025 | Grammar consolidation (one CIDR/endpoint parser) | DONE | canonical parse_cidr in api::validate, pool.rs delegates + masks, engine/warp.rs thin wrapper, cli_wizard delegates validate_ports, grammar fixture test added to api, 457 tests green |
 | 026 | HTTP parser consolidation (socks + inline_verify) | DONE | generic `read_response` in socks.rs, inline_verify delegates, diff proptest asserts agreement |
+| 009 | ProPanel decomposition (6 new components) | DONE | ProfilesBar, CustomCidrsCard, Phase2TunnelCard, WarpIdentityCard, WarpRegistrationCard extracted; ProPanel shrunk from 1372→990 lines |
 
 ## Remaining (plans written, not yet shipped)
 
 | Plan | Title | Why deferred | Next step |
 |---|---|---|---|
-| — | (005 remaining now shipped: i18n keys + a11y throttle) | — | — |
-| — | (006 clipboard slice now shipped above) | — | — |
-| 009 | ProPanel decomposition (6 new components) | DONE | ProfilesBar, CustomCidrsCard, Phase2TunnelCard, WarpIdentityCard, WarpRegistrationCard extracted; ProPanel shrunk from 1372→990 lines |
-| 023 | api/types.rs split (limits/error/validate) | DONE | limits.rs (44L), error.rs (88L), validate.rs (278L), types.rs facade (346L), types_tests.rs (912L) |
+| — | All 26 advisor plans shipped | — | — |
 
 ## Direction (design spikes, not yet planned as builds)
 

@@ -30,6 +30,28 @@ fn grammar_fixture_endpoint_and_sni_cases_match_server_rules() {
     }
 }
 
+/// Shared grammar fixture: CIDR cases exercised through the canonical
+/// `api::types::parse_cidr` (the single grammar entry point).
+#[test]
+fn grammar_fixture_cidr_cases_match_parse_cidr() {
+    let raw = include_str!("../../tests/fixtures/grammar-cases.json");
+    let cases: Vec<serde_json::Value> = serde_json::from_str(raw).unwrap();
+    let checked = cases.iter().filter(|c| c["kind"] == "cidr").count();
+    assert!(
+        checked >= 15,
+        "fixture must keep cidr coverage, got {checked}"
+    );
+    for case in cases.iter().filter(|c| c["kind"] == "cidr") {
+        let input = case["input"].as_str().unwrap();
+        let expect_ok = case["expect"] == "ok";
+        assert_eq!(
+            parse_cidr(input).is_ok(),
+            expect_ok,
+            "cidr {input:?} expected {expect_ok}"
+        );
+    }
+}
+
 fn valid_config() -> ScanConfig {
     ScanConfig::default()
 }

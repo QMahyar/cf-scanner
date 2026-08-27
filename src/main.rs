@@ -788,11 +788,11 @@ async fn serve(
             listener,
             server::router(controller.clone(), bind_addr.port()),
         )
-            .with_graceful_shutdown(async move {
-                shutdown_signal(controller, tray_enabled).await;
-                let _ = shutdown_fired_tx.send(true);
-            })
-            .await
+        .with_graceful_shutdown(async move {
+            shutdown_signal(controller, tray_enabled).await;
+            let _ = shutdown_fired_tx.send(true);
+        })
+        .await
     });
     tokio::select! {
         res = &mut server => {

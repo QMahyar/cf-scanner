@@ -33,9 +33,6 @@ use crate::verify::{ProbeRequest, TunnelProbe, TunnelResult};
 /// declaring a huge Content-Length or chunk size must fail the probe instead
 /// of forcing a large zeroed allocation per attempt.
 const MAX_PROBE_BODY_BYTES: usize = 1024 * 1024;
-/// The HTTP head (status + headers) is tiny; anything bigger is a protocol
-/// failure, not a real response.
-const MAX_HEADER_BYTES: usize = 64 * 1024;
 
 /// Boxable tunnel stream: plain TCP when `security=none`, rustls when `tls`.
 trait AsyncStream: AsyncRead + AsyncWrite + Unpin + Send {}
@@ -504,135 +501,13 @@ impl<R: AsyncWrite + Unpin> AsyncWrite for PrefixedReader<R> {
 }
 
 /// Parses one HTTP/1.1 response off a keep-alive stream: the head, then the
-/// body sized by Content-Length / chunked / close-delimited. The xray path's
-/// `send_http` cannot serve here — it reads to EOF, which never comes on a
-/// connection that must survive the next URL.
-async fn read_http_response<S: AsyncRead + Unpin + ?Sized>(
+/// body sized by Content-Length / chunked / close-delimited. Delegates to the
+/// shared [`socks::read_response`] reader.
+pub(crate) async fn read_http_response<S: AsyncRead + Unpin + ?Sized>(
     stream: &mut S,
 ) -> Result<(u16, Vec<u8>)> {
-    let mut head = Vec::new();
-    let mut byte = [0u8; 1];
-    while !head.ends_with(b"\r\n\r\n") {
-        if head.len() >= MAX_HEADER_BYTES {
-            bail!("response headers exceed the {MAX_HEADER_BYTES} cap");
-        }
-        stream
-            .read_exact(&mut byte)
-            .await
-            .context("reading response headers")?;
-        head.push(byte[0]);
-    }
-    let head = std::str::from_utf8(&head).context("response headers are not utf-8")?;
-    let mut lines = head.lines();
-    let status_line = lines.next().context("empty HTTP response")?;
-    let status = status_line
-        .split_whitespace()
-        .nth(1)
-        .and_then(|s| s.parse().ok())
-        .context("malformed status line")?;
-    let headers: Vec<String> = lines.map(str::to_owned).collect();
-    let body = read_http_body(stream, &headers).await?;
-    Ok((status, body))
-}
-
-async fn read_http_body<S: AsyncRead + Unpin + ?Sized>(
-    stream: &mut S,
-    headers: &[String],
-) -> Result<Vec<u8>> {
-    let contains = |needle: &str| {
-        headers
-            .iter()
-            .any(|h| h.to_ascii_lowercase().contains(needle))
-    };
-    if contains("transfer-encoding: chunked") {
-        // Reassemble the raw chunked stream and hand it to the shared
-        // decoder (bounded, proptested) instead of duplicating the grammar.
-        let mut raw = Vec::new();
-        loop {
-            let size_line = read_line(stream, 256).await.context("reading chunk size")?;
-            let text = std::str::from_utf8(&size_line).context("chunk size not utf-8")?;
-            let size = usize::from_str_radix(text.split(';').next().unwrap_or("").trim(), 16)
-                .context("malformed chunk size")?;
-            if size == 0 {
-                // Trailers up to the blank line.
-                loop {
-                    let line = read_line(stream, 4096).await?;
-                    if line.is_empty() {
-                        break;
-                    }
-                }
-                raw.extend_from_slice(b"0\r\n\r\n");
-                break;
-            }
-            if size > MAX_PROBE_BODY_BYTES.saturating_sub(raw.len()) {
-                bail!("chunked body exceeds the {MAX_PROBE_BODY_BYTES} cap");
-            }
-            raw.extend_from_slice(format!("{size:x}\r\n").as_bytes());
-            let mut data = vec![0u8; size];
-            stream
-                .read_exact(&mut data)
-                .await
-                .context("reading chunk data")?;
-            raw.extend_from_slice(&data);
-            let mut crlf = [0u8; 2];
-            stream.read_exact(&mut crlf).await?;
-            if crlf != *b"\r\n" {
-                bail!("malformed chunk terminator");
-            }
-            raw.extend_from_slice(b"\r\n");
-        }
-        socks::decode_chunked(&raw)
-    } else if let Some(cl) = headers
-        .iter()
-        .find(|h| h.to_ascii_lowercase().starts_with("content-length:"))
-    {
-        let n: usize = cl
-            .split(':')
-            .nth(1)
-            .and_then(|s| s.trim().parse().ok())
-            .context("malformed content-length")?;
-        if n > MAX_PROBE_BODY_BYTES {
-            bail!("response body exceeds the {MAX_PROBE_BODY_BYTES} cap");
-        }
-        let mut body = vec![0u8; n];
-        stream
-            .read_exact(&mut body)
-            .await
-            .context("reading content-length body")?;
-        Ok(body)
-    } else {
-        // No framing: the connection closes the response. Read one byte
-        // past the cap so an over-cap body fails the probe explicitly
-        // instead of cropping into something that could parse as success.
-        let mut body = Vec::new();
-        stream
-            .take(MAX_PROBE_BODY_BYTES as u64 + 1)
-            .read_to_end(&mut body)
-            .await
-            .context("reading close-delimited body")?;
-        if body.len() > MAX_PROBE_BODY_BYTES {
-            bail!("response body exceeded the {MAX_PROBE_BODY_BYTES} byte cap");
-        }
-        Ok(body)
-    }
-}
-
-/// Reads one CRLF-terminated line (the CRLF stripped), capped so a hostile
-/// server cannot feed an unbounded line.
-async fn read_line<S: AsyncRead + Unpin + ?Sized>(stream: &mut S, cap: usize) -> Result<Vec<u8>> {
-    let mut line = Vec::new();
-    let mut byte = [0u8; 1];
-    loop {
-        if line.len() >= cap {
-            bail!("line exceeds the {cap} cap");
-        }
-        stream.read_exact(&mut byte).await?;
-        line.push(byte[0]);
-        if line.ends_with(b"\r\n") {
-            line.truncate(line.len() - 2);
-            return Ok(line);
-        }
-    }
+    let resp = socks::read_response(stream, MAX_PROBE_BODY_BYTES).await?;
+    Ok((resp.status, resp.body))
 }
 
 /// Parses a UUID string (dashes optional) into its 16 raw bytes, as VLESS

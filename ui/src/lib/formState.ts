@@ -151,24 +151,27 @@ export function formStateFromConfig(cfg: ScanConfig): FormState {
 export type FormField = keyof FormState;
 
 /** One validation problem: which FormState key failed (null = form-wide) and
- * what to tell the user. The field key lets the UI light up the exact input. */
+ * what to tell the user. The field key lets the UI light up the exact input.
+ * `key` is an i18n key; `params` carries interpolation values. */
 export interface FieldIssue {
   field: FormField | null;
-  message: string;
+  key: string;
+  params?: Record<string, string | number>;
 }
 
 export class FormValidationError extends Error {
   readonly issues: FieldIssue[];
 
   constructor(issues: FieldIssue[]) {
-    super(issues.map((i) => i.message).join(" · "));
+    super(issues.map((i) => i.key).join(" · "));
     this.name = "FormValidationError";
     this.issues = issues;
   }
 
-  /** Flat messages for click-time summary lists. */
-  get errors(): string[] {
-    return this.issues.map((i) => i.message);
+  /** Flat messages for click-time summary lists — resolved at render time
+   * via t() since formState is i18n-free by design. */
+  get errors(): FieldIssue[] {
+    return this.issues;
   }
 }
 
@@ -188,7 +191,7 @@ function csv(text: string): string[] {
 
 function wholeNumber(
   value: unknown,
-  label: string,
+  keyPrefix: string,
   min: number,
   max: number,
   field: FormField,
@@ -196,11 +199,11 @@ function wholeNumber(
 ): number {
   const n = Math.trunc(Number(value));
   if (!Number.isFinite(n) || n < min) {
-    issues.push({ field, message: `${label}: enter a whole number ≥ ${min}` });
+    issues.push({ field, key: `${keyPrefix}.belowMin`, params: { min } });
     return min;
   }
   if (n > max) {
-    issues.push({ field, message: `${label}: maximum is ${max.toLocaleString("en-US")}` });
+    issues.push({ field, key: `${keyPrefix}.aboveMax`, params: { max: max.toLocaleString("en-US") } });
     return max;
   }
   return n;
@@ -212,7 +215,7 @@ function wholeNumber(
 function checkLines(
   text: string,
   field: FormField,
-  label: string,
+  keyPrefix: string,
   parse: (line: string) => { ok: true; value: string } | { ok: false; message: string },
   routable: boolean,
   maxLines: number | null,
@@ -222,7 +225,8 @@ function checkLines(
   if (maxLines !== null && list.length > maxLines) {
     issues.push({
       field,
-      message: `${label}: at most ${maxLines} lines (got ${list.length})`,
+      key: `${keyPrefix}.tooManyLines`,
+      params: { max: maxLines, got: list.length },
     });
     return;
   }
@@ -231,7 +235,7 @@ function checkLines(
     // `=== false`, not truthiness: without tsconfig strictNullChecks the
     // truthy form does not narrow this discriminated union.
     if (v.ok === false) {
-      issues.push({ field, message: `${label}: ${v.message}` });
+      issues.push({ field, key: `${keyPrefix}.invalid`, params: { detail: v.message } });
       continue;
     }
     if (routable) {
@@ -239,7 +243,8 @@ function checkLines(
       if (!isRoutableIpv4(ip)) {
         issues.push({
           field,
-          message: `${label}: ${ip} is a reserved/local range — the server refuses it`,
+          key: `${keyPrefix}.reserved`,
+          params: { ip },
         });
       }
     }
@@ -254,7 +259,7 @@ function parseCustomPorts(text: string, issues: FieldIssue[]): number[] {
     if (!token) {
       issues.push({
         field: "customPortsText",
-        message: "Custom ports: empty entry between commas",
+        key: "issue.customPorts.emptyEntry",
       });
       continue;
     }
@@ -262,7 +267,8 @@ function parseCustomPorts(text: string, issues: FieldIssue[]): number[] {
     if (!Number.isInteger(port) || port < 1 || port > 65535) {
       issues.push({
         field: "customPortsText",
-        message: `Custom ports: "${token}" is not a valid port (whole number 1–65535)`,
+        key: "issue.customPorts.invalid",
+        params: { token },
       });
       continue;
     }
@@ -278,7 +284,8 @@ function parseCap(text: string, issues: FieldIssue[]): number | null {
   if (!Number.isInteger(cap) || cap < 1) {
     issues.push({
       field: "capText",
-      message: `Hard cap: "${token}" is not a positive integer (clear the field for no cap)`,
+      key: "issue.capText.invalid",
+      params: { token },
     });
     return null;
   }
@@ -298,30 +305,30 @@ export function buildConfig(f: FormState): ScanConfig {
   if (ports.length === 0) {
     issues.push({
       field: "selectedPorts",
-      message: "Ports: check at least one port or enter a custom one",
+      key: "issue.ports.noneSelected",
     });
   }
   if (ports.length > MAX_PORTS) {
     issues.push({
       field: "customPortsText",
-      message: `Ports: at most ${MAX_PORTS} unique ports (got ${ports.length})`,
+      key: "issue.ports.tooMany",
+      params: { max: MAX_PORTS, got: ports.length },
     });
   }
   if (f.mode === "Warp" && ports.includes(443)) {
     issues.push({
       field: "customPortsText",
-      message:
-        "WARP speaks WireGuard, not MASQUE — UDP 443 only serves the MASQUE protocol (try 2408, 500, 1701 or 4500)",
+      key: "issue.ports.warpUdp443",
     });
   }
   const cap = parseCap(f.capText, issues);
   if (cap !== null && cap > MAX_STOP_VALUE) {
-    issues.push({ field: "capText", message: `Hard cap: maximum is ${MAX_STOP_VALUE.toLocaleString("en-US")}` });
+    issues.push({ field: "capText", key: "issue.capText.aboveMax", params: { max: MAX_STOP_VALUE.toLocaleString("en-US") } });
   }
-  const count = wholeNumber(f.count, "Candidate count", 1, MAX_SCAN_COUNT, "count", issues);
+  const count = wholeNumber(f.count, "issue.count", 1, MAX_SCAN_COUNT, "count", issues);
   const stopFound = wholeNumber(
     f.stopFound,
-    "Stop after N working",
+    "issue.stopFound",
     1,
     MAX_STOP_VALUE,
     "stopFound",
@@ -329,16 +336,16 @@ export function buildConfig(f: FormState): ScanConfig {
   );
   const concurrency = wholeNumber(
     f.concurrency,
-    "Concurrency",
+    "issue.concurrency",
     1,
     1000,
     "concurrency",
     issues,
   );
-  const timeoutMs = wholeNumber(f.timeoutMs, "Timeout", 100, 30_000, "timeoutMs", issues);
+  const timeoutMs = wholeNumber(f.timeoutMs, "issue.timeout", 100, 30_000, "timeoutMs", issues);
   const warpProbes = wholeNumber(
     f.warpProbes,
-    "Handshake probes per endpoint",
+    "issue.warpProbes",
     1,
     10,
     "warpProbes",
@@ -347,13 +354,13 @@ export function buildConfig(f: FormState): ScanConfig {
 
   // Free-text lists: same grammar the server enforces, checked at entry so
   // inline errors and profile-save gating match scan-time 400s exactly.
-  checkLines(f.customCidrs, "customCidrs", "Custom CIDRs", parseCidr, true, MAX_CIDRS, issues);
-  checkLines(f.exclude, "exclude", "Exclude", parseCidr, false, MAX_CIDRS, issues);
+  checkLines(f.customCidrs, "customCidrs", "issue.customCidrs", parseCidr, true, MAX_CIDRS, issues);
+  checkLines(f.exclude, "exclude", "issue.exclude", parseCidr, false, MAX_CIDRS, issues);
   if (f.mode === "Warp") {
     checkLines(
       f.warpEndpoints,
       "warpEndpoints",
-      "Custom endpoints",
+      "issue.warpEndpoints",
       parseEndpoint,
       true,
       MAX_ENDPOINTS,
@@ -363,7 +370,8 @@ export function buildConfig(f: FormState): ScanConfig {
   if (f.wgconf.trim().length > MAX_WGCONF_BYTES) {
     issues.push({
       field: "wgconf",
-      message: `wgconf exceeds ${Math.floor(MAX_WGCONF_BYTES / 1024)} KB`,
+      key: "issue.wgconf.tooLarge",
+      params: { kb: Math.floor(MAX_WGCONF_BYTES / 1024) },
     });
   }
 
@@ -373,29 +381,33 @@ export function buildConfig(f: FormState): ScanConfig {
     if (phase2Configs.length === 0) {
       issues.push({
         field: "configsText",
-        message: "Phase 2: add at least one config URI to verify",
+        key: "issue.configsText.none",
       });
     }
     if (phase2Configs.length > MAX_PHASE2_ENTRIES) {
       issues.push({
         field: "configsText",
-        message: `Phase 2: at most ${MAX_PHASE2_ENTRIES} configs (got ${phase2Configs.length})`,
+        key: "issue.configsText.tooMany",
+        params: { max: MAX_PHASE2_ENTRIES, got: phase2Configs.length },
       });
     }
     for (const c of phase2Configs) {
       if (c.length > MAX_CONFIG_ENTRY_BYTES) {
         issues.push({
           field: "configsText",
-          message: `Phase 2: one config exceeds ${Math.floor(MAX_CONFIG_ENTRY_BYTES / 1024)} KB`,
+          key: "issue.configsText.tooLarge",
+          params: { kb: Math.floor(MAX_CONFIG_ENTRY_BYTES / 1024) },
         });
         break;
       }
       // Server-side API rule: share URIs and subscription URLs carry a
       // scheme; local xray JSON paths are CLI-only.
       if (!c.includes("://")) {
+        const snippet = c.slice(0, 32) + (c.length > 32 ? "\u2026" : "");
         issues.push({
           field: "configsText",
-          message: `Phase 2: "${c.slice(0, 32)}${c.length > 32 ? "…" : ""}" has no scheme — paste a vless:// trojan:// vmess:// ss:// link or a subscription URL`,
+          key: "issue.configsText.noScheme",
+          params: { snippet },
         });
       }
     }
@@ -403,19 +415,20 @@ export function buildConfig(f: FormState): ScanConfig {
     if (sniList.length > MAX_PHASE2_ENTRIES) {
       issues.push({
         field: "snis",
-        message: `SNI variants: at most ${MAX_PHASE2_ENTRIES} (got ${sniList.length})`,
+        key: "issue.snis.tooMany",
+        params: { max: MAX_PHASE2_ENTRIES, got: sniList.length },
       });
     }
     for (const s of sniList) {
       const v = validateSni(s);
       if (v.ok === false) {
-        issues.push({ field: "snis", message: `SNI: ${v.message}` });
+        issues.push({ field: "snis", key: "issue.snis.invalid", params: { detail: v.message } });
       } else if (v.value.length > MAX_SNI_BYTES) {
-        issues.push({ field: "snis", message: `SNI exceeds ${MAX_SNI_BYTES} bytes` });
+        issues.push({ field: "snis", key: "issue.snis.tooLarge", params: { max: MAX_SNI_BYTES } });
       }
     }
     const pv = validateProbeUrl(f.probeUrl);
-    if (pv.ok === false) issues.push({ field: "probeUrl", message: `Probe URL: ${pv.message}` });
+    if (pv.ok === false) issues.push({ field: "probeUrl", key: "issue.probeUrl.invalid", params: { detail: pv.message } });
   }
 
   if (issues.length > 0) throw new FormValidationError(issues);

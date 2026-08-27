@@ -321,9 +321,13 @@ mod tests {
     #[tokio::test]
     async fn warp_measures_loss_and_min_latency() {
         let t = FakeTransport::new()
-            .seq("10.0.0.1".parse().unwrap(), 2408, vec![Ok(5), Ok(7), Ok(6)])
             .seq(
-                "10.0.0.2".parse().unwrap(),
+                "203.0.113.1".parse().unwrap(),
+                2408,
+                vec![Ok(5), Ok(7), Ok(6)],
+            )
+            .seq(
+                "203.0.113.2".parse().unwrap(),
                 2408,
                 vec![
                     Ok(9),
@@ -332,7 +336,7 @@ mod tests {
                 ],
             );
         let (c, _) = warp_controller(t);
-        let summary = run_local(&c, warp_cfg(3, &["10.0.0.1", "10.0.0.2"]), 1)
+        let summary = run_local(&c, warp_cfg(3, &["203.0.113.1", "203.0.113.2"]), 1)
             .await
             .unwrap();
         // Zero-loss endpoint emits a verdict; lossy endpoint is excluded.
@@ -345,9 +349,9 @@ mod tests {
 
     #[tokio::test]
     async fn warp_custom_endpoint_port_overrides_cfg_ports() {
-        let t = FakeTransport::new().ok("10.0.0.9".parse().unwrap(), 1234, 12);
+        let t = FakeTransport::new().ok("203.0.113.9".parse().unwrap(), 1234, 12);
         let (c, _) = warp_controller(t);
-        let mut cfg = warp_cfg(1, &["10.0.0.9:1234"]);
+        let mut cfg = warp_cfg(1, &["203.0.113.9:1234"]);
         cfg.ports = vec![2408];
         let summary = run_local(&c, cfg, 1).await.unwrap();
         assert_eq!(summary.found, 1);
@@ -357,7 +361,9 @@ mod tests {
     #[tokio::test]
     async fn warp_closed_endpoints_produce_no_verdicts() {
         let (c, _) = warp_controller(FakeTransport::new());
-        let summary = run_local(&c, warp_cfg(2, &["10.0.0.5"]), 1).await.unwrap();
+        let summary = run_local(&c, warp_cfg(2, &["203.0.113.5"]), 1)
+            .await
+            .unwrap();
         assert_eq!(summary.scanned, 1);
         assert_eq!(summary.found, 0);
         assert!(c.results().is_empty());
@@ -366,11 +372,11 @@ mod tests {
     #[tokio::test]
     async fn warp_stop_condition_stops_early() {
         let t = FakeTransport::new()
-            .ok("10.0.0.1".parse().unwrap(), 2408, 5)
-            .ok("10.0.0.2".parse().unwrap(), 2408, 5)
-            .ok("10.0.0.3".parse().unwrap(), 2408, 5);
+            .ok("203.0.113.1".parse().unwrap(), 2408, 5)
+            .ok("203.0.113.2".parse().unwrap(), 2408, 5)
+            .ok("203.0.113.3".parse().unwrap(), 2408, 5);
         let (c, _) = warp_controller(t);
-        let mut cfg = warp_cfg(1, &["10.0.0.1", "10.0.0.2", "10.0.0.3"]);
+        let mut cfg = warp_cfg(1, &["203.0.113.1", "203.0.113.2", "203.0.113.3"]);
         cfg.stop = StopCondition {
             found: 1,
             cap: None,
@@ -423,13 +429,13 @@ mod tests {
     fn warp_rejects_unparsable_exclusion_cidrs() {
         let (c, _) = warp_controller(FakeTransport::new());
         let mut cfg = warp_cfg(1, &[]);
-        cfg.exclude = vec!["10.0.0.0/33".to_owned()];
+        cfg.exclude = vec!["203.0.113.0/33".to_owned()];
         // Direct planning call: a full run rejects the same entry earlier in
         // cfg.validate, so this isolates the exclusion handling itself.
         let err = c
             .warp_groups(&cfg, cfg.warp.as_ref().unwrap(), 1)
             .expect_err("an unparsable --exclude CIDR must fail the plan");
-        assert!(err.to_string().contains("10.0.0.0/33"), "{err:#}");
+        assert!(err.to_string().contains("203.0.113.0/33"), "{err:#}");
     }
 
     #[tokio::test]
@@ -445,11 +451,11 @@ mod tests {
 
     #[tokio::test]
     async fn warp_duplicate_custom_endpoints_probe_once() {
-        let t = FakeTransport::new().ok("10.0.0.1".parse().unwrap(), 2408, 5);
+        let t = FakeTransport::new().ok("203.0.113.1".parse().unwrap(), 2408, 5);
         let (c, _) = warp_controller(t);
         // Identical endpoints (bare, repeated, and port-suffixed) must dedupe
         // into a single group.
-        let cfg = warp_cfg(1, &["10.0.0.1", "10.0.0.1", "10.0.0.1:2408"]);
+        let cfg = warp_cfg(1, &["203.0.113.1", "203.0.113.1", "203.0.113.1:2408"]);
         let summary = run_local(&c, cfg, 1).await.unwrap();
         assert_eq!(summary.scanned, 1, "duplicate endpoints must probe once");
         assert_eq!(summary.found, 1);
@@ -458,12 +464,15 @@ mod tests {
     #[tokio::test]
     async fn warp_count_caps_custom_endpoints_by_sampling() {
         let t = FakeTransport::new()
-            .ok("10.0.0.1".parse().unwrap(), 2408, 5)
-            .ok("10.0.0.2".parse().unwrap(), 2408, 5)
-            .ok("10.0.0.3".parse().unwrap(), 2408, 5)
-            .ok("10.0.0.4".parse().unwrap(), 2408, 5);
+            .ok("203.0.113.1".parse().unwrap(), 2408, 5)
+            .ok("203.0.113.2".parse().unwrap(), 2408, 5)
+            .ok("203.0.113.3".parse().unwrap(), 2408, 5)
+            .ok("203.0.113.4".parse().unwrap(), 2408, 5);
         let (c, _) = warp_controller(t);
-        let mut cfg = warp_cfg(1, &["10.0.0.1", "10.0.0.2", "10.0.0.3", "10.0.0.4"]);
+        let mut cfg = warp_cfg(
+            1,
+            &["203.0.113.1", "203.0.113.2", "203.0.113.3", "203.0.113.4"],
+        );
         cfg.target = ScanTarget::Count(2);
         let summary = run_local(&c, cfg, 1).await.unwrap();
         assert_eq!(
@@ -476,7 +485,7 @@ mod tests {
     #[tokio::test]
     async fn warp_verify_fails_fast_without_a_wgconf() {
         let (c, _) = warp_controller(FakeTransport::new());
-        let mut cfg = warp_cfg(1, &["10.0.0.1"]);
+        let mut cfg = warp_cfg(1, &["203.0.113.1"]);
         cfg.warp = Some(WarpConfig {
             verify_with_wgconf: true,
             ..Default::default()
@@ -488,7 +497,7 @@ mod tests {
     #[tokio::test]
     async fn warp_verify_rejects_an_invalid_wgconf_before_probing() {
         let (c, _) = warp_controller(FakeTransport::new());
-        let mut cfg = warp_cfg(1, &["10.0.0.1"]);
+        let mut cfg = warp_cfg(1, &["203.0.113.1"]);
         cfg.warp = Some(WarpConfig {
             verify_with_wgconf: true,
             wgconf: Some("not a wgconf at all".to_owned()),

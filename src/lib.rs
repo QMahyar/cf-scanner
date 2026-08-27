@@ -9,7 +9,7 @@
 pub mod api;
 pub mod cli_wizard;
 pub mod configs;
-mod dgst;
+pub mod dgst;
 pub mod engine;
 pub mod paths;
 pub mod probe;

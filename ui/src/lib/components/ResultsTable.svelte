@@ -32,20 +32,24 @@
   /** Chip applied over view.rows in view sort order; the render cap slices
    * THIS list so "show more" always reveals rows matching the active chip.
    * Counts for chips and copy buttons come from view.matched (uncapped). */
-  const chipRows = $derived(
-    emptyKind === "candidates" && chip !== "all"
-      ? view.rows.filter(chipPass)
-      : view.rows,
-  );
+  const { chipRows, passedRows, tunnelSummary } = $derived.by(() => {
+    const rows = view.rows;
+    const matched = view.matched;
+    let cr = rows;
+    if (emptyKind === "candidates" && chip !== "all") cr = rows.filter(chipPass);
+    let pr: Verdict[] | null = null;
+    let ts: string | null = null;
+    for (const r of matched) {
+      if (r.phase2) {
+        if (pr === null) pr = [];
+        if (r.phase2.passed) pr.push(r);
+      }
+    }
+    if (pr !== null) ts = t("table.tunnel.summary", { passed: pr.length, total: matched.length });
+    return { chipRows: cr, passedRows: pr ?? [], tunnelSummary: ts };
+  });
   const visibleRows = $derived(chipRows.slice(0, view.renderLimit));
   const capped = $derived(chipRows.length > view.renderLimit);
-
-  const passedRows = $derived(view.matched.filter((r) => r.phase2?.passed === true));
-  const tunnelSummary = $derived(
-    view.matched.some((r) => r.phase2)
-      ? t("table.tunnel.summary", { passed: passedRows.length, total: view.matched.length })
-      : null,
-  );
 
   // Approximates the old "new results array clears selection": selection now
   // lives on the view, whose source ref can't be observed from here — but a
@@ -177,7 +181,7 @@
         <span
           class="pill ms-2 align-middle"
           style="background: oklch(30% .06 155); color: var(--good)"
-          title="Every probe ran under your wgconf private key, not a dummy key"
+          title={t("table.verifiedTitle")}
         >
           <ShieldCheck class="size-3.5" />
           {t("table.verified")}
@@ -429,6 +433,7 @@
                 <button
                   class="btn btn-ghost btn-sm"
                   title={t("table.copyUriTitle")}
+                  aria-label={t("table.copyUriAria")}
                   onclick={() => copyUri(r, i)}
                 >
                   {#if copiedIdx === i}
@@ -441,6 +446,7 @@
                   <button
                     class="btn btn-ghost btn-sm"
                     title={t("table.copyUriExport")}
+                    aria-label={t("table.copyExportAria")}
                     onclick={() => copyImportable(r, i)}
                   >
                     {#if copiedUriIdx === i}

@@ -126,7 +126,7 @@
         class="btn btn-secondary btn-sm"
         onclick={toggleLocale}
         title="فارسی / English"
-        aria-label="Switch language"
+        aria-label={t("app.switchLanguage")}
       >
         <Languages class="size-4" />
         {currentLocale() === "fa" ? "EN" : "فا"}
@@ -187,12 +187,12 @@
     class="border-t pt-5 pb-[max(1.25rem,env(safe-area-inset-bottom))] text-xs"
     style="border-color: oklch(100% 0 0 / 6%); color: var(--ink-muted);"
   >
-    <span>{t("app.footer.geo").split("db-ip.com")[0]}<a
+    <span>{t("app.footer.geoPrefix")} <a
         class="underline decoration-dotted"
         style="color: var(--accent)"
         href="https://db-ip.com"
         rel="noopener noreferrer"
-        target="_blank">db-ip.com</a> (CC BY 4.0)
+        target="_blank">db-ip.com</a> {t("app.footer.geoSuffix")}
     </span>
   </footer>
 </div>

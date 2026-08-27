@@ -22,6 +22,19 @@
   let copiedAll = $state<ExportHow | null>(null);
   let tick = $state(0);
 
+  // Throttled screen-reader announcement: update at most every 10 s or when
+  // working count changes, so an aria-live region doesn't chatter on every tick.
+  let lastAnnounce = 0;
+  let announced = "";
+  const progressAnnounce = $derived.by(() => {
+    void tick; // re-evaluated via the existing interval tick state
+    const now = Date.now();
+    if (now - lastAnnounce < 10_000) return announced;
+    lastAnnounce = now;
+    announced = t("simple.progressAnnounce", { working: app.progress.found, checked: app.progress.scanned });
+    return announced;
+  });
+
   // Preset sample sizes; CDN samples candidates on 443, WARP sweeps
   // endpoints across the official port set. Custom reveals one field.
   type SizeKey = "quick" | "normal" | "big" | "custom";
@@ -239,7 +252,7 @@
       app.progress.total
         ? Math.min(100, Math.round((app.progress.scanned / app.progress.total) * 100))
         : null}
-    <div class="fade-in mt-8" role="status" aria-live="polite">
+    <div class="fade-in mt-8">
       {#if finishedIdle && app.summary}
         <div class="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
           <p class="text-sm font-semibold">
@@ -256,7 +269,7 @@
           <span>
             <span class="mono font-semibold" style="color: var(--accent)">
               {app.progress.found}</span>
-            <span title="passed a real TLS handshake">{t("progress.working")}</span>
+            <span title={t("simple.handshakeTitle")}>{t("progress.working")}</span>
             <span style="color: var(--ink-muted)">· {app.progress.scanned} {scanMode === "Warp" ? t("progress.endpointsChecked") : t("progress.checked")}{pct !== null ? ` · ${pct}%` : ""}</span>
           </span>
           {#if pace}
@@ -282,13 +295,16 @@
       {/if}
     </div>
   {/if}
+  {#if progressAnnounce}
+    <span role="status" class="sr-only">{progressAnnounce}</span>
+  {/if}
   </div>
 </section>
 
 {#if !app.running && app.summary === null && best.length === 0}
   <section
     class="card fade-in flex flex-wrap items-center justify-center gap-x-3 gap-y-2 px-4 py-3"
-    aria-label="What a scan does"
+    aria-label={t("simple.howtoAria")}
   >
     <span class="flex items-center gap-1.5 text-xs whitespace-nowrap" style="color: var(--ink-muted)">
       <Play class="size-3.5" />
@@ -308,7 +324,7 @@
 {/if}
 
 {#if finishedIdle && app.results.length === 0}
-  <section class="card fade-in px-6 py-6" aria-label="No results guidance">
+  <section class="card fade-in px-6 py-6"     aria-label={t("simple.emptyGuidanceAria")}>
     <h3 class="text-base font-semibold">{t("empty.title")}</h3>
     <p class="mt-2 max-w-lg text-sm" style="color: var(--ink-muted)">
       {t("empty.body")}
@@ -364,6 +380,7 @@
             <button
               class="btn btn-ghost btn-sm shrink-0"
               title={t("card.copyTitle")}
+              aria-label={t("card.copyTitle")}
               onclick={async () => {
                 try {
                   await navigator.clipboard.writeText(`${r.ip}:${r.port}`);

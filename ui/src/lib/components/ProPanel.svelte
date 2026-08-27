@@ -2,24 +2,13 @@
   import { onMount } from "svelte";
   import Segmented from "./Segmented.svelte";
   import {
-    Check,
-    Copy,
-    Download,
-    FolderOpen,
     Gauge,
-    Info,
-    KeyRound,
     Play,
-    Save,
     ShieldCheck,
     Square,
-    Trash2,
   } from "@lucide/svelte";
   import {
     api,
-    assertOk,
-    type ProfilePayload,
-    type RangesPayload,
     type XrayStatusPayload,
   } from "../api";
   import {
@@ -36,30 +25,30 @@
     defaultFormState,
     defaultSelectedPorts,
     FORM_PERSIST_KEY,
-    formStateFromConfig,
     formStateFromPersisted,
     persistedFormState,
     portCatalog,
     FormValidationError,
   } from "../formState";
-  import WgNoiseEditor from "./WgNoiseEditor.svelte";
+  import CustomCidrsCard from "./CustomCidrsCard.svelte";
+  import Phase2TunnelCard from "./Phase2TunnelCard.svelte";
+  import ProfilesBar from "./ProfilesBar.svelte";
+  import WarpIdentityCard from "./WarpIdentityCard.svelte";
+  import WarpRegistrationCard from "./WarpRegistrationCard.svelte";
   import {
-    MAX_CIDRS,
     normalizeLines,
     parseCidr,
     parseEndpoint,
   } from "../validators";
-  import { t } from "../i18n.svelte";
+  import { t, type MsgKey } from "../i18n.svelte";
   import type { CdnPreset, Mode } from "../types";
   import type { FieldIssue, FormField, FormState } from "../formState";
-  import { EXCLUDE_WARP_INGRESS } from "../cidrPresets";
   import ResultsTable from "./ResultsTable.svelte";
 
   const app = ui();
   let starting = $state(false);
-  let validationErrors = $state<string[]>([]);
+  let validationErrors = $state<FieldIssue[]>([]);
   let form = $state<FormState>(defaultFormState());
-  let rangesInfo = $state<RangesPayload | null>(null);
 
   /** Keys the user has edited — live inline validation only lights up these
    * so untouched fields stay quiet until a submit attempt. */
@@ -71,103 +60,45 @@
    * never writes defaults over a saved form before hydration. */
   let hydrated = $state(false);
 
-  let profiles = $state<ProfilePayload[]>([]);
-  let selectedProfile = $state("");
-  let profileNameInput = $state("");
-  let profileBusy = $state(false);
-  let profileStatus = $state<{ ok: boolean; text: string } | null>(null);
-
   let xray = $state<XrayStatusPayload | null>(null);
   let xrayBusy = $state(false);
   let xrayError = $state<string | null>(null);
 
-  let licenseInput = $state("");
-  let registering = $state(false);
-  let registerError = $state<string | null>(null);
-  let offerOverwrite = $state(false);
-  let registeredConf = $state("");
-  let confCopied = $state(false);
+  /** WARP endpoints file import (local to WARP section). */
+  const WARP_RANGES_MAX_BYTES = 256 * 1024;
+  let warpRangesFileInput = $state<HTMLInputElement | null>(null);
+  let warpRangesNote = $state<{ ok: boolean; text: string } | null>(null);
 
-  /** wgconf file import: hidden picker + visible button. Files above this
-   * ceiling are rejected before reading — a wgconf is a few KB; anything
-   * bigger is the wrong file. */
-  const WGCONF_MAX_BYTES = 64 * 1024;
-  let wgconfFileInput = $state<HTMLInputElement | null>(null);
-  let wgconfFileName = $state("");
-  let wgconfFileError = $state<string | null>(null);
-
-  async function loadWgconfFile(
-    e: Event & { currentTarget: EventTarget & HTMLInputElement },
-  ) {
-    const input = e.currentTarget;
-    const file = input.files?.[0] ?? null;
-    // Reset so re-picking the same file fires change again.
-    input.value = "";
-    wgconfFileError = null;
-    if (!file) return;
-    if (file.size > WGCONF_MAX_BYTES) {
-      wgconfFileError = t("pro.warp.wgconfSizeError", { name: file.name, kb: Math.ceil(file.size / 1024) });
-      return;
-    }
-    try {
-      form.wgconf = await file.text();
-      form.verifyWarp = true;
-      wgconfFileName = file.name;
-      delete serverFieldErrors.wgconf;
-    } catch {
-      wgconfFileError = t("pro.warp.wgconfReadError", { name: file.name });
-    }
-  }
-
-  /** Ranges import (plan T4 + addendum T9): one IP/CIDR per line, the
-   * standard published list format. Lines are validated with the same
-   * grammar the server enforces (validators.ts); bare IPv4s become /32s for
-   * CDN CIDR import and plain endpoints for WARP; anything unparseable is
-   * skipped and counted. Merges deduped into the caller-named textarea. */
-  const RANGES_MAX_BYTES = 256 * 1024;
-  let rangesFileInput = $state<HTMLInputElement | null>(null);
-  let rangesTarget = $state<"customCidrs" | "warpEndpoints">("customCidrs");
-  let rangesNote = $state<{ ok: boolean; text: string } | null>(null);
-
-  function importRangesFile(
+  function importWarpRangesFile(
     e: Event & { currentTarget: EventTarget & HTMLInputElement },
   ) {
     const input = e.currentTarget;
     const file = input.files?.[0] ?? null;
     input.value = "";
-    rangesNote = null;
-    const field = rangesTarget;
+    warpRangesNote = null;
     if (!file) return;
-    if (file.size > RANGES_MAX_BYTES) {
-      rangesNote = {
+    if (file.size > WARP_RANGES_MAX_BYTES) {
+      warpRangesNote = {
         ok: false,
         text: t("pro.warp.rangesSizeError", { name: file.name, kb: Math.ceil(file.size / 1024) }),
       };
       return;
     }
     void file.text().then((raw) => {
-      const existing = form[field]
+      const existing = form.warpEndpoints
         .split("\n")
         .map((s) => s.trim())
         .filter(Boolean);
       const seen = new Set(existing);
-      const cap = field === "customCidrs" ? MAX_CIDRS : null;
       let imported = 0;
       let skipped = 0;
       for (const line of raw.split(/\r?\n/).map((s) => s.trim())) {
         if (!line || line.startsWith("#")) continue;
         let entry: string | null = null;
-        if (field === "customCidrs") {
-          // Published dual-stack lists carry v6 CIDRs too — accept both.
-          const v = parseCidr(line);
-          if (v.ok) entry = line;
-          else if (parseEndpoint(line).ok) entry = `${line}/32`;
-        } else {
-          const v = parseEndpoint(line);
-          if (v.ok) entry = v.value;
-          else if (parseCidr(line).ok) entry = line.split("/")[0];
-        }
-        if (entry === null || (cap !== null && existing.length >= cap)) {
+        const v = parseEndpoint(line);
+        if (v.ok) entry = v.value;
+        else if (parseCidr(line).ok) entry = line.split("/")[0];
+        if (entry === null) {
           skipped += 1;
           continue;
         }
@@ -177,10 +108,10 @@
           imported += 1;
         }
       }
-      form[field] = existing.join("\n");
-      touched[field] = true;
-      delete serverFieldErrors[field];
-      rangesNote = {
+      form.warpEndpoints = existing.join("\n");
+      touched.warpEndpoints = true;
+      delete serverFieldErrors.warpEndpoints;
+      warpRangesNote = {
         ok: imported > 0,
         text: imported === 0 && skipped === 0 ? t("pro.warp.rangesEmpty", { name: file.name }) : skipped > 0 ? t("pro.warp.rangesImportedSkipped", { count: imported, s: imported === 1 ? "" : "s", skipped }) : t("pro.warp.rangesImported", { count: imported, s: imported === 1 ? "" : "s" }),
       };
@@ -266,6 +197,13 @@
       hasCandidates(),
   );
 
+  const verifyBankedDisabledReason = $derived.by(() => {
+    if (!form.phase2On) return t("pro.verify.reason.phase2Off");
+    if (configsListed.length === 0) return t("pro.verify.reason.noConfigs");
+    if (!hasCandidates()) return t("pro.verify.reason.noCandidates");
+    return "";
+  });
+
   async function verifyBanked() {
     verifyingBanked = true;
     try {
@@ -327,36 +265,14 @@
     app.frozenPhase1 !== null || (form.mode === "Cdn" && form.phase2On),
   );
 
-  let tunnelAdvancedOpen = $state(false);
   let scanAdvancedOpen = $state(false);
   let warpAdvancedOpen = $state(false);
   /** Custom-ports field renders only on demand; a restored form that
       already carries custom ports reopens it automatically. */
   let customPortsOpen = $state(false);
 
-  const DEFAULT_PROBE_URL = defaultFormState().probeUrl;
-
-  /** Digest for the collapsed expert-knob summary: only deviations from
-     defaults appear, as raw technical tokens (preset ids / hosts) that need
-     no translation. */
-  const tunnelAdvancedSummary = $derived.by(() => {
-    const bits: string[] = [];
-    if (form.fragment !== "off") bits.push(form.fragment);
-    const sniList = form.snis.split(",").map((s) => s.trim()).filter(Boolean);
-    if (sniList.length > 0)
-      bits.push(sniList[0] + (sniList.length > 1 ? ` +${sniList.length - 1}` : ""));
-    const probe = form.probeUrl.trim();
-    if (probe && probe !== DEFAULT_PROBE_URL)
-      bits.push(probe.length > 28 ? `${probe.slice(0, 28)}…` : probe);
-    return bits.join(" · ");
-  });
-
   // A routed error on any collapsed knob pops the disclosure open so its
   // inline message is never hidden inside it.
-  $effect(() => {
-    if (fieldErrors.snis || fieldErrors.fragment || fieldErrors.probeUrl)
-      tunnelAdvancedOpen = true;
-  });
   $effect(() => {
     if (fieldErrors.concurrency || fieldErrors.timeoutMs || fieldErrors.capText)
       scanAdvancedOpen = true;
@@ -390,12 +306,12 @@
     allIssues.filter((i) => i.field !== null && touched[i.field]),
   );
 
-  /** field → first message: client issues for touched fields, overlaid by
-   * server-routed errors (which are cleared on edit). */
+  /** field → first translated message: client issues for touched fields,
+   * overlaid by server-routed errors (which are cleared on edit). */
   const fieldErrors = $derived.by(() => {
     const map: Partial<Record<FormField, string>> = {};
     for (const i of liveIssues)
-      if (i.field !== null && map[i.field] === undefined) map[i.field] = i.message;
+      if (i.field !== null && map[i.field] === undefined) map[i.field] = t(i.key as MsgKey, i.params);
     return Object.assign(map, serverFieldErrors);
   });
 
@@ -485,28 +401,6 @@
     delete serverFieldErrors.customPortsText;
   }
 
-  /** Append the WARP-ingress preset to the exclusions, deduping against
-   * lines already present so clicking twice never duplicates a CIDR. */
-  function excludeWarpIngress() {
-    const kept = form.exclude
-      .split("\n")
-      .map((s) => s.trim())
-      .filter(Boolean);
-    const seen = new Set(kept);
-    form.exclude = [
-      ...kept,
-      ...EXCLUDE_WARP_INGRESS.filter((c) => !seen.has(c)),
-    ].join("\n");
-    touched.exclude = true;
-    delete serverFieldErrors.exclude;
-  }
-
-  function clearExclusions() {
-    form.exclude = "";
-    touched.exclude = true;
-    delete serverFieldErrors.exclude;
-  }
-
   // Flipping CDN ↔ WARP swaps the chip catalog: re-default the selection so
   // stale cross-family ports can't linger silently. The guard keeps this
   // from firing on hydration or cross-mode profile loads (either would wipe
@@ -551,70 +445,6 @@
     }
   }
 
-  async function loadRangeInfo() {
-    try {
-      rangesInfo = await api.ranges();
-      app.error = null;
-    } catch (e) {
-      app.error = errorText(e);
-    }
-  }
-
-  async function refreshProfiles() {
-    profiles = await api.profiles();
-    if (!profiles.some((p) => p.name === selectedProfile))
-      selectedProfile = "";
-  }
-
-  function loadSelectedProfile() {
-    const p = profiles.find((x) => x.name === selectedProfile);
-    if (!p) return;
-    // The form swap may change form.mode; the port-reset effect must not
-    // clobber the profile's own port selection right after it lands.
-    suppressPortReset = true;
-    form = formStateFromConfig(p.config);
-    touched = {};
-    serverFieldErrors = {};
-    validationErrors = [];
-  }
-
-  async function saveProfile() {
-    const name = profileNameInput.trim();
-    if (!name) {
-      profileStatus = { ok: false, text: t("pro.profile.needName") };
-      return;
-    }
-    profileBusy = true;
-    try {
-      await assertOk(await api.saveProfile(name, buildConfig(form)));
-      profileStatus = { ok: true, text: t("pro.profile.saved", { name }) };
-      profileNameInput = "";
-      await refreshProfiles();
-      selectedProfile = name;
-    } catch (e) {
-      profileStatus = {
-        ok: false,
-        text: e instanceof FormValidationError ? e.message : errorText(e),
-      };
-    }
-    profileBusy = false;
-  }
-
-  async function deleteSelectedProfile() {
-    if (!selectedProfile || !confirm(t("pro.profile.deleteConfirm", { name: selectedProfile })))
-      return;
-    profileBusy = true;
-    const deleted = selectedProfile;
-    try {
-      await assertOk(await api.deleteProfile(deleted));
-      profileStatus = { ok: true, text: t("pro.profile.deleted", { name: deleted }) };
-      await refreshProfiles();
-    } catch (e) {
-      profileStatus = { ok: false, text: errorText(e) };
-    }
-    profileBusy = false;
-  }
-
   async function loadXray() {
     try {
       xray = await api.xrayStatus();
@@ -634,41 +464,6 @@
       xrayError = errorText(e);
     }
     xrayBusy = false;
-  }
-
-  /** The register flow can take up to ~45 s server-side; a conflict asks for
-   * explicit overwrite consent (retried from the inline button), and the
-   * cooldown message is shown verbatim. */
-  async function registerWarp(overwrite: boolean) {
-    registering = true;
-    registerError = null;
-    offerOverwrite = false;
-    try {
-      const res = await api.warpRegister(licenseInput.trim() || null, overwrite);
-      registeredConf = res.wgconf;
-    } catch (e) {
-      const msg = errorText(e);
-      registerError = msg;
-      offerOverwrite = /overwrite/i.test(msg);
-    }
-    registering = false;
-  }
-
-  async function copyConf() {
-    try {
-      await navigator.clipboard.writeText(registeredConf);
-      confCopied = true;
-      setTimeout(() => (confCopied = false), 1200);
-    } catch {
-      /* clipboard unavailable */
-    }
-  }
-
-  function useRegisteredConf() {
-    form.wgconf = registeredConf;
-    form.verifyWarp = true;
-    registeredConf = "";
-    registerError = null;
   }
 
   /** Persist every change (debounced ~300 ms); wgconf is excluded inside
@@ -698,10 +493,19 @@
     }
     hydrated = true;
 
-    void refreshProfiles().catch((e) => {
-      profileStatus = { ok: false, text: errorText(e) };
-    });
     void loadXray();
+  });
+  // Throttled screen-reader announcement for phase-2 progress: update at
+  // most every 10 s so the aria-live region doesn't chatter on every tick.
+  let lastPhase2Announce = 0;
+  let phase2Announced = "";
+  const phase2Announce = $derived.by(() => {
+    if (!app.phase2) { lastPhase2Announce = 0; return ""; }
+    const now = Date.now();
+    if (now - lastPhase2Announce < 10_000) return phase2Announced;
+    lastPhase2Announce = now;
+    phase2Announced = t("pro.tunnel.progress", { done: app.phase2.done, total: app.phase2.total });
+    return phase2Announced;
   });
 </script>
 
@@ -721,126 +525,14 @@
   <section class="shell">
     <div class="core px-6 py-8 sm:px-8 sm:py-10">
     <!-- profiles bar: outside the <form> so Enter here never starts a scan -->
-    <div
-      class="mb-4 flex flex-wrap items-center gap-2 border-b pb-4"
-      style="border-color: oklch(100% 0 0 / 6%)"
-    >
-      <span
-        class="flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wider"
-        style="color: var(--ink-muted)"
-      >
-        <FolderOpen class="size-3.5" style="color: var(--accent)" /> {t("pro.profile.heading")}
-      </span>
-      <select
-        class="field !w-auto text-xs"
-        bind:value={selectedProfile}
-        onchange={loadSelectedProfile}
-        disabled={profiles.length === 0}
-        title={t("pro.profile.loadTitle")}
-      >
-        <option value="">
-          {profiles.length === 0 ? t("pro.profile.noSaved") : t("pro.profile.loadPlaceholder")}
-        </option>
-        {#each profiles as p (p.name)}
-          <option value={p.name}>{p.name}</option>
-        {/each}
-      </select>
-      <input
-        class="field mono !w-44 text-xs"
-        placeholder={t("pro.profile.namePlaceholder")}
-        maxlength="64"
-        bind:value={profileNameInput}
-      />
-      <button
-        class="btn btn-secondary btn-sm"
-        onclick={saveProfile}
-        disabled={profileBusy}
-        title={t("pro.profile.saveTitle")}
-      >
-        <Save class="size-3.5" /> {t("pro.profile.save")}
-      </button>
-      <button
-        class="btn btn-secondary btn-sm"
-        onclick={deleteSelectedProfile}
-        disabled={!selectedProfile || profileBusy}
-        title={t("pro.profile.deleteTitle")}
-      >
-        <Trash2 class="size-3.5" /> {t("pro.profile.delete")}
-      </button>
-      {#if profileStatus}
-        <span
-          class="fade-in text-xs"
-          role="status"
-          style={profileStatus.ok
-            ? "color: var(--good)"
-            : "color: var(--bad)"}
-        >
-          {profileStatus.text}
-        </span>
-      {/if}
-    </div>
+    <ProfilesBar form={form} onload={() => { touched = {}; serverFieldErrors = {}; validationErrors = []; }} />
 
     <!-- delegated touched/server-error tracking + Ctrl+Enter accelerator -->
     <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
     <form onsubmit={onFormSubmit} oninput={markTouched} onchange={markTouched} onkeydown={onFormKeydown}>
-      <!-- shared file picker for both Import-list buttons (target set at click time) -->
-      <input
-        bind:this={rangesFileInput}
-        class="hidden"
-        type="file"
-        accept=".txt,.csv,.list,.text,text/plain"
-        onchange={importRangesFile}
-      />
-      <div class="flex flex-wrap items-center justify-between gap-3">
-        <h2 class="flex items-center gap-2 text-sm font-semibold">
-          <Gauge class="size-4" style="color: var(--accent)" /> {t("pro.section.scanConfig")}
-        </h2>
-        <div class="flex items-center gap-2">
-          {#if xray}
-            <span
-              class="pill"
-              title={xray.found ? (xray.path ?? t("pro.xray.foundFallback")) : t("pro.xray.missingUnder", { dir: xray.data_dir ?? "" })}
-              style={xray.found
-                ? "background: oklch(30% .06 155); color: var(--good)"
-                : "background: oklch(30% .09 25); color: var(--bad)"}
-            >
-              xray {xray.found ? xray.version : t("pro.xray.missing")}
-            </span>
-            {#if !xray.found}
-              <button
-                type="button"
-                class="btn btn-secondary btn-sm"
-                onclick={downloadXray}
-                disabled={xrayBusy}
-                data-state={xrayBusy ? "loading" : undefined}
-                title={t("pro.xray.downloadTitle", { dir: xray.data_dir ?? "" })}
-              >
-                <Download class="size-3.5" /> {t("pro.xray.download")}
-              </button>
-            {/if}
-          {/if}
-          <button
-            type="button"
-            class="btn btn-secondary btn-sm"
-            onclick={loadRangeInfo}
-            title={t("pro.range.infoTitle")}
-          >
-            <Info class="size-3.5" /> {t("pro.range.button")}
-          </button>
-        </div>
-      </div>
-
-      {#if xrayError}
-        <p class="fade-in mt-2 text-xs" role="alert" style="color: var(--bad)">
-          {t("pro.xray.error", { msg: xrayError })}
-        </p>
-      {/if}
-
-      {#if rangesInfo}
-        <p class="mono fade-in mt-2 text-[11px]" style="color: var(--ink-muted)">
-          {t("pro.range.info", { count: rangesInfo.host_count.toLocaleString("en-US"), date: rangesInfo.last_updated ?? t("pro.range.bundled") })}
-        </p>
-      {/if}
+      <h2 class="flex items-center gap-2 text-sm font-semibold">
+        <Gauge class="size-4" style="color: var(--accent)" /> {t("pro.section.scanConfig")}
+      </h2>
 
       {#if validationErrors.length > 0}
         <div class="fade-in mt-3 text-xs" role="alert" style="color: var(--bad)">
@@ -1103,71 +795,13 @@
         </div>
       </div>
 
-      <details class="mt-4">
-        <summary class="cursor-pointer text-xs font-semibold" style="color: var(--ink-muted)">
-          {t("pro.section.customCidrs")}
-        </summary>
-        <div class="mt-3 grid gap-4 grid-form">
-          <label class="text-xs" style="color: var(--ink-muted)">
-            {t("pro.field.customCidrs")}
-            <textarea
-              class="field mono mt-1"
-              rows="3"
-              name="customCidrs"
-              aria-invalid={fieldErrors.customCidrs ? "true" : undefined}
-              aria-describedby={fieldErrors.customCidrs ? "err-customCidrs" : undefined}
-              bind:value={form.customCidrs}
-              onchange={() => normalizeField("customCidrs")}></textarea>
-            {@render fieldError("customCidrs")}
-          </label>
-          <label class="text-xs" style="color: var(--ink-muted)">
-            {t("pro.field.exclude")}
-            <textarea
-              class="field mono mt-1"
-              rows="3"
-              name="exclude"
-              aria-invalid={fieldErrors.exclude ? "true" : undefined}
-              aria-describedby={fieldErrors.exclude ? "err-exclude" : undefined}
-              bind:value={form.exclude}
-              onchange={() => normalizeField("exclude")}></textarea>
-            {@render fieldError("exclude")}
-          </label>
-        </div>
-        <div class="mt-2 flex flex-wrap items-center gap-1.5">
-          <button
-            type="button"
-            class="pill cursor-pointer"
-            style="background: var(--paper-3); color: var(--ink)"
-            title={t("pro.field.excludeWarpTitle")}
-            onclick={excludeWarpIngress}
-          >{t("pro.field.excludeWarp")}</button>
-          {#if form.mode === "Cdn"}
-            <button
-              type="button"
-              class="pill cursor-pointer"
-              style="background: var(--paper-3); color: var(--ink)"
-              title={t("pro.field.importListTitle")}
-              onclick={() => { rangesTarget = "customCidrs"; rangesFileInput?.click(); }}
-            >{t("pro.field.importList")}</button>
-          {/if}
-          <button
-            type="button"
-            class="pill cursor-pointer"
-            style="color: var(--ink-muted)"
-            title={t("pro.field.clearTitle")}
-            onclick={clearExclusions}
-          >{t("pro.field.clear")}</button>
-          {#if rangesNote}
-            <span
-              class="fade-in mono text-[10px]"
-              role="status"
-              style={rangesNote.ok ? "color: var(--good)" : "color: var(--bad)"}
-            >
-              {rangesNote.text}
-            </span>
-          {/if}
-        </div>
-      </details>
+      <CustomCidrsCard
+        form={form}
+        fieldErrors={fieldErrors}
+        touched={touched}
+        serverFieldErrors={serverFieldErrors}
+        onNormalize={normalizeField}
+      />
 
       {#if form.mode === "Warp"}
         <div class="mt-4">
@@ -1208,170 +842,37 @@
                   class="pill cursor-pointer"
                   style="background: var(--paper-3); color: var(--ink)"
                   title={t("pro.warp.endpointsImportTitle")}
-                  onclick={() => { rangesTarget = "warpEndpoints"; rangesFileInput?.click(); }}
+                  onclick={() => warpRangesFileInput?.click()}
                 >{t("pro.field.importList")}</button>
-                {#if rangesNote}
+                {#if warpRangesNote}
                   <span
                     class="fade-in mono text-[10px]"
                     role="status"
-                    style={rangesNote.ok ? "color: var(--good)" : "color: var(--bad)"}
+                    style={warpRangesNote.ok ? "color: var(--good)" : "color: var(--bad)"}
                   >
-                    {rangesNote.text}
+                    {warpRangesNote.text}
                   </span>
                 {/if}
               </div>
+              <input
+                bind:this={warpRangesFileInput}
+                class="hidden"
+                type="file"
+                accept=".txt,.csv,.list,.text,text/plain"
+                onchange={importWarpRangesFile}
+              />
             </div>
           </details>
 
           <div class="mt-3 grid gap-4 grid-form">
-          <div
-            class="rounded-md border px-3 py-3 span-all"
-            style="border-color: oklch(100% 0 0 / 8%); background: oklch(100% 0 0 / 2%)"
-          >
-            <p class="mb-2 text-xs font-semibold" style="color: var(--ink)">{t("pro.warp.identityGroup")}</p>
-            <div class="text-xs" style="color: var(--ink-muted)">
-              <label class="block">
-                {t("pro.warp.wgconfLabel")}
-              <textarea
-                class="field mono mt-1"
-                rows="3"
-                name="wgconf"
-                aria-invalid={fieldErrors.wgconf ? "true" : undefined}
-                aria-describedby={fieldErrors.wgconf ? "err-wgconf" : undefined}
-                bind:value={form.wgconf}
-                onchange={() => {
-                  // Mirror the file-load behavior: a pasted config implies
-                  // intent to verify — flip the checkbox on automatically.
-                  if (form.wgconf.trim()) {
-                    form.verifyWarp = true;
-                    touched.verifyWarp = true;
-                  }
-                }}
-              ></textarea>
-            </label>
-            {@render fieldError("wgconf")}
-            <div class="mt-1.5 flex flex-wrap items-center gap-2">
-              <button
-                type="button"
-                class="btn btn-secondary btn-sm"
-                title={t("pro.warp.wgconfLoadTitle")}
-                onclick={() => wgconfFileInput?.click()}
-              >
-                <FolderOpen class="size-3.5" /> {t("pro.warp.wgconfLoad")}
-              </button>
-              {#if wgconfFileName}
-                <span
-                  class="fade-in mono max-w-48 truncate text-[11px]"
-                  style="color: var(--ink-muted)"
-                  title={wgconfFileName}>{wgconfFileName}</span
-                >
-              {/if}
-            </div>
-            {#if wgconfFileError}
-              <p class="fade-in mt-1 text-[11px]" role="alert" style="color: var(--bad)">
-                {wgconfFileError}
-              </p>
-            {/if}
-            <div class="mt-2">
-              <WgNoiseEditor
-                text={form.wgconf}
-                onchange={(next) => {
-                  form.wgconf = next;
-                  touched.wgconf = true;
-                  delete serverFieldErrors.wgconf;
-                }}
-              />
-            </div>
-            <input
-              bind:this={wgconfFileInput}
-              class="hidden"
-              type="file"
-              accept=".conf,.txt"
-              onchange={loadWgconfFile}
-            />
-          </div>
-          <label class="flex items-center gap-2 text-xs" style="color: var(--ink-muted)">
-            <input type="checkbox" name="verifyWarp" bind:checked={form.verifyWarp} disabled={!form.wgconf} class="accent-[var(--accent)]" />
-            {t("pro.warp.verify")}
-          </label>
-          <p class="mt-1 text-[11px]" style="color: var(--ink-muted)">{t("pro.warp.verifyHint")}</p>
-          </div>
+          <WarpIdentityCard
+            form={form}
+            fieldErrors={fieldErrors}
+            touched={touched}
+            serverFieldErrors={serverFieldErrors}
+          />
 
-          <!-- WARP registration -->
-          <div
-            class="fade-in rounded-md border px-3 py-3 span-all"
-            style="border-color: oklch(100% 0 0 / 8%)"
-          >
-            <div class="flex flex-wrap items-end gap-2">
-              <label class="text-xs" style="color: var(--ink-muted)">
-                {t("pro.warp.licenseLabel")}
-                <input
-                  class="field mono mt-1 !w-56"
-                  bind:value={licenseInput}
-                  maxlength="256"
-                  placeholder={t("pro.warp.licensePlaceholder")}
-                />
-              </label>
-              <button
-                type="button"
-                class="btn btn-secondary btn-sm"
-                onclick={() => registerWarp(false)}
-                disabled={registering}
-                data-state={registering ? "loading" : undefined}
-                title={t("pro.warp.registerTitle")}
-              >
-                <KeyRound class="size-3.5" />
-                {registering ? t("pro.warp.registering") : t("pro.warp.register")}
-              </button>
-            </div>
-
-            {#if registerError}
-              <div class="fade-in mt-2 flex flex-wrap items-center gap-2 text-xs">
-                <span role="alert" style="color: var(--bad)">{registerError}</span>
-                {#if offerOverwrite && !registering}
-                  <button
-                    type="button"
-                    class="btn btn-secondary btn-sm"
-                    onclick={() => registerWarp(true)}
-                    title={t("pro.warp.overwriteTitle")}
-                  >
-                    {t("pro.warp.overwrite")}
-                  </button>
-                {/if}
-              </div>
-            {/if}
-
-            {#if registeredConf}
-              <div class="fade-in mt-3">
-                <p class="text-xs font-semibold" style="color: var(--good)">
-                  {t("pro.warp.registeredHeading")}
-                </p>
-                <textarea
-                  class="field mono mt-1 w-full"
-                  rows="5"
-                  readonly
-                  value={registeredConf}
-                ></textarea>
-                <div class="mt-2 flex flex-wrap gap-2">
-                  <button type="button" class="btn btn-secondary btn-sm" onclick={copyConf}>
-                    {#if confCopied}
-                      <Check class="size-3.5" style="color: var(--good)" /> {t("pro.warp.copied")}
-                    {:else}
-                      <Copy class="size-3.5" /> {t("pro.warp.copy")}
-                    {/if}
-                  </button>
-                  <button
-                    type="button"
-                    class="btn btn-primary btn-sm"
-                    onclick={useRegisteredConf}
-                    title={t("pro.warp.useInVerifyTitle")}
-                  >
-                    {t("pro.warp.useInVerify")}
-                  </button>
-                </div>
-              </div>
-            {/if}
-            </div>
+          <WarpRegistrationCard form={form} />
           </div>
         </div>
       {:else}
@@ -1388,68 +889,15 @@
         {/if}
 
         {#if form.phase2On}
-          <!-- Tunnel-test card: configs stay visible; expert knobs collapse
-               into a details whose summary lists non-default choices. -->
-          <div
-            class="fade-in mt-4 rounded-md border px-4 py-4"
-            style="border-color: oklch(100% 0 0 / 8%)"
-          >
-            <span class="eyebrow mb-3">{t("table.tunnel.col")}</span>
-            <label class="text-xs" style="color: var(--ink-muted)">
-              {t("pro.phase2.configsLabel")}
-              <textarea
-                class="field mono mt-1"
-                rows="3"
-                name="configsText"
-                aria-invalid={fieldErrors.configsText ? "true" : undefined}
-                aria-describedby={fieldErrors.configsText ? "err-configsText" : undefined}
-                bind:value={form.configsText}
-                onchange={() => normalizeField("configsText")}></textarea>
-              {@render fieldError("configsText")}
-            </label>
-            <details class="mt-3" bind:open={tunnelAdvancedOpen}>
-              <summary class="cursor-pointer text-xs font-semibold" style="color: var(--ink-muted)">
-                {t("pro.section.tunnelAdvanced")}
-                {#if tunnelAdvancedSummary}
-                  <span class="mono font-normal" style="color: var(--accent)">
-                    · {tunnelAdvancedSummary}
-                  </span>
-                {/if}
-              </summary>
-              <div class="mt-3 grid gap-4 grid-form">
-                <label class="text-xs" style="color: var(--ink-muted)">
-                  {t("pro.phase2.fragment")}
-                  <select class="field mt-1" name="fragment" bind:value={form.fragment}>
-                    <option>off</option><option>light</option><option>medium</option><option>heavy</option>
-                  </select>
-                  {@render fieldError("fragment")}
-                </label>
-                <label class="text-xs span-all" style="color: var(--ink-muted)">
-                  {t("pro.phase2.sniLabel")}
-                  <input
-                    class="field mono mt-1"
-                    name="snis"
-                    placeholder={t("pro.phase2.sniPlaceholder")}
-                    aria-invalid={fieldErrors.snis ? "true" : undefined}
-                    aria-describedby={fieldErrors.snis ? "err-snis" : undefined}
-                    bind:value={form.snis}
-                  />
-                  {@render fieldError("snis")}
-                </label>
-                <label class="text-xs span-all" style="color: var(--ink-muted)">
-                  {t("pro.phase2.probeLabel")}
-                  <input
-                    class="field mono mt-1"
-                    name="probeUrl"
-                    aria-invalid={fieldErrors.probeUrl ? "true" : undefined}
-                    aria-describedby={fieldErrors.probeUrl ? "err-probeUrl" : undefined}
-                    bind:value={form.probeUrl}
-                  />
-                  {@render fieldError("probeUrl")}
-                </label>
-              </div>
-            </details>
-          </div>
+          <Phase2TunnelCard
+            form={form}
+            fieldErrors={fieldErrors}
+            onNormalize={normalizeField}
+            xray={xray}
+            xrayBusy={xrayBusy}
+            xrayError={xrayError}
+            onDownloadXray={downloadXray}
+          />
         {/if}
       {/if}
 
@@ -1485,14 +933,16 @@
                 class="btn btn-secondary btn-sm"
                 disabled={!canVerifyBanked}
                 data-state={verifyingBanked ? "loading" : undefined}
-                title={form.phase2On && configsListed.length > 0
-                  ? t("pro.action.skipTitle")
-                  : t("pro.phase2.configsLabel")}
+                title={verifyBankedDisabledReason || t("pro.action.skipTitle")}
+                aria-describedby="verify-banked-reason"
                 onclick={verifyBanked}
               >
                 <ShieldCheck class="size-3.5" />
                 {t("pro.action.verifyBanked", { n: app.results.length })}
               </button>
+              {#if verifyBankedDisabledReason}
+                <span id="verify-banked-reason" class="sr-only">{verifyBankedDisabledReason}</span>
+              {/if}
             {/if}
             <button
               type="submit"
@@ -1518,7 +968,10 @@
   </section>
 
   {#if app.phase2}
-    <p class="mono fade-in px-1 text-xs" style="color: var(--accent)" role="status">
+    {#if phase2Announce}
+      <span role="status" class="sr-only">{phase2Announce}</span>
+    {/if}
+    <p class="mono fade-in px-1 text-xs" style="color: var(--accent)">
       {t("pro.tunnel.progress", { done: app.phase2.done, total: app.phase2.total })}
     </p>
   {:else if app.running && suggestSkip}

@@ -1,40 +1,12 @@
-//! Candidate ranges for CDN mode: bundled official Cloudflare space, custom
-//! CIDRs, dirty-range exclusions, and the official-ranges HTTP fetch. Pure
-//! logic here; the network fetch for `ranges refresh` is injected so tests
-//! never touch the wire. (Scan planning over these pools lives in
-//! `crate::engine::plan`.)
-
 use std::fs;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
-use std::sync::LazyLock;
-use std::time::Duration;
 
-use anyhow::{Context, Result, anyhow, bail};
-use serde::Deserialize;
+use anyhow::{Context, Result, anyhow};
 
 use crate::paths;
 
-pub const BUNDLED_RANGES: &str = include_str!("../data/cf-ranges.txt");
-pub const BUNDLED_RANGES_V6: &str = include_str!("../data/cf-ranges-v6.txt");
-pub const OFFICIAL_IPS_URL: &str = "https://api.cloudflare.com/client/v4/ips";
-pub const OFFICIAL_IPS_V6_URL: &str = "https://www.cloudflare.com/ips-v6/";
-const FETCH_TIMEOUT: Duration = Duration::from_secs(20);
-
-pub(crate) static HTTP_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
-    reqwest::Client::builder()
-        .use_rustls_tls()
-        .redirect(reqwest::redirect::Policy::custom(|attempt| {
-            if attempt.previous().len() >= 5 {
-                return attempt.error("too many redirects");
-            }
-            if let Err(err) = validate_fetch_url(attempt.url().as_str()) {
-                return attempt.error(err.to_string());
-            }
-            attempt.follow()
-        }))
-        .build()
-        .expect("HTTP client must build")
-});
+pub const BUNDLED_RANGES: &str = include_str!("../../data/cf-ranges.txt");
+pub const BUNDLED_RANGES_V6: &str = include_str!("../../data/cf-ranges-v6.txt");
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Cidr {
@@ -108,28 +80,11 @@ impl Cidr {
     }
 }
 
-/// Validates and normalizes `ip/prefix`; host bits are masked off. Both v4
-/// and v6 are accepted.
+/// Parses and normalizes `ip/prefix`; host bits are masked off. Delegates
+/// grammar validation to the canonical `api::validate::parse_cidr` and adds
+/// pool-specific host-bit masking.
 pub fn parse_cidr(s: &str) -> Result<Cidr> {
-    let (ip, prefix) = s
-        .split_once('/')
-        .ok_or_else(|| anyhow!("missing /prefix in {s:?}"))?;
-    let addr: IpAddr = ip.trim().parse().context("invalid IP address")?;
-    let prefix: u8 = prefix.trim().parse().context("prefix is not a number")?;
-    let bits = match addr {
-        IpAddr::V4(_) => 32,
-        IpAddr::V6(_) => 128,
-    };
-    if prefix > bits {
-        bail!("prefix out of range 0-{bits}");
-    }
-    // A v6 /0 covers 2^128 addresses: `host_count` saturates at u128::MAX,
-    // so exclusion and planning math on it would be off by one. The API
-    // validator has always rejected it; keep the rejection in the parser so
-    // `validate_cidr` can delegate without a second rule.
-    if addr.is_ipv6() && prefix == 0 {
-        bail!("IPv6 /0 is not supported (host count exceeds u128)");
-    }
+    let (addr, prefix) = crate::api::types::parse_cidr(s).map_err(|e| anyhow!("{e}"))?;
     let masked = match addr {
         IpAddr::V4(a) => {
             let mask = if prefix == 0 {
@@ -154,7 +109,7 @@ pub fn parse_cidr(s: &str) -> Result<Cidr> {
     })
 }
 
-fn parse_lines(text: &str) -> Result<Vec<Cidr>> {
+pub(crate) fn parse_lines(text: &str) -> Result<Vec<Cidr>> {
     text.lines()
         .map(str::trim)
         .filter(|l| !l.is_empty() && !l.starts_with('#'))
@@ -183,6 +138,10 @@ impl CidrPool {
     /// The official Cloudflare IPv6 ranges; opt-in via `ScanConfig::include_v6`.
     pub fn bundled_v6() -> Self {
         Self::parse(BUNDLED_RANGES_V6).expect("bundled v6 ranges must parse: data/cf-ranges-v6.txt")
+    }
+
+    pub(crate) fn from_ranges(ranges: Vec<Cidr>) -> Self {
+        Self { ranges }
     }
 
     pub fn parse(text: &str) -> Result<Self> {
@@ -249,9 +208,6 @@ fn subtract(outer: Cidr, inner: Cidr) -> Subtract {
     let after_start = b + inner.host_count() - a;
     let after = outer.host_count() - after_start;
     let mut parts = Vec::new();
-    // Greedy high-bit blocks capped by the current address alignment; both
-    // lengths are multiples of inner's stride, so this always lands on
-    // valid CIDR boundaries.
     decompose(a, before, bits, &mut parts);
     decompose(a + after_start, after, bits, &mut parts);
     Subtract::Split(parts)
@@ -323,9 +279,6 @@ pub fn effective_pool_from(
     refreshed_v4: Option<&str>,
     refreshed_v6: Option<&str>,
 ) -> Result<CidrPool> {
-    // Custom CIDRs REPLACE the official pool: pasting your own ranges means
-    // "scan these, not the internet" (explicit v6 input is always honored,
-    // the flag only gates the bundled v6 list). Exclusions still apply.
     let mut pool = if custom_cidrs.is_empty() {
         base_pool(refreshed_v4)?
     } else {
@@ -374,21 +327,6 @@ pub fn effective_pool(
 
 pub const LAST_UPDATED_PREFIX: &str = "# last-updated: ";
 
-/// Fetches the official list, validates it, and returns the parsed pool.
-pub async fn fetch_official(http: &impl HttpGet) -> Result<CidrPool> {
-    let body = http.get(OFFICIAL_IPS_URL).await?;
-    let cidrs = parse_official(&body)?;
-    Ok(CidrPool { ranges: cidrs })
-}
-
-/// Fetches the official list over HTTPS and writes it to the data dir with a
-/// fresh last-updated header. Returns the number of ranges.
-pub async fn refresh_to_disk(http: &impl HttpGet) -> Result<usize> {
-    let pool = fetch_official(http).await?;
-    write_pool(&pool, &rfc3339_utc(unix_now()))?;
-    Ok(pool.ranges().len())
-}
-
 /// Atomically replaces the data-dir ranges file with `pool` (temp file +
 /// rename), tagged with the `last_updated` header that CLI refreshes and the
 /// server's background refresh share as one timestamp source.
@@ -406,8 +344,6 @@ pub fn write_pool_to(path: &std::path::Path, pool: &CidrPool, last_updated: &str
     let mut text = format!("{LAST_UPDATED_PREFIX}{last_updated}\n");
     text.push_str(&render_lines(pool.ranges()));
     let tmp = path.with_extension("txt.tmp");
-    // Scans read this file at start; a torn write would fail the scan. Rename
-    // is atomic on the same volume, so readers see old or new, never partial.
     fs::write(&tmp, text).context("write refreshed ranges")?;
     fs::rename(&tmp, path).context("replace refreshed ranges")?;
     Ok(())
@@ -451,220 +387,19 @@ pub fn rfc3339_utc(unix_secs: u64) -> String {
     format!("{y:04}-{m:02}-{d:02}T{h:02}:{mi:02}:{s:02}Z")
 }
 
-/// Fetches the official IPv6 list (`ranges refresh --ipv6`) and writes it to
-/// the data dir. The endpoint serves plain one-CIDR-per-line text, so every
-/// parsed entry must come back v6.
-pub async fn refresh_v6_to_disk(http: &impl HttpGet) -> Result<usize> {
-    let body = http.get(OFFICIAL_IPS_V6_URL).await?;
-    let cidrs = parse_lines(&body)?;
-    if let Some(bad) = cidrs.iter().find(|c| !c.addr.is_ipv6()) {
-        bail!("{OFFICIAL_IPS_V6_URL} returned a non-IPv6 CIDR: {bad}");
-    }
-    // Same atomic replace + last-updated header as the v4 refresh, so a
-    // concurrent include_v6 scan never reads a torn file.
-    let pool = CidrPool { ranges: cidrs };
-    write_pool_to(
-        &paths::refreshed_ranges_v6_path()?,
-        &pool,
-        &rfc3339_utc(unix_now()),
-    )?;
-    Ok(pool.ranges().len())
-}
-
-#[derive(Deserialize)]
-struct OfficialResponse {
-    success: bool,
-    result: Option<OfficialResult>,
-    #[serde(default)]
-    errors: Vec<serde_json::Value>,
-}
-
-#[derive(Deserialize)]
-struct OfficialResult {
-    ipv4_cidrs: Vec<String>,
-}
-
-/// IPv6 entries are skipped: this JSON endpoint feeds the v4 refresh only;
-/// the v6 list has its own source (`cf-ranges-v6.txt`, `ips-v6` endpoint).
-pub fn parse_official(body: &str) -> Result<Vec<Cidr>> {
-    let resp: OfficialResponse =
-        serde_json::from_str(body).context("parse cloudflare API response")?;
-    if !resp.success {
-        bail!("cloudflare API error: {:#?}", resp.errors);
-    }
-    let Some(r) = resp.result else {
-        bail!("cloudflare API returned no result");
-    };
-    r.ipv4_cidrs
-        .iter()
-        .filter_map(|c| {
-            // The ipv4_cidrs feed is v4 by contract, but a v6 entry would
-            // otherwise land in the refreshed v4 file and a v4-only scan
-            // would silently scan v6 hosts: skip v6 regardless of parse
-            // success.
-            if c.contains(':') {
-                return None;
-            }
-            match parse_cidr(c) {
-                Ok(c) => Some(Ok(c)),
-                Err(e) => Some(Err(e).with_context(|| format!("bad CIDR from API: {c}"))),
-            }
-        })
-        .collect()
-}
-
-/// One HTTPS GET, boxed so the seam is dyn-compatible and Send (the server
-/// spawns refreshes as a background task).
-pub type HttpFuture<'a> =
-    std::pin::Pin<Box<dyn std::future::Future<Output = Result<String>> + Send + 'a>>;
-
-pub trait HttpGet {
-    fn get<'a>(&'a self, url: &'a str) -> HttpFuture<'a>;
-}
-
-/// Minimal HTTPS GET (HTTP/1.1, rustls roots); enough for one JSON endpoint.
-pub struct RealHttp;
-
-impl HttpGet for RealHttp {
-    fn get<'a>(&'a self, url: &'a str) -> HttpFuture<'a> {
-        Box::pin(async move {
-            tokio::time::timeout(FETCH_TIMEOUT, fetch_tls(url))
-                .await
-                .context("fetch timed out")?
-        })
-    }
-}
-
-/// HTTPS GET with extra request headers (e.g. `User-Agent`), used by the
-/// phase-2 subscription fetcher which must not send the bare default UA.
-pub async fn fetch_tls_with_headers(url: &str, extra_headers: &str) -> Result<String> {
-    let body = fetch_tls_parts(url, extra_headers).await?;
-    Ok(String::from_utf8_lossy(&body).into_owned())
-}
-
-/// HTTPS GET returning raw bytes (binary downloads like the xray zip).
-pub async fn fetch_bytes(url: &str) -> Result<Vec<u8>> {
-    fetch_tls_parts(url, "Accept: */*").await
-}
-
-async fn fetch_tls_parts(url: &str, extra_headers: &str) -> Result<Vec<u8>> {
-    tokio::time::timeout(FETCH_TIMEOUT, fetch_tls_inner(url, extra_headers))
-        .await
-        .context("fetch timed out")?
-}
-
-async fn fetch_tls(url: &str) -> Result<String> {
-    let body = fetch_tls_parts(url, "Accept: application/json").await?;
-    Ok(String::from_utf8_lossy(&body).into_owned())
-}
-
-async fn fetch_tls_inner(url: &str, extra_headers: &str) -> Result<Vec<u8>> {
-    validate_fetch_url(url)?;
-    let mut request = HTTP_CLIENT
-        .get(url)
-        .timeout(FETCH_TIMEOUT)
-        .header(reqwest::header::USER_AGENT, "cf-scanner/0.1.0");
-    for line in extra_headers.split("\r\n") {
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
-        }
-        if let Some((name, value)) = line.split_once(':') {
-            request = request.header(name.trim(), value.trim());
-        }
-    }
-    let response = request
-        .send()
-        .await
-        .with_context(|| format!("fetch failed for {}", sanitize_url_for_error(url)))?;
-    const MAX_BODY_BYTES: usize = 64 * 1024 * 1024;
-    if let Some(len) = response.content_length() {
-        if len > MAX_BODY_BYTES as u64 {
-            bail!("response body exceeds the {MAX_BODY_BYTES} byte cap (Content-Length {len})");
-        }
-    }
-    let bytes = response.bytes().await.with_context(|| {
-        format!(
-            "failed to read response body of {}",
-            sanitize_url_for_error(url)
-        )
-    })?;
-    if bytes.len() > MAX_BODY_BYTES {
-        bail!("response body exceeded the {MAX_BODY_BYTES} byte cap");
-    }
-    Ok(bytes.to_vec())
-}
-
-/// URL text safe for errors/logs: userinfo (and query/fragment) stripped.
-fn sanitize_url_for_error(url: &str) -> String {
-    match url::Url::parse(url) {
-        Ok(mut parsed) => {
-            if !parsed.username().is_empty() || parsed.password().is_some() {
-                let _ = parsed.set_username("***");
-                let _ = parsed.set_password(Some("***"));
-            }
-            parsed.set_query(None);
-            parsed.set_fragment(None);
-            parsed.to_string()
-        }
-        Err(_) => url.to_owned(),
-    }
-}
-
-/// SSRF guard for every outbound fetch: https scheme only, and literal
-/// loopback/link-local/unspecified IP hosts are refused. DNS names stay
-/// allowed (GitHub, CDNs, subscription hosts); the API binds 127.0.0.1, so
-/// only local code could have crafted a hostile URL in the first place, and
-/// private LAN ranges are kept working for self-hosted subscription feeds.
-pub(crate) fn validate_fetch_url(url: &str) -> Result<()> {
-    let parsed = url::Url::parse(url).context("bad URL")?;
-    if parsed.scheme() != "https" {
-        bail!("only https:// URLs supported (got {}://)", parsed.scheme());
-    }
-    if let Some(host) = parsed.host() {
-        // Loopback, link-local and unspecified IPs are refused; DNS names
-        // pass (GitHub, CDNs, subscription hosts). Link-local ranges
-        // (169.254.0.0/16, fe80::/10) are spelled out because std lacks a
-        // stable is_link_local on both address types in this toolchain.
-        let unroutable = match host {
-            url::Host::Ipv4(v4) => {
-                let [a, b, _, _] = v4.octets();
-                v4.is_loopback() || v4.is_unspecified() || (a == 169 && b == 254)
-            }
-            url::Host::Ipv6(v6) => {
-                // Mapped-v6 literals connect as their embedded v4 address,
-                // so judge them by the v4 rules instead of the v6 ones.
-                if let Some(v4) = v6.to_ipv4_mapped() {
-                    let [a, b, _, _] = v4.octets();
-                    v4.is_loopback() || v4.is_unspecified() || (a == 169 && b == 254)
-                } else {
-                    v6.is_loopback()
-                        || v6.is_unspecified()
-                        || v6.segments()[0] & 0xffc0 == 0xfe80
-                }
-            }
-            url::Host::Domain(_) => false,
-        };
-        if unroutable {
-            bail!("refusing fetch from non-routable host {host}");
-        }
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::api::types::{CdnPreset, ScanTarget};
     use crate::engine::{PlanItem, SplitMix64, plan};
-    use crate::paths::test_env::{DATA_DIR_LOCK, IsolatedDataDir};
+    use std::net::Ipv4Addr;
 
     /// Shared grammar fixture: the same cases the UI's TS mirror
     /// (ui/src/lib/validators.ts) is written against, so a server-side
     /// grammar change that strands the frontend shows up here.
     #[test]
     fn grammar_fixture_cidr_cases_match_parse_cidr() {
-        let raw = include_str!("../tests/fixtures/grammar-cases.json");
+        let raw = include_str!("../../tests/fixtures/grammar-cases.json");
         let cases: Vec<serde_json::Value> = serde_json::from_str(raw).unwrap();
         let checked = cases.iter().filter(|c| c["kind"] == "cidr").count();
         assert!(
@@ -699,27 +434,6 @@ mod tests {
                 prefix: 24
             }
         );
-    }
-
-    #[test]
-    fn fetch_url_guard_rejects_non_https_and_local_hosts() {
-        assert!(validate_fetch_url("https://example.com/sub").is_ok());
-        assert!(validate_fetch_url("https://8.8.8.8/sub").is_ok());
-        assert!(validate_fetch_url("https://10.0.0.5:8443/sub").is_ok());
-        assert!(validate_fetch_url("https://example.com:8443/sub").is_ok());
-        assert!(validate_fetch_url("http://example.com/sub").is_err());
-        assert!(validate_fetch_url("ftp://example.com/x").is_err());
-        assert!(validate_fetch_url("file:///etc/passwd").is_err());
-        assert!(validate_fetch_url("https://127.0.0.1:8765/x").is_err());
-        assert!(validate_fetch_url("https://[::1]/x").is_err());
-        // Mapped-v6 literals must be judged by their embedded v4 address.
-        assert!(validate_fetch_url("https://[::ffff:127.0.0.1]/x").is_err());
-        assert!(validate_fetch_url("https://[::ffff:169.254.0.1]/x").is_err());
-        // Real v6 globals stay allowed.
-        assert!(validate_fetch_url("https://[2001:db8::1]/x").is_ok());
-        assert!(validate_fetch_url("https://169.254.0.1/x").is_err());
-        assert!(validate_fetch_url("https://0.0.0.0/x").is_err());
-        assert!(validate_fetch_url("not a url").is_err());
     }
 
     #[test]
@@ -758,8 +472,6 @@ mod tests {
                 prefix: 0
             }
         );
-        // v6 /0 saturates `host_count` at u128::MAX; the API validator has
-        // always rejected it, and so must the shared parser.
         assert!(parse_cidr("::/0").is_err());
     }
 
@@ -823,10 +535,18 @@ mod tests {
             prefix: 120,
         };
         assert_eq!(c.host_count(), 256);
-        assert_eq!(c.host(0), "2001:db8::".parse::<Ipv6Addr>().unwrap());
-        assert_eq!(c.host(255), "2001:db8::ff".parse::<Ipv6Addr>().unwrap());
-        assert_eq!(c.host(256), "2001:db8::".parse::<Ipv6Addr>().unwrap());
-        // A /32 sample lands inside 2606:4700::/32.
+        assert_eq!(
+            c.host(0),
+            "2001:db8::".parse::<std::net::Ipv6Addr>().unwrap()
+        );
+        assert_eq!(
+            c.host(255),
+            "2001:db8::ff".parse::<std::net::Ipv6Addr>().unwrap()
+        );
+        assert_eq!(
+            c.host(256),
+            "2001:db8::".parse::<std::net::Ipv6Addr>().unwrap()
+        );
         let big = Cidr {
             addr: "2606:4700::".parse().unwrap(),
             prefix: 32,
@@ -1136,7 +856,6 @@ mod tests {
 
     // --- Property tests (seeded, no external RNG) -----------------------------
 
-    /// Random v4 address aligned to `prefix`.
     fn random_v4_base(rng: &mut SplitMix64, prefix: u8) -> Ipv4Addr {
         let raw = rng.next_u64() as u32;
         let mask = if prefix == 0 {
@@ -1147,8 +866,7 @@ mod tests {
         Ipv4Addr::from(raw & mask)
     }
 
-    /// Random v6 address aligned to `prefix`.
-    fn random_v6_base(rng: &mut SplitMix64, prefix: u8) -> Ipv6Addr {
+    fn random_v6_base(rng: &mut SplitMix64, prefix: u8) -> std::net::Ipv6Addr {
         let lo = rng.next_u64() as u128;
         let hi = rng.next_u64() as u128;
         let raw = (hi << 64) | lo;
@@ -1157,15 +875,13 @@ mod tests {
         } else {
             u128::MAX << (128 - prefix)
         };
-        Ipv6Addr::from(raw & mask)
+        std::net::Ipv6Addr::from(raw & mask)
     }
 
-    /// Half-open [start, end) span of a range.
     fn span(c: Cidr) -> (u128, u128) {
         (c.base(), c.base() + c.host_count())
     }
 
-    /// Sorted list of every address in `pool` for containment checks.
     fn pool_hosts(pool: &CidrPool) -> Vec<IpAddr> {
         let mut hosts = Vec::new();
         for c in pool.ranges() {
@@ -1177,8 +893,6 @@ mod tests {
         hosts
     }
 
-    /// Collects the concrete hosts a count plan yields, panicking on non-host
-    /// items.
     fn plan_hosts(plan: &[PlanItem]) -> Vec<IpAddr> {
         let mut hosts = Vec::new();
         for item in plan {
@@ -1199,16 +913,11 @@ mod tests {
         hosts
     }
 
-    /// Brute-force exclusion invariant over random v4 (outer, inner) pairs:
-    /// every host of `outer` must land in exactly one of {inner, output},
-    /// the output must cover `outer` minus the overlap, and no output range
-    /// may overlap `inner` or escape `outer`. Aligned CIDRs never partially
-    /// overlap, so the span-intersection arithmetic is exact.
     #[test]
     fn exclusion_split_matches_brute_force_for_random_cidrs() {
         let mut rng = SplitMix64::new(0xC1D5_5EED);
         for _ in 0..400 {
-            let outer_prefix = 18 + rng.below(11) as u8; // 18..=28: <= 16384 hosts
+            let outer_prefix = 18 + rng.below(11) as u8;
             let outer = Cidr {
                 addr: IpAddr::V4(random_v4_base(&mut rng, outer_prefix)),
                 prefix: outer_prefix,
@@ -1265,13 +974,11 @@ mod tests {
         }
     }
 
-    /// Same invariant for small v6 ranges (prefix 120..=126 keeps the brute
-    /// force tractable), inner drawn aligned inside `outer` or equal to it.
     #[test]
     fn v6_exclusion_split_matches_brute_force_for_random_cidrs() {
         let mut rng = SplitMix64::new(0x6E5_5EED);
         for _ in 0..200 {
-            let outer_prefix = 120 + rng.below(7) as u8; // 120..=126: <= 256 hosts
+            let outer_prefix = 120 + rng.below(7) as u8;
             let outer = Cidr {
                 addr: IpAddr::V6(random_v6_base(&mut rng, outer_prefix)),
                 prefix: outer_prefix,
@@ -1279,7 +986,7 @@ mod tests {
             let inner_prefix = outer_prefix + rng.below((128 - outer_prefix) as u64 + 1) as u8;
             let stride = 1u128 << (128 - inner_prefix);
             let inner = Cidr {
-                addr: IpAddr::V6(Ipv6Addr::from(
+                addr: IpAddr::V6(std::net::Ipv6Addr::from(
                     outer.base() + rng.below_u128(outer.host_count() / stride) * stride,
                 )),
                 prefix: inner_prefix,
@@ -1314,8 +1021,6 @@ mod tests {
         }
     }
 
-    /// Count sampling must stay distinct and in-pool across many seeds and
-    /// counts, including counts near the pool boundary (offset rounding).
     #[test]
     fn count_sampling_is_distinct_across_seeds_and_counts() {
         let pool = CidrPool {
@@ -1349,7 +1054,6 @@ mod tests {
         }
     }
 
-    /// The same distinctness/containment properties on a mixed v4+v6 pool.
     #[test]
     fn count_sampling_stays_distinct_on_mixed_family_pools() {
         let pool = CidrPool {
@@ -1379,8 +1083,6 @@ mod tests {
                         "seed {seed} count {n}: {ip} outside the pool"
                     );
                 }
-                // Small counts may legitimately land entirely in the v4 half
-                // (512 hosts, 256 v4); only a near-total sample must reach v6.
                 if n >= 400 {
                     assert!(
                         picked.iter().any(|ip| ip.is_ipv6()),
@@ -1487,52 +1189,6 @@ mod tests {
     }
 
     #[test]
-    fn parses_official_fixture_skipping_v6() {
-        // v6 entries in the response are discarded: the v4 refresh must
-        // never seed v6 hosts into a v4-only scan.
-        let body = r#"{
-            "success": true,
-            "result": {
-                "ipv4_cidrs": ["104.16.0.0/13", "2001:4860::/32"]
-            },
-            "errors": []
-        }"#;
-        let cidrs = parse_official(body).unwrap();
-        assert_eq!(cidrs, vec![parse_cidr("104.16.0.0/13").unwrap()]);
-    }
-
-    #[test]
-    fn rejects_official_error_response() {
-        let body = r#"{"success": false, "errors": [{"code": 7000, "message": "nope"}]}"#;
-        assert!(parse_official(body).is_err());
-    }
-
-    struct FakeHttp(&'static str);
-
-    impl HttpGet for FakeHttp {
-        fn get<'a>(&'a self, _url: &'a str) -> HttpFuture<'a> {
-            Box::pin(async move { Ok(self.0.to_owned()) })
-        }
-    }
-
-    #[tokio::test]
-    async fn refresh_to_disk_round_trips() {
-        // Refresh writes the data-dir file for real; redirect the data dir to
-        // a throwaway temp dir (warpgen pattern) so a developer's refreshed
-        // ranges are never read, replaced, or deleted by a test run.
-        let _guard = DATA_DIR_LOCK.lock().await;
-        let _isolated = IsolatedDataDir::new();
-        let body = r#"{"success":true,"result":{"ipv4_cidrs":["10.0.0.0/8"]},"errors":[]}"#;
-        let http = FakeHttp(body);
-        assert_eq!(refresh_to_disk(&http).await.unwrap(), 1);
-        let written = fs::read_to_string(paths::refreshed_ranges_path().unwrap()).unwrap();
-        assert!(written.starts_with("# last-updated: "), "{written}");
-        assert!(written.ends_with("10.0.0.0/8\n"), "{written}");
-        assert!(last_updated_of(&written).is_some());
-        assert_eq!(CidrPool::parse(&written).unwrap().host_count(), 1 << 24);
-    }
-
-    #[test]
     fn rfc3339_utc_formats_known_instants() {
         assert_eq!(rfc3339_utc(0), "1970-01-01T00:00:00Z");
         assert_eq!(rfc3339_utc(1_735_689_600), "2025-01-01T00:00:00Z");
@@ -1558,28 +1214,5 @@ mod tests {
         let pool = CidrPool::parse(text).unwrap();
         assert_eq!(pool.ranges().len(), 2);
         assert_eq!(base_pool_v6(Some(text)).unwrap().ranges().len(), 2);
-    }
-
-    #[tokio::test]
-    async fn refresh_v6_to_disk_round_trips() {
-        // Same isolation as the v4 round trip: the write lands in the
-        // throwaway data dir, never the developer's.
-        let _guard = DATA_DIR_LOCK.lock().await;
-        let _isolated = IsolatedDataDir::new();
-        let http = FakeHttp("2606:4700::/32\n2400:cb00::/32\n");
-        assert_eq!(refresh_v6_to_disk(&http).await.unwrap(), 2);
-        let written = fs::read_to_string(paths::refreshed_ranges_v6_path().unwrap()).unwrap();
-        assert!(
-            last_updated_of(&written).is_some(),
-            "v6 refresh must carry a last-updated header like the v4 refresh"
-        );
-        let pool = CidrPool::parse(&written).unwrap();
-        assert_eq!(pool.ranges().len(), 2);
-    }
-
-    #[tokio::test]
-    async fn refresh_v6_rejects_non_v6_entries() {
-        let http = FakeHttp("2606:4700::/32\n1.2.3.4/24\n");
-        assert!(refresh_v6_to_disk(&http).await.is_err());
     }
 }

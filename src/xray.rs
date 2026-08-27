@@ -299,8 +299,7 @@ async fn write_trial_config(path: &Path, config_json: &Value) -> Result<()> {
         }
         #[cfg(not(unix))]
         {
-            std::fs::write(&path, json)?;
-            crate::paths::lock_down_to_owner(&path)?;
+            crate::paths::write_secret(&path, json.as_bytes())?;
         }
         Ok(())
     })

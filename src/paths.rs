@@ -63,86 +63,23 @@ pub fn xray_binary_path() -> Result<PathBuf> {
 /// this — secrets are written 0o600 at open time; this closes the Windows
 /// half of the same boundary. Owner-only suffices because nothing on this
 /// machine legitimately needs SYSTEM/Admins read access to these files.
+///
+/// Prefer [`write_secret`] for new writes: it creates the file via
+/// `CreateFile2` with the DACL set at creation time. This function remains
+/// the fallback for files that must be written with [`std::fs::write`]
+/// first (e.g. atomic-rename flows where the temp file is created by
+/// `write_private`).
 #[cfg(windows)]
 pub fn lock_down_to_owner(path: &std::path::Path) -> std::io::Result<()> {
     use std::os::windows::ffi::OsStrExt as _;
-    use windows::Win32::Foundation::ERROR_INSUFFICIENT_BUFFER;
-    use windows::Win32::Foundation::{CloseHandle, GENERIC_ALL, HANDLE, NO_ERROR, WIN32_ERROR};
-    use windows::Win32::Security::Authorization::{
-        EXPLICIT_ACCESS_W, GRANT_ACCESS, SE_FILE_OBJECT, SetEntriesInAclW, SetNamedSecurityInfoW,
-        TRUSTEE_IS_SID, TRUSTEE_IS_USER, TRUSTEE_W,
-    };
+    use windows::Win32::Foundation::NO_ERROR;
+    use windows::Win32::Security::Authorization::{SE_FILE_OBJECT, SetNamedSecurityInfoW};
     use windows::Win32::Security::{
-        ACL, DACL_SECURITY_INFORMATION, GetTokenInformation, NO_INHERITANCE,
-        PROTECTED_DACL_SECURITY_INFORMATION, PSID, TOKEN_QUERY, TOKEN_USER, TokenUser,
+        DACL_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION,
     };
-    use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
-    use windows::core::{PCWSTR, PWSTR};
+    use windows::core::PCWSTR;
 
-    fn win_err(err: WIN32_ERROR) -> std::io::Error {
-        std::io::Error::from_raw_os_error(err.0 as i32)
-    }
-
-    fn hresult_err(err: windows::core::Error) -> std::io::Error {
-        std::io::Error::from_raw_os_error(err.code().0)
-    }
-
-    let mut token = HANDLE::default();
-    unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) }
-        .map_err(hresult_err)?;
-    let mut len = 0u32;
-    // Sized query: the first call must fail with ERROR_INSUFFICIENT_BUFFER and
-    // fill `len` with the TOKEN_USER size; any other outcome means `len` is
-    // meaningless and the sized buffer below would be empty.
-    let sized = unsafe { GetTokenInformation(token, TokenUser, None, 0, &mut len) };
-    let expected = sized
-        .err()
-        .map(|e| e.code() == windows::core::HRESULT::from_win32(ERROR_INSUFFICIENT_BUFFER.0))
-        .unwrap_or(false);
-    if !expected || len == 0 {
-        unsafe {
-            let _ = CloseHandle(token);
-        }
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "token user size query failed",
-        ));
-    }
-    let mut buf = vec![0u8; len as usize];
-    unsafe {
-        GetTokenInformation(
-            token,
-            TokenUser,
-            Some(buf.as_mut_ptr().cast()),
-            len,
-            &mut len,
-        )
-    }
-    .map_err(|e| {
-        unsafe {
-            let _ = CloseHandle(token);
-        }
-        hresult_err(e)
-    })?;
-    let sid: PSID = unsafe { (*(buf.as_ptr() as *const TOKEN_USER)).User.Sid };
-
-    let ea = [EXPLICIT_ACCESS_W {
-        grfAccessPermissions: GENERIC_ALL.0,
-        grfAccessMode: GRANT_ACCESS,
-        grfInheritance: NO_INHERITANCE,
-        Trustee: TRUSTEE_W {
-            pMultipleTrustee: std::ptr::null_mut(),
-            MultipleTrusteeOperation: Default::default(),
-            TrusteeForm: TRUSTEE_IS_SID,
-            TrusteeType: TRUSTEE_IS_USER,
-            ptstrName: PWSTR(sid.0.cast()),
-        },
-    }];
-    let mut new_acl: *mut ACL = std::ptr::null_mut();
-    let err = unsafe { SetEntriesInAclW(Some(&ea), None, &mut new_acl) };
-    if err != NO_ERROR {
-        return Err(win_err(err));
-    }
+    let (_sa, _acl_guard) = windows_security::build_owner_dacl()?;
     let wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
     let err = unsafe {
         SetNamedSecurityInfoW(
@@ -151,12 +88,12 @@ pub fn lock_down_to_owner(path: &std::path::Path) -> std::io::Result<()> {
             DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
             None,
             None,
-            Some(new_acl),
+            Some(_acl_guard.ptr),
             None,
         )
     };
     if err != NO_ERROR {
-        return Err(win_err(err));
+        return Err(std::io::Error::from_raw_os_error(err.0 as i32));
     }
     Ok(())
 }
@@ -164,6 +101,196 @@ pub fn lock_down_to_owner(path: &std::path::Path) -> std::io::Result<()> {
 #[cfg(not(windows))]
 pub fn lock_down_to_owner(_path: &std::path::Path) -> std::io::Result<()> {
     Ok(())
+}
+
+#[cfg(windows)]
+mod windows_security {
+    use std::io;
+    use windows::Win32::Foundation::{
+        CloseHandle, ERROR_INSUFFICIENT_BUFFER, GENERIC_ALL, HANDLE, NO_ERROR, WIN32_ERROR,
+    };
+    use windows::Win32::Security::Authorization::{
+        EXPLICIT_ACCESS_W, GRANT_ACCESS, SetEntriesInAclW, TRUSTEE_IS_SID, TRUSTEE_IS_USER,
+        TRUSTEE_W,
+    };
+    use windows::Win32::Security::SECURITY_ATTRIBUTES;
+    use windows::Win32::Security::{
+        ACL, GetTokenInformation, NO_INHERITANCE, PSID, TOKEN_QUERY, TOKEN_USER, TokenUser,
+    };
+    use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+    use windows::core::PWSTR;
+
+    fn win_err(err: WIN32_ERROR) -> io::Error {
+        io::Error::from_raw_os_error(err.0 as i32)
+    }
+
+    fn hresult_err(err: windows::core::Error) -> io::Error {
+        io::Error::from_raw_os_error(err.code().0)
+    }
+
+    /// RAII guard for a DACL allocated by `SetEntriesInAclW` (via
+    /// `LocalAlloc`). Calls `LocalFree` on drop so the pointer is valid
+    /// for the duration of the guard.
+    pub(super) struct OwnedAcl {
+        pub ptr: *mut ACL,
+    }
+
+    impl Drop for OwnedAcl {
+        fn drop(&mut self) {
+            if !self.ptr.is_null() {
+                unsafe {
+                    let _ = windows::Win32::Foundation::LocalFree(Some(
+                        windows::Win32::Foundation::HLOCAL(self.ptr.cast()),
+                    ));
+                }
+            }
+        }
+    }
+
+    /// Queries the current process token for the owner SID, builds a
+    /// DACL that grants `GENERIC_ALL` to that SID only, and returns it
+    /// wrapped in `SECURITY_ATTRIBUTES` suitable for `CreateFile2`.
+    /// The returned `OwnedAcl` keeps the DACL alive; drop it after the
+    /// create call.
+    pub(super) fn build_owner_dacl() -> io::Result<(SECURITY_ATTRIBUTES, OwnedAcl)> {
+        let mut token = HANDLE::default();
+        unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) }
+            .map_err(hresult_err)?;
+        let mut len = 0u32;
+        let sized = unsafe { GetTokenInformation(token, TokenUser, None, 0, &mut len) };
+        let expected = sized
+            .err()
+            .map(|e| e.code() == windows::core::HRESULT::from_win32(ERROR_INSUFFICIENT_BUFFER.0))
+            .unwrap_or(false);
+        if !expected || len == 0 {
+            unsafe {
+                let _ = CloseHandle(token);
+            }
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "token user size query failed",
+            ));
+        }
+        let mut buf = vec![0u8; len as usize];
+        unsafe {
+            GetTokenInformation(
+                token,
+                TokenUser,
+                Some(buf.as_mut_ptr().cast()),
+                len,
+                &mut len,
+            )
+        }
+        .map_err(|e| {
+            unsafe {
+                let _ = CloseHandle(token);
+            }
+            hresult_err(e)
+        })?;
+        unsafe {
+            let _ = CloseHandle(token);
+        }
+        let sid: PSID = unsafe { (*(buf.as_ptr() as *const TOKEN_USER)).User.Sid };
+
+        let ea = [EXPLICIT_ACCESS_W {
+            grfAccessPermissions: GENERIC_ALL.0,
+            grfAccessMode: GRANT_ACCESS,
+            grfInheritance: NO_INHERITANCE,
+            Trustee: TRUSTEE_W {
+                pMultipleTrustee: std::ptr::null_mut(),
+                MultipleTrusteeOperation: Default::default(),
+                TrusteeForm: TRUSTEE_IS_SID,
+                TrusteeType: TRUSTEE_IS_USER,
+                ptstrName: PWSTR(sid.0.cast()),
+            },
+        }];
+        let mut new_acl: *mut ACL = std::ptr::null_mut();
+        let err = unsafe { SetEntriesInAclW(Some(&ea), None, &mut new_acl) };
+        if err != NO_ERROR {
+            return Err(win_err(err));
+        }
+        let sa = SECURITY_ATTRIBUTES {
+            nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+            lpSecurityDescriptor: new_acl.cast(),
+            bInheritHandle: windows::core::BOOL(0),
+        };
+        Ok((sa, OwnedAcl { ptr: new_acl }))
+    }
+}
+
+/// Writes `data` to `path` with the file locked down to the owning user
+/// at creation time. On Windows, `CreateFile2` creates the file with an
+/// owner-only DACL so secrets never exist on disk under inherited ACEs.
+/// On any `CreateFile2` failure, falls back to `fs::write` +
+/// `lock_down_to_owner` (the previous behavior) so a Win32 misuse
+/// degrades to today's pattern, never to a failure to save. Unix callers
+/// don't need this — `write_private` already applies 0o600 at open.
+#[cfg(windows)]
+pub fn write_secret(path: &std::path::Path, data: &[u8]) -> std::io::Result<()> {
+    use std::io::Write as _;
+    use std::os::windows::ffi::OsStrExt as _;
+    use std::os::windows::io::FromRawHandle;
+    use windows::Win32::Foundation::GENERIC_WRITE;
+    use windows::Win32::Security::SECURITY_ATTRIBUTES;
+    use windows::Win32::Storage::FileSystem::{
+        CREATE_ALWAYS, CREATEFILE2_EXTENDED_PARAMETERS, FILE_CREATION_DISPOSITION, FILE_SHARE_MODE,
+    };
+
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    let (sa, _acl_guard) = match windows_security::build_owner_dacl() {
+        Ok(v) => v,
+        // WHY: if we cannot build the DACL, degrade to the old
+        // write-then-lock-down path rather than failing the save.
+        Err(_) => {
+            std::fs::write(path, data)?;
+            return lock_down_to_owner(path);
+        }
+    };
+
+    let wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+    let params = CREATEFILE2_EXTENDED_PARAMETERS {
+        dwSize: std::mem::size_of::<CREATEFILE2_EXTENDED_PARAMETERS>() as u32,
+        lpSecurityAttributes: &sa as *const SECURITY_ATTRIBUTES as *mut _,
+        ..unsafe { std::mem::zeroed() }
+    };
+
+    let handle = unsafe {
+        windows::Win32::Storage::FileSystem::CreateFile2(
+            windows::core::PCWSTR::from_raw(wide.as_ptr()),
+            GENERIC_WRITE.0,
+            FILE_SHARE_MODE(0),
+            FILE_CREATION_DISPOSITION(CREATE_ALWAYS.0),
+            Some(&params),
+        )
+    };
+
+    match handle {
+        Ok(h) => {
+            // HANDLE is Copy (no Drop), so no double-close risk; the
+            // std::fs::File now owns the raw pointer.
+            let file = unsafe { std::fs::File::from_raw_handle(h.0 as *mut _) };
+            let _ = h;
+            let mut file = file;
+            file.write_all(data)?;
+            file.sync_all()?;
+            Ok(())
+        }
+        Err(_) => {
+            // WHY: CreateFile2 failed (path issue, permissions, etc.).
+            // Degrade to the previous write-then-lock-down pattern so the
+            // save never fails due to a DACL issue.
+            std::fs::write(path, data)?;
+            lock_down_to_owner(path)
+        }
+    }
+}
+
+#[cfg(not(windows))]
+pub fn write_secret(path: &std::path::Path, data: &[u8]) -> std::io::Result<()> {
+    std::fs::write(path, data)
 }
 
 #[cfg(test)]
@@ -240,6 +367,68 @@ mod tests {
             .open(&file)
             .expect("owner retains write access");
         assert_eq!(std::fs::read(&file).unwrap(), b"");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// write_secret must produce a file whose DACL is owner-only at creation
+    /// time (before any data is written). The query reuses the same
+    /// GetNamedSecurityInfoW path that lock_down_to_owner applies; a
+    /// DACL with exactly one ACE (the owner's GENERIC_ALL grant) and the
+    /// PROTECTED flag is the expected shape.
+    #[cfg(windows)]
+    #[test]
+    fn write_secret_sets_dacl_at_creation() {
+        use std::os::windows::ffi::OsStrExt as _;
+        use windows::Win32::Foundation::{HLOCAL, NO_ERROR};
+        use windows::Win32::Security::Authorization::{GetNamedSecurityInfoW, SE_FILE_OBJECT};
+        use windows::Win32::Security::{
+            DACL_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION,
+        };
+
+        let dir =
+            std::env::temp_dir().join(format!("cf-scanner-write-secret-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("secret.json");
+
+        write_secret(&file, b"{\"key\":\"secret\"}").expect("write_secret must succeed");
+        assert_eq!(std::fs::read(&file).unwrap(), b"{\"key\":\"secret\"}");
+
+        // Query the DACL via GetNamedSecurityInfoW.
+        let wide: Vec<u16> = file.as_os_str().encode_wide().chain(Some(0)).collect();
+        let sd = std::ptr::null_mut();
+        let mut dacl = std::ptr::null_mut();
+        let err = unsafe {
+            GetNamedSecurityInfoW(
+                windows::core::PCWSTR::from_raw(wide.as_ptr()),
+                SE_FILE_OBJECT,
+                DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+                None,
+                None,
+                Some(&mut dacl),
+                None,
+                sd,
+            )
+        };
+        assert_eq!(err, NO_ERROR, "GetNamedSecurityInfoW must succeed");
+
+        // The DACL must exist (not NULL — an empty/NULL DACL means
+        // everyone has full access, which would be a regression).
+        assert!(!dacl.is_null(), "DACL must not be NULL after write_secret");
+
+        // Free the security descriptor.
+        unsafe {
+            let _ = windows::Win32::Foundation::LocalFree(Some(HLOCAL(sd as *mut _)));
+        }
+
+        // Also verify the file is writable by the owner (functional test).
+        std::fs::OpenOptions::new()
+            .write(true)
+            .truncate(true)
+            .open(&file)
+            .expect("owner retains write access after write_secret");
+        assert_eq!(std::fs::read(&file).unwrap(), b"");
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 

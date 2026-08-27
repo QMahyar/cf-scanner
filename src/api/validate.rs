@@ -200,21 +200,44 @@ fn is_ascii_digits(s: &str) -> bool {
     !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit())
 }
 
-/// Validates `ip/prefix` for both address families. Delegates parsing to the
-/// canonical `ranges::parse_cidr`; only the deliberate v6 /0 rejection (host
-/// count exceeds u128) stays here, checked after the parse succeeds.
-pub(crate) fn validate_cidr(s: &str) -> Result<(), ConfigError> {
-    let cidr = crate::ranges::parse_cidr(s)
-        .map_err(|e| ConfigError::InvalidCidr(s.to_owned(), format!("{e}")))?;
-    // A v6 /0 covers 2^128 addresses: `Cidr::host_count` saturates at
-    // u128::MAX, so exclusion/planning math on it would be off by one.
-    if cidr.addr.is_ipv6() && cidr.prefix == 0 {
+/// Parses `ip/prefix` for both address families. Returns the raw (address,
+/// prefix) pair — host bits are NOT masked. This is the canonical grammar
+/// entry point; every other CIDR parser in the crate delegates here.
+pub fn parse_cidr(s: &str) -> Result<(IpAddr, u8), ConfigError> {
+    let (ip_s, prefix_s) = s
+        .split_once('/')
+        .ok_or_else(|| ConfigError::InvalidCidr(s.to_owned(), "missing /prefix".to_owned()))?;
+    let addr: IpAddr = ip_s
+        .trim()
+        .parse()
+        .map_err(|_| ConfigError::InvalidCidr(s.to_owned(), "invalid IP address".to_owned()))?;
+    let prefix: u8 = prefix_s
+        .trim()
+        .parse()
+        .map_err(|_| ConfigError::InvalidCidr(s.to_owned(), "prefix is not a number".to_owned()))?;
+    let bits: u8 = match addr {
+        IpAddr::V4(_) => 32,
+        IpAddr::V6(_) => 128,
+    };
+    if prefix > bits {
+        return Err(ConfigError::InvalidCidr(
+            s.to_owned(),
+            format!("prefix out of range 0-{bits}"),
+        ));
+    }
+    if addr.is_ipv6() && prefix == 0 {
         return Err(ConfigError::InvalidCidr(
             s.to_owned(),
             "IPv6 /0 is not supported (host count exceeds u128)".to_owned(),
         ));
     }
-    Ok(())
+    Ok((addr, prefix))
+}
+
+/// Validates `ip/prefix` for both address families. Delegates to the
+/// canonical `parse_cidr` above.
+pub(crate) fn validate_cidr(s: &str) -> Result<(), ConfigError> {
+    parse_cidr(s).map(|_| ())
 }
 
 /// Validates an SNI value: a raw IP (v4/v6) or a hostname with RFC 1035

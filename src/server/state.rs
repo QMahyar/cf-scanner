@@ -21,6 +21,9 @@ pub(crate) const MAX_PROFILES: usize = 50;
 /// WARP registration hits Cloudflare's registration endpoint; one attempt per
 /// 60 s keeps a stuck page from hammering it (process-wide, single-user app).
 pub(crate) const REGISTER_COOLDOWN: Duration = Duration::from_secs(60);
+/// Xray download endpoint: same 60 s gate so a stuck client cannot loop
+/// download attempts indefinitely (mirrors the register-cooldown pattern).
+pub(crate) const XRAY_DOWNLOAD_COOLDOWN: Duration = Duration::from_secs(60);
 /// Persisted profiles file inside the data dir (identity.json lives
 /// alongside it); written on every mutation, loaded at serve start so saved
 /// profiles survive restarts (review Domain 2, rec 10).
@@ -93,6 +96,11 @@ pub(crate) struct ProfilePayload {
 /// injectability).
 pub(crate) type WarpRegistrar = Arc<dyn Fn(Option<String>) -> anyhow::Result<String> + Send + Sync>;
 
+/// Xray binary fetch seam: production drives `xray::ensure_binary` with the
+/// real HTTP fetcher; tests inject a fake that returns a dummy path so the
+/// cooldown gate can be tested without touching the network.
+pub(crate) type XrayFetcher = Arc<dyn Fn() -> anyhow::Result<std::path::PathBuf> + Send + Sync>;
+
 pub(crate) struct AppState {
     pub(crate) controller: Arc<ScanController>,
     pub(crate) profiles: TokioRwLock<HashMap<String, crate::api::types::ScanConfig>>,
@@ -115,6 +123,12 @@ pub(crate) struct AppState {
     /// across the network call; the cooldown already limits registrations to
     /// 1/60 s, so serializing them costs nothing.
     pub(crate) register_gate: tokio::sync::Mutex<Option<Instant>>,
+    /// Serializes xray downloads end-to-end and carries the last attempt
+    /// for the 60 s limit (mirrors the register_gate pattern).
+    pub(crate) xray_download_gate: tokio::sync::Mutex<Option<Instant>>,
+    /// Xray binary fetch seam: production drives `xray::ensure_binary` with
+    /// the real HTTP fetcher; tests inject a fake.
+    pub(crate) xray_fetch: XrayFetcher,
 }
 
 /// What /api/ranges serves: the current pool plus when it was last refreshed.

@@ -1,5 +1,5 @@
 import { ApiError, api } from "./api";
-import { phase2Only } from "./resultsView.svelte";
+import { markDirty, phase2Only } from "./resultsView.svelte";
 import type { Mode, ScanConfig, ScanSummary, Verdict } from "./types";
 
 export interface UiState {
@@ -62,12 +62,14 @@ export function applyResult(verdict: Verdict) {
     resultIndexByKey.set(key, app.results.length);
     app.results.push(verdict);
   }
+  markDirty();
 }
 
 export function setResults(rows: Verdict[]) {
   resultIndexByKey.clear();
   for (let i = 0; i < rows.length; i++) resultIndexByKey.set(`${rows[i].ip}:${rows[i].port}`, i);
   app.results = rows;
+  markDirty();
 }
 
 export function resetResults() {
@@ -82,6 +84,7 @@ export function resetResults() {
   app.lastScanVerified = false;
   app.frozenPhase1 = null;
   resetTicks();
+  markDirty();
 }
 
 export function errorText(e: unknown): string {
