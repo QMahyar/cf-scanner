@@ -3,6 +3,23 @@
 All notable changes to CF-Scanner are documented here, grouped by
 Added / Changed / Fixed / Deprecated / Removed / Security, newest on top.
 
+## [0.11.0] - 2026-08-27
+
+### Added
+- **Advisor audit closure (26 plans, 10 parallel audits → 92 findings).** All remaining plans shipped: single admission point + xray cooldown (017), Windows DACL at create (019), store accessors (020), de-flaked tests + proptest (021), server split (022), api/types split (023), ranges split (024), grammar consolidation (025), HTTP parser consolidation (026), batched view recompute (007), woff2-only fonts (008), ProPanel 5-extract decomposition (009), identity-group + i18n/a11y (004/005). Plans removed; 26/26 done.
+- **Ranges/Api/Server splits.** `src/api/types.rs` → `limits.rs`/`error.rs`/`validate.rs` + facade; `src/ranges.rs` → `pool.rs`/`http.rs`/`official.rs`; `src/server/mod.rs` → `tests.rs` (2122 lines). Zero consumer import changes; `cargo check` clean.
+- **Grammar + HTTP consolidation.** Single `parse_cidr`/`parse_endpoint` behind `api::types` (fixture-driven); single `read_response` in `socks.rs` shared by `inline_verify.rs` (diff proptest, ~130 lines deleted).
+- **Windows secret DACL at create.** `src/paths.rs::write_secret` via `CreateFile2` + `SECURITY_ATTRIBUTES` (owner-only), fallback to `fs::write` + `lock_down`; `Win32_Storage_FileSystem` feature; DACL-at-create test.
+
+### Changed
+- **Admission parity.** `ScanConfig::validate()` now rejects non-routable custom CIDRs/endpoints (loopback/link-local/ULA/mapped-v6) and CDN-default port for WARP; CLI and server share one gate (3 new `ConfigError` variants).
+- **View recompute batching.** `resultsView.svelte.ts` dirty-flag + lazy getters; `store.svelte.ts` marks dirty on `applyResult`/`setResults`; `ResultsTable.svelte` single-pass `$derived.by`.
+- **Font bundle.** JetBrains Mono now woff2-only latin faces; Vazirmatn kept arabic/latin-ext/latin via `unicode-range` (≈107 KB dist reduction).
+
+### Fixed
+- **SSE cap flake.** `sse_connection_cap_rejects_fifth_stream` now uses 100 ms sleep + single 429 check (was polling with deadline); `cargo test` 3× green.
+- **Import band-aids.** `src/server/mod.rs` `#[allow(unused_imports)]` removed; test-only imports moved to `tests.rs`; clippy `never_loop` fixed.
+
 ## [Unreleased]
 
 ### Fixed
@@ -691,6 +708,7 @@ Changes merged by the `review/*` branches land here.
 - `custom_cidrs` now REPLACE the bundled ranges (was: merged in addition);
   exclusions still apply to custom ranges.
 
+[0.11.0]: https://github.com/QMahyar/cf-scanner/releases/tag/v0.11.0
 [0.10.0]: https://github.com/QMahyar/cf-scanner/releases/tag/v0.10.0
 [0.9.0]: https://github.com/QMahyar/cf-scanner/releases/tag/v0.9.0
 [0.8.0]: https://github.com/QMahyar/cf-scanner/releases/tag/v0.8.0
