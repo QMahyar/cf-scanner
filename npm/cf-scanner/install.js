@@ -28,7 +28,7 @@ const REPO = "qmahyar/cf-scanner";
 // fixes like this one) without a new binary release. Bump RELEASE_TAG with
 // every new binary release; bump version with every npm publish.
 const VERSION = require("./package.json").version;
-const RELEASE_TAG = "v0.11.0";
+const RELEASE_TAG = "v0.11.1";
 
 /** Maps (os, arch) → dist target triple. */
 const TARGETS = {
@@ -134,17 +134,18 @@ function download(url, hops = 0) {
 
 // Strict checksum extraction mirroring src/dgst.rs's `.dgst` line grammar
 // (`SHA2-256= <64 hex>[ <filename>]`), extended with dist's shasum-style
-// `.sha256` line (`<64 hex>[  <filename>]`, two spaces). First accepted line
-// wins; a near-miss line — junk after an otherwise-matching hex run, or a
-// labeled line whose token is not a clean 64-hex digest — rejects the whole
-// file instead of falling through to a later line.
+// `.sha256` line (`<64 hex>[  <filename>]` or `<64 hex> *<filename>]` for
+// binary mode). First accepted line wins; a near-miss line — junk after an
+// otherwise-matching hex run, or a labeled line whose token is not a clean
+// 64-hex digest — rejects the whole file instead of falling through to a
+// later line.
 function parseChecksum(text) {
   for (const raw of String(text).split(/\r?\n/)) {
     const line = raw.trim().toLowerCase();
     if (!line) continue;
     const match =
       line.match(/^sha2-256= *([0-9a-f]{64})(?: (.+))?$/) ||
-      line.match(/^([0-9a-f]{64})(?:  (.+))?$/);
+      line.match(/^([0-9a-f]{64})(?:\s+[*]?\s*(.+))?$/);
     if (match) {
       return match[1];
     }

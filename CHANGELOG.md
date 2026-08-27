@@ -3,6 +3,11 @@
 All notable changes to CF-Scanner are documented here, grouped by
 Added / Changed / Fixed / Deprecated / Removed / Security, newest on top.
 
+## [0.11.1] - 2026-08-27
+
+### Fixed
+- **npm install checksum + provenance.** `install.js` `parseChecksum` now handles `cargo-dist`'s ` *` (binary) separator in `.sha256` files (was only `  `), fixing `Invalid sha256 file: no strict SHA2-256 digest found` on Windows. `package.json` `repository.url` corrected to `https://github.com/QMahyar/cf-scanner` (capital Q) for `--provenance` attestation.
+
 ## [0.11.0] - 2026-08-27
 
 ### Added
@@ -708,6 +713,7 @@ Changes merged by the `review/*` branches land here.
 - `custom_cidrs` now REPLACE the bundled ranges (was: merged in addition);
   exclusions still apply to custom ranges.
 
+[0.11.1]: https://github.com/QMahyar/cf-scanner/releases/tag/v0.11.1
 [0.11.0]: https://github.com/QMahyar/cf-scanner/releases/tag/v0.11.0
 [0.10.0]: https://github.com/QMahyar/cf-scanner/releases/tag/v0.10.0
 [0.9.0]: https://github.com/QMahyar/cf-scanner/releases/tag/v0.9.0
