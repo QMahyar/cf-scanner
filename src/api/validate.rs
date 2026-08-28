@@ -130,7 +130,7 @@ pub(crate) fn validate_phase2(p2: &super::types::Phase2Config) -> Result<(), Con
         if p2.probe_url.len() > MAX_PROBE_URL_BYTES {
             return Err(ConfigError::ProbeUrlTooLong(MAX_PROBE_URL_BYTES));
         }
-        if !(p2.probe_url.starts_with("https://") || p2.probe_url.starts_with("http://")) {
+        if !(p2.probe_url.starts_with("https://")) {
             return Err(ConfigError::InvalidProbeUrl);
         }
     } else {
@@ -141,7 +141,7 @@ pub(crate) fn validate_phase2(p2: &super::types::Phase2Config) -> Result<(), Con
             if url.len() > MAX_PROBE_URL_BYTES {
                 return Err(ConfigError::ProbeUrlTooLong(MAX_PROBE_URL_BYTES));
             }
-            if !(url.starts_with("https://") || url.starts_with("http://")) {
+            if !(url.starts_with("https://")) {
                 return Err(ConfigError::InvalidProbeUrl);
             }
         }

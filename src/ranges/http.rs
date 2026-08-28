@@ -28,7 +28,9 @@ pub(crate) static HTTP_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
 /// loopback/link-local/unspecified IP hosts are refused. DNS names stay
 /// allowed (GitHub, CDNs, subscription hosts); the API binds 127.0.0.1, so
 /// only local code could have crafted a hostile URL in the first place, and
-/// private LAN ranges are kept working for self-hosted subscription feeds.
+/// private LAN ranges (RFC 1918: 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16)
+/// are intentionally permitted to support self-hosted subscription feeds that
+/// run on local networks.
 pub fn validate_fetch_url(url: &str) -> Result<()> {
     let parsed = url::Url::parse(url).context("bad URL")?;
     if parsed.scheme() != "https" {
