@@ -1,6 +1,6 @@
 {
   "name": "@qmahyar/cf-scanner",
-  "version": "0.12.0",
+  "version": "0.12.1",
   "description": "Find working Cloudflare endpoints on restricted networks",
   "license": "MIT",
   "repository": {

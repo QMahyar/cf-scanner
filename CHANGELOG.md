@@ -25,7 +25,43 @@ Added / Changed / Fixed / Deprecated / Removed / Security, newest on top.
 - **SSE cap flake.** `sse_connection_cap_rejects_fifth_stream` now uses 100 ms sleep + single 429 check (was polling with deadline); `cargo test` 3× green.
 - **Import band-aids.** `src/server/mod.rs` `#[allow(unused_imports)]` removed; test-only imports moved to `tests.rs`; clippy `never_loop` fixed.
 
-## [Unreleased]
+## [0.12.1] - 2026-08-29
+
+### Added
+- **axe-core a11y CI gate.** The new `ui-a11y` job scans the built UI with real
+  Chromium across four views (desktop/mobile × simple/Pro) and fails on
+  serious/critical WCAG 2.1 AA violations; per-view screenshots upload as CI
+  artifacts (`@axe-core/playwright` + `playwright` devDependencies, `npm run a11y`).
+  First run: 0 violations on all four views.
+
+### Changed
+- **Smaller JS bundle.** SimpleStart's clipboard-fallback dynamic import of the
+  store became a static import, removing Vite's dual-import warning and 0.65 kB
+  gzipped.
+
+### Fixed
+- **CSP blocked every runtime inline style.** Svelte state-driven styles
+  (progress-bar `scaleX`, per-card animation delays, latency colors) violated
+  `style-src 'self'`, logging 19+ console errors per page load and silently
+  dropping inline visuals. The CSP now reads `style-src 'self' 'unsafe-inline'`;
+  script sources stay fully locked, so no script-execution path opens.
+- **Two names for one setting.** Simple mode's "Find up to" and Pro's
+  "Stop after" drove the same `stop.found` config. Simple now says
+  "Stop after" too (EN + FA).
+- **Blind sample-size choice.** The Quick/Normal/Large pills now carry
+  time-expectation tooltips ("~4K candidates — usually well under a minute",
+  etc., EN + FA) so the size decision is informed.
+- **Version noise in the live badge.** The header pill mixed connection health
+  with the app version; the version now renders as quiet mono text beside the
+  `● Live` badge.
+- **Pro sticky action bar.** The 24px drop shadow softened with a hairline top
+  border, and a bottom spacer plus `scroll-padding-bottom` keep the last
+  keyboard-focused fields fully visible above the bar.
+- **Muted-text contrast on raised surfaces.** `--ink-muted` raised 66% → 70%:
+  measured 7.0:1 on `--paper-3` and 7.7:1 on `--paper` (AA pass; previously
+  6.1:1 / 6.6:1).
+
+## [0.12.0] - 2026-08-28
 
 ### Fixed
 - **Duplicate Custom-ports field.** The F7 consolidation left an orphaned
