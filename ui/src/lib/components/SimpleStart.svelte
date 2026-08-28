@@ -112,8 +112,8 @@
 
 <section class="shell fade-in">
   <div class="core px-6 py-8 sm:px-8 sm:py-10">
-    <div class="flex flex-col items-start gap-6 sm:flex-row sm:items-center sm:justify-between">
-      <div>
+    <div class="flex flex-col gap-6 sm:flex-row sm:items-end sm:justify-between">
+      <div class="min-w-0 flex-1">
         <span class="eyebrow mb-4">{scanMode === "Warp" ? "WARP" : "CDN"}</span>
         <div
           class="mb-4 inline-flex items-center rounded-full p-1"
@@ -162,6 +162,13 @@
               class="btn btn-sm btn-secondary"
               class:btn-state-on={sizeChoice === sKey}
               aria-pressed={sizeChoice === sKey}
+              title={sKey === "custom"
+                ? undefined
+                : sKey === "quick"
+                  ? t("simple.size.quickHint")
+                  : sKey === "normal"
+                    ? t("simple.size.normalHint")
+                    : t("simple.size.bigHint")}
               onclick={() => (sizeChoice = sKey)}
             >
               {t(`simple.size.${sKey}`)}
@@ -203,13 +210,13 @@
         {t("simple.stop")}
       </button>
     {:else}
-      <div class="flex flex-col items-start gap-1.5 sm:items-end">
-        <div class="flex flex-wrap items-center gap-x-4 gap-y-2">
+      <div class="flex w-full flex-col gap-2 sm:w-auto sm:items-end">
+        <div class="flex flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-center sm:gap-x-4 sm:gap-y-2">
           <label
             class="flex items-center gap-2 text-xs whitespace-nowrap"
             style="color: var(--ink-muted)"
           >
-            {t("simple.findUpTo")}
+            {t("simple.stopAfter")}
             <input
               class="field mono field-num"
               type="number"
@@ -395,7 +402,6 @@
                   // Clipboard API can fail (e.g. insecure context); the
                   // bulk export path has a download fallback, but per-card
                   // copy has no fallback — surface it via the existing toast.
-                  const { ui } = await import("../store.svelte");
                   ui().error = t("simple.copyFailed");
                   setTimeout(() => { if (ui().error === t("simple.copyFailed")) ui().error = null; }, 3000);
                 }
