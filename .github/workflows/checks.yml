@@ -83,6 +83,34 @@ jobs:
         # rebuild would silently ship the stale embedded UI.
         run: git diff --exit-code ui/dist
 
+  ui-a11y:
+    name: ui a11y (axe, desktop + mobile)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+      - name: Install
+        run: npm ci
+        working-directory: ui
+      - name: Build
+        run: npm run build
+        working-directory: ui
+      - name: Install Chromium
+        run: npx playwright install --with-deps chromium
+        working-directory: ui
+      - name: A11y gate
+        run: npm run a11y
+        working-directory: ui
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: a11y-screens
+          path: ui/a11y-screens
+
   placeholder-guard:
     name: no tracked file > 1MB
     runs-on: ubuntu-latest

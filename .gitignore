@@ -12,6 +12,7 @@ cargo-dist/
 .playwright-mcp/
 ui/node_modules/
 ui/.svelte-check*
+ui/a11y-screens/
 vite-dev.log
 
 .ruff_cache/
