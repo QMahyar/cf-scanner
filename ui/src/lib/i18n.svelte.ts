@@ -21,7 +21,7 @@ const EN = {
   "simple.sizeGroup": "Sample size",
   "simple.findUpTo": "Find up to",
   "simple.testUpTo": "Test up to",
-  "simple.warpCapHint": "اسکن WARP حداکثر ۵٬۰۰۰ اندپوینت را می‌آزماید",
+  "simple.warpCapHint": "WARP scans test up to 5,000 endpoints",
   "simple.copyFailed": "Copy failed — clipboard unavailable",
   "simple.start.cdn": "Start scan",
   "simple.start.warp": "Scan WARP",

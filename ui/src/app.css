@@ -63,6 +63,7 @@
  */
 
 :root {
+  color-scheme: dark;
   --paper: oklch(10% 0.008 260);
   --paper-2: oklch(13.5% 0.01 260);
   --paper-3: oklch(17.5% 0.012 260);
@@ -89,6 +90,7 @@
 html,
 body {
   overflow-x: clip;
+  scroll-padding-top: 5rem;
 }
 
 body {
@@ -150,6 +152,7 @@ body::before {
 
 .mono {
   font-family: "JetBrains Mono", ui-monospace, monospace;
+  font-variant-numeric: tabular-nums;
 }
 
 /*

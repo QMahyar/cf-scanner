@@ -283,10 +283,17 @@
         class="mt-2 h-1.5 overflow-hidden rounded-full"
         style="background: var(--paper-3)"
       >
-        <div
-          class="bar-fill h-full w-full rounded-full transition-transform duration-500"
-          style="transform: scaleX({(pct ?? 6) / 100}); background: var(--accent);"
-        ></div>
+        {#if pct != null}
+          <div
+            class="bar-fill h-full w-full rounded-full transition-transform duration-500"
+            style="transform: scaleX({pct / 100}); background: var(--accent);"
+          ></div>
+        {:else}
+          <div
+            class="bar-fill h-full w-1/3 rounded-full animate-pulse"
+            style="background: var(--accent);"
+          ></div>
+        {/if}
       </div>
       {#if app.running}
         <p class="mt-2 text-xs" style="color: var(--ink-muted)">
