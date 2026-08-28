@@ -112,9 +112,8 @@
 
 <section class="shell fade-in">
   <div class="core px-6 py-8 sm:px-8 sm:py-10">
-    <div class="flex flex-col gap-6 sm:flex-row sm:items-end sm:justify-between">
+    <div class="flex flex-col gap-6 lg:flex-row lg:items-end lg:justify-between">
       <div class="min-w-0 flex-1">
-        <span class="eyebrow mb-4">{scanMode === "Warp" ? "WARP" : "CDN"}</span>
         <div
           class="mb-4 inline-flex items-center rounded-full p-1"
           style="background: var(--paper-3)"
@@ -146,11 +145,11 @@
         >
           {scanMode === "Warp" ? t("simple.heading.warp") : t("simple.heading.cdn")}
         </h2>
-        <p class="mt-3 max-w-md text-sm" style="color: var(--ink-muted)">
+        <p class="mt-3 max-w-lg text-sm leading-relaxed" style="color: var(--ink-muted)">
           {t("simple.intro")}
         </p>
         <div
-          class="mt-4 inline-flex flex-wrap items-center gap-1 rounded-full p-1"
+          class="mt-4 flex flex-wrap items-center gap-1.5 rounded-2xl p-1.5"
           style="background: var(--paper-3)"
           role="group"
           aria-label={t("simple.sizeGroup")}

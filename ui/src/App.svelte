@@ -126,7 +126,7 @@
         ></span>
         {liveLabel}
       </span>
-      <span class="mono text-[11px]" style="color: var(--ink-muted)" aria-hidden="false">v{version || "…"}</span>
+      <span class="mono ms-1 text-[11px]" style="color: var(--ink-muted)" aria-hidden="false">v{version || "…"}</span>
       <button
         type="button"
         class="btn btn-secondary btn-sm"

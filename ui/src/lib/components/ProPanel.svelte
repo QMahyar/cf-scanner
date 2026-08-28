@@ -564,7 +564,7 @@
             <!-- Amounts live in the labels; no separate hint line, no
                  custom-count checkbox — Custom reveals the field itself. -->
             <div
-              class="flex flex-wrap items-center gap-1 rounded-full p-1"
+              class="flex flex-wrap items-center gap-1.5 rounded-2xl p-1.5"
               style="background: var(--paper-3)"
               role="group"
               aria-label={t("pro.field.target")}
