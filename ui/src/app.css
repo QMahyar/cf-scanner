@@ -59,7 +59,7 @@
  * Sans; fa falls through to Vazirmatn Variable. Data: JetBrains Mono.
  * Motion: one spring cubic-bezier everywhere, transform/opacity only,
  * prefers-reduced-motion flattens all of it.
- * Contrast: body ink >= 7:1 on paper; accent passes for large text/controls.
+ * Contrast: body ink 15.2:1 on paper; muted 7.1:1 on paper-3 (AA 4.5:1), 7.7:1 on paper (AA 7:1).
  */
 
 :root {
@@ -68,7 +68,7 @@
   --paper-2: oklch(13.5% 0.01 260);
   --paper-3: oklch(17.5% 0.012 260);
   --ink: oklch(90% 0.008 40);
-  --ink-muted: oklch(66% 0.01 40);
+  --ink-muted: oklch(70% 0.012 40);
   --accent: oklch(70% 0.15 45);
   --accent-strong: oklch(76% 0.17 48);
   --accent-ink: oklch(18% 0.05 45);
