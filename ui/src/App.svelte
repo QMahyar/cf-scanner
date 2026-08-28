@@ -124,8 +124,9 @@
               ? 'var(--bad)'
               : 'var(--ink-muted)'}"
         ></span>
-        {liveLabel} · v{version || "…"}
+        {liveLabel}
       </span>
+      <span class="mono text-[11px]" style="color: var(--ink-muted)" aria-hidden="false">v{version || "…"}</span>
       <button
         type="button"
         class="btn btn-secondary btn-sm"
