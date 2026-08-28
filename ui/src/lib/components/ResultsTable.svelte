@@ -365,6 +365,7 @@
   {:else}
     <div class="max-h-[26rem] overflow-x-auto overflow-y-auto">
       <table class="w-full min-w-[38rem] border-collapse text-sm">
+        <caption class="sr-only">Scan results</caption>
         <thead class="sticky top-0 z-10" style="background: var(--paper-2)">
           <tr class="text-start text-[11px] uppercase tracking-wider" style="color: var(--ink-muted)">
             <th class="w-11 px-1 py-2">
@@ -379,7 +380,7 @@
                 />
               </label>
             </th>
-            <th class="px-4 py-2 font-medium" scope="col" aria-sort={view.sortCol === "ip" ? (view.sortDir === "asc" ? "ascending" : "descending") : undefined}>
+            <th class="sticky left-0 z-10 bg-[var(--paper-2)] px-4 py-2 font-medium border-e" scope="col" style="border-color: oklch(100% 0 0 / 9%)" aria-sort={view.sortCol === "ip" ? (view.sortDir === "asc" ? "ascending" : "descending") : undefined}>
               <!-- svelte-ignore a11y_role_supports_aria_props_implicit -->
               <button class="uppercase tracking-wider" onclick={() => view.cycleSort("ip")} aria-sort={view.sortCol === "ip" ? (view.sortDir === "asc" ? "ascending" : "descending") : undefined} aria-label={view.sortCol === "ip" ? `${t("table.col.endpoint")} ${view.sortDir === "asc" ? "ascending" : "descending"}` : t("table.col.endpoint")}>{t("table.col.endpoint")}<span aria-hidden="true">{view.sortCol === "ip" ? (view.sortDir === "asc" ? " ▲" : " ▼") : ""}</span>
               </button>
@@ -408,8 +409,8 @@
                   />
                 </label>
               </td>
-              <td class="mono px-4 py-2"><span dir="ltr">{r.ip}<span style="color: var(--ink-muted)">:{r.port}</span></span></td>
-              <td class="mono px-4 py-2" style="color: {latencyClass(r.latency_ms)}">
+              <td class="sticky left-0 z-10 bg-[var(--paper-2)] mono px-4 py-2 border-e" style="border-color: oklch(100% 0 0 / 9%)"><span dir="ltr">{r.ip}<span style="color: var(--ink-muted)">:{r.port}</span></span></td>
+              <td class="mono px-4 py-2 text-end" style="color: {latencyClass(r.latency_ms)}">
                 <span dir="ltr">{r.latency_ms}ms</span>
               </td>
               <td class="px-4 py-2" style="color: var(--ink-muted)">
