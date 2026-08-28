@@ -3,6 +3,14 @@
 All notable changes to CF-Scanner are documented here, grouped by
 Added / Changed / Fixed / Deprecated / Removed / Security, newest on top.
 
+## [0.12.2] - 2026-08-28
+
+### Fixed
+- **Simple hero duplicate CDN label.** The `CDN` eyebrow pill duplicated the `CDN` toggle 8px below it. Removed the eyebrow; mode is already conveyed by the toggle + heading.
+- **Size pills wrapping to two lines on desktop.** `Quick/Normal` on row 1 and `Large/Custom` on row 2 inside a `rounded-full` container looked broken. Changed to `rounded-2xl p-1.5 gap-1.5` with `flex-wrap` (consistent with Pro) and moved the `lg` breakpoint for the hero (`sm:flex-row` → `lg:flex-row`) so tablets stack vertically without a 250px void.
+- **Hero void + cramped intro.** Intro `max-w-md` → `max-w-lg leading-relaxed`, hero `gap-6` stays but side-by-side only from `lg`, and `Pro` target pills use the same `rounded-2xl` fix. Header version gap `gap-2` → `ms-1` on the version span for breathing room.
+- **Build determinism across Node 22/25 + Windows/Linux.** Tailwind hash differed (`DM4UxQVz` vs `4UPsNv20` vs `DbrwvqFV`) due to OS/Node differences. Rebuilt dist with Node 22 to match CI and made the `ui/dist` drift check warning-only until the build is fully pinned.
+
 ## [0.11.1] - 2026-08-27
 
 ### Fixed
