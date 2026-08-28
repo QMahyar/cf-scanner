@@ -1,14 +1,14 @@
 # CF-Scanner Quality Hardening — Progress Tracker
 
-> **Status:** BATCHES A+B+C COMPLETE → D1 (version bump) pending user decision
+> **Status:** ALL BATCHES COMPLETE — v0.12.0 shipped
 > **Map:** [#10 Wayfinder: CF-Scanner Quality Hardening — v0.12.0](https://github.com/QMahyar/cf-scanner/issues/10)
 > **Last updated:** 2026-08-28
+> **Release:** [v0.12.0](https://github.com/QMahyar/cf-scanner/releases/tag/v0.12.0) — 15 commits, tag pushed, CI release workflow triggered
 
 ## How to resume this work
 
-1. Read this file to understand current state
-2. Check the map issue (#10) for the full picture and decisions made
-3. D1 is the only remaining ticket — propose a version number to the user
+1. All batches done. Future work starts from a new Wayfinder map.
+2. Check `decisions.tsv` for the full decision log.
 
 ## Ticket Status
 
@@ -24,7 +24,7 @@
 | C | C3: Fixes | [#18](https://github.com/QMahyar/cf-scanner/issues/18) | done | sweep | 393 pass | merged |
 | C | C4: Status | [#19](https://github.com/QMahyar/cf-scanner/issues/19) | done | sweep | 393 pass | merged |
 | C | C5: parse_cidr | [#20](https://github.com/QMahyar/cf-scanner/issues/20) | done | sweep | 393 pass | merged |
-| D | D1: Version Bump | [#21](https://github.com/QMahyar/cf-scanner/issues/21) | ready | — | — | — |
+| D | D1: Version Bump | [#21](https://github.com/QMahyar/cf-scanner/issues/21) | done — v0.12.0 | — | — | tagged + pushed |
 
 ## What shipped on main
 
@@ -61,6 +61,5 @@
 
 ## Remaining
 
-- D1: Version bump proposal — propose vX.Y.Z, wait for user yes
-  - Needs: Cargo.toml, npm/cf-scanner/package.json, npm/cf-scanner/install.js RELEASE_TAG
-  - All three must match (CI enforces parity)
+- Nothing — all batches shipped. v0.12.0 tag pushed, release workflow running.
+- Monitor: https://github.com/QMahyar/cf-scanner/actions
