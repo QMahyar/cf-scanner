@@ -308,7 +308,7 @@ async fn index_carries_hardened_security_headers() {
         "base-uri 'self'",
         "object-src 'none'",
         "script-src 'self'",
-        "style-src 'self'",
+        "style-src 'self' 'unsafe-inline'",
         "font-src 'self' data:",
     ] {
         assert!(csp.contains(directive), "CSP missing {directive}: {csp}");

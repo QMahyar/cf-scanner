@@ -114,7 +114,8 @@ where
 
 /// Directives every HTML response must carry. The compiled UI ships real
 /// asset files, so everything stays 'self' — no inline script or style.
-pub(crate) const SECURITY_CSP: &str = "default-src 'self'; script-src 'self'; style-src 'self'; font-src 'self' data:; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'; script-src-attr 'none'";
+/// Runtime-dynamic Svelte styles cannot be hash-pinned, so `style-src` allows `'unsafe-inline'`; `script-src`/`script-src-attr` stay locked, so style injection adds no script-execution path.
+pub(crate) const SECURITY_CSP: &str = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self' data:; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'; script-src-attr 'none'";
 
 /// Adds the security headers every response should carry, leaving any header
 /// the handler already set untouched (the HTML handlers set their own CSP).
