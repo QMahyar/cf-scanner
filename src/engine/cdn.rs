@@ -167,19 +167,19 @@ impl ScanController {
                     ctx.scanned.fetch_add(1, Ordering::Relaxed);
                     if let Ok(latency_ms) = outcome {
                         ctx.found.fetch_add(1, Ordering::Relaxed);
-                        let verdict = Verdict {
+                        let verdict = Box::new(Verdict {
                             ip: task.ip,
                             port: task.port,
                             latency_ms: Some(latency_ms),
                             country: ctx.geo.country(task.ip),
                             colo: None,
                             phase2: None,
-                        };
-                        batch.push(verdict.clone());
+                        });
+                        let _ = ctx.events.send(ScanEvent::Result(verdict.clone()));
+                        batch.push(*verdict);
                         if batch.len() >= BATCH_FLUSH {
                             merge_sorted(&ctx.store, &ctx.dirty, std::mem::take(&mut batch));
                         }
-                        let _ = ctx.events.send(ScanEvent::Result(Box::new(verdict)));
                     }
                     // Timeouts and refusals are counted in `scanned` only.
                     let scanned = ctx.scanned.load(Ordering::Relaxed);

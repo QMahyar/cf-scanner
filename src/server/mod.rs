@@ -441,7 +441,11 @@ async fn xray_download(
         }
         *last = Some(Instant::now());
     }
-    match (state.xray_fetch)() {
+    let fetch = Arc::clone(&state.xray_fetch);
+    let result = tokio::task::spawn_blocking(move || fetch())
+        .await
+        .map_err(|_| ApiError::internal("xray fetch task panicked"))?;
+    match result {
         Ok(path) => Ok(Json(XrayDownloadResponse {
             success: true,
             path: Some(path.display().to_string()),

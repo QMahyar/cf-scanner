@@ -104,7 +104,7 @@ impl ScanController {
                 let mut idx: usize = 0;
                 'outer: for (ip, ports) in &groups {
                     let ip = IpAddr::from(*ip);
-                    for &port in ports {
+                    for &port in ports.iter() {
                         if ctx.should_stop() {
                             break 'outer;
                         }
@@ -167,19 +167,19 @@ impl ScanController {
                     ctx.scanned.fetch_add(1, Ordering::Relaxed);
                     if let Some(latency) = latency_ms.filter(|_| failed == 0) {
                         ctx.found.fetch_add(1, Ordering::Relaxed);
-                        let verdict = Verdict {
+                        let verdict = Box::new(Verdict {
                             ip: task.ip,
                             port: task.port,
                             latency_ms: Some(latency),
                             country: ctx.geo.country(task.ip),
                             colo: None,
                             phase2: None,
-                        };
-                        batch.push(verdict.clone());
+                        });
+                        let _ = ctx.events.send(ScanEvent::Result(verdict.clone()));
+                        batch.push(*verdict);
                         if batch.len() >= BATCH_FLUSH {
                             merge_sorted(&ctx.store, &ctx.dirty, std::mem::take(&mut batch));
                         }
-                        let _ = ctx.events.send(ScanEvent::Result(Box::new(verdict)));
                     }
                     let scanned = ctx.scanned.load(Ordering::Relaxed);
                     if ctx.milestone_due(scanned) {
@@ -214,8 +214,8 @@ impl ScanController {
         cfg: &ScanConfig,
         warp: &WarpConfig,
         seed: u64,
-    ) -> Result<Vec<(std::net::Ipv4Addr, Vec<u16>)>> {
-        let ports = cfg.ports.clone();
+    ) -> Result<Vec<(std::net::Ipv4Addr, Arc<Vec<u16>>)>> {
+        let ports = Arc::new(cfg.ports.clone());
         let mut groups = Vec::new();
         if warp.custom_endpoints.is_empty() {
             // Same collect-and-bail contract as the CDN pool: an unparsable
@@ -244,12 +244,12 @@ impl ScanController {
             // Identical (endpoint, ports) entries must not create duplicate
             // groups: they would share one connected socket and skew the
             // `scanned` count. Per-port overrides stay distinct groups.
-            let mut seen: HashSet<(std::net::Ipv4Addr, Vec<u16>)> = HashSet::new();
+            let mut seen: HashSet<(std::net::Ipv4Addr, Arc<Vec<u16>>)> = HashSet::new();
             for ep in &warp.custom_endpoints {
                 let (ip, port) = parse_endpoint(ep)?;
-                let ports = port.map_or_else(|| ports.clone(), |p| vec![p]);
-                if seen.insert((ip, ports.clone())) {
-                    groups.push((ip, ports));
+                let ep_ports = port.map_or_else(|| ports.clone(), |p| Arc::new(vec![p]));
+                if seen.insert((ip, ep_ports.clone())) {
+                    groups.push((ip, ep_ports));
                 }
             }
             if let ScanTarget::Count(n) = cfg.target {
