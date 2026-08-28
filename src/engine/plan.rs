@@ -52,8 +52,8 @@ pub fn plan(pool: &CidrPool, target: &ScanTarget, rng: &mut SplitMix64) -> Vec<P
     match target {
         ScanTarget::Count(n) => plan_count(pool, *n as u64, rng),
         ScanTarget::Preset(p) => match p {
-            CdnPreset::Quick => plan_preset(pool, 1, rng),
-            CdnPreset::Normal => plan_preset(pool, 3, rng),
+            CdnPreset::Quick => plan_preset(pool, 1),
+            CdnPreset::Normal => plan_preset(pool, 3),
             CdnPreset::Full => pool
                 .ranges()
                 .iter()
@@ -74,7 +74,7 @@ pub fn plan(pool: &CidrPool, target: &ScanTarget, rng: &mut SplitMix64) -> Vec<P
 /// 1 (Quick) or 3 (Normal) random hosts per /24, network/broadcast excluded.
 /// v6 ranges have no /24 notion; they yield `per` random hosts from the
 /// whole block.
-fn plan_preset(pool: &CidrPool, per: u64, _rng: &mut SplitMix64) -> Vec<PlanItem> {
+fn plan_preset(pool: &CidrPool, per: u64) -> Vec<PlanItem> {
     let mut items = Vec::new();
     for &cidr in pool.ranges() {
         if cidr.addr.is_ipv6() {

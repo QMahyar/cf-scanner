@@ -6,7 +6,7 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use anyhow::{Context as _, Result, anyhow};
 use base64::Engine as _;
@@ -15,6 +15,7 @@ use rand_core::{OsRng, RngCore};
 use serde::{Deserialize, Serialize};
 
 use crate::paths;
+use crate::ranges::unix_now;
 use crate::wgconf::{WgConfig, WgPeer, render_wgconf};
 
 const DEFAULT_API_BASE: &str = "https://api.cloudflareclient.com";
@@ -611,13 +612,6 @@ fn write_stdout(text: &str) {
     let mut out = std::io::stdout().lock();
     let _ = writeln!(out, "{text}");
     let _ = out.flush();
-}
-
-fn unix_now() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
 }
 
 /// The `tos` field of the register request: a full RFC3339-style timestamp

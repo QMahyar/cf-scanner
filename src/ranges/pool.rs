@@ -327,13 +327,6 @@ pub fn effective_pool(
 
 pub const LAST_UPDATED_PREFIX: &str = "# last-updated: ";
 
-/// Atomically replaces the data-dir ranges file with `pool` (temp file +
-/// rename), tagged with the `last_updated` header that CLI refreshes and the
-/// server's background refresh share as one timestamp source.
-pub fn write_pool(pool: &CidrPool, last_updated: &str) -> Result<()> {
-    write_pool_to(&paths::refreshed_ranges_path()?, pool, last_updated)
-}
-
 /// Atomically replaces `path` with `pool` (temp file + rename), tagged with
 /// the `last_updated` header that CLI refreshes and the server's background
 /// refresh share as one timestamp source.

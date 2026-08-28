@@ -234,12 +234,6 @@ pub fn parse_cidr(s: &str) -> Result<(IpAddr, u8), ConfigError> {
     Ok((addr, prefix))
 }
 
-/// Validates `ip/prefix` for both address families. Delegates to the
-/// canonical `parse_cidr` above.
-pub(crate) fn validate_cidr(s: &str) -> Result<(), ConfigError> {
-    parse_cidr(s).map(|_| ())
-}
-
 /// Validates an SNI value: a raw IP (v4/v6) or a hostname with RFC 1035
 /// label rules (letters/digits/hyphens, no empty labels, no leading/trailing
 /// hyphen, max 63 chars per label and 253 total). Shared by `phase2.snis`
@@ -307,9 +301,4 @@ pub fn parse_endpoint(s: &str) -> Result<(IpAddr, Option<u16>), ConfigError> {
         None => None,
     };
     Ok((IpAddr::V4(ip), port))
-}
-
-/// Validates `ip` or `ip:port` (IPv4 only by design).
-pub(crate) fn validate_endpoint(s: &str) -> Result<(), ConfigError> {
-    parse_endpoint(s).map(|_| ())
 }

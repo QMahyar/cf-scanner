@@ -17,7 +17,7 @@ use serde_json::{Value, json};
 use sha2::{Digest as _, Sha256};
 
 use crate::api::types::{CustomFragment, FragmentPreset};
-use crate::configs::{OutboundSpec, Protocol, WsSettings, sanitize_error_text};
+use crate::configs::{OutboundSpec, Protocol, sanitize_error_text};
 use crate::paths;
 
 pub const VERSION: &str = include_str!("../data/xray-version.txt");
@@ -26,7 +26,7 @@ const READY_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Fragment preset -> freedom-outbound fragment block (community cfray
 /// values, packets always `tlshello` per the AGENTS.md contract).
-pub fn fragment_block(preset: &FragmentPreset, custom: Option<&CustomFragment>) -> Option<Value> {
+fn fragment_block(preset: &FragmentPreset, custom: Option<&CustomFragment>) -> Option<Value> {
     let (length, interval) = match preset {
         FragmentPreset::Off => return None,
         FragmentPreset::Light => ("100-200", "10-20"),
@@ -59,7 +59,7 @@ fn fragment_outbound(preset: &FragmentPreset, custom: Option<&CustomFragment>) -
 /// Rebuilds the user's outbound JSON from a normalized spec, dialing
 /// `dial_ip` (the phase-2 candidate) instead of the original server.
 pub fn build_outbound(spec: &OutboundSpec, dial_ip: Ipv4Addr, sni_override: Option<&str>) -> Value {
-    let mut stream = json!({"network": ws_network(spec.ws.as_ref())});
+    let mut stream = json!({"network": if spec.ws.is_some() { "ws" } else { "tcp" }});
     if spec.security == "tls" {
         let mut tls = json!({});
         tls["serverName"] = Value::from(
@@ -128,10 +128,6 @@ pub fn build_outbound(spec: &OutboundSpec, dial_ip: Ipv4Addr, sni_override: Opti
     };
     outbound["streamSettings"] = stream;
     outbound
-}
-
-fn ws_network(ws: Option<&WsSettings>) -> &str {
-    if ws.is_some() { "ws" } else { "tcp" }
 }
 
 /// Full `xray run` config: socks inbound on `socks_port` plus the proxied
