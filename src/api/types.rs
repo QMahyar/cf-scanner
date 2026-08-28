@@ -303,7 +303,7 @@ impl ScanConfig {
             return Err(ConfigError::InvalidTimeout(self.timeout_ms));
         }
         for cidr in self.exclude.iter().chain(self.custom_cidrs.iter()) {
-            validate_cidr(cidr)?;
+            parse_cidr(cidr)?;
         }
         match self.mode {
             Mode::Cdn => {
@@ -360,7 +360,7 @@ impl WarpConfig {
             return Err(ConfigError::TooManyEndpoints(self.custom_endpoints.len()));
         }
         for ep in &self.custom_endpoints {
-            validate_endpoint(ep)?;
+            parse_endpoint(ep)?;
         }
         Ok(())
     }

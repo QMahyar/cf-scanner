@@ -13,9 +13,10 @@ use std::collections::HashSet;
 use std::net::IpAddr;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Instant, SystemTime};
+use std::time::Instant;
 
 use anyhow::{Result, anyhow};
+use rand_core::{OsRng, RngCore};
 use tokio::sync::broadcast::error::TryRecvError;
 use tokio::sync::{broadcast, watch};
 
@@ -227,7 +228,7 @@ impl ScanController {
     }
 
     pub async fn run(&self, cfg: ScanConfig) -> Result<ScanSummary> {
-        self.run_seeded(cfg, time_seed()).await
+        self.run_seeded(cfg, OsRng.next_u64()).await
     }
 
     /// Runs `cfg` while invoking `on_event` as each event is emitted (the
@@ -239,7 +240,8 @@ impl ScanController {
         cfg: ScanConfig,
         on_event: impl FnMut(ScanEvent),
     ) -> Result<ScanSummary> {
-        self.run_streaming_seeded(cfg, time_seed(), on_event).await
+        self.run_streaming_seeded(cfg, OsRng.next_u64(), on_event)
+            .await
     }
 
     /// `run_streaming` with an explicit sampling seed (repro runs).
@@ -266,7 +268,7 @@ impl ScanController {
     ) -> Result<ScanSummary> {
         let rx = self.subscribe();
         let controller = self.clone();
-        let seed = time_seed();
+        let seed = OsRng.next_u64();
         let handle = tokio::spawn(async move { controller.run_reserved(cfg, seed).await });
         self.drive_run(handle, rx, on_event).await
     }
@@ -459,14 +461,6 @@ impl ScanController {
     fn emit(&self, event: ScanEvent) {
         let _ = self.events.send(event);
     }
-}
-
-/// Sampling seed for interactive runs (per-run entropy; explicit seeds win).
-fn time_seed() -> u64 {
-    SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .map(|d| d.as_nanos() as u64)
-        .unwrap_or(0)
 }
 
 /// Concrete hosts a plan item yields, streamed lazily so a Full scan never

@@ -163,7 +163,9 @@ impl RangesState {
         };
         Arc::new(Self {
             inner: RwLock::new(RangesInner { pool, last_updated }),
-            persist: Arc::new(ranges::write_pool),
+            persist: Arc::new(|pool, last_updated| {
+                ranges::write_pool_to(&paths::refreshed_ranges_path()?, pool, last_updated)
+            }),
         })
     }
 
