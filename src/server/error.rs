@@ -47,7 +47,7 @@ impl ApiError {
 
     pub(crate) fn invalid_config(err: impl std::fmt::Display) -> Self {
         Self {
-            status: StatusCode::BAD_REQUEST,
+            status: StatusCode::UNPROCESSABLE_ENTITY,
             code: "invalid_config",
             message: err.to_string(),
         }

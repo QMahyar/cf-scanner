@@ -256,7 +256,7 @@ struct RegisterRequest {
     #[serde(default)]
     license: Option<String>,
     #[serde(default)]
-    overwrite: Option<bool>,
+    overwrite: bool,
 }
 
 #[derive(Serialize)]
@@ -296,7 +296,7 @@ async fn warp_register(
     let mut last_attempt = state.register_gate.lock().await;
     // Refuse to silently clobber an existing identity; the caller must
     // explicitly opt in (first-time registration has no identity → proceeds).
-    if crate::warpgen::has_identity() && !req.overwrite.unwrap_or(false) {
+    if crate::warpgen::has_identity() && !req.overwrite {
         return Err(ApiError::conflict(
             "identity already registered; pass {\"overwrite\":true} to replace it",
         ));

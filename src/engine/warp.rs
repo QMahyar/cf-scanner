@@ -215,7 +215,7 @@ impl ScanController {
         warp: &WarpConfig,
         seed: u64,
     ) -> Result<Vec<(std::net::Ipv4Addr, Vec<u16>)>> {
-        let ports = cfg.ports.clone();
+        let ports: Vec<u16> = cfg.ports.iter().map(|p| p.get()).collect();
         let mut groups = Vec::new();
         if warp.custom_endpoints.is_empty() {
             // Same collect-and-bail contract as the CDN pool: an unparsable
@@ -280,7 +280,7 @@ fn parse_endpoint(s: &str) -> Result<(std::net::Ipv4Addr, Option<u16>)> {
 mod tests {
     use super::*;
     use crate::api::types::{
-        CdnPreset, MAX_SCAN_COUNT, Mode, ScanConfig, ScanEvent, ScanTarget, StopCondition,
+        CdnPreset, MAX_SCAN_COUNT, Mode, Port, ScanConfig, ScanEvent, ScanTarget, StopCondition,
         WarpConfig,
     };
     use crate::engine::tests::run_local;
@@ -294,7 +294,7 @@ mod tests {
                 found: 5,
                 cap: None,
             },
-            ports: vec![2408],
+            ports: vec![Port::new(2408)],
             concurrency: 1,
             warp: Some(WarpConfig {
                 probes_per_endpoint: probes,
@@ -352,7 +352,7 @@ mod tests {
         let t = FakeTransport::new().ok("203.0.113.9".parse().unwrap(), 1234, 12);
         let (c, _) = warp_controller(t);
         let mut cfg = warp_cfg(1, &["203.0.113.9:1234"]);
-        cfg.ports = vec![2408];
+        cfg.ports = vec![Port::new(2408)];
         let summary = run_local(&c, cfg, 1).await.unwrap();
         assert_eq!(summary.found, 1);
         assert_eq!(c.results()[0].port, 1234);

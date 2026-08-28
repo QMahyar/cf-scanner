@@ -64,14 +64,14 @@ fn default_config_is_valid() {
 #[test]
 fn rejects_zero_port() {
     let mut c = valid_config();
-    c.ports = vec![0];
+    c.ports = vec![Port::new(0)];
     assert_eq!(c.validate(), Err(ConfigError::InvalidPort(0)));
 }
 
 #[test]
 fn accepts_max_port() {
     let mut c = valid_config();
-    c.ports = vec![u16::MAX];
+    c.ports = vec![Port::new(u16::MAX)];
     assert_eq!(c.validate(), Ok(()));
 }
 
@@ -548,20 +548,26 @@ fn summary_cancelled_round_trips() {
 fn ports_are_deduped_for_the_cap() {
     // 100 raw entries collapse to 2 unique ports: valid, not an error.
     let mut c = valid_config();
-    c.ports = (0..100).map(|_| 443).collect();
+    c.ports = (0..100).map(|_| Port::new(443)).collect();
     assert_eq!(c.validate(), Ok(()));
     let mut c = valid_config();
-    c.ports = vec![443, 8443, 443, 2408, 443];
+    c.ports = vec![
+        Port::new(443),
+        Port::new(8443),
+        Port::new(443),
+        Port::new(2408),
+        Port::new(443),
+    ];
     assert_eq!(c.validate(), Ok(()));
 }
 
 #[test]
 fn rejects_too_many_unique_ports() {
     let mut c = valid_config();
-    c.ports = (1..=65).collect();
+    c.ports = (1..=65).map(Port::new).collect();
     assert_eq!(c.validate(), Err(ConfigError::TooManyPorts(65)));
     let mut c = valid_config();
-    c.ports = (1..=MAX_PORTS as u16).collect();
+    c.ports = (1..=MAX_PORTS as u16).map(Port::new).collect();
     assert_eq!(c.validate(), Ok(()), "64 unique ports must be accepted");
 }
 
@@ -956,7 +962,7 @@ fn rejects_non_routable_warp_endpoints() {
     let mut c = valid_config();
     c.mode = Mode::Warp;
     c.custom_cidrs = vec![];
-    c.ports = vec![2408];
+    c.ports = vec![Port::new(2408)];
     c.warp = Some(WarpConfig {
         custom_endpoints: vec!["127.0.0.1".to_owned()],
         ..WarpConfig::default()
@@ -975,14 +981,14 @@ fn rejects_default_warp_port_in_warp_mode() {
     let mut c = valid_config();
     c.mode = Mode::Warp;
     c.custom_cidrs = vec![];
-    c.ports = vec![DEFAULT_PORT]; // 443 = CDN default
+    c.ports = vec![Port::new(DEFAULT_PORT)]; // 443 = CDN default
     c.warp = Some(WarpConfig {
         custom_endpoints: vec!["203.0.113.1".to_owned()],
         ..WarpConfig::default()
     });
     assert_eq!(c.validate(), Err(ConfigError::DefaultWarpPort));
     // Real WARP port list passes.
-    c.ports = vec![2408, 500];
+    c.ports = vec![Port::new(2408), Port::new(500)];
     assert_eq!(c.validate(), Ok(()));
 }
 

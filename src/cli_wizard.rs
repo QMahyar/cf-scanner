@@ -5,8 +5,8 @@
 use std::sync::Arc;
 
 use crate::api::types::{
-    CdnPreset, DEFAULT_CONCURRENCY, FragmentPreset, Mode, Phase2Config, ScanConfig, ScanEvent,
-    ScanTarget, StopCondition, WarpConfig,
+    CdnPreset, DEFAULT_CONCURRENCY, FragmentPreset, Mode, Phase2Config, Port, ScanConfig,
+    ScanEvent, ScanTarget, StopCondition, WarpConfig,
 };
 use crate::engine::ScanController;
 use crate::warp;
@@ -458,7 +458,7 @@ fn parse_list(prompt: &str) -> Result<Vec<String>> {
         .collect())
 }
 
-fn parse_ports(s: &str) -> Result<Vec<u16>> {
+fn parse_ports(s: &str) -> Result<Vec<Port>> {
     let ports: Vec<u16> = s
         .split(',')
         .map(str::trim)
@@ -468,6 +468,7 @@ fn parse_ports(s: &str) -> Result<Vec<u16>> {
                 .map_err(|_| anyhow!("port '{p}' is not a number"))
         })
         .collect::<Result<_>>()?;
+    let ports: Vec<Port> = ports.into_iter().map(Port).collect();
     crate::api::types::validate_ports(&ports).map_err(|e| anyhow!("{e}"))?;
     Ok(ports)
 }
@@ -491,8 +492,11 @@ mod tests {
 
     #[test]
     fn parses_comma_ports() {
-        assert_eq!(parse_ports("443").unwrap(), vec![443]);
-        assert_eq!(parse_ports(" 2408, 500 ").unwrap(), vec![2408, 500]);
+        assert_eq!(parse_ports("443").unwrap(), vec![Port::new(443)]);
+        assert_eq!(
+            parse_ports(" 2408, 500 ").unwrap(),
+            vec![Port::new(2408), Port::new(500)]
+        );
         assert!(parse_ports("").is_err());
         assert!(parse_ports("0,443").is_err());
         assert!(parse_ports("abc").is_err());

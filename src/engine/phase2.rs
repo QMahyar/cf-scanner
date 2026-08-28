@@ -413,7 +413,7 @@ fn redact_entry(entry: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::api::types::Phase2Config;
+    use crate::api::types::{FragmentPreset, Phase2Config};
     use crate::configs::SubFetch;
     use crate::engine::tests::{ok_cfg, run_local};
     use crate::probe::FakeTransport;
