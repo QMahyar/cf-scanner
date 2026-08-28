@@ -901,11 +901,12 @@
         {/if}
       {/if}
 
+      <div aria-hidden="true" class="h-14 sm:h-16"></div>
       <!-- sticky actions: one canonical Start/Stop pair, visible even with
            phase-2/WARP textareas expanded -->
       <div
         class="sticky bottom-0 z-10 -mx-6 sm:-mx-8 -mb-8 sm:-mb-10 mt-5 rounded-b-2xl px-6 sm:px-8 pt-3 backdrop-blur-md"
-        style="background: color-mix(in oklab, var(--paper-2) 88%, transparent); box-shadow: 0 -12px 24px oklch(0% 0 0 / 25%); padding-bottom: max(1rem, env(safe-area-inset-bottom));"
+        style="background: color-mix(in oklab, var(--paper-2) 88%, transparent); border-top: 1px solid oklch(100% 0 0 / 6%); box-shadow: 0 -8px 16px oklch(0% 0 0 / 20%); padding-bottom: max(1rem, env(safe-area-inset-bottom));"
       >
         <div class="flex flex-wrap items-center justify-end gap-2">
           {#if app.running}
@@ -1047,3 +1048,9 @@
     {/if}
   {/if}
 </div>
+
+<style>
+  :global(html) {
+    scroll-padding-bottom: 6rem;
+  }
+</style>
