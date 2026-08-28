@@ -7,7 +7,7 @@ use std::time::Duration;
 use anyhow::{Context as _, Result, anyhow, bail};
 use cf_scanner::api;
 use cf_scanner::api::types::{
-    CdnPreset, DEFAULT_CONCURRENCY, Mode, ScanConfig, ScanEvent, ScanTarget, StopCondition,
+    CdnPreset, DEFAULT_CONCURRENCY, Mode, Port, ScanConfig, ScanEvent, ScanTarget, StopCondition,
 };
 use cf_scanner::{cli_wizard, engine, paths, probe, ranges, server, tray, warpgen};
 use clap::{Parser, Subcommand, ValueEnum};
@@ -414,9 +414,9 @@ fn build_scan_config(args: &ScanArgs) -> Result<ScanConfig> {
         mode,
         target,
         ports: match args.ports.clone() {
-            Some(ports) if !ports.is_empty() => ports,
+            Some(ports) if !ports.is_empty() => ports.into_iter().map(Port::new).collect(),
             _ if args.mode == ModeArg::Warp => api::types::DEFAULT_WARP_PORTS.to_vec(),
-            _ => vec![api::types::DEFAULT_PORT],
+            _ => vec![Port::new(api::types::DEFAULT_PORT)],
         },
         stop: StopCondition {
             found: args.target,
@@ -644,7 +644,7 @@ async fn run_scan(args: ScanArgs) -> Result<()> {
         ScanEvent::Phase2Progress(p) => {
             eprintln!("phase 2: {}/{} verified", p.done, p.total);
         }
-        ScanEvent::Failed(_msg) => {}
+        ScanEvent::Failed(_) => {}
         ScanEvent::Progress(p) => {
             // TTY-only ticker: NDJSON consumers get clean stdout, humans see
             // live progress instead of silence between results.
@@ -933,7 +933,7 @@ mod tests {
     fn defaults_to_quick_preset_and_port_443() {
         let cfg = build_scan_config(&args()).unwrap();
         assert_eq!(cfg.target, ScanTarget::Preset(CdnPreset::Quick));
-        assert_eq!(cfg.ports, vec![DEFAULT_PORT]);
+        assert_eq!(cfg.ports, vec![Port::new(DEFAULT_PORT)]);
         assert_eq!(
             cfg.stop,
             StopCondition {
@@ -1007,7 +1007,7 @@ mod tests {
         let mut a = args();
         a.ports = Some(vec![443, 8443]);
         let cfg = build_scan_config(&a).unwrap();
-        assert_eq!(cfg.ports, vec![443, 8443]);
+        assert_eq!(cfg.ports, vec![Port::new(443), Port::new(8443)]);
     }
 
     #[test]
@@ -1016,7 +1016,7 @@ mod tests {
         a.mode = ModeArg::Warp;
         let cfg = build_scan_config(&a).unwrap();
         assert_eq!(cfg.mode, Mode::Warp);
-        assert_eq!(cfg.ports, api::types::DEFAULT_WARP_PORTS);
+        assert_eq!(cfg.ports.as_slice(), api::types::DEFAULT_WARP_PORTS);
     }
 
     #[test]

@@ -6,8 +6,44 @@ pub use super::error::*;
 pub use super::limits::*;
 pub use super::validate::*;
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::net::IpAddr;
+
+/// A validated TCP/UDP port number (1..=65535). Rejects 0 at deserialization
+/// time so invalid ports never reach the engine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Port(pub u16);
+
+impl Port {
+    pub const fn new(n: u16) -> Self {
+        Port(n)
+    }
+    pub fn get(self) -> u16 {
+        self.0
+    }
+}
+
+impl From<u16> for Port {
+    fn from(n: u16) -> Self {
+        Port(n)
+    }
+}
+
+impl<'de> Deserialize<'de> for Port {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let n = u16::deserialize(d)?;
+        if n == 0 {
+            return Err(serde::de::Error::custom("port must be > 0"));
+        }
+        Ok(Port(n))
+    }
+}
+
+impl Serialize for Port {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        self.0.serialize(s)
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Mode {
@@ -47,12 +83,32 @@ impl StopCondition {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum FragmentPreset {
     Off,
     Light,
     Medium,
     Heavy,
     Custom,
+}
+
+impl std::fmt::Display for FragmentPreset {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Off => write!(f, "off"),
+            Self::Light => write!(f, "light"),
+            Self::Medium => write!(f, "medium"),
+            Self::Heavy => write!(f, "heavy"),
+            Self::Custom => write!(f, "custom"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Verifier {
+    Inline,
+    Xray,
 }
 
 /// Free-form Xray fragment values (Int32Range strings).
@@ -147,11 +203,12 @@ impl Default for WarpConfig {
 pub struct ScanConfig {
     pub mode: Mode,
     pub target: ScanTarget,
-    pub ports: Vec<u16>,
+    pub ports: Vec<Port>,
     pub stop: StopCondition,
-    /// Dirty ranges to skip (CIDRs).
+    /// Dirty ranges to skip (CIDRs). Validated as CIDRs by `validate_phase2()`.
     pub exclude: Vec<String>,
     /// CIDRs to scan INSTEAD of the bundled ranges; empty = bundled ranges.
+    /// Validated as CIDRs by `validate_phase2()`.
     pub custom_cidrs: Vec<String>,
     /// Include the bundled Cloudflare IPv6 ranges in the CDN phase-1 pool.
     /// Off by default so existing scans stay IPv4-only unless requested.
@@ -174,7 +231,7 @@ impl Default for ScanConfig {
         Self {
             mode: Mode::Cdn,
             target: ScanTarget::Count(350),
-            ports: vec![DEFAULT_PORT],
+            ports: vec![Port(DEFAULT_PORT)],
             stop: StopCondition::unlimited(20),
             exclude: Vec::new(),
             custom_cidrs: Vec::new(),
@@ -202,8 +259,8 @@ pub struct Verdict {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Phase2Verdict {
     pub passed: bool,
-    /// Label of the fragment setting that worked, e.g. "light" or "custom".
-    pub fragment: String,
+    /// Fragment preset that was used for this verdict.
+    pub fragment: FragmentPreset,
     pub sni: String,
     pub latency_ms: Option<u32>,
     /// Redacted failure detail from the last failed attempt, when `passed`
@@ -214,10 +271,10 @@ pub struct Phase2Verdict {
     /// verdict; None when unknown/legacy.
     #[serde(default)]
     pub config_index: Option<u32>,
-    /// Which verifier produced the verdict: "inline" (in-process vless/trojan)
-    /// or "xray" (subprocess). Absent for legacy payloads.
+    /// Which verifier produced the verdict: inline (in-process vless/trojan)
+    /// or xray (subprocess). Absent for legacy payloads.
     #[serde(default)]
-    pub verifier: Option<String>,
+    pub verifier: Option<Verifier>,
 }
 
 /// Phase-2 progress: how many of the total (candidate × config × SNI)
@@ -248,6 +305,11 @@ pub struct ScanSummary {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct FailedPayload {
+    pub reason: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ScanEvent {
     Progress(ScanProgress),
@@ -257,7 +319,7 @@ pub enum ScanEvent {
     Phase2Progress(Phase2Progress),
     /// The run aborted before finishing (e.g. phase-2 setup failed); the
     /// message is redacted and safe for the UI/stderr. No `Finished` follows.
-    Failed(String),
+    Failed(FailedPayload),
 }
 
 impl ScanConfig {

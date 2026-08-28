@@ -1,5 +1,15 @@
+use super::types::Port;
+
 pub const DEFAULT_PORT: u16 = 443;
-pub const DEFAULT_WARP_PORTS: &[u16] = &[2408, 500, 854, 880, 1701, 3138, 4500];
+pub const DEFAULT_WARP_PORTS: &[Port] = &[
+    Port::new(2408),
+    Port::new(500),
+    Port::new(854),
+    Port::new(880),
+    Port::new(1701),
+    Port::new(3138),
+    Port::new(4500),
+];
 /// 64 not 200: that many parallel TLS handshakes from a residential IP is
 /// aggressive and risks ISP/Cloudflare rate-limiting; power users can raise
 /// it via the existing 1..=1000 range.

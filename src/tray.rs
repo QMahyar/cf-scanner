@@ -303,7 +303,7 @@ pub use imp::*;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::api::types::{CdnPreset, Mode, ScanConfig, ScanTarget};
+    use crate::api::types::{CdnPreset, Mode, Port, ScanConfig, ScanTarget};
 
     #[test]
     fn cdn_payload_is_a_valid_scan_config() {
@@ -311,7 +311,7 @@ mod tests {
         cfg.validate().unwrap();
         assert_eq!(cfg.mode, Mode::Cdn);
         assert_eq!(cfg.target, ScanTarget::Preset(CdnPreset::Quick));
-        assert_eq!(cfg.ports, vec![443]);
+        assert_eq!(cfg.ports, vec![Port::new(443)]);
         assert_eq!(cfg.stop.found, 20);
         assert_eq!(cfg.stop.cap, None);
         assert_eq!(cfg.concurrency, 64);
@@ -326,7 +326,7 @@ mod tests {
         cfg.validate().unwrap();
         assert_eq!(cfg.mode, Mode::Warp);
         assert_eq!(cfg.target, ScanTarget::Count(40));
-        assert_eq!(cfg.ports, vec![2408, 500]);
+        assert_eq!(cfg.ports, vec![Port::new(2408), Port::new(500)]);
         assert_eq!(cfg.stop.found, 10);
         assert_eq!(cfg.stop.cap, None);
         assert_eq!(cfg.concurrency, 64);

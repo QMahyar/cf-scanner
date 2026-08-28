@@ -380,7 +380,9 @@ impl ScanController {
     /// store or the cancel slot.
     pub async fn run_seeded(&self, cfg: ScanConfig, seed: u64) -> Result<ScanSummary> {
         self.reserve().map_err(|err| {
-            self.emit(ScanEvent::Failed(format!("{err:#}")));
+            self.emit(ScanEvent::Failed(crate::api::types::FailedPayload {
+                reason: format!("{err:#}"),
+            }));
             anyhow!("{err}")
         })?;
         self.run_reserved(cfg, seed).await
@@ -416,7 +418,9 @@ impl ScanController {
             // The chain can carry imported config material (URLs, paths);
             // sanitize before it reaches logs or the wire.
             let msg = crate::configs::sanitize_error_text(&format!("{err:#}"));
-            self.emit(ScanEvent::Failed(msg));
+            self.emit(ScanEvent::Failed(crate::api::types::FailedPayload {
+                reason: msg,
+            }));
         }
         result
     }
@@ -539,7 +543,7 @@ fn plan_hosts_iter<'a>(
     }
 }
 
-fn plan_probe_count(plan: &[PlanItem], ports: &[u16]) -> u64 {
+fn plan_probe_count(plan: &[PlanItem], ports: &[super::api::types::Port]) -> u64 {
     let hosts: u128 = plan
         .iter()
         .map(|i| match i {
@@ -654,7 +658,7 @@ fn sort_if_dirty(store: &Store, dirty: &AtomicBool) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::api::types::{ScanConfig, ScanTarget, StopCondition};
+    use crate::api::types::{Port, ScanConfig, ScanTarget, StopCondition};
     use crate::probe::FakeTransport;
     use std::time::Duration;
 
@@ -726,7 +730,7 @@ mod tests {
             mode: Mode::Cdn,
             target: ScanTarget::Count(8),
             stop: StopCondition { found, cap },
-            ports: vec![443],
+            ports: vec![Port::new(443)],
             concurrency: 1,
             ..ScanConfig::default()
         }
@@ -780,7 +784,7 @@ mod tests {
     async fn run_streaming_reports_errors_without_finished() {
         let c = Arc::new(ScanController::new(Arc::new(FakeTransport::new())));
         let mut cfg = ok_cfg(1, None);
-        cfg.ports = vec![0]; // validation rejects the run before any event
+        cfg.ports = vec![Port::new(0)]; // validation rejects the run before any event
         let mut events = vec![];
         let err = c.run_streaming(cfg, |e| events.push(e)).await.unwrap_err();
         assert!(err.to_string().contains("out of range"));
@@ -824,10 +828,14 @@ mod tests {
                 break event;
             }
         };
-        let ScanEvent::Failed(msg) = event else {
+        let ScanEvent::Failed(payload) = event else {
             unreachable!("loop only breaks on Failed")
         };
-        assert!(msg.contains("already running"), "{msg}");
+        assert!(
+            payload.reason.contains("already running"),
+            "{}",
+            payload.reason
+        );
 
         let summary = first.await.unwrap();
         assert_eq!(summary.found, 8);

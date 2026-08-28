@@ -113,17 +113,20 @@ impl ScanController {
                 let mut rngs: Vec<SplitMix64> = cfg
                     .ports
                     .iter()
-                    .map(|&p| SplitMix64::new(seed ^ p as u64))
+                    .map(|p| SplitMix64::new(seed ^ p.get() as u64))
                     .collect();
                 let mut idx: usize = 0;
                 'outer: for item in &plan {
-                    for (port_idx, &port) in cfg.ports.iter().enumerate() {
+                    for (port_idx, port) in cfg.ports.iter().enumerate() {
                         let rng = &mut rngs[port_idx];
                         for host in plan_hosts_iter(item, rng) {
                             if ctx.should_stop() {
                                 break 'outer;
                             }
-                            let task = ProbeTask { ip: host, port };
+                            let task = ProbeTask {
+                                ip: host,
+                                port: port.get(),
+                            };
                             let w = idx % concurrency;
                             idx = idx.wrapping_add(1);
                             if ctx.should_stop() {
@@ -220,7 +223,7 @@ impl ScanController {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::api::types::ScanTarget;
+    use crate::api::types::{Port, ScanTarget};
     use crate::engine::tests::{controller, ok_cfg, run_local};
     use crate::probe::{FakeTransport, ProbeError, Transport};
     use std::future::Future;
@@ -339,7 +342,7 @@ mod tests {
             .ok("203.0.113.1".parse().unwrap(), 443, 1)
             .ok("203.0.113.1".parse().unwrap(), 8443, 1);
         let mut cfg = ok_cfg(2, None);
-        cfg.ports = vec![443, 8443];
+        cfg.ports = vec![Port::new(443), Port::new(8443)];
         let (c, _) = controller(Arc::new(t));
         let summary = run_local(&c, cfg, 1).await.unwrap();
         assert_eq!(summary.found, 2);
@@ -548,7 +551,7 @@ mod tests {
     async fn rejects_invalid_config() {
         let (c, _) = controller(Arc::new(FakeTransport::new()));
         let mut cfg = ok_cfg(1, None);
-        cfg.ports = vec![0];
+        cfg.ports = vec![Port::new(0)];
         assert!(run_local(&c, cfg, 1).await.is_err());
     }
 }

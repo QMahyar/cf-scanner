@@ -36,7 +36,9 @@ pub(crate) fn banned_ip(ip: &IpAddr) -> bool {
 }
 
 pub(crate) fn reject_default_warp_ports(cfg: &super::types::ScanConfig) -> Result<(), ConfigError> {
-    if cfg.mode == super::types::Mode::Warp && cfg.ports.as_slice() == [DEFAULT_PORT] {
+    if cfg.mode == super::types::Mode::Warp
+        && cfg.ports.as_slice() == [super::types::Port::new(DEFAULT_PORT)]
+    {
         return Err(ConfigError::DefaultWarpPort);
     }
     Ok(())
@@ -74,7 +76,7 @@ pub(crate) fn reject_non_routable(cfg: &super::types::ScanConfig) -> Result<(), 
     Ok(())
 }
 
-pub(crate) fn validate_ports(ports: &[u16]) -> Result<(), ConfigError> {
+pub(crate) fn validate_ports(ports: &[super::types::Port]) -> Result<(), ConfigError> {
     if ports.is_empty() {
         return Err(ConfigError::InvalidPort(0));
     }
@@ -83,14 +85,15 @@ pub(crate) fn validate_ports(ports: &[u16]) -> Result<(), ConfigError> {
     if ports.len() > MAX_PORTS * 64 {
         return Err(ConfigError::TooManyPorts(ports.len()));
     }
+    // Port::new(0) is not rejected at construction (const fn), so guard here.
     for &p in ports {
-        if p == 0 {
-            return Err(ConfigError::InvalidPort(p));
+        if p.get() == 0 {
+            return Err(ConfigError::InvalidPort(0));
         }
     }
     // Duplicate ports probe the same endpoint twice: dedupe, then cap the
     // unique set so an unauthenticated API call cannot fan out unbounded.
-    let mut unique = ports.to_vec();
+    let mut unique: Vec<u16> = ports.iter().map(|p| p.get()).collect();
     unique.sort_unstable();
     unique.dedup();
     if unique.len() > MAX_PORTS {

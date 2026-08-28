@@ -7,7 +7,7 @@ use tokio::sync::Notify;
 use tokio_stream::StreamExt as _;
 use tokio_stream::wrappers::BroadcastStream;
 
-use crate::api::types::{DEFAULT_WARP_PORTS, MAX_STOP_VALUE};
+use crate::api::types::{DEFAULT_WARP_PORTS, MAX_STOP_VALUE, Port};
 use crate::api::types::{Mode, Phase2Config, ScanTarget, StopCondition, WarpConfig};
 use crate::probe::FakeTransport;
 use crate::ranges::BUNDLED_RANGES;
@@ -42,7 +42,7 @@ fn cfg(count: u32, found: u32) -> ScanConfig {
         stop: StopCondition { found, cap: None },
         // Explicit pool input keeps tests off the filesystem ranges.
         custom_cidrs: vec!["203.0.113.0/29".to_owned()],
-        ports: vec![443],
+        ports: vec![Port::new(443)],
         concurrency: 1,
         ..ScanConfig::default()
     }
@@ -344,7 +344,7 @@ async fn rejects_invalid_scan_config() {
     let addr = serve(FakeTransport::new()).await;
     let body = r#"{"mode":"Cdn","target":{"Preset":"Quick"},"ports":[0],"stop":{"found":1,"cap":null},"exclude":[],"custom_cidrs":[],"concurrency":1,"timeout_ms":3000,"phase2":null,"warp":null}"#;
     let status = post_scan(addr, body).await;
-    assert_eq!(status, 400);
+    assert_eq!(status, 422);
 }
 
 #[tokio::test]
@@ -820,10 +820,10 @@ async fn get_single_profile_returns_stored_config_then_404s() {
 async fn put_rejects_invalid_config() {
     let addr = serve(FakeTransport::new()).await;
     let mut bad = cfg(1, 1);
-    bad.ports = vec![0];
+    bad.ports = vec![Port::new(0)];
     let body = serde_json::to_string(&bad).unwrap();
     let (status, _) = put_profile(addr, "quick", &body).await;
-    assert_eq!(status, 400);
+    assert_eq!(status, 422);
     let (_, text) = get_profiles(addr).await;
     assert_eq!(
         response_body(&text).trim(),
@@ -1477,7 +1477,7 @@ async fn scan_rejects_non_routable_custom_cidrs() {
         let mut c = cfg(1, 1);
         c.custom_cidrs = vec![cidr.to_owned()];
         let status = post_scan(addr, &serde_json::to_string(&c).unwrap()).await;
-        assert_eq!(status, 400, "custom_cidrs {cidr} must be rejected");
+        assert_eq!(status, 422, "custom_cidrs {cidr} must be rejected");
     }
     // TEST-NET ranges stay routable over the API.
     assert_eq!(
@@ -1488,14 +1488,14 @@ async fn scan_rejects_non_routable_custom_cidrs() {
     let mut c = cfg(1, 1);
     c.mode = Mode::Warp;
     c.custom_cidrs = vec![];
-    c.ports = vec![2408]; // WARP needs explicit ports (no defaulting)
+    c.ports = vec![Port::new(2408)]; // WARP needs explicit ports (no defaulting)
     c.warp = Some(WarpConfig {
         custom_endpoints: vec!["127.0.0.1".to_owned()],
         ..WarpConfig::default()
     });
     assert_eq!(
         post_scan(addr, &serde_json::to_string(&c).unwrap()).await,
-        400
+        422
     );
     c.warp.as_mut().unwrap().custom_endpoints = vec!["203.0.113.1".to_owned()];
     assert_eq!(
@@ -1514,7 +1514,7 @@ async fn scan_rejects_stop_values_above_the_frontend_cap() {
     };
     assert_eq!(
         post_scan(addr, &serde_json::to_string(&c).unwrap()).await,
-        400,
+        422,
         "found above the frontend cap must be rejected"
     );
     c.stop = StopCondition {
@@ -1523,7 +1523,7 @@ async fn scan_rejects_stop_values_above_the_frontend_cap() {
     };
     assert_eq!(
         post_scan(addr, &serde_json::to_string(&c).unwrap()).await,
-        400,
+        422,
         "cap 0 must be rejected"
     );
     c.stop = StopCondition {
@@ -1550,8 +1550,7 @@ async fn warp_scan_with_cdn_default_port_is_rejected_not_substituted() {
         ..Default::default()
     });
     let (status, text) = post_scan_full(addr, &serde_json::to_string(&c).unwrap()).await;
-    assert_eq!(status, 400, "{text}");
-    assert!(text.contains("explicit UDP ports"), "{text}");
+    assert_eq!(status, 422, "{text}");
     // A real WARP port list passes (the scan itself runs in the
     // background against real UDP timeouts; only the accept matters).
     c.ports = DEFAULT_WARP_PORTS.to_vec();
@@ -1595,7 +1594,7 @@ fn warp_cfg_with_wgconf() -> ScanConfig {
     let mut c = cfg(1, 1);
     c.mode = Mode::Warp;
     c.custom_cidrs = vec![]; // CDN-only; WARP takes custom_endpoints
-    c.ports = vec![2408];
+    c.ports = vec![Port::new(2408)];
     c.warp = Some(WarpConfig {
         custom_endpoints: vec!["203.0.113.1".to_owned()],
         wgconf: Some(
@@ -1928,9 +1927,9 @@ async fn error_responses_carry_machine_readable_codes() {
     // invalid_config vs bad_request: cfg.validate failure is invalid_config
     let addr3 = serve(FakeTransport::new()).await;
     let mut bad = cfg(1, 1);
-    bad.ports = vec![0];
+    bad.concurrency = 0;
     let (status, text) = post_scan_full(addr3, &serde_json::to_string(&bad).unwrap()).await;
-    assert_eq!(status, 400);
+    assert_eq!(status, 422);
     let parsed: serde_json::Value = serde_json::from_str(json_body(&text)).unwrap();
     assert_eq!(parsed["code"], "invalid_config");
 

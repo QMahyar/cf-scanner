@@ -170,10 +170,10 @@ pub(crate) fn map_event(ev: ScanEvent) -> Option<axum::response::sse::Event> {
             .event("phase2-progress")
             .json_data(p)
             .ok(),
-        ScanEvent::Failed(msg) => axum::response::sse::Event::default()
+        ScanEvent::Failed(payload) => axum::response::sse::Event::default()
             .retry(retry)
             .event("failed")
-            .json_data(msg)
+            .json_data(payload)
             .ok(),
     }
 }
