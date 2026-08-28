@@ -18,7 +18,7 @@ pub enum ConfigError {
     WarpWrongMode,
     #[error("phase2 requires at least one config")]
     NoConfigs,
-    #[error("probe_url must be a non-empty http(s) URL")]
+    #[error("probe_url must be a non-empty https URL")]
     InvalidProbeUrl,
     #[error("phase2.probe_urls must have at most 8 entries, got {0}")]
     TooManyProbeUrls(usize),

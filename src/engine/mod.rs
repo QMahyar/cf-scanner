@@ -68,7 +68,10 @@ pub struct ScanController {
 impl ScanController {
     pub fn new(transport: Arc<dyn Transport>) -> Self {
         let warp_cache = Arc::new(crate::warp::SocketCache::default());
-        let warp_transport = Arc::new(crate::warp::WarpTransport::with_cache(warp_cache.clone()));
+        let warp_transport = Arc::new(
+            crate::warp::WarpTransport::with_cache(warp_cache.clone())
+                .expect("WARP server key must decode"),
+        );
         let mut ctrl = Self::with_transports(transport, warp_transport);
         ctrl.warp_cache = Some(warp_cache);
         ctrl

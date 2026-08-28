@@ -39,17 +39,28 @@ pub const SERVER_PUBLIC_KEY_B64: &str = "bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wP
 /// handshake, only that the Init is well-formed.
 const DUMMY_STATIC_PRIVATE: [u8; 32] = [0u8; 32];
 
-pub fn server_public_key() -> PublicKey {
+pub fn server_public_key() -> anyhow::Result<PublicKey> {
     // A registration refresh wins over the bundled constant; the identity
     // file is only ever written by us (0o600, atomic), so a corrupt entry
     // falls back silently (warn logged in warpgen).
     let b64 = crate::warpgen::persisted_server_public_key()
         .unwrap_or_else(|| SERVER_PUBLIC_KEY_B64.to_owned());
-    let bytes = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, b64)
-        .expect("WARP server key must decode");
-    PublicKey::from(
-        <[u8; 32]>::try_from(bytes.as_slice()).expect("WARP server key must be 32 bytes"),
-    )
+    let bytes = match base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &b64) {
+        Ok(b) => b,
+        Err(e) => {
+            tracing::warn!(
+                "failed to decode WARP server public key: {e}; falling back to bundled key"
+            );
+            base64::Engine::decode(
+                &base64::engine::general_purpose::STANDARD,
+                SERVER_PUBLIC_KEY_B64,
+            )
+            .map_err(|e| anyhow::anyhow!("bundled WARP server key must decode: {e}"))?
+        }
+    };
+    let arr = <[u8; 32]>::try_from(bytes.as_slice())
+        .map_err(|_| anyhow::anyhow!("WARP server public key is not 32 bytes"))?;
+    Ok(PublicKey::from(arr))
 }
 
 /// Bundled WARP pools (embedded; no refresh path — the pools are stable).
@@ -66,21 +77,21 @@ pub struct WarpTransport {
 }
 
 impl WarpTransport {
-    pub fn new() -> Self {
+    pub fn new() -> anyhow::Result<Self> {
         Self::with_cache(std::sync::Arc::new(SocketCache::default()))
     }
 
-    pub fn with_cache(cache: std::sync::Arc<SocketCache>) -> Self {
-        Self {
-            server_public: server_public_key(),
+    pub fn with_cache(cache: std::sync::Arc<SocketCache>) -> anyhow::Result<Self> {
+        Ok(Self {
+            server_public: server_public_key()?,
             sockets: cache,
-        }
+        })
     }
 }
 
 impl Default for WarpTransport {
     fn default() -> Self {
-        Self::new()
+        Self::new().expect("WARP server key must decode")
     }
 }
 
@@ -445,7 +456,7 @@ mod tests {
             base64::Engine::encode(&base64::engine::general_purpose::STANDARD, [1u8; 32])
         );
         std::fs::write(dir.join("identity.json"), identity).unwrap();
-        assert_eq!(server_public_key().to_bytes(), [7u8; 32]);
+        assert_eq!(server_public_key().unwrap().to_bytes(), [7u8; 32]);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -493,7 +504,7 @@ mod tests {
     async fn handshake_init_is_a_148_byte_type_1_message() {
         let mut tunn = Tunn::new(
             StaticSecret::from(DUMMY_STATIC_PRIVATE),
-            server_public_key(),
+            server_public_key().unwrap(),
             None,
             None,
             1,
@@ -523,6 +534,7 @@ mod tests {
             server.send_to(&resp, peer).await.unwrap();
         });
         let lat = WarpTransport::new()
+            .unwrap()
             .probe(Ipv4Addr::LOCALHOST.into(), addr.port(), 2000)
             .await
             .unwrap();
@@ -536,6 +548,7 @@ mod tests {
         let silent = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
         let addr = silent.local_addr().unwrap();
         let err = WarpTransport::new()
+            .unwrap()
             .probe(Ipv4Addr::LOCALHOST.into(), addr.port(), 200)
             .await
             .unwrap_err();

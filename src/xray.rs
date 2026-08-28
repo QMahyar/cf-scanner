@@ -680,6 +680,7 @@ pub struct RealFetch;
 
 impl BinaryFetch for RealFetch {
     async fn bytes(&self, url: &str) -> Result<Vec<u8>> {
+        const MAX_BODY_BYTES: u64 = 64 * 1024 * 1024; // 64 MiB
         let resp = crate::ranges::HTTP_CLIENT
             .get(url)
             .timeout(Duration::from_secs(60))
@@ -687,11 +688,20 @@ impl BinaryFetch for RealFetch {
             .await
             .context("failed to start download")?
             .error_for_status()
-            .context("download returned an error")?
-            .bytes()
-            .await
-            .context("failed to read download body")?;
-        Ok(resp.to_vec())
+            .context("download returned an error")?;
+        if let Some(len) = resp.content_length() {
+            if len > MAX_BODY_BYTES {
+                bail!("response body too large: {len} bytes exceeds 64 MiB cap");
+            }
+        }
+        let bytes = resp.bytes().await.context("failed to read download body")?;
+        if bytes.len() as u64 > MAX_BODY_BYTES {
+            bail!(
+                "response body too large: {} bytes exceeds 64 MiB cap",
+                bytes.len()
+            );
+        }
+        Ok(bytes.to_vec())
     }
 }
 
