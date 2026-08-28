@@ -172,9 +172,9 @@ async fn run_wizard(controller: Arc<ScanController>) -> Result<()> {
             ScanEvent::Phase2Progress(p) => {
                 eprint!("\r\x1b[Kphase 2: {}/{} verified", p.done, p.total);
             }
-            ScanEvent::Failed(msg) => {
+            ScanEvent::Failed(payload) => {
                 eprint!("\r\x1b[K");
-                eprintln!("scan failed: {msg}");
+                eprintln!("scan failed: {}", payload.reason);
             }
         })
         .await

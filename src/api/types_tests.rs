@@ -360,7 +360,7 @@ fn probe_urls_round_trip_through_serde() {
     assert_eq!(serde_json::from_str::<Phase2Config>(&json).unwrap(), p2);
     // Omitted fields keep old payloads decoding: probe_urls defaults to
     // the empty list and an explicit probe_url round-trips as-is.
-    let legacy = r#"{"configs":["vless://uuid@example.com:443"],"fragment":"Off","snis":[],"probe_url":"https://cp.cloudflare.com/","concurrency":3}"#;
+    let legacy = r#"{"configs":["vless://uuid@example.com:443"],"fragment":"off","snis":[],"probe_url":"https://cp.cloudflare.com/","concurrency":3}"#;
     let decoded: Phase2Config = serde_json::from_str(legacy).unwrap();
     assert!(decoded.probe_urls.is_empty());
     assert_eq!(
@@ -368,7 +368,7 @@ fn probe_urls_round_trip_through_serde() {
         "an explicit probe_url survives decoding"
     );
     // A payload with no probe_url at all falls back to the default.
-    let bare = r#"{"configs":["vless://uuid@example.com:443"],"fragment":"Off","snis":[],"concurrency":3}"#;
+    let bare = r#"{"configs":["vless://uuid@example.com:443"],"fragment":"off","snis":[],"concurrency":3}"#;
     let decoded: Phase2Config = serde_json::from_str(bare).unwrap();
     assert_eq!(decoded.probe_url, DEFAULT_PROBE_URL);
 }
@@ -383,12 +383,12 @@ fn phase2_verdict_config_index_defaults_to_none() {
     );
     let json = serde_json::to_string(&Phase2Verdict {
         passed: true,
-        fragment: "light".to_owned(),
+        fragment: FragmentPreset::Light,
         sni: "a.me".to_owned(),
         latency_ms: Some(7),
         error: None,
         config_index: Some(2),
-        verifier: Some("inline".to_owned()),
+        verifier: Some(Verifier::Inline),
     })
     .unwrap();
     assert!(json.contains("\"config_index\":2"), "{json}");

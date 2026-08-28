@@ -12,8 +12,10 @@ use tokio::sync::watch;
 use tokio::task::JoinSet;
 
 use super::{ScanController, Store, cancelled_signal, claim_milestone};
+#[allow(unused_imports)]
 use crate::api::types::{
     FragmentPreset, Phase2Config, Phase2Progress, Phase2Verdict, ScanConfig, ScanEvent, Verdict,
+    Verifier,
 };
 use crate::configs::{OutboundSpec, parse_subscription, parse_uri, parse_xray_json};
 use crate::verify::ProbeRequest;
@@ -144,12 +146,12 @@ impl ScanController {
                             let colo = result.colo.clone();
                             let verdict = Phase2Verdict {
                                 passed: result.passed,
-                                fragment: fragment_label(&p2.fragment),
+                                fragment: p2.fragment.clone(),
                                 sni: sni.clone().unwrap_or_default(),
                                 latency_ms: result.latency_ms,
                                 error: None,
                                 config_index: Some(*config_idx),
-                                verifier: result.verifier.map(str::to_owned),
+                                verifier: result.verifier.and_then(parse_verifier),
                             };
                             if result.passed {
                                 passed
@@ -174,7 +176,7 @@ impl ScanController {
                             }
                             let verdict = Phase2Verdict {
                                 passed: false,
-                                fragment: fragment_label(&p2.fragment),
+                                fragment: p2.fragment.clone(),
                                 sni: sni.clone().unwrap_or_default(),
                                 latency_ms: None,
                                 error: Some(msg),
@@ -359,16 +361,13 @@ fn update_verdict_phase2(
     Some(results[pos].clone())
 }
 
-/// Stable fragment label for verdicts: `off`/`light`/`medium`/`heavy`/`custom`.
-fn fragment_label(preset: &FragmentPreset) -> String {
-    match preset {
-        FragmentPreset::Off => "off",
-        FragmentPreset::Light => "light",
-        FragmentPreset::Medium => "medium",
-        FragmentPreset::Heavy => "heavy",
-        FragmentPreset::Custom => "custom",
+/// Maps the internal `&'static str` verifier tag to the API enum.
+fn parse_verifier(tag: &str) -> Option<Verifier> {
+    match tag {
+        "inline" => Some(Verifier::Inline),
+        "xray" => Some(Verifier::Xray),
+        _ => None,
     }
-    .to_owned()
 }
 
 /// Renders a config entry safe for logs/errors: userinfo and query/fragment
@@ -586,7 +585,7 @@ mod tests {
         for v in &results {
             let p2 = v.phase2.as_ref().expect("phase-2 verdict attached");
             assert!(p2.passed, "{v:?}");
-            assert_eq!(p2.fragment, "off");
+            assert_eq!(p2.fragment, FragmentPreset::Off);
             assert_eq!(p2.sni, "");
             assert_eq!(p2.latency_ms, Some(7));
         }
@@ -614,7 +613,7 @@ mod tests {
         let results = c.results();
         let p2 = results[0].phase2.as_ref().unwrap();
         assert!(!p2.passed);
-        assert_eq!(p2.fragment, "off");
+        assert_eq!(p2.fragment, FragmentPreset::Off);
         assert_eq!(p2.latency_ms, None);
     }
 
@@ -788,18 +787,18 @@ mod tests {
             colo: Some("FRA".to_owned()),
             phase2: Some(Phase2Verdict {
                 passed: true,
-                fragment: "light".to_owned(),
+                fragment: FragmentPreset::Light,
                 sni: "".to_owned(),
                 latency_ms: Some(42),
                 error: None,
                 config_index: Some(0),
-                verifier: Some("xray".to_owned()),
+                verifier: Some(Verifier::Xray),
             }),
         }]));
         // A racing failed combo must not clobber the passing verdict.
         let failed = Phase2Verdict {
             passed: false,
-            fragment: "off".to_owned(),
+            fragment: FragmentPreset::Off,
             sni: "".to_owned(),
             latency_ms: None,
             error: Some("spawn failed".to_owned()),
