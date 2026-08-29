@@ -2,7 +2,7 @@
 //! inbound, then the same TLS+HTTP GET leg as a direct fetch. Used for the
 //! phase-2 tunnel probes (verify.rs); not a general-purpose client.
 
-use std::net::SocketAddr;
+use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -177,6 +177,7 @@ where
 {
     let (mut rd, mut wr) = tokio::io::split(stream);
     wr.write_all(request.as_bytes()).await?;
+    let _ = wr.shutdown().await;
     let resp = read_response(&mut rd, MAX_BODY_BYTES).await?;
     Ok((resp.status, resp.headers, resp.body))
 }
@@ -281,12 +282,22 @@ async fn socks5_connect(stream: &mut TcpStream, host: &str, port: u16) -> Result
     if method != [0x05, 0x00] {
         bail!("socks server refused no-auth: {method:02x?}");
     }
-    let host = host.as_bytes();
-    if host.len() > 255 {
-        bail!("socks host too long");
+    let mut req = vec![0x05, 0x01, 0x00];
+    if let Ok(ip) = host.parse::<Ipv4Addr>() {
+        req.push(0x01);
+        req.extend_from_slice(&ip.octets());
+    } else if let Ok(ip) = host.parse::<Ipv6Addr>() {
+        req.push(0x04);
+        req.extend_from_slice(&ip.octets());
+    } else {
+        let host_bytes = host.as_bytes();
+        if host_bytes.len() > 255 {
+            bail!("socks host too long");
+        }
+        req.push(0x03);
+        req.push(host_bytes.len() as u8);
+        req.extend_from_slice(host_bytes);
     }
-    let mut req = vec![0x05, 0x01, 0x00, 0x03, host.len() as u8];
-    req.extend_from_slice(host);
     req.extend_from_slice(&port.to_be_bytes());
     stream.write_all(&req).await?;
 
