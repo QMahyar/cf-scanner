@@ -54,6 +54,7 @@ fn xray_version() -> &'static str {
 fn main() {
     println!("cargo:rerun-if-changed=data/geoip-version.txt");
     println!("cargo:rerun-if-changed=data/xray-version.txt");
+    println!("cargo:rerun-if-changed=src/dgst.rs");
     println!("cargo:rerun-if-env-changed=CFSCANNER_OFFLINE_BUILD");
     embed_geoip();
     bundle_xray_if_requested();
@@ -180,7 +181,11 @@ fn sidecar_path(cache: &Path) -> PathBuf {
 /// tmp+rename so a killed build never leaves a half-written file that a
 /// later run would accept (the rename replaces any existing file).
 fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    let tmp = path.with_extension("tmp");
+    let file_name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "tmp".to_owned());
+    let tmp = path.with_file_name(format!("{file_name}.tmp"));
     std::fs::write(&tmp, bytes)?;
     std::fs::rename(tmp, path)
 }
@@ -243,7 +248,11 @@ fn bundle_xray_if_requested() {
         std::process::exit(1);
     }
 
-    let tmp = dest.with_extension("tmp");
+    let file_name = dest
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "tmp".to_owned());
+    let tmp = dest.with_file_name(format!("{file_name}.tmp"));
     let mut archive = ZipArchive::new(std::io::Cursor::new(&zip)).unwrap_or_else(|err| {
         eprintln!("error: xray zip unreadable: {err}");
         std::process::exit(1)
@@ -360,6 +369,8 @@ fn download(url: &str) -> Option<Vec<u8>> {
             "--retry-delay",
             "2",
             "--proto",
+            "=https",
+            "--proto-redir",
             "=https",
             "--tlsv1.2",
             "--max-time",

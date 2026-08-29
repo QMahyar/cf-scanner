@@ -24,7 +24,9 @@ pub fn data_dir() -> Result<PathBuf> {
     // same variable (its own entry point), so a test or embedder setting it
     // redirects the entire product data footprint.
     if let Ok(dir) = std::env::var("CF_SCANNER_DATA_DIR") {
-        return Ok(PathBuf::from(dir));
+        if !dir.trim().is_empty() {
+            return Ok(PathBuf::from(dir));
+        }
     }
     let dirs = directories::ProjectDirs::from("com", "qmahyar", "cf-scanner")
         .ok_or_else(|| anyhow!("could not resolve a data directory"))?;
@@ -79,7 +81,7 @@ pub fn lock_down_to_owner(path: &std::path::Path) -> std::io::Result<()> {
     };
     use windows::core::PCWSTR;
 
-    let (_sa, _acl_guard) = windows_security::build_owner_dacl()?;
+    let guard = windows_security::build_owner_dacl()?;
     let wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
     let err = unsafe {
         SetNamedSecurityInfoW(
@@ -88,7 +90,7 @@ pub fn lock_down_to_owner(path: &std::path::Path) -> std::io::Result<()> {
             DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
             None,
             None,
-            Some(_acl_guard.ptr),
+            Some(guard.acl_ptr()),
             None,
         )
     };
@@ -113,9 +115,10 @@ mod windows_security {
         EXPLICIT_ACCESS_W, GRANT_ACCESS, SetEntriesInAclW, TRUSTEE_IS_SID, TRUSTEE_IS_USER,
         TRUSTEE_W,
     };
-    use windows::Win32::Security::SECURITY_ATTRIBUTES;
     use windows::Win32::Security::{
-        ACL, GetTokenInformation, NO_INHERITANCE, PSID, TOKEN_QUERY, TOKEN_USER, TokenUser,
+        ACL, GetTokenInformation, InitializeSecurityDescriptor, NO_INHERITANCE,
+        PSECURITY_DESCRIPTOR, PSID, SECURITY_ATTRIBUTES, SECURITY_DESCRIPTOR,
+        SetSecurityDescriptorDacl, TOKEN_QUERY, TOKEN_USER, TokenUser,
     };
     use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
     use windows::core::PWSTR;
@@ -147,12 +150,32 @@ mod windows_security {
         }
     }
 
+    pub(super) struct OwnerDacl {
+        descriptor: SECURITY_DESCRIPTOR,
+        acl: OwnedAcl,
+    }
+
+    impl OwnerDacl {
+        pub fn acl_ptr(&self) -> *mut ACL {
+            self.acl.ptr
+        }
+
+        pub fn security_attributes(&self) -> SECURITY_ATTRIBUTES {
+            SECURITY_ATTRIBUTES {
+                nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+                lpSecurityDescriptor: &self.descriptor as *const SECURITY_DESCRIPTOR
+                    as *mut core::ffi::c_void,
+                bInheritHandle: windows::core::BOOL(0),
+            }
+        }
+    }
+
     /// Queries the current process token for the owner SID, builds a
     /// DACL that grants `GENERIC_ALL` to that SID only, and returns it
-    /// wrapped in `SECURITY_ATTRIBUTES` suitable for `CreateFile2`.
-    /// The returned `OwnedAcl` keeps the DACL alive; drop it after the
-    /// create call.
-    pub(super) fn build_owner_dacl() -> io::Result<(SECURITY_ATTRIBUTES, OwnedAcl)> {
+    /// wrapped in a self-relative `SECURITY_DESCRIPTOR` suitable for
+    /// `CreateFile2`. The returned guard keeps both the descriptor and
+    /// the DACL alive; drop it after the create call.
+    pub(super) fn build_owner_dacl() -> io::Result<OwnerDacl> {
         let mut token = HANDLE::default();
         unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) }
             .map_err(hresult_err)?;
@@ -209,12 +232,27 @@ mod windows_security {
         if err != NO_ERROR {
             return Err(win_err(err));
         }
-        let sa = SECURITY_ATTRIBUTES {
-            nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
-            lpSecurityDescriptor: new_acl.cast(),
-            bInheritHandle: windows::core::BOOL(0),
-        };
-        Ok((sa, OwnedAcl { ptr: new_acl }))
+        let mut descriptor = SECURITY_DESCRIPTOR::default();
+        unsafe {
+            InitializeSecurityDescriptor(
+                PSECURITY_DESCRIPTOR(&mut descriptor as *mut _ as *mut _),
+                1,
+            )
+        }
+        .map_err(hresult_err)?;
+        unsafe {
+            SetSecurityDescriptorDacl(
+                PSECURITY_DESCRIPTOR(&mut descriptor as *mut _ as *mut _),
+                true,
+                Some(new_acl),
+                false,
+            )
+        }
+        .map_err(hresult_err)?;
+        Ok(OwnerDacl {
+            descriptor,
+            acl: OwnedAcl { ptr: new_acl },
+        })
     }
 }
 
@@ -240,7 +278,7 @@ pub fn write_secret(path: &std::path::Path, data: &[u8]) -> std::io::Result<()> 
         std::fs::create_dir_all(parent)?;
     }
 
-    let (sa, _acl_guard) = match windows_security::build_owner_dacl() {
+    let guard = match windows_security::build_owner_dacl() {
         Ok(v) => v,
         // WHY: if we cannot build the DACL, degrade to the old
         // write-then-lock-down path rather than failing the save.
@@ -249,6 +287,7 @@ pub fn write_secret(path: &std::path::Path, data: &[u8]) -> std::io::Result<()> 
             return lock_down_to_owner(path);
         }
     };
+    let sa = guard.security_attributes();
 
     let wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
     let params = CREATEFILE2_EXTENDED_PARAMETERS {
@@ -290,7 +329,33 @@ pub fn write_secret(path: &std::path::Path, data: &[u8]) -> std::io::Result<()> 
 
 #[cfg(not(windows))]
 pub fn write_secret(path: &std::path::Path, data: &[u8]) -> std::io::Result<()> {
-    std::fs::write(path, data)
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let _ = std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700));
+        }
+    }
+    #[cfg(unix)]
+    {
+        use std::io::Write as _;
+        use std::os::unix::fs::OpenOptionsExt as _;
+        use std::os::unix::fs::PermissionsExt as _;
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(path)?;
+        file.write_all(data)?;
+        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+        Ok(())
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::write(path, data)
+    }
 }
 
 #[cfg(test)]
@@ -333,6 +398,11 @@ pub(crate) mod test_env {
             let dir = std::env::temp_dir().join("cf-scanner-paths-tests");
             let _ = std::fs::remove_dir_all(&dir);
             std::fs::create_dir_all(&dir).unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt as _;
+                let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
+            }
             // Unsafe: process-global env mutation, sound because callers
             // serialize on DATA_DIR_LOCK and the value is a stable absolute
             // path any reader can safely use.
@@ -357,6 +427,11 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("cf-scanner-acl-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
+        }
         let file = dir.join("secret.json");
         std::fs::write(&file, b"{}").unwrap();
         lock_down_to_owner(&file).expect("DACL lockdown must succeed for the owner");
@@ -389,6 +464,11 @@ mod tests {
             std::env::temp_dir().join(format!("cf-scanner-write-secret-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
+        }
         let file = dir.join("secret.json");
 
         write_secret(&file, b"{\"key\":\"secret\"}").expect("write_secret must succeed");
