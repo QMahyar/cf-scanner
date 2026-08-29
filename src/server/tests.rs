@@ -343,8 +343,10 @@ async fn api_responses_carry_security_headers() {
 async fn rejects_invalid_scan_config() {
     let addr = serve(FakeTransport::new()).await;
     let body = r#"{"mode":"Cdn","target":{"Preset":"Quick"},"ports":[0],"stop":{"found":1,"cap":null},"exclude":[],"custom_cidrs":[],"concurrency":1,"timeout_ms":3000,"phase2":null,"warp":null}"#;
-    let status = post_scan(addr, body).await;
+    let (status, text) = post_scan_full(addr, body).await;
     assert_eq!(status, 422);
+    let parsed: serde_json::Value = serde_json::from_str(json_body(&text)).unwrap();
+    assert_eq!(parsed["code"], "invalid_config");
 }
 
 #[tokio::test]
@@ -2128,4 +2130,164 @@ async fn xray_download_is_rate_limited() {
     );
     let parsed: serde_json::Value = serde_json::from_str(json_body(&text)).unwrap();
     assert_eq!(parsed["code"], "rate_limited");
+}
+
+#[tokio::test]
+async fn post_to_get_only_returns_405_with_code() {
+    let addr = serve(FakeTransport::new()).await;
+    let (status, text) = request(
+        addr,
+        "POST /api/status HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+        None,
+    )
+    .await;
+    assert_eq!(status, 405, "{text}");
+    let parsed: serde_json::Value = serde_json::from_str(json_body(&text)).unwrap();
+    assert_eq!(parsed["code"], "method_not_allowed");
+}
+
+#[tokio::test]
+async fn post_scan_with_wrong_content_type_returns_415() {
+    let addr = serve(FakeTransport::new()).await;
+    let body = "{}";
+    let (status, text) = request(
+        addr,
+        &format!(
+            "POST /api/scan HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        ),
+        None,
+    )
+    .await;
+    assert_eq!(status, 415, "{text}");
+    let parsed: serde_json::Value = serde_json::from_str(json_body(&text)).unwrap();
+    assert_eq!(parsed["code"], "unsupported_media_type");
+}
+
+#[tokio::test]
+async fn forbidden_responses_carry_security_headers() {
+    let addr = serve(FakeTransport::new()).await;
+    let (status, text) = request(
+        addr,
+        "GET /api/status HTTP/1.1\r\nHost: evil.example\r\nConnection: close\r\n\r\n",
+        None,
+    )
+    .await;
+    assert_eq!(status, 403, "{text}");
+    let headers = text.split_once("\r\n\r\n").map(|(h, _)| h).unwrap_or("");
+    let lower = headers.to_ascii_lowercase();
+    assert!(
+        lower.contains("x-content-type-options: nosniff"),
+        "missing nosniff on 403: {headers}"
+    );
+    assert!(
+        lower.contains("referrer-policy: no-referrer"),
+        "missing referrer-policy on 403: {headers}"
+    );
+    let parsed: serde_json::Value = serde_json::from_str(json_body(&text)).unwrap();
+    assert_eq!(parsed["code"], "forbidden");
+}
+
+#[tokio::test]
+async fn warp_register_timeout_maps_to_504() {
+    let _isolated = isolate_identity_dir();
+    let timeout_reg: WarpRegistrar = Arc::new(|_| {
+        Err(anyhow::Error::from(
+            crate::warpgen::WarpRegisterError::Timeout,
+        ))
+    });
+    let addr = serve_with_registrar(
+        FakeTransport::new(),
+        RangesState::load_text(BUNDLED_RANGES, None),
+        timeout_reg,
+    )
+    .await;
+    let (status, text) = post_register(addr, r#"{"license":null}"#).await;
+    assert_eq!(status, 504, "{text}");
+    let parsed: serde_json::Value = serde_json::from_str(json_body(&text)).unwrap();
+    assert_eq!(parsed["code"], "gateway_timeout");
+}
+
+#[tokio::test]
+async fn events_after_reset_does_not_replay_old_terminal() {
+    let t = FakeTransport::new();
+    for i in 0..8u8 {
+        t.insert(format!("203.0.113.{i}").parse().unwrap(), 443, Ok(10));
+    }
+    let addr = serve(t).await;
+    let body = cfg(1, 1);
+    assert_eq!(
+        post_scan(addr, &serde_json::to_string(&body).unwrap()).await,
+        202
+    );
+    wait_until_idle(addr).await;
+    let (status, _) = request(
+        addr,
+        "POST /api/reset HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+        None,
+    )
+    .await;
+    assert_eq!(status, 204);
+    let (status, text) = request(
+        addr,
+        "GET /api/events HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n",
+        Some("event: finished"),
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert!(
+        !text.contains("event: finished"),
+        "reset must not replay stale terminal: {text}"
+    );
+}
+
+#[tokio::test]
+async fn lagged_stream_with_cap_8_stays_alive_with_terminal() {
+    let (tx, rx) = tokio::sync::broadcast::channel(8);
+    let last = Arc::new(Mutex::new(Some((
+        42u64,
+        ScanEvent::Finished(ScanSummary {
+            scanned: 8,
+            found: 1,
+            duration_ms: 5,
+            cancelled: false,
+        }),
+    ))));
+    let mut stream = TerminalBounded {
+        rx: BroadcastStream::new(rx),
+        _slot: try_acquire_sse_slot(&Arc::new(AtomicUsize::new(0))).unwrap(),
+        done: false,
+        replay: None,
+        last_terminal: Arc::clone(&last),
+        epoch: 42,
+    };
+    for i in 0..16 {
+        let _ = tx.send(ScanEvent::Progress(crate::api::types::ScanProgress {
+            scanned: i,
+            found: 0,
+            total: Some(16),
+        }));
+    }
+    let item = tokio::time::timeout(Duration::from_secs(1), stream.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    drop(item);
+    let mut stayed_open = true;
+    for _ in 0..8 {
+        match tokio::time::timeout(Duration::from_millis(100), stream.next()).await {
+            Err(_) => break,
+            Ok(None) => {
+                stayed_open = false;
+                break;
+            }
+            Ok(Some(_)) => continue,
+        }
+    }
+    assert!(
+        stayed_open,
+        "stream must stay alive after Lagged with cap 8"
+    );
 }

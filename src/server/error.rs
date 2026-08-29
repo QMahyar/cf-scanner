@@ -31,6 +31,7 @@ pub(crate) fn status_to_code(status: StatusCode) -> &'static str {
         StatusCode::TOO_MANY_REQUESTS => "rate_limited",
         StatusCode::BAD_GATEWAY => "upstream_error",
         StatusCode::GATEWAY_TIMEOUT => "gateway_timeout",
+        StatusCode::UNSUPPORTED_MEDIA_TYPE => "unsupported_media_type",
         StatusCode::INTERNAL_SERVER_ERROR => "internal",
         _ => "internal",
     }
@@ -164,15 +165,14 @@ pub(crate) fn map_register_error(err: anyhow::Error) -> ApiError {
                 }
                 crate::warpgen::WarpRegisterError::Server { status, detail } => {
                     let detail = sanitize_truncate(detail);
-                    return ApiError::bad_gateway(format!(
-                        "registration failed (HTTP {status}): {detail}"
-                    ));
+                    let msg = format!("registration failed (HTTP {status}): {detail}");
+                    return ApiError::bad_gateway(sanitize_truncate(&msg));
                 }
             }
         }
     }
-    ApiError::bad_gateway(format!(
+    ApiError::bad_gateway(sanitize_truncate(&format!(
         "registration failed: {}",
         sanitize_truncate(&format!("{err:#}"))
-    ))
+    )))
 }

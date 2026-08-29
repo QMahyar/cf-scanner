@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use axum::extract::{Path, State};
+use axum::extract::{DefaultBodyLimit, Path, State};
 use axum::http::{StatusCode, Uri};
 use axum::middleware::{self};
 use axum::response::{IntoResponse, Response};
@@ -124,11 +124,12 @@ fn router_with_dir(
         .with_state(state)
         .fallback(fallback)
         .method_not_allowed_fallback(method_not_allowed)
-        .layer(middleware::from_fn(security_headers))
+        .layer(DefaultBodyLimit::max(2 * 1024 * 1024))
         .layer(middleware::from_fn_with_state(
             guard::GuardConfig { port: bound_port },
             localhost_only,
         ))
+        .layer(middleware::from_fn(security_headers))
 }
 
 /// Unmatched paths serve the embedded Svelte UI: `/` and `/index.html` the
@@ -187,7 +188,9 @@ async fn start_scan(
 ) -> Result<StatusCode, ApiError> {
     cfg.validate().map_err(ApiError::invalid_config)?;
     if let Some(phase2) = &cfg.phase2 {
-        if let Some(local) = phase2.configs.iter().find(|c| !c.contains("://")) {
+        if let Some(local) = phase2.configs.iter().find(|c| {
+            c.is_empty() || c.to_ascii_lowercase().starts_with("file://") || !c.contains("://")
+        }) {
             return Err(ApiError::bad_request(format!(
                 "phase2 config {local:?} is not a URL; local file paths are CLI-only"
             )));
@@ -245,6 +248,11 @@ async fn cancel(State(state): State<Arc<AppState>>) -> StatusCode {
 
 async fn reset(State(state): State<Arc<AppState>>) -> StatusCode {
     state.controller.reset();
+    *state
+        .last_terminal
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+    state.run_epoch.fetch_add(1, Ordering::SeqCst);
     StatusCode::NO_CONTENT
 }
 
@@ -291,25 +299,26 @@ async fn warp_register(
             crate::api::types::MAX_LICENSE_BYTES
         )));
     }
-    // One critical section across the overwrite-consent check, the cooldown
-    // bookkeeping, and the registration itself (see register_gate).
-    let mut last_attempt = state.register_gate.lock().await;
-    // Refuse to silently clobber an existing identity; the caller must
-    // explicitly opt in (first-time registration has no identity → proceeds).
-    if crate::warpgen::has_identity() && !req.overwrite {
-        return Err(ApiError::conflict(
-            "identity already registered; pass {\"overwrite\":true} to replace it",
-        ));
+    let overwrite = req.overwrite;
+    {
+        let mut last_attempt = state.register_gate.lock().await;
+        // Refuse to silently clobber an existing identity; the caller must
+        // explicitly opt in (first-time registration has no identity → proceeds).
+        if crate::warpgen::has_identity() && !overwrite {
+            return Err(ApiError::conflict(
+                "identity already registered; pass {\"overwrite\":true} to replace it",
+            ));
+        }
+        // Check-and-set before doing any work: the limit counts every attempt
+        // that gets past the overwrite guard (the guard rejection above does
+        // not consume the budget).
+        if last_attempt.is_some_and(|at| at.elapsed() < REGISTER_COOLDOWN) {
+            return Err(ApiError::too_many(
+                "registration is rate-limited to one attempt per 60 s",
+            ));
+        }
+        *last_attempt = Some(Instant::now());
     }
-    // Check-and-set before doing any work: the limit counts every attempt
-    // that gets past the overwrite guard (the guard rejection above does
-    // not consume the budget).
-    if last_attempt.is_some_and(|at| at.elapsed() < REGISTER_COOLDOWN) {
-        return Err(ApiError::too_many(
-            "registration is rate-limited to one attempt per 60 s",
-        ));
-    }
-    *last_attempt = Some(Instant::now());
     let license = req
         .license
         .map(|l| l.trim().to_owned())
