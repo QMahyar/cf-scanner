@@ -66,18 +66,13 @@ pub fn validate_fetch_url(url: &str) -> Result<()> {
             url::Host::Domain(domain) => {
                 let decoded = percent_encoding::percent_decode_str(domain).decode_utf8_lossy();
                 let lower = decoded.to_ascii_lowercase();
-                if lower == "localhost" || lower.ends_with(".localhost") {
-                    true
-                } else if !decoded.is_empty()
-                    && decoded
-                        .chars()
-                        .all(|c| matches!(c, '0'..='9' | 'a'..='f' | 'A'..='F' | 'x' | 'X' | '.'))
-                    && decoded.chars().any(|c| c.is_ascii_digit())
-                {
-                    true
-                } else {
-                    false
-                }
+                lower == "localhost"
+                    || lower.ends_with(".localhost")
+                    || (!decoded.is_empty()
+                        && decoded.chars().all(
+                            |c| matches!(c, '0'..='9' | 'a'..='f' | 'A'..='F' | 'x' | 'X' | '.'),
+                        )
+                        && decoded.chars().any(|c| c.is_ascii_digit()))
             }
         };
         if unroutable {

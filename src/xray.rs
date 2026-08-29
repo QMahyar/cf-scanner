@@ -474,29 +474,35 @@ static BINARY_STATE: OnceLock<tokio::sync::Mutex<Option<Result<PathBuf, String>>
 /// phase 2 for the process lifetime, so failures retry on the next attempt.
 pub async fn ensure_binary(fetch: &impl BinaryFetch) -> Result<PathBuf> {
     let state = BINARY_STATE.get_or_init(|| tokio::sync::Mutex::new(None));
+    let cached_ok = |path: &PathBuf| {
+        path.metadata()
+            .is_ok_and(|m| m.is_file() && m.len() >= MIN_BUNDLED_BYTES)
+    };
+    // Fast path: a memoized success (file still present) returns without
+    // queueing behind the download lock.
     let snapshot = { state.lock().await.clone() };
-    if let Some(result) = &snapshot {
-        match result {
-            Ok(path) => {
-                let valid = path
-                    .metadata()
-                    .is_ok_and(|m| m.is_file() && m.len() >= MIN_BUNDLED_BYTES);
-                if valid {
-                    return Ok(path.clone());
-                }
-                // cached binary vanished or truncated: treat as miss
-            }
-            Err(message) => return Err(anyhow!(message.clone())),
+    if let Some(Ok(path)) = &snapshot {
+        if cached_ok(path) {
+            return Ok(path.clone());
+        }
+        // cached binary vanished or truncated: treat as miss
+    }
+    if let Some(Err(message)) = &snapshot {
+        return Err(anyhow!(message.clone()));
+    }
+    // Slow path: hold the async lock across resolution so concurrent
+    // attempts share ONE download instead of stampeding the origin.
+    let mut guard = state.lock().await;
+    if let Some(Ok(path)) = &*guard {
+        if cached_ok(path) {
+            return Ok(path.clone());
         }
     }
     let result = resolve_binary(fetch).await;
     match &result {
-        Ok(path) => {
-            let mut guard = state.lock().await;
-            *guard = Some(Ok(path.clone()));
-        }
+        Ok(path) => *guard = Some(Ok(path.clone())),
         Err(err) => {
-            tracing::warn!("xray binary resolution failed; the next attempt will retry: {err:#}");
+            tracing::warn!("xray binary resolution failed; the next attempt will retry: {err:#}")
         }
     }
     result

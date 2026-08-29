@@ -19,7 +19,7 @@ pub fn dgst_sha256_hex(text: &str) -> Option<String> {
         }
     }
     let remainder = &rest[1..];
-    let hex = remainder.split(|c| c == ' ' || c == '\t').next()?;
+    let hex = remainder.split([' ', '\t']).next()?;
     (hex.len() == 64 && hex.bytes().all(|b| b.is_ascii_hexdigit()))
         .then(|| hex.to_ascii_lowercase())
 }

@@ -300,25 +300,26 @@ async fn warp_register(
         )));
     }
     let overwrite = req.overwrite;
-    {
-        let mut last_attempt = state.register_gate.lock().await;
-        // Refuse to silently clobber an existing identity; the caller must
-        // explicitly opt in (first-time registration has no identity → proceeds).
-        if crate::warpgen::has_identity() && !overwrite {
-            return Err(ApiError::conflict(
-                "identity already registered; pass {\"overwrite\":true} to replace it",
-            ));
-        }
-        // Check-and-set before doing any work: the limit counts every attempt
-        // that gets past the overwrite guard (the guard rejection above does
-        // not consume the budget).
-        if last_attempt.is_some_and(|at| at.elapsed() < REGISTER_COOLDOWN) {
-            return Err(ApiError::too_many(
-                "registration is rate-limited to one attempt per 60 s",
-            ));
-        }
-        *last_attempt = Some(Instant::now());
+    // Held across the registration below on purpose: tokio's async mutex
+    // parks waiters instead of blocking threads, and registration must be
+    // serialized so a second caller sees the identity the first wrote.
+    let mut last_attempt = state.register_gate.lock().await;
+    // Refuse to silently clobber an existing identity; the caller must
+    // explicitly opt in (first-time registration has no identity → proceeds).
+    if crate::warpgen::has_identity() && !overwrite {
+        return Err(ApiError::conflict(
+            "identity already registered; pass {\"overwrite\":true} to replace it",
+        ));
     }
+    // Check-and-set before doing any work: the limit counts every attempt
+    // that gets past the overwrite guard (the guard rejection above does
+    // not consume the budget).
+    if last_attempt.is_some_and(|at| at.elapsed() < REGISTER_COOLDOWN) {
+        return Err(ApiError::too_many(
+            "registration is rate-limited to one attempt per 60 s",
+        ));
+    }
+    *last_attempt = Some(Instant::now());
     let license = req
         .license
         .map(|l| l.trim().to_owned())

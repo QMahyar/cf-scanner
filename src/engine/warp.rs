@@ -49,7 +49,10 @@ impl ScanController {
             let wg = crate::wgconf::parse_wg_entry(text)
                 .map_err(|e| anyhow!("invalid wgconf: {e:#}"))?;
             if let Some(cache) = &self.warp_cache {
-                Arc::new(crate::warp::WgVerifyTransport::with_cache(cache.clone(), &wg)?)
+                Arc::new(crate::warp::WgVerifyTransport::with_cache(
+                    cache.clone(),
+                    &wg,
+                )?)
             } else {
                 Arc::new(crate::warp::WgVerifyTransport::from_config(&wg)?)
             }
