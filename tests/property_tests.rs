@@ -568,7 +568,11 @@ proptest! {
         let is_loopback = addr.is_loopback();
         let is_unspecified = addr.is_unspecified();
         let is_link_local = a == 169 && b == 254;
-        let should_refuse = is_loopback || is_unspecified || is_link_local;
+        let is_multicast = addr.is_multicast();
+        let is_broadcast = addr.is_broadcast();
+        let is_zero_net = a == 0;
+        let should_refuse =
+            is_loopback || is_unspecified || is_link_local || is_multicast || is_broadcast || is_zero_net;
         assert_eq!(
             result.is_err(),
             should_refuse,
