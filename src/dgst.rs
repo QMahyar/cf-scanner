@@ -7,11 +7,19 @@
 /// longer digest on a comment line, so the value must be a clean 64-hex token.
 /// Lowercased to match `Sha256` hex output.
 pub fn dgst_sha256_hex(text: &str) -> Option<String> {
-    let line = text
-        .lines()
-        .map(str::trim_start)
-        .find(|l| l.starts_with("SHA2-256="))?;
-    let hex = line["SHA2-256=".len()..].split_whitespace().next()?;
+    let line = text.lines().find(|l| l.starts_with("SHA2-256="))?;
+    let rest = &line["SHA2-256=".len()..];
+    if !rest.starts_with(' ') {
+        return None;
+    }
+    if rest.len() >= 2 {
+        let second = rest.as_bytes()[1];
+        if second == b' ' || second == b'\t' {
+            return None;
+        }
+    }
+    let remainder = &rest[1..];
+    let hex = remainder.split(|c| c == ' ' || c == '\t').next()?;
     (hex.len() == 64 && hex.bytes().all(|b| b.is_ascii_hexdigit()))
         .then(|| hex.to_ascii_lowercase())
 }
@@ -65,5 +73,49 @@ mod tests {
     fn trailing_filename_after_space_is_tolerated() {
         let dgst = format!("SHA2-256= {} Xray-linux-64.zip", "2".repeat(64));
         assert_eq!(dgst_sha256_hex(&dgst), Some("2".repeat(64)));
+    }
+
+    #[test]
+    fn no_space_form_rejected() {
+        let dgst = format!("SHA2-256={}", "a".repeat(64));
+        assert_eq!(dgst_sha256_hex(&dgst), None);
+    }
+
+    #[test]
+    fn double_space_rejected() {
+        let dgst = format!("SHA2-256=  {}", "a".repeat(64));
+        assert_eq!(dgst_sha256_hex(&dgst), None);
+    }
+
+    #[test]
+    fn tab_after_equals_rejected() {
+        let dgst = format!("SHA2-256=\t{}", "a".repeat(64));
+        assert_eq!(dgst_sha256_hex(&dgst), None);
+    }
+
+    #[test]
+    fn leading_whitespace_rejected() {
+        let dgst = format!(" SHA2-256= {}", "a".repeat(64));
+        assert_eq!(dgst_sha256_hex(&dgst), None);
+        let dgst = format!("\tSHA2-256= {}", "a".repeat(64));
+        assert_eq!(dgst_sha256_hex(&dgst), None);
+    }
+
+    #[test]
+    fn crlf_still_parses() {
+        let dgst = format!("SHA2-256= {}\r\n", "b".repeat(64));
+        assert_eq!(dgst_sha256_hex(&dgst), Some("b".repeat(64)));
+    }
+
+    #[test]
+    fn sixty_five_hex_rejected() {
+        let dgst = format!("SHA2-256= {}", "c".repeat(65));
+        assert_eq!(dgst_sha256_hex(&dgst), None);
+    }
+
+    #[test]
+    fn filename_with_spaces_still_parses() {
+        let dgst = format!("SHA2-256= {} my file with spaces.zip", "d".repeat(64));
+        assert_eq!(dgst_sha256_hex(&dgst), Some("d".repeat(64)));
     }
 }
