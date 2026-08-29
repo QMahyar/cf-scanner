@@ -87,7 +87,7 @@ impl ScanController {
         });
 
         let concurrency = usize::from(cfg.concurrency).max(1);
-        let per_worker_cap = ((concurrency * 4).div_ceil(concurrency)).max(4);
+        let per_worker_cap: usize = 4;
         let mut worker_txs = Vec::with_capacity(concurrency);
         let mut worker_rxs = Vec::with_capacity(concurrency);
         for _ in 0..concurrency {
@@ -105,17 +105,19 @@ impl ScanController {
                 'outer: for (ip, ports) in &groups {
                     let ip = IpAddr::from(*ip);
                     for &port in ports.iter() {
-                        if ctx.should_stop() {
-                            break 'outer;
-                        }
                         let task = WarpTask { ip, port };
                         let w = idx % concurrency;
                         idx = idx.wrapping_add(1);
                         if ctx.should_stop() {
                             break 'outer;
                         }
-                        if worker_txs[w].send(task).await.is_err() {
-                            break 'outer;
+                        tokio::select! {
+                            r = worker_txs[w].send(task) => {
+                                if r.is_err() {
+                                    break 'outer;
+                                }
+                            }
+                            _ = ctx.cancelled() => break 'outer,
                         }
                     }
                 }
@@ -192,6 +194,7 @@ impl ScanController {
 
         while let Some(res) = workers.join_next().await {
             if let Err(join_err) = res {
+                producer.abort();
                 self.cancel();
                 return Err(anyhow!("WARP probe worker panicked: {join_err}"));
             }

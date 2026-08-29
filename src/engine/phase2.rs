@@ -129,8 +129,8 @@ impl ScanController {
                         continue;
                     }
                     attempts.fetch_add(1, Ordering::Relaxed);
-                    match probe
-                        .probe(ProbeRequest {
+                    let probe_result = tokio::select! {
+                        r = probe.probe(ProbeRequest {
                             spec,
                             dial_ip: ip,
                             preset: &p2.fragment,
@@ -138,9 +138,13 @@ impl ScanController {
                             sni: sni.as_deref(),
                             probe_urls: &probe_urls,
                             timeout_ms,
-                        })
-                        .await
-                    {
+                        }) => Some(r),
+                        _ = cancelled_signal(cancel.clone()) => None,
+                    };
+                    let Some(probe_result) = probe_result else {
+                        break;
+                    };
+                    match probe_result {
                         Ok(result) => {
                             completed.fetch_add(1, Ordering::Relaxed);
                             let colo = result.colo.clone();
@@ -222,6 +226,9 @@ impl ScanController {
                 .send(ScanEvent::Phase2Progress(Phase2Progress { done, total }));
         }
 
+        if *cancel_rx.borrow() {
+            return Ok(());
+        }
         let attempts_val = attempts.load(Ordering::Relaxed);
         let completed_val = completed.load(Ordering::Relaxed);
         if attempts_val > 0 && completed_val == 0 {
@@ -937,5 +944,38 @@ mod tests {
             progress, 2,
             "the terminal progress event must report done == executed combos"
         );
+    }
+
+    #[tokio::test]
+    async fn cancel_during_tunnel_probe_aborts_promptly() {
+        struct HangingProbe;
+        impl TunnelProbe for HangingProbe {
+            fn probe(
+                &self,
+                _req: ProbeRequest<'_>,
+            ) -> Pin<Box<dyn Future<Output = Result<TunnelResult>> + Send + '_>> {
+                Box::pin(async { std::future::pending::<Result<TunnelResult>>().await })
+            }
+        }
+        let t = FakeTransport::new().ok("203.0.113.1".parse().unwrap(), 443, 10);
+        let c = Arc::new(ScanController::with_probes(
+            Arc::new(t),
+            Arc::new(FakeSub("")),
+            Arc::new(HangingProbe),
+        ));
+        let mut cfg = ok_cfg(1, None);
+        cfg.phase2 = Some(p2_cfg(&[VLESS], &[]));
+        let handle = tokio::spawn({
+            let c = c.clone();
+            async move { run_local(&c, cfg, 1).await }
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        c.cancel();
+        let summary = tokio::time::timeout(std::time::Duration::from_secs(5), handle)
+            .await
+            .expect("cancel must abort hanging tunnel probe")
+            .unwrap()
+            .unwrap();
+        assert!(summary.cancelled, "summary must report the cancel");
     }
 }
