@@ -40,17 +40,45 @@ pub fn validate_fetch_url(url: &str) -> Result<()> {
         let unroutable = match host {
             url::Host::Ipv4(v4) => {
                 let [a, b, _, _] = v4.octets();
-                v4.is_loopback() || v4.is_unspecified() || (a == 169 && b == 254)
+                v4.is_loopback()
+                    || v4.is_unspecified()
+                    || v4.is_multicast()
+                    || v4.is_broadcast()
+                    || (a == 169 && b == 254)
+                    || a == 0
             }
             url::Host::Ipv6(v6) => {
-                if let Some(v4) = v6.to_ipv4_mapped() {
+                if let Some(v4) = v6.to_ipv4_mapped().or_else(|| v6.to_ipv4()) {
                     let [a, b, _, _] = v4.octets();
-                    v4.is_loopback() || v4.is_unspecified() || (a == 169 && b == 254)
+                    v4.is_loopback()
+                        || v4.is_unspecified()
+                        || v4.is_multicast()
+                        || v4.is_broadcast()
+                        || (a == 169 && b == 254)
+                        || a == 0
                 } else {
-                    v6.is_loopback() || v6.is_unspecified() || v6.segments()[0] & 0xffc0 == 0xfe80
+                    v6.is_loopback()
+                        || v6.is_unspecified()
+                        || v6.is_multicast()
+                        || v6.segments()[0] & 0xffc0 == 0xfe80
                 }
             }
-            url::Host::Domain(_) => false,
+            url::Host::Domain(domain) => {
+                let decoded = percent_encoding::percent_decode_str(domain).decode_utf8_lossy();
+                let lower = decoded.to_ascii_lowercase();
+                if lower == "localhost" || lower.ends_with(".localhost") {
+                    true
+                } else if !decoded.is_empty()
+                    && decoded
+                        .chars()
+                        .all(|c| matches!(c, '0'..='9' | 'a'..='f' | 'A'..='F' | 'x' | 'X' | '.'))
+                    && decoded.chars().any(|c| c.is_ascii_digit())
+                {
+                    true
+                } else {
+                    false
+                }
+            }
         };
         if unroutable {
             bail!("refusing fetch from non-routable host {host}");
@@ -88,9 +116,7 @@ pub async fn fetch_bytes(url: &str) -> Result<Vec<u8>> {
 }
 
 async fn fetch_tls_parts(url: &str, extra_headers: &str) -> Result<Vec<u8>> {
-    tokio::time::timeout(FETCH_TIMEOUT, fetch_tls_inner(url, extra_headers))
-        .await
-        .context("fetch timed out")?
+    fetch_tls_inner(url, extra_headers).await
 }
 
 async fn fetch_tls(url: &str) -> Result<String> {
@@ -104,14 +130,23 @@ async fn fetch_tls_inner(url: &str, extra_headers: &str) -> Result<Vec<u8>> {
         .get(url)
         .timeout(FETCH_TIMEOUT)
         .header(reqwest::header::USER_AGENT, "cf-scanner/0.1.0");
-    for line in extra_headers.split("\r\n") {
+    for line in extra_headers.split('\n') {
         let line = line.trim();
         if line.is_empty() {
             continue;
         }
-        if let Some((name, value)) = line.split_once(':') {
-            request = request.header(name.trim(), value.trim());
+        let Some((name, value)) = line.split_once(':') else {
+            continue;
+        };
+        let name = name.trim();
+        let value = value.trim();
+        if name.is_empty() || value.is_empty() {
+            continue;
         }
+        if !is_valid_header_name(name) || !is_valid_header_value(value) {
+            continue;
+        }
+        request = request.header(name, value);
     }
     let response = request
         .send()
@@ -135,6 +170,34 @@ async fn fetch_tls_inner(url: &str, extra_headers: &str) -> Result<Vec<u8>> {
     Ok(bytes.to_vec())
 }
 
+fn is_valid_header_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.bytes().all(|b| {
+            b.is_ascii_alphanumeric()
+                || matches!(
+                    b,
+                    b'!' | b'#'
+                        | b'$'
+                        | b'%'
+                        | b'&'
+                        | b'\''
+                        | b'*'
+                        | b'+'
+                        | b'-'
+                        | b'.'
+                        | b'^'
+                        | b'_'
+                        | b'`'
+                        | b'|'
+                        | b'~'
+                )
+        })
+}
+
+fn is_valid_header_value(value: &str) -> bool {
+    !value.bytes().any(|b| b == b'\r' || b == b'\n' || b == 0)
+}
+
 /// One HTTPS GET, boxed so the seam is dyn-compatible and Send (the server
 /// spawns refreshes as a background task).
 pub type HttpFuture<'a> =
@@ -149,11 +212,7 @@ pub struct RealHttp;
 
 impl HttpGet for RealHttp {
     fn get<'a>(&'a self, url: &'a str) -> HttpFuture<'a> {
-        Box::pin(async move {
-            tokio::time::timeout(FETCH_TIMEOUT, fetch_tls(url))
-                .await
-                .context("fetch timed out")?
-        })
+        Box::pin(async move { fetch_tls(url).await })
     }
 }
 
@@ -178,5 +237,21 @@ mod tests {
         assert!(validate_fetch_url("https://169.254.0.1/x").is_err());
         assert!(validate_fetch_url("https://0.0.0.0/x").is_err());
         assert!(validate_fetch_url("not a url").is_err());
+    }
+
+    #[test]
+    fn fetch_url_guard_extended_ssrf_cases() {
+        assert!(validate_fetch_url("https://[::127.0.0.1]/x").is_err());
+        assert!(validate_fetch_url("https://[::ffff:127.0.0.1]/x").is_err());
+        assert!(validate_fetch_url("https://0.1.2.3/x").is_err());
+        assert!(validate_fetch_url("https://224.0.0.1/x").is_err());
+        assert!(validate_fetch_url("https://255.255.255.255/x").is_err());
+        assert!(validate_fetch_url("https://[ff02::1]/x").is_err());
+        assert!(validate_fetch_url("https://localhost/x").is_err());
+        assert!(validate_fetch_url("https://0x7f.0.0.1/x").is_err());
+        assert!(validate_fetch_url("https://2130706433/x").is_err());
+        assert!(validate_fetch_url("https://10.0.0.1/x").is_ok());
+        assert!(validate_fetch_url("https://example.com/x").is_ok());
+        assert!(validate_fetch_url("https://www.cloudflare.com/ips-v4/").is_ok());
     }
 }

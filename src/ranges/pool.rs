@@ -140,7 +140,9 @@ impl CidrPool {
         Self::parse(BUNDLED_RANGES_V6).expect("bundled v6 ranges must parse: data/cf-ranges-v6.txt")
     }
 
-    pub(crate) fn from_ranges(ranges: Vec<Cidr>) -> Self {
+    pub(crate) fn from_ranges(mut ranges: Vec<Cidr>) -> Self {
+        ranges.sort_by(|a, b| a.addr.cmp(&b.addr).then_with(|| a.prefix.cmp(&b.prefix)));
+        ranges.dedup();
         Self { ranges }
     }
 
@@ -1207,5 +1209,16 @@ mod tests {
         let pool = CidrPool::parse(text).unwrap();
         assert_eq!(pool.ranges().len(), 2);
         assert_eq!(base_pool_v6(Some(text)).unwrap().ranges().len(), 2);
+    }
+
+    #[test]
+    fn from_ranges_dedups_exact_duplicates() {
+        let cidrs = vec![
+            parse_cidr("10.0.0.0/24").unwrap(),
+            parse_cidr("10.0.0.0/24").unwrap(),
+        ];
+        let pool = CidrPool::from_ranges(cidrs);
+        assert_eq!(pool.ranges().len(), 1);
+        assert_eq!(pool.host_count(), 256);
     }
 }
