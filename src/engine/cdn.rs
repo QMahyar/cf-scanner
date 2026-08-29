@@ -93,7 +93,7 @@ impl ScanController {
         });
 
         let concurrency = usize::from(cfg.concurrency).max(1);
-        let per_worker_cap = ((concurrency * 4).div_ceil(concurrency)).max(4);
+        let per_worker_cap: usize = 4;
         let mut worker_txs = Vec::with_capacity(concurrency);
         let mut worker_rxs = Vec::with_capacity(concurrency);
         for _ in 0..concurrency {
@@ -120,9 +120,6 @@ impl ScanController {
                     for (port_idx, port) in cfg.ports.iter().enumerate() {
                         let rng = &mut rngs[port_idx];
                         for host in plan_hosts_iter(item, rng) {
-                            if ctx.should_stop() {
-                                break 'outer;
-                            }
                             let task = ProbeTask {
                                 ip: host,
                                 port: port.get(),
@@ -132,8 +129,13 @@ impl ScanController {
                             if ctx.should_stop() {
                                 break 'outer;
                             }
-                            if worker_txs[w].send(task).await.is_err() {
-                                break 'outer;
+                            tokio::select! {
+                                r = worker_txs[w].send(task) => {
+                                    if r.is_err() {
+                                        break 'outer;
+                                    }
+                                }
+                                _ = ctx.cancelled() => break 'outer,
                             }
                         }
                     }
@@ -196,6 +198,7 @@ impl ScanController {
 
         while let Some(res) = workers.join_next().await {
             if let Err(join_err) = res {
+                producer.abort();
                 self.cancel();
                 return Err(anyhow!("probe worker panicked: {join_err}"));
             }

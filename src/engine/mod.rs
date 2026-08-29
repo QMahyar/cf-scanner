@@ -639,7 +639,7 @@ fn merge_sorted(store: &Store, dirty: &AtomicBool, batch: Vec<Verdict>) {
     }
     let mut results = store.lock().unwrap_or_else(|e| e.into_inner());
     results.extend(batch);
-    dirty.store(true, Ordering::Relaxed);
+    dirty.store(true, Ordering::Release);
 }
 
 fn sort_if_dirty(store: &Store, dirty: &AtomicBool) {
