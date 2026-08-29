@@ -488,7 +488,18 @@ fn build_phase2(args: &ScanArgs) -> Result<Option<api::types::Phase2Config>> {
 #[tokio::main]
 async fn main() -> ExitCode {
     let _ = rustls::crypto::ring::default_provider().install_default();
-    let cli = Cli::parse();
+    let cli = match Cli::try_parse() {
+        Ok(cli) => cli,
+        Err(e) => {
+            let json_errors =
+                std::env::args().any(|a| a == "--json-errors" || a.starts_with("--json-errors="));
+            if json_errors {
+                let line = serde_json::json!({ "error": e.to_string() }).to_string();
+                let _ = write_stdout_line(&line);
+            }
+            e.exit();
+        }
+    };
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
         .with_env_filter(env_filter(
@@ -504,8 +515,8 @@ async fn main() -> ExitCode {
             if json_errors {
                 // Machine-readable failure for agents; the chain (`{err:#}`)
                 // stays on stderr for humans.
-                let line = serde_json::json!({ "error": err.to_string() });
-                println!("{line}");
+                let line = serde_json::json!({ "error": err.to_string() }).to_string();
+                let _ = write_stdout_line(&line);
             }
             eprintln!("error: {err:#}");
             ExitCode::FAILURE
@@ -630,6 +641,7 @@ async fn run_scan(args: ScanArgs) -> Result<()> {
             scan_controller.cancel();
         }
     };
+    let stderr_is_tty = std::io::stderr().is_terminal();
     let streaming = |e: ScanEvent| match e {
         ScanEvent::Result(v) => {
             if let Some(line) = serialize_event(&v) {
@@ -642,13 +654,15 @@ async fn run_scan(args: ScanArgs) -> Result<()> {
             }
         }
         ScanEvent::Phase2Progress(p) => {
-            eprintln!("phase 2: {}/{} verified", p.done, p.total);
+            if stderr_is_tty {
+                eprintln!("phase 2: {}/{} verified", p.done, p.total);
+            }
         }
         ScanEvent::Failed(_) => {}
         ScanEvent::Progress(p) => {
             // TTY-only ticker: NDJSON consumers get clean stdout, humans see
             // live progress instead of silence between results.
-            if std::io::stderr().is_terminal() {
+            if stderr_is_tty {
                 match p.total {
                     Some(total) => eprint!(
                         "\r\x1b[Kchecked {}/{} — {} working",
@@ -880,6 +894,9 @@ async fn shutdown_signal(controller: Arc<engine::ScanController>, tray_enabled: 
     }
     tracing::info!("shutting down; cancelling any active scan");
     controller.cancel();
+    if tray_enabled {
+        tray::request_exit();
+    }
 }
 
 /// Completes once the tray thread requests shutdown via its Exit menu item.

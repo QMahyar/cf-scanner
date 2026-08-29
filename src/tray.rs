@@ -20,6 +20,10 @@ pub fn exit_requested() -> bool {
     EXIT_REQUESTED.load(Ordering::Relaxed)
 }
 
+pub fn request_exit() {
+    EXIT_REQUESTED.store(true, Ordering::Relaxed);
+}
+
 /// `HKCU\...\Run` value payload: the quoted exe path plus the `serve` flags
 /// the autostart entry must launch. Pure so the quoting/arg shape is unit
 /// testable without touching the registry.
@@ -71,7 +75,6 @@ fn warp_payload() -> serde_json::Value {
 
 #[cfg(target_os = "windows")]
 mod imp {
-    use std::sync::atomic::Ordering;
     use std::time::Duration;
 
     use anyhow::{Context, Result};
@@ -173,7 +176,7 @@ mod imp {
     }
 
     fn request_exit() {
-        super::EXIT_REQUESTED.store(true, Ordering::Relaxed);
+        super::request_exit();
     }
 
     /// Registers/removes the `HKCU\...\CurrentVersion\Run` entry that starts
@@ -247,7 +250,14 @@ mod imp {
     /// list unchanged.
     fn pump_messages() {
         unsafe {
-            let mut msg: Msg = std::mem::zeroed();
+            let mut msg = Msg {
+                hwnd: std::ptr::null_mut(),
+                message: 0,
+                wparam: 0,
+                lparam: 0,
+                time: 0,
+                pt: Point { x: 0, y: 0 },
+            };
             while PeekMessageW(&mut msg, 0, 0, 0, PM_REMOVE) != 0 {
                 if msg.message == WM_QUIT {
                     return;
