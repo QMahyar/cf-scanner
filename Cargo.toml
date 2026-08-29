@@ -6,7 +6,7 @@ description = "Find working Cloudflare IPs/endpoints on ISP-restricted networks"
 license = "MIT"
 authors = ["qmahyar"]
 repository = "https://github.com/qmahyar/cf-scanner"
-rust-version = "1.85"
+rust-version = "1.88"
 
 [package.metadata.wix]
 upgrade-guid = "B4B16BC8-2905-4E0E-A024-47552733A782"
