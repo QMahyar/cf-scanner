@@ -45,6 +45,21 @@ fn prompt_warp() -> Result<ScanConfig> {
         .interact()?;
     let custom =
         parse_list("Custom endpoints ip or ip:port (comma-separated; empty = bundled pools)")?;
+    if custom.len() > crate::api::types::MAX_ENDPOINTS {
+        anyhow::bail!(
+            "custom endpoints exceed {} entries",
+            crate::api::types::MAX_ENDPOINTS
+        );
+    }
+    if custom
+        .iter()
+        .any(|s| s.len() > crate::api::types::MAX_CONFIG_ENTRY_BYTES)
+    {
+        anyhow::bail!(
+            "custom endpoint entry exceeds {} bytes",
+            crate::api::types::MAX_CONFIG_ENTRY_BYTES
+        );
+    }
     let verify = Confirm::new()
         .with_prompt("Verify with your own wgconf (real keypair handshake)?")
         .default(false)
@@ -53,7 +68,22 @@ fn prompt_warp() -> Result<ScanConfig> {
         let path: String = Input::new()
             .with_prompt("Path to a wg-quick / AmneziaWG config file")
             .interact()?;
-        Some(std::fs::read_to_string(&path).map_err(|e| anyhow!("could not read wgconf: {e}"))?)
+        {
+            use std::io::Read as _;
+            let file =
+                std::fs::File::open(&path).map_err(|e| anyhow!("could not read wgconf: {e}"))?;
+            let mut buf = String::new();
+            file.take(crate::api::types::MAX_WGCONF_BYTES as u64 + 1)
+                .read_to_string(&mut buf)
+                .map_err(|e| anyhow!("could not read wgconf: {e}"))?;
+            if buf.len() > crate::api::types::MAX_WGCONF_BYTES {
+                anyhow::bail!(
+                    "wgconf exceeds {} bytes",
+                    crate::api::types::MAX_WGCONF_BYTES
+                );
+            }
+            Some(buf)
+        }
     } else {
         None
     };
@@ -335,7 +365,37 @@ fn prompt_config() -> Result<ScanConfig> {
     let custom_cidrs = parse_cidr_list(
         "Custom CIDRs (comma-separated, replaces bundled ranges; empty = bundled)",
     )?;
+    if custom_cidrs.len() > crate::api::types::MAX_CIDRS {
+        anyhow::bail!(
+            "custom CIDRs exceed {} entries",
+            crate::api::types::MAX_CIDRS
+        );
+    }
+    if custom_cidrs
+        .iter()
+        .any(|s| s.len() > crate::api::types::MAX_CONFIG_ENTRY_BYTES)
+    {
+        anyhow::bail!(
+            "custom CIDR entry exceeds {} bytes",
+            crate::api::types::MAX_CONFIG_ENTRY_BYTES
+        );
+    }
     let exclude = parse_cidr_list("Excluded CIDRs (comma-separated; empty = none)")?;
+    if exclude.len() > crate::api::types::MAX_CIDRS {
+        anyhow::bail!(
+            "excluded CIDRs exceed {} entries",
+            crate::api::types::MAX_CIDRS
+        );
+    }
+    if exclude
+        .iter()
+        .any(|s| s.len() > crate::api::types::MAX_CONFIG_ENTRY_BYTES)
+    {
+        anyhow::bail!(
+            "excluded CIDR entry exceeds {} bytes",
+            crate::api::types::MAX_CONFIG_ENTRY_BYTES
+        );
+    }
 
     let phase2 = if Confirm::new()
         .with_prompt("Verify candidates through xray (phase 2)?")
@@ -373,6 +433,21 @@ fn prompt_phase2() -> Result<Phase2Config> {
     let configs = parse_list(
         "Configs (vless/trojan/vmess/ss URIs, subscription URLs, or xray JSON paths; comma-separated)",
     )?;
+    if configs.len() > crate::api::types::MAX_PHASE2_ENTRIES {
+        anyhow::bail!(
+            "phase2 configs exceed {} entries",
+            crate::api::types::MAX_PHASE2_ENTRIES
+        );
+    }
+    if configs
+        .iter()
+        .any(|s| s.len() > crate::api::types::MAX_CONFIG_ENTRY_BYTES)
+    {
+        anyhow::bail!(
+            "phase2 config entry exceeds {} bytes",
+            crate::api::types::MAX_CONFIG_ENTRY_BYTES
+        );
+    }
     if configs.is_empty() {
         return Err(anyhow!("at least one config required for phase 2"));
     }
@@ -409,6 +484,21 @@ fn prompt_phase2() -> Result<Phase2Config> {
 
     let snis =
         parse_list("SNI fronting variants (comma-separated; empty = each config's own SNI)")?;
+    if snis.len() > crate::api::types::MAX_PHASE2_ENTRIES {
+        anyhow::bail!(
+            "SNI entries exceed {} entries",
+            crate::api::types::MAX_PHASE2_ENTRIES
+        );
+    }
+    if snis
+        .iter()
+        .any(|s| s.len() > crate::api::types::MAX_SNI_BYTES)
+    {
+        anyhow::bail!(
+            "SNI entry exceeds {} bytes",
+            crate::api::types::MAX_SNI_BYTES
+        );
+    }
     let probe_url: String = Input::new()
         .with_prompt("Probe URL fetched through the tunnel")
         .default(crate::api::types::DEFAULT_PROBE_URL.to_owned())
