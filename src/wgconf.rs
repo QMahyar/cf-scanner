@@ -89,8 +89,8 @@ pub fn parse_wgconf(text: &str) -> Result<WgConfig> {
         if line.is_empty() || line.starts_with('#') || line.starts_with(';') {
             continue;
         }
-        if line.starts_with('[') && line.ends_with(']') {
-            section = Some(line[1..line.len() - 1].trim().to_ascii_lowercase());
+        if let Some(inner) = line.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
+            section = Some(inner.trim().to_ascii_lowercase());
             continue;
         }
         let Some((key, value)) = line.split_once('=') else {
@@ -173,7 +173,11 @@ fn parse_awg_uri(entry: &str) -> Result<WgConfig> {
         public_key: required(&q, "public_key")?,
         preshared_key: q.get("preshared_key").cloned(),
         allowed_ips: vec![],
-        endpoint: Some(format!("{host}:{port}")),
+        endpoint: Some(if host.contains(':') {
+            format!("[{host}]:{port}")
+        } else {
+            format!("{host}:{port}")
+        }),
         persistent_keepalive: parse_opt(&q, "persistent_keepalive")?,
     };
     build_wg_config(
@@ -576,5 +580,25 @@ mod tests {
         // Plain text that is neither a URI nor an INI with keys fails.
         assert!(parse_wg_entry("not a config at all").is_err());
         assert!(parse_wg_entry("[Interface]\nAddress = 1.2.3.4/32\n").is_err());
+    }
+
+    #[test]
+    fn awg_uri_brackets_ipv6_endpoint() {
+        let uri = "wg://[2001:db8::1]:51820?private_key=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA%3D&public_key=bmXOC%2BF1FxEMF9dyiK2H5%2F1SUtzH0JuVo51h2wPfgyo%3D";
+        let wg = parse_wg_entry(uri).unwrap();
+        assert_eq!(wg.peer.endpoint.as_deref(), Some("[2001:db8::1]:51820"));
+        let uri2 = "wg://[::1]:2408?private_key=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA%3D&public_key=bmXOC%2BF1FxEMF9dyiK2H5%2F1SUtzH0JuVo51h2wPfgyo%3D";
+        let wg2 = parse_wg_entry(uri2).unwrap();
+        assert_eq!(wg2.peer.endpoint.as_deref(), Some("[::1]:2408"));
+    }
+
+    #[test]
+    fn wgconf_section_parsing_tolerates_non_ascii() {
+        let text = "[Interface\u{00e9}]\nPrivateKey = AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\n[Interface]\nPrivateKey = AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\n[Peer]\nPublicKey = bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=\n";
+        let wg = parse_wgconf(text).unwrap();
+        assert_eq!(
+            wg.private_key,
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+        );
     }
 }
