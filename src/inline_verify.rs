@@ -293,6 +293,7 @@ async fn establish(
     let tcp = TcpStream::connect((dial_ip, spec.port))
         .await
         .context("tcp connect to candidate")?;
+    let _ = tcp.set_nodelay(true);
     if spec.security.eq_ignore_ascii_case("tls") {
         let name = outer_server_name(sni, spec.tls_server_name.as_deref(), dial_ip);
         let tls = connector

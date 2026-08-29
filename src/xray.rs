@@ -25,20 +25,21 @@ const RELEASE_BASE: &str = "https://github.com/XTLS/Xray-core/releases/download"
 const READY_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Fragment preset -> freedom-outbound fragment block (community cfray
-/// values, packets always `tlshello` per the AGENTS.md contract).
+/// values, packets always `tlshello` except Custom which honors the user's
+/// validated `packets` value).
 fn fragment_block(preset: &FragmentPreset, custom: Option<&CustomFragment>) -> Option<Value> {
-    let (length, interval) = match preset {
+    let (packets, length, interval) = match preset {
         FragmentPreset::Off => return None,
-        FragmentPreset::Light => ("100-200", "10-20"),
-        FragmentPreset::Medium => ("50-200", "10-40"),
-        FragmentPreset::Heavy => ("10-300", "5-50"),
+        FragmentPreset::Light => ("tlshello", "100-200", "10-20"),
+        FragmentPreset::Medium => ("tlshello", "50-200", "10-40"),
+        FragmentPreset::Heavy => ("tlshello", "10-300", "5-50"),
         FragmentPreset::Custom => {
             let c = custom?;
-            (c.length.as_str(), c.interval.as_str())
+            (c.packets.as_str(), c.length.as_str(), c.interval.as_str())
         }
     };
     Some(json!({
-        "packets": "tlshello",
+        "packets": packets,
         "length": length,
         "interval": interval,
     }))
@@ -176,12 +177,6 @@ impl XrayProcess {
     pub async fn stop(&mut self) {
         let _ = self.child.kill().await;
         let _ = self.child.wait().await;
-    }
-}
-
-impl Drop for XrayProcess {
-    fn drop(&mut self) {
-        let _ = self.child.start_kill();
     }
 }
 
@@ -479,8 +474,8 @@ static BINARY_STATE: OnceLock<tokio::sync::Mutex<Option<Result<PathBuf, String>>
 /// phase 2 for the process lifetime, so failures retry on the next attempt.
 pub async fn ensure_binary(fetch: &impl BinaryFetch) -> Result<PathBuf> {
     let state = BINARY_STATE.get_or_init(|| tokio::sync::Mutex::new(None));
-    let mut guard = state.lock().await;
-    if let Some(result) = &*guard {
+    let snapshot = { state.lock().await.clone() };
+    if let Some(result) = &snapshot {
         match result {
             Ok(path) => {
                 let valid = path
@@ -497,6 +492,7 @@ pub async fn ensure_binary(fetch: &impl BinaryFetch) -> Result<PathBuf> {
     let result = resolve_binary(fetch).await;
     match &result {
         Ok(path) => {
+            let mut guard = state.lock().await;
             *guard = Some(Ok(path.clone()));
         }
         Err(err) => {
@@ -760,7 +756,7 @@ mod tests {
             interval: "3-4".to_owned(),
         };
         let block = fragment_block(&FragmentPreset::Custom, Some(&custom)).unwrap();
-        assert_eq!(block["packets"], "tlshello");
+        assert_eq!(block["packets"], "1-3");
         assert_eq!(block["length"], "1-2");
         assert_eq!(block["interval"], "3-4");
     }

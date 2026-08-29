@@ -98,67 +98,83 @@ impl TunnelProbe for XrayTunnelProbe {
             // guard removes them even when the attempt dies mid-flight (the
             // explicit cleanup below handles the normal resolve path).
             let _guard = TrialDirGuard(trial_dir.clone());
-            let outcome = async {
-                let fetch = xray::RealFetch;
-                let xray_bin = xray::ensure_binary(&fetch).await.with_context(|| {
-                    "no verified xray binary (cached copy failed its checksum or the download failed)"
-                })?;
-                // The picked port can be stolen between the ephemeral bind
-                // probe and xray's own bind; retry with a fresh port instead
-                // of failing the whole probe on that race.
-                let mut proc = spawn_with_retry(dial_ip, |socks_port| {
-                    // Clones keep the retry closure self-contained (it may
-                    // run up to 3 times); the originals stay for cleanup.
-                    let spec = spec.clone();
-                    let preset = preset.clone();
-                    let custom = custom.clone();
-                    let sni = sni.clone();
-                    let trial_dir = trial_dir.clone();
-                    let xray_bin = xray_bin.clone();
-                    async move {
-                        let cfg = xray::build_config(
-                            &spec,
-                            dial_ip,
-                            &preset,
-                            custom.as_ref(),
-                            sni.as_deref(),
-                            socks_port,
-                        )?;
-                        xray::spawn(&trial_dir, &xray_bin, &cfg).await
-                    }
-                })
-                .await?;
+            let outcome: Result<TunnelResult> = match tokio::time::timeout(
+                Duration::from_millis(timeout_ms),
+                async {
+                    let fetch = xray::RealFetch;
+                    let xray_bin = xray::ensure_binary(&fetch).await.with_context(|| {
+                        "no verified xray binary (cached copy failed its checksum or the download failed)"
+                    })?;
+                    // The picked port can be stolen between the ephemeral bind
+                    // probe and xray's own bind; retry with a fresh port instead
+                    // of failing the whole probe on that race.
+                    let mut proc = spawn_with_retry(dial_ip, |socks_port| {
+                        // Clones keep the retry closure self-contained (it may
+                        // run up to 3 times); the originals stay for cleanup.
+                        let spec = spec.clone();
+                        let preset = preset.clone();
+                        let custom = custom.clone();
+                        let sni = sni.clone();
+                        let trial_dir = trial_dir.clone();
+                        let xray_bin = xray_bin.clone();
+                        async move {
+                            let cfg = xray::build_config(
+                                &spec,
+                                dial_ip,
+                                &preset,
+                                custom.as_ref(),
+                                sni.as_deref(),
+                                socks_port,
+                            )?;
+                            xray::spawn(&trial_dir, &xray_bin, &cfg).await
+                        }
+                    })
+                    .await?;
 
-                // One xray spawn serves the WHOLE probe list: every URL is
-                // GET through the same socks inbound (fresh SOCKS5 stream per
-                // URL, one process), so multi-URL verification costs one
-                // spawn instead of one per URL. A pass needs every URL to
-                // deliver 200; the colo comes from the first trace body that
-                // carries one.
-                let started = Instant::now();
-                let mut all_ok = true;
-                let mut colo = None;
-                for url in &probe_urls {
-                    match socks::get_via_socks(url, proc.socks_addr, timeout_ms).await {
-                        Ok(body) if colo.is_none() => colo = crate::geo::parse_colo(&body),
-                        Ok(_) => {}
-                        Err(err) => {
-                            tracing::debug!(%err, ip = %dial_ip, %url, "phase-2 probe did not deliver 200");
-                            all_ok = false;
+                    // One xray spawn serves the WHOLE probe list: every URL is
+                    // GET through the same socks inbound (fresh SOCKS5 stream per
+                    // URL, one process), so multi-URL verification costs one
+                    // spawn instead of one per URL. A pass needs every URL to
+                    // deliver 200; the colo comes from the first trace body that
+                    // carries one.
+                    let started = Instant::now();
+                    let mut all_ok = true;
+                    let mut colo = None;
+                    for url in &probe_urls {
+                        match socks::get_via_socks(url, proc.socks_addr, timeout_ms).await {
+                            Ok(body) if colo.is_none() => colo = crate::geo::parse_colo(&body),
+                            Ok(_) => {}
+                            Err(err) => {
+                                tracing::debug!(%err, ip = %dial_ip, %url, "phase-2 probe did not deliver 200");
+                                all_ok = false;
+                            }
                         }
                     }
-                }
-                let latency_ms = started.elapsed().as_millis() as u32;
-                proc.stop().await;
+                    let latency_ms = started.elapsed().as_millis() as u32;
+                    proc.stop().await;
 
-                if all_ok {
-                    Ok(TunnelResult {
-                        passed: true,
-                        latency_ms: Some(latency_ms),
-                        colo,
-                        verifier: Some("xray"),
-                    })
-                } else {
+                    if all_ok {
+                        Ok(TunnelResult {
+                            passed: true,
+                            latency_ms: Some(latency_ms),
+                            colo,
+                            verifier: Some("xray"),
+                        })
+                    } else {
+                        Ok(TunnelResult {
+                            passed: false,
+                            latency_ms: None,
+                            colo: None,
+                            verifier: Some("xray"),
+                        })
+                    }
+                },
+            )
+            .await
+            {
+                Ok(res) => res,
+                Err(_) => {
+                    tracing::debug!(ip = %dial_ip, "xray probe timed out");
                     Ok(TunnelResult {
                         passed: false,
                         latency_ms: None,
@@ -166,8 +182,7 @@ impl TunnelProbe for XrayTunnelProbe {
                         verifier: Some("xray"),
                     })
                 }
-            }
-            .await;
+            };
 
             cleanup_trial_dir(&trial_dir).await;
             outcome
@@ -217,10 +232,7 @@ impl TrialDirGuard {
 
 impl Drop for TrialDirGuard {
     fn drop(&mut self) {
-        let dir = self.0.clone();
-        std::thread::spawn(move || {
-            let _ = std::fs::remove_dir_all(dir);
-        });
+        let _ = std::fs::remove_dir_all(&self.0);
     }
 }
 
