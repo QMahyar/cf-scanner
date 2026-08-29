@@ -21,12 +21,13 @@ use std::time::Duration;
 use anyhow::Result;
 use boringtun::noise::{Tunn, TunnResult};
 use boringtun::x25519::{PublicKey, StaticSecret};
-use rand_core::RngCore;
 use tokio::net::UdpSocket;
 use tokio::time::timeout;
 
 use crate::probe::{ProbeError, Transport};
 use crate::ranges::CidrPool;
+
+static JITTER_COUNTER: AtomicU32 = AtomicU32::new(0);
 
 pub const BUNDLED_POOLS: &str = include_str!("../data/warp-pools.txt");
 
@@ -82,6 +83,7 @@ impl WarpTransport {
     }
 
     pub fn with_cache(cache: std::sync::Arc<SocketCache>) -> anyhow::Result<Self> {
+        cache.clear();
         Ok(Self {
             server_public: server_public_key()?,
             sockets: cache,
@@ -111,6 +113,12 @@ pub struct SocketCache {
 }
 
 impl SocketCache {
+    pub(crate) fn clear(&self) {
+        if let Ok(mut map) = self.sockets.try_lock() {
+            map.clear();
+        }
+    }
+
     async fn get_or_bind(&self, ip: Ipv4Addr, port: u16) -> Result<Arc<UdpSocket>, ProbeError> {
         {
             let map = self.sockets.lock().await;
@@ -146,15 +154,20 @@ impl SocketCache {
 pub struct WgVerifyTransport {
     static_secret: StaticSecret,
     peer_public: PublicKey,
-    sockets: SocketCache,
+    sockets: Arc<SocketCache>,
 }
 
 impl WgVerifyTransport {
     pub fn from_config(wg: &crate::wgconf::WgConfig) -> Result<Self> {
+        Self::with_cache(Arc::new(SocketCache::default()), wg)
+    }
+
+    pub fn with_cache(cache: Arc<SocketCache>, wg: &crate::wgconf::WgConfig) -> Result<Self> {
+        cache.clear();
         Ok(Self {
             static_secret: StaticSecret::from(crate::wgconf::decode_key(&wg.private_key)?),
             peer_public: PublicKey::from(crate::wgconf::decode_key(&wg.peer.public_key)?),
-            sockets: SocketCache::default(),
+            sockets: cache,
         })
     }
 }
@@ -244,12 +257,23 @@ async fn probe_once(
     // Randomized 10-40ms pacing between handshakes: synchronized Init bursts
     // trip WARP's per-IP rate shaping and read as false negatives. Bounded,
     // so a full pool stays fast even at 200 concurrency.
-    let jitter_ms = 10 + RngCore::next_u64(&mut rand_core::OsRng) % 31;
+    let jitter_ms = {
+        let c = JITTER_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let mut rng = crate::engine::SplitMix64::new(c as u64);
+        10 + rng.next_u64() % 31
+    };
     tokio::time::sleep(Duration::from_millis(jitter_ms)).await;
 
     // Fresh index per probe so concurrent sockets can never confuse
     // each other's receiver-index check.
-    let index = NEXT_INDEX.fetch_add(1, Ordering::Relaxed);
+    let index = {
+        let v = NEXT_INDEX.fetch_add(1, Ordering::Relaxed);
+        if v == 0 {
+            NEXT_INDEX.fetch_add(1, Ordering::Relaxed)
+        } else {
+            v
+        }
+    };
     let mut tunn = Tunn::new(static_secret, peer_public, None, None, index, None);
     let mut packet = [0u8; 148];
     let init = match tunn.format_handshake_initiation(&mut packet, true) {
@@ -280,7 +304,7 @@ async fn probe_once(
                 return Err(ProbeError::Refused("reply is not a WARP handshake"));
             }
             if depth == ProbeDepth::ShapeOnly {
-                return Ok(started.elapsed().as_millis() as u32);
+                return Ok((started.elapsed().as_millis().min(u32::MAX as u128)) as u32);
             }
             finish_full_session(&mut tunn, &socket, &reply[..n], started, timeout_ms).await
         }
@@ -331,7 +355,9 @@ async fn finish_full_session(
         .map_err(|_| ProbeError::Refused("data send failed"))?;
 
     let mut reply = [0u8; 2048];
-    let received = timeout(Duration::from_millis(timeout_ms), socket.recv(&mut reply)).await;
+    let elapsed_ms = started.elapsed().as_millis().min(u64::MAX as u128) as u64;
+    let rem = timeout_ms.saturating_sub(elapsed_ms).max(1);
+    let received = timeout(Duration::from_millis(rem), socket.recv(&mut reply)).await;
     match received {
         Ok(Ok(n)) => match tunn.decapsulate(None, &reply[..n], &mut out) {
             // WriteToTunnelV4/V6: the reply decrypted into a valid inner IP
@@ -340,7 +366,7 @@ async fn finish_full_session(
                 if inner.is_empty() {
                     Err(ProbeError::Refused("empty data reply through tunnel"))
                 } else {
-                    Ok(started.elapsed().as_millis() as u32)
+                    Ok((started.elapsed().as_millis().min(u32::MAX as u128)) as u32)
                 }
             }
             TunnResult::WriteToNetwork(_) => {
