@@ -2,7 +2,7 @@
 //! local xray JSON) and verifies phase-1 candidates through tunnel probes with
 //! fragment presets and SNI combos, updating verdicts in place.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -23,6 +23,11 @@ use crate::verify::ProbeRequest;
 /// Phase-2 progress events: every 32 completed attempts (plus the final
 /// one), so a long verification run stays observable without flooding.
 const PROGRESS_EVERY_P2: u64 = 32;
+
+/// Shared (ip, port) -> store-position index for phase-2 verdict updates.
+/// The inner `Arc` is swapped atomically when a fallback lookup rebuilds the
+/// mapping after a concurrent in-place store sort permuted positions.
+type PosIndex = Arc<Mutex<Arc<HashMap<(Ipv4Addr, u16), usize>>>>;
 
 impl ScanController {
     /// Verifies every phase-1 candidate through the user's configs, trying
@@ -70,6 +75,27 @@ impl ScanController {
         if v4_candidates.is_empty() {
             return Ok(());
         }
+        // Store positions of every v4 candidate so update_verdict_phase2 can
+        // index the store directly instead of a linear scan per completed
+        // combo. The row set cannot change during phase 2 (reset() no-ops
+        // while a run is active and phase 2 updates in place), but a
+        // concurrent results()/for_each_result() CAN sort the store in place
+        // (snapshot_sorted during the async config-parse window), permuting
+        // positions after this index is built. The update re-validates the
+        // indexed row and, on mismatch, falls back to the authoritative scan
+        // and rebuilds the shared index from the store under the lock — so
+        // the optimization self-heals instead of silently degrading.
+        // First match wins to mirror the linear scan's semantics on
+        // duplicate keys.
+        let pos_index: PosIndex = Arc::new(Mutex::new(Arc::new({
+            let mut map: HashMap<(Ipv4Addr, u16), usize> = HashMap::new();
+            for (i, v) in candidates.iter().enumerate() {
+                if let IpAddr::V4(ip) = v.ip {
+                    map.entry((ip, v.port)).or_insert(i);
+                }
+            }
+            map
+        })));
 
         let combos_per_candidate = (specs.len() * snis.len()) as u64;
         let total = v4_candidates.len() as u64 * combos_per_candidate;
@@ -101,6 +127,7 @@ impl ScanController {
             let first_error = first_error.clone();
             let next = next.clone();
             let candidates = v4_candidates.clone();
+            let pos_index = pos_index.clone();
             let specs = specs.clone();
             let snis = snis.clone();
             let probe_urls = probe_urls.clone();
@@ -177,7 +204,7 @@ impl ScanController {
                                 break;
                             }
                             if let Some(updated) =
-                                update_verdict_phase2(&store, ip, port, verdict, colo)
+                                update_verdict_phase2(&store, ip, port, verdict, colo, &pos_index)
                             {
                                 let _ = events.send(ScanEvent::Result(Box::new(updated)));
                             }
@@ -209,7 +236,7 @@ impl ScanController {
                                 break;
                             }
                             if let Some(updated) =
-                                update_verdict_phase2(&store, ip, port, verdict, None)
+                                update_verdict_phase2(&store, ip, port, verdict, None, &pos_index)
                             {
                                 let _ = events.send(ScanEvent::Result(Box::new(updated)));
                             }
@@ -368,17 +395,45 @@ impl ScanController {
 /// the stored row and returns the updated verdict for re-emission. `None`
 /// when the row vanished (reset mid-phase) or a passing verdict is already
 /// recorded: concurrent combos race, and a pass must never be downgraded.
+/// `pos_index` maps (ip, port) to snapshot positions, making the lookup O(1)
+/// instead of a full scan under the store mutex. A concurrent in-place sort
+/// (snapshot_sorted) can permute positions after the index was built, so the
+/// mapped row is re-validated; on mismatch the lookup falls back to the
+/// authoritative linear scan and rebuilds the shared index from the store
+/// under the lock, keeping later lookups O(1).
 fn update_verdict_phase2(
     store: &Store,
     ip: Ipv4Addr,
     port: u16,
     p2v: Phase2Verdict,
     colo: Option<String>,
+    pos_index: &PosIndex,
 ) -> Option<Verdict> {
     let mut results = store.lock().unwrap_or_else(|e| e.into_inner());
-    let pos = results
-        .iter()
-        .position(|v| v.ip == IpAddr::V4(ip) && v.port == port)?;
+    let indexed = {
+        let index = pos_index.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        index.get(&(ip, port)).copied().filter(|&pos| {
+            results
+                .get(pos)
+                .is_some_and(|v| v.ip == IpAddr::V4(ip) && v.port == port)
+        })
+    };
+    let pos = match indexed {
+        Some(pos) => pos,
+        None => {
+            let found = results
+                .iter()
+                .position(|v| v.ip == IpAddr::V4(ip) && v.port == port)?;
+            let mut fresh: HashMap<(Ipv4Addr, u16), usize> = HashMap::with_capacity(results.len());
+            for (i, v) in results.iter().enumerate() {
+                if let IpAddr::V4(ip4) = v.ip {
+                    fresh.entry((ip4, v.port)).or_insert(i);
+                }
+            }
+            *pos_index.lock().unwrap_or_else(|e| e.into_inner()) = Arc::new(fresh);
+            found
+        }
+    };
     if results[pos].phase2.as_ref().is_some_and(|p| p.passed) {
         return None;
     }
@@ -834,12 +889,50 @@ mod tests {
             config_index: None,
             verifier: None,
         };
-        let updated =
-            update_verdict_phase2(&store, "203.0.113.1".parse().unwrap(), 443, failed, None);
+        let index: PosIndex = PosIndex::new(Mutex::new(Arc::new(HashMap::from([(
+            ("203.0.113.1".parse().unwrap(), 443),
+            0,
+        )]))));
+        let updated = update_verdict_phase2(
+            &store,
+            "203.0.113.1".parse().unwrap(),
+            443,
+            failed.clone(),
+            None,
+            &index,
+        );
         assert!(updated.is_none(), "a pass must never be downgraded");
-        let row = &store.lock().unwrap_or_else(|e| e.into_inner())[0];
-        assert!(row.phase2.as_ref().unwrap().passed);
-        assert_eq!(row.colo.as_deref(), Some("FRA"));
+        {
+            let row = &store.lock().unwrap_or_else(|e| e.into_inner())[0];
+            assert!(row.phase2.as_ref().unwrap().passed);
+            assert_eq!(row.colo.as_deref(), Some("FRA"));
+        }
+
+        // A permuted index (stale position) falls back to the authoritative
+        // linear scan: the row is still found, the pass guard holds, and the
+        // shared index is rebuilt so later lookups map back to the true row.
+        let stale_index = PosIndex::new(Mutex::new(Arc::new(HashMap::from([(
+            ("203.0.113.1".parse().unwrap(), 443),
+            7_usize,
+        )]))));
+        let via_fallback = update_verdict_phase2(
+            &store,
+            "203.0.113.1".parse().unwrap(),
+            443,
+            failed.clone(),
+            None,
+            &stale_index,
+        );
+        assert!(
+            via_fallback.is_none(),
+            "fallback must find the row and honor the pass guard"
+        );
+        let rebuilt = stale_index.lock().unwrap_or_else(|e| e.into_inner());
+        assert_eq!(
+            rebuilt.get(&("203.0.113.1".parse::<Ipv4Addr>().unwrap(), 443)),
+            Some(&0),
+            "fallback must rebuild the index from the store"
+        );
     }
 
     #[tokio::test]

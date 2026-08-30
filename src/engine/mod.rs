@@ -133,8 +133,13 @@ impl ScanController {
     }
 
     /// True once the last scan produced at least one working endpoint.
+    /// Emptiness needs neither the sort nor the clone of [`Self::results`].
     pub fn has_results(&self) -> bool {
-        !self.snapshot_sorted().is_empty()
+        !self
+            .store
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_empty()
     }
 
     /// Iterate sorted results after taking a snapshot under the lock, so the

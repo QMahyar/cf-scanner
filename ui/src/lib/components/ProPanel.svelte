@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from "svelte";
+  import { onDestroy, onMount } from "svelte";
   import Segmented from "./Segmented.svelte";
   import {
     Gauge,
@@ -467,11 +467,16 @@
   }
 
   /** Persist every change (debounced ~300 ms); wgconf is excluded inside
-   * persistedFormState so keys never reach disk. */
+   * persistedFormState so keys never reach disk. The snapshot awaiting its
+   * debounce is also flushed on unmount, so toggling Pro off right after an
+   * edit cannot lose the last keystrokes. */
+  let pendingPersist: string | null = null;
   $effect(() => {
     if (!hydrated) return;
     const snapshot = persistedFormState(form);
+    pendingPersist = snapshot;
     const t = setTimeout(() => {
+      pendingPersist = null;
       try {
         localStorage.setItem(FORM_PERSIST_KEY, snapshot);
       } catch {
@@ -479,6 +484,17 @@
       }
     }, 300);
     return () => clearTimeout(t);
+  });
+
+  onDestroy(() => {
+    if (pendingPersist !== null) {
+      try {
+        localStorage.setItem(FORM_PERSIST_KEY, pendingPersist);
+      } catch {
+        /* storage unavailable */
+      }
+      pendingPersist = null;
+    }
   });
 
   onMount(() => {

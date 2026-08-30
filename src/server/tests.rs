@@ -549,6 +549,7 @@ async fn terminal_bounded_stream_stops_after_finished() {
         ))),
         seen: std::collections::HashSet::new(),
         pending: std::collections::VecDeque::new(),
+        last_resync: None,
     };
     tx.send(ScanEvent::Progress(crate::api::types::ScanProgress {
         scanned: 1,
@@ -609,6 +610,7 @@ async fn replayed_terminal_does_not_close_the_stream() {
         ))),
         seen: std::collections::HashSet::new(),
         pending: std::collections::VecDeque::new(),
+        last_resync: None,
     };
     let first = tokio::time::timeout(Duration::from_secs(1), stream.next())
         .await
@@ -2073,6 +2075,7 @@ async fn lagged_stream_stays_alive_with_terminal_snapshot() {
         ))),
         seen: std::collections::HashSet::new(),
         pending: std::collections::VecDeque::new(),
+        last_resync: None,
     };
     // Fill and overflow the 2-slot channel so the receiver lags.
     tx.send(ScanEvent::Progress(crate::api::types::ScanProgress {
@@ -2283,6 +2286,7 @@ async fn lagged_stream_with_cap_8_stays_alive_with_terminal() {
         ))),
         seen: std::collections::HashSet::new(),
         pending: std::collections::VecDeque::new(),
+        last_resync: None,
     };
     for i in 0..16 {
         let _ = tx.send(ScanEvent::Progress(crate::api::types::ScanProgress {

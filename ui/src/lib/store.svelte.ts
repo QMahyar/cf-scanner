@@ -128,7 +128,9 @@ export class UiStore {
     const last = this.#tickWindow[this.#tickWindow.length - 1];
     if (last && p.scanned < last.scanned) this.#tickWindow.length = 0;
     this.#tickWindow.push({ scanned: p.scanned, found: p.found });
-    while (this.#tickWindow.length > 2 && last.scanned - this.#tickWindow[0].scanned > 500)
+    // Window must span ≤500 scanned ending at the NEWEST tick; using the
+    // pre-push tail here kept the window one tick too long.
+    while (this.#tickWindow.length > 2 && p.scanned - this.#tickWindow[0].scanned > 500)
       this.#tickWindow.shift();
   }
 

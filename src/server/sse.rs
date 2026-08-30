@@ -6,7 +6,7 @@ use std::convert::Infallible;
 use std::net::IpAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use axum::response::Sse;
 use tokio_stream::{Stream, wrappers::BroadcastStream};
@@ -19,6 +19,13 @@ use super::state::AppState;
 /// Cap on concurrent SSE event streams so hung tabs cannot hoard broadcast
 /// receivers; the UI needs one, extras are an abuse signal.
 pub(crate) const MAX_SSE_CONNECTIONS: usize = 4;
+
+/// Minimum spacing between Lagged re-syncs on one stream. Each re-sync costs
+/// an O(store) snapshot clone, and a slow consumer that lags because of it
+/// would otherwise invite the next lag — a feedback loop. Anything still
+/// missed inside the window is healed by the next lag past it, or at the
+/// terminal (the UI refetches /api/results on finished).
+const RESYNC_MIN_INTERVAL: Duration = Duration::from_millis(250);
 
 /// One concurrent SSE stream per app slot; the slot is held by the returned
 /// stream for the connection's lifetime, so a dropped connection frees it.
@@ -61,6 +68,7 @@ pub(crate) async fn events(
             controller: Arc::clone(&state.controller),
             seen: HashSet::new(),
             pending: VecDeque::new(),
+            last_resync: None,
         });
     Ok(Sse::new(stream).keep_alive(axum::response::sse::KeepAlive::default()))
 }
@@ -85,6 +93,8 @@ pub(crate) struct TerminalBounded {
     pub(super) controller: Arc<crate::engine::ScanController>,
     pub(super) seen: HashSet<(IpAddr, u16)>,
     pub(super) pending: VecDeque<ScanEvent>,
+    /// Last Lagged re-sync instant, for the [`RESYNC_MIN_INTERVAL`] throttle.
+    pub(super) last_resync: Option<Instant>,
 }
 
 #[allow(clippy::ref_option)]
@@ -141,13 +151,19 @@ impl Stream for TerminalBounded {
                 // a fresh terminal snapshot if one exists for this epoch, then
                 // keep listening for live events.
                 std::task::Poll::Ready(Some(Err(_lagged))) => {
-                    let mut to_add = Vec::new();
-                    self.controller.for_each_result(|v| {
-                        to_add.push(v.clone());
-                    });
-                    for v in to_add {
-                        if self.seen.insert((v.ip, v.port)) {
-                            self.pending.push_back(ScanEvent::Result(Box::new(v)));
+                    if self
+                        .last_resync
+                        .is_none_or(|t| t.elapsed() >= RESYNC_MIN_INTERVAL)
+                    {
+                        self.last_resync = Some(Instant::now());
+                        let mut to_add = Vec::new();
+                        self.controller.for_each_result(|v| {
+                            to_add.push(v.clone());
+                        });
+                        for v in to_add {
+                            if self.seen.insert((v.ip, v.port)) {
+                                self.pending.push_back(ScanEvent::Result(Box::new(v)));
+                            }
                         }
                     }
                     if let Some(ev) = self.pending.pop_front()
