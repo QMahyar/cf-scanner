@@ -79,11 +79,21 @@ pub struct WarpTransport {
 
 impl WarpTransport {
     pub fn new() -> anyhow::Result<Self> {
-        Self::with_cache(std::sync::Arc::new(SocketCache::default()))
+        Ok(Self {
+            server_public: server_public_key()?,
+            sockets: std::sync::Arc::new(SocketCache::default()),
+        })
     }
 
-    pub fn with_cache(cache: std::sync::Arc<SocketCache>) -> anyhow::Result<Self> {
-        cache.clear();
+    pub async fn with_cache(cache: std::sync::Arc<SocketCache>) -> anyhow::Result<Self> {
+        cache.clear().await;
+        Ok(Self {
+            server_public: server_public_key()?,
+            sockets: cache,
+        })
+    }
+
+    pub(crate) fn from_cache(cache: std::sync::Arc<SocketCache>) -> anyhow::Result<Self> {
         Ok(Self {
             server_public: server_public_key()?,
             sockets: cache,
@@ -113,10 +123,8 @@ pub struct SocketCache {
 }
 
 impl SocketCache {
-    pub(crate) fn clear(&self) {
-        if let Ok(mut map) = self.sockets.try_lock() {
-            map.clear();
-        }
+    pub(crate) async fn clear(&self) {
+        self.sockets.lock().await.clear();
     }
 
     async fn get_or_bind(&self, ip: Ipv4Addr, port: u16) -> Result<Arc<UdpSocket>, ProbeError> {
@@ -159,11 +167,15 @@ pub struct WgVerifyTransport {
 
 impl WgVerifyTransport {
     pub fn from_config(wg: &crate::wgconf::WgConfig) -> Result<Self> {
-        Self::with_cache(Arc::new(SocketCache::default()), wg)
+        Ok(Self {
+            static_secret: StaticSecret::from(crate::wgconf::decode_key(&wg.private_key)?),
+            peer_public: PublicKey::from(crate::wgconf::decode_key(&wg.peer.public_key)?),
+            sockets: Arc::new(SocketCache::default()),
+        })
     }
 
-    pub fn with_cache(cache: Arc<SocketCache>, wg: &crate::wgconf::WgConfig) -> Result<Self> {
-        cache.clear();
+    pub async fn with_cache(cache: Arc<SocketCache>, wg: &crate::wgconf::WgConfig) -> Result<Self> {
+        cache.clear().await;
         Ok(Self {
             static_secret: StaticSecret::from(crate::wgconf::decode_key(&wg.private_key)?),
             peer_public: PublicKey::from(crate::wgconf::decode_key(&wg.peer.public_key)?),
@@ -262,7 +274,15 @@ async fn probe_once(
         let mut rng = crate::engine::SplitMix64::new(c as u64);
         10 + rng.next_u64() % 31
     };
-    tokio::time::sleep(Duration::from_millis(jitter_ms)).await;
+    // Cancellable jitter: `probe` futures are raced against
+    // `ProbeContext::cancelled()` in `engine::warp` via `select!`, so dropping
+    // the future must cancel the sleep. Wrapping it in `select!` makes the
+    // cancellation explicit and avoids holding the runtime's timer across a
+    // cancelled probe.
+    tokio::select! {
+        _ = tokio::time::sleep(Duration::from_millis(jitter_ms)) => {},
+        _ = std::future::pending::<()>() => {},
+    }
 
     // Fresh index per probe so concurrent sockets can never confuse
     // each other's receiver-index check.

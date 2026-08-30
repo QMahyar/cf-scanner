@@ -232,7 +232,16 @@ impl TrialDirGuard {
 
 impl Drop for TrialDirGuard {
     fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
+        let path = self.0.clone();
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn_blocking(move || {
+                let _ = std::fs::remove_dir_all(path);
+            });
+        } else {
+            std::thread::spawn(move || {
+                let _ = std::fs::remove_dir_all(path);
+            });
+        }
     }
 }
 
