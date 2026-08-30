@@ -303,6 +303,7 @@ dependencies = [
  "dialoguer",
  "directories",
  "flate2",
+ "http",
  "maxminddb",
  "percent-encoding",
  "proptest",

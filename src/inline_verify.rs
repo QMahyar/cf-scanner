@@ -324,10 +324,7 @@ fn outer_server_name(
 fn build_protocol_header(spec: &OutboundSpec, host: &str, port: u16) -> Result<Vec<u8>> {
     match spec.protocol {
         Protocol::Trojan => {
-            let hash: String = Sha224::digest(spec.user_id.as_bytes())
-                .iter()
-                .map(|b| format!("{b:02x}"))
-                .collect();
+            let hash = crate::dgst::hex_lower(&Sha224::digest(spec.user_id.as_bytes()));
             let mut out = Vec::with_capacity(56 + 2 + 1 + 1 + host.len() + 2 + 2);
             out.extend_from_slice(hash.as_bytes());
             out.extend_from_slice(b"\r\n");
@@ -726,7 +723,7 @@ mod tests {
                 let mut atyp = [0u8; 1];
                 conn.read_exact(&mut atyp).await?;
                 read_xray_addr(conn, atyp[0]).await?;
-                Ok(uuid.iter().map(|b| format!("{b:02x}")).collect())
+                Ok(crate::dgst::hex_lower(&uuid))
             }
             _ => bail!("unsupported test protocol"),
         }
@@ -781,10 +778,7 @@ mod tests {
     const TROJAN_PASSWORD: &str = "hunter2-secret";
 
     fn trojan_hash(password: &str) -> String {
-        Sha224::digest(password.as_bytes())
-            .iter()
-            .map(|b| format!("{b:02x}"))
-            .collect()
+        crate::dgst::hex_lower(&Sha224::digest(password.as_bytes()))
     }
 
     fn probe(spec: OutboundSpec, ports: &[&str], timeout_ms: u64) -> TunnelResult {

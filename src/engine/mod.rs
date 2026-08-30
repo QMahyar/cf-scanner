@@ -473,40 +473,12 @@ impl ScanController {
     }
 }
 
-/// Concrete hosts a plan item yields, streamed lazily so a Full scan never
-/// materializes an entire `Every` range. `Sample` rolls fresh random hosts
-/// with a per-port seed so multi-port scans don't repeat the same host.
-/// v6 host spaces need u128 sampling (see `SplitMix64::below_u128`).
-enum PlanHosts<I1, I2, I3> {
-    Every(I1),
-    Sample(I2),
-    Hosts(I3),
-}
-
-impl<I1, I2, I3> Iterator for PlanHosts<I1, I2, I3>
-where
-    I1: Iterator<Item = IpAddr>,
-    I2: Iterator<Item = IpAddr>,
-    I3: Iterator<Item = IpAddr>,
-{
-    type Item = IpAddr;
-    fn next(&mut self) -> Option<IpAddr> {
-        match self {
-            Self::Every(i) => i.next(),
-            Self::Sample(i) => i.next(),
-            Self::Hosts(i) => i.next(),
-        }
-    }
-}
-
 fn plan_hosts_iter<'a>(
     item: &'a PlanItem,
     rng: &'a mut SplitMix64,
-) -> impl Iterator<Item = IpAddr> + 'a {
+) -> Box<dyn Iterator<Item = IpAddr> + Send + 'a> {
     match item {
-        PlanItem::Every { cidr } => {
-            PlanHosts::Every((0..cidr.host_count()).map(move |i| cidr.host(i)))
-        }
+        PlanItem::Every { cidr } => Box::new((0..cidr.host_count()).map(move |i| cidr.host(i))),
         PlanItem::Sample { cidr, count } => {
             let count = (*count as u128).min(cidr.host_count());
             // Dense v4 blocks (/24 and tighter) skip network and broadcast
@@ -518,7 +490,7 @@ fn plan_hosts_iter<'a>(
             };
             let mut seen = std::collections::HashSet::new();
             let mut emitted = 0u128;
-            PlanHosts::Sample(std::iter::from_fn(move || {
+            Box::new(std::iter::from_fn(move || {
                 // Draws are deduped per block: sampling with replacement
                 // produced duplicate verdicts and inflated `found` counts.
                 if emitted >= count || seen.len() as u128 >= draw_max {
@@ -537,9 +509,7 @@ fn plan_hosts_iter<'a>(
                 }
             }))
         }
-        PlanItem::Hosts { cidr, offsets } => {
-            PlanHosts::Hosts(offsets.iter().map(move |&o| cidr.host(o)))
-        }
+        PlanItem::Hosts { cidr, offsets } => Box::new(offsets.iter().map(move |&o| cidr.host(o))),
     }
 }
 
