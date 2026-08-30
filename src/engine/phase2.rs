@@ -81,6 +81,7 @@ impl ScanController {
         let terminal_sent = Arc::new(AtomicBool::new(false));
         let first_error: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
         let cap = cfg.stop.cap;
+        let stop_found = cfg.stop.found as usize;
 
         let specs = Arc::new(specs);
         let snis = Arc::new(snis);
@@ -109,6 +110,7 @@ impl ScanController {
                 loop {
                     if *cancel.borrow()
                         || cap.is_some_and(|c| attempts.load(Ordering::Relaxed) >= u64::from(c))
+                        || passed.lock().unwrap_or_else(|e| e.into_inner()).len() >= stop_found
                     {
                         break;
                     }
@@ -127,6 +129,9 @@ impl ScanController {
                         .contains(&(ip, port))
                     {
                         continue;
+                    }
+                    if passed.lock().unwrap_or_else(|e| e.into_inner()).len() >= stop_found {
+                        break;
                     }
                     attempts.fetch_add(1, Ordering::Relaxed);
                     let probe_result = tokio::select! {
@@ -163,6 +168,14 @@ impl ScanController {
                                     .unwrap_or_else(|e| e.into_inner())
                                     .insert((ip, port));
                             }
+                            if passed.lock().unwrap_or_else(|e| e.into_inner()).len() >= stop_found
+                                && !result.passed
+                            {
+                                break;
+                            }
+                            if passed.lock().unwrap_or_else(|e| e.into_inner()).len() > stop_found {
+                                break;
+                            }
                             if let Some(updated) =
                                 update_verdict_phase2(&store, ip, port, verdict, colo)
                             {
@@ -170,6 +183,10 @@ impl ScanController {
                             }
                         }
                         Err(err) => {
+                            if passed.lock().unwrap_or_else(|e| e.into_inner()).len() >= stop_found
+                            {
+                                break;
+                            }
                             // Local failures (spawn, config build) are kept
                             // redacted and surfaced on the row so clients see
                             // why the candidate did not verify.
@@ -187,6 +204,10 @@ impl ScanController {
                                 config_index: Some(*config_idx),
                                 verifier: None,
                             };
+                            if passed.lock().unwrap_or_else(|e| e.into_inner()).len() >= stop_found
+                            {
+                                break;
+                            }
                             if let Some(updated) =
                                 update_verdict_phase2(&store, ip, port, verdict, None)
                             {

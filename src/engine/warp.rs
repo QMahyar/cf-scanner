@@ -143,9 +143,12 @@ impl ScanController {
                     if ctx.should_stop() {
                         break;
                     }
-                    let task = match rx.recv().await {
-                        Some(task) => task,
-                        None => break,
+                    let task = tokio::select! {
+                        maybe = rx.recv() => match maybe {
+                            Some(task) => task,
+                            None => break,
+                        },
+                        _ = ctx.cancelled() => break,
                     };
                     let mut latency_ms: Option<u32> = None;
                     let mut failed = 0u64;
