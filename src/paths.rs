@@ -23,10 +23,10 @@ pub fn data_dir() -> Result<PathBuf> {
     // resolve through this one function. warpgen's identity path honors the
     // same variable (its own entry point), so a test or embedder setting it
     // redirects the entire product data footprint.
-    if let Ok(dir) = std::env::var("CF_SCANNER_DATA_DIR") {
-        if !dir.trim().is_empty() {
-            return Ok(PathBuf::from(dir));
-        }
+    if let Ok(dir) = std::env::var("CF_SCANNER_DATA_DIR")
+        && !dir.trim().is_empty()
+    {
+        return Ok(PathBuf::from(dir));
     }
     let dirs = directories::ProjectDirs::from("com", "qmahyar", "cf-scanner")
         .ok_or_else(|| anyhow!("could not resolve a data directory"))?;

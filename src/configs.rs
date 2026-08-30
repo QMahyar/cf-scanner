@@ -14,6 +14,8 @@ use percent_encoding::{AsciiSet, CONTROLS, utf8_percent_encode};
 use serde::Deserialize;
 use url::Url;
 
+use crate::util::percent_decode;
+
 use crate::ranges;
 
 const SUB_UA: &str = "cf-scanner/0.1.0";
@@ -637,12 +639,6 @@ fn reject_unsupported_security(security: &str) -> Result<()> {
         bail!("security 'reality' is not supported; use tls or none")
     }
     Ok(())
-}
-
-fn percent_decode(s: &str) -> String {
-    percent_encoding::percent_decode_str(s)
-        .decode_utf8_lossy()
-        .into_owned()
 }
 
 fn base64_any(s: &str) -> Result<Vec<u8>> {

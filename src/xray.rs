@@ -18,6 +18,7 @@ use sha2::{Digest as _, Sha256};
 
 use crate::api::types::{CustomFragment, FragmentPreset};
 use crate::configs::{OutboundSpec, Protocol, sanitize_error_text};
+use crate::dgst::hex_lower;
 use crate::paths;
 
 pub const VERSION: &str = include_str!("../data/xray-version.txt");
@@ -481,22 +482,22 @@ pub async fn ensure_binary(fetch: &impl BinaryFetch) -> Result<PathBuf> {
     // Fast path: a memoized success (file still present) returns without
     // queueing behind the download lock.
     let snapshot = { state.lock().await.clone() };
-    if let Some(Ok(path)) = &snapshot {
-        if cached_ok(path) {
-            return Ok(path.clone());
-        }
-        // cached binary vanished or truncated: treat as miss
+    if let Some(Ok(path)) = &snapshot
+        && cached_ok(path)
+    {
+        return Ok(path.clone());
     }
+    // cached binary vanished or truncated: treat as miss
     if let Some(Err(message)) = &snapshot {
         return Err(anyhow!(message.clone()));
     }
     // Slow path: hold the async lock across resolution so concurrent
     // attempts share ONE download instead of stampeding the origin.
     let mut guard = state.lock().await;
-    if let Some(Ok(path)) = &*guard {
-        if cached_ok(path) {
-            return Ok(path.clone());
-        }
+    if let Some(Ok(path)) = &*guard
+        && cached_ok(path)
+    {
+        return Ok(path.clone());
     }
     let result = resolve_binary(fetch).await;
     match &result {
@@ -600,14 +601,6 @@ pub async fn download_binary(fetch: &impl BinaryFetch) -> Result<PathBuf> {
     Ok(dest)
 }
 
-fn hex_lower(bytes: &[u8]) -> String {
-    let mut s = String::with_capacity(bytes.len() * 2);
-    for b in bytes {
-        s.push_str(&format!("{b:02x}"));
-    }
-    s
-}
-
 fn random_u32() -> u32 {
     RngCore::next_u32(&mut OsRng)
 }
@@ -691,10 +684,10 @@ impl BinaryFetch for RealFetch {
             .context("failed to start download")?
             .error_for_status()
             .context("download returned an error")?;
-        if let Some(len) = resp.content_length() {
-            if len > MAX_BODY_BYTES {
-                bail!("response body too large: {len} bytes exceeds 64 MiB cap");
-            }
+        if let Some(len) = resp.content_length()
+            && len > MAX_BODY_BYTES
+        {
+            bail!("response body too large: {len} bytes exceeds 64 MiB cap");
         }
         let bytes = resp.bytes().await.context("failed to read download body")?;
         if bytes.len() as u64 > MAX_BODY_BYTES {
