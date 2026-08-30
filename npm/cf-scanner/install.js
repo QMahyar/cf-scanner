@@ -23,10 +23,11 @@ const path = require("path");
 // ---------------------------------------------------------------------------
 
 const REPO = "qmahyar/cf-scanner";
-// npm package version and the GitHub release tag the binary is downloaded
-// from. These MUST match `Cargo.toml` version per docs/release-process.md
-// (parity job enforces Cargo.toml == npm version == RELEASE_TAG). Bump all
-// three together on every release; never republish the wrapper alone.
+// MUST match: Cargo.toml version == npm/cf-scanner/package.json version ==
+// RELEASE_TAG (without leading 'v'). The version-parity CI job
+// (.github/workflows/checks.yml: version-parity) enforces this. Bump all
+// three together on every release; never republish the same npm version
+// (npm blocks republishing for 24h; fix with a PATCH bump).
 const VERSION = require("./package.json").version;
 const RELEASE_TAG = "v0.12.2";
 

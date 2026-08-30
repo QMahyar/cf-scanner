@@ -11,9 +11,13 @@ A single cross-platform Rust binary that finds working Cloudflare IPs/endpoints
 on ISP-restricted networks. Two modes:
 
 - **CDN/proxy mode** — phase 1: TCP+TLS handshake scan of Cloudflare IPv4
-  ranges; phase 2 (optional): verify candidate IPs against a real proxy config
-  (VLESS/Trojan/VMess/SS via embedded Xray subprocess, with DPI-bypass
-  fragmentation + SNI variants).
+  ranges; phase 2 (optional): hybrid verification of candidate IPs against a
+  real proxy config — plain VLESS/Trojan (no fragmentation, no `ws`) verifies
+  in-process (`inline_verify.rs`, no subprocess); every other combo (VMess/SS,
+  `ws` transports, any DPI fragmentation preset) verifies through the embedded
+  Xray subprocess, with DPI-bypass fragmentation + SNI variants. Each
+  `Phase2Verdict.verifier` reports `inline` vs `xray` so the UI can surface the
+  path.
 - **WARP mode** — UDP endpoint discovery over known Cloudflare WARP pools using
   a real WireGuard handshake probe; optional verification with the user's own
   WireGuard/AmneziaWG config; opt-in full config generation via Cloudflare's
@@ -37,29 +41,54 @@ copy/save working IPs one-per-line — all in one binary, no external services.
 - TLS probing: `tokio-rustls` + `rustls` (no OpenSSL)
 - `serde` / `serde_json` (API + configs)
 - Xray phase 2: spawn official `xray` binary subprocess, local socks
-  inbound; fragment via freedom outbound + `sockopt.dialerProxy`
+  inbound; fragment via freedom outbound + `sockopt.dialerProxy`. Hybrid
+  verifier: `verify::HybridTunnelProbe` routes `FragmentPreset::Off` +
+  `vless|trojan` + non-`ws` + `tls|none` to `inline_verify::InlineTunnelProbe`
+  (in-process, ~0ms spawn), everything else to `xray::XrayTunnelProbe`.
 - WARP probe: `boringtun` (0.7.x) for WireGuard Init/parse; `reqwest` for the
   Cloudflare client API (`api.cloudflareclient.com/v0a884`) registration
 - GeoIP: `maxminddb` 0.30 (built-in `geoip2` types), db-ip.com Lite MMDB
   embedded via `include_bytes!`
 - Logging: `tracing` + `tracing-subscriber`; `anyhow` (errors)
-- Frontend: one embedded HTML file, vanilla JS + native EventSource, custom
-  design system (0.3.0) — see docs/review/product-review-2026-08-13.md
-  - Shipped reality (v0.7+): Svelte 5 SPA in `ui/` compiled to committed `ui/dist`, embedded via `rust-embed` (`src/server/mod.rs`), bilingual EN/FA.
-- Configuration: hand-rolled JSON in the platform data dir (`profiles.json`,
-  `identity.json`, refreshed ranges); no config crate, no TOML
+- Frontend: Svelte 5 (runes-only) + Tailwind 4 + Vite 7 in `ui/` compiled to
+  committed `ui/dist`, embedded via `rust-embed` (`src/server/mod.rs`),
+  bilingual EN/FA, single origin, no external assets. See
+  `docs/review/product-review-2026-08-13.md`. Dev: `cd ui && npm ci && npm run check && npm run build`; commit `ui/src` with `ui/dist`.
+- Tray (Windows-only): `tray-icon` 0.24 (default-features off) + `winreg` 0.56
+  behind `serve --tray`; `--autostart` registers `serve --tray` at
+  `HKCU\Software\Microsoft\Windows\CurrentVersion\Run\CF-Scanner` (requires
+  `--tray`; `remove` works without). Non-Windows stub logs and serves without
+  tray.
+- Caps (enforced in `src/api/limits.rs` + `src/api/validate.rs`): ports 1-65535,
+  max 64 distinct; concurrency 1-1000 (default 64); timeout 100-30000 ms
+  (default 3000); scan count ≤100_000; `stop.found`/`cap` ≤100_000_000;
+  warp endpoints ≤2048, `probes_per_endpoint` 1-10; phase2 entries ≤8, each
+  ≤8 KiB, SNIs ≤256 B, probe URLs ≤2 KiB, `wgconf` ≤64 KiB; profiles ≤50
+  (2 MiB body cap, wgconf stripped on persist).
+- Configuration: hand-rolled JSON in the platform data dir (`identity.json`
+  for WARP keys with 0600 on Unix, `profiles.json` up to 50 `ScanConfig`s with
+  wgconf stripped on persist, `refreshed-ranges.json` + `refreshed-ranges-v6.json`);
+  no config crate, no TOML. CLI `--phase2-configs` accepts local file paths;
+  the HTTP API accepts URLs/URIs only (file paths are CLI-only, validated at
+  `server/mod.rs::start_scan`).
 
 ## 3. Commands
 
 ```
 Build:            cargo build --release
-Dev run:          cargo run -- serve            # start API + UI on 127.0.0.1:8765
+Dev run:          cargo run -- serve --open     # start API + UI on 127.0.0.1:8765
 Test:             cargo test
 Lint:             cargo clippy --all-targets -- -D warnings
 Fmt check:        cargo fmt --check
-Scan (one-shot):  cargo run -- scan --mode cdn --preset quick --target 20
-                  cargo run -- scan --mode warp --ports 2408,500
-Refresh ranges:   cargo run -- ranges refresh
+Scan (one-shot):  cargo run -- scan --preset quick --target 20 --cap 5000
+                  cargo run -- scan --mode warp --count 512 --ports 2408,500
+                  cargo run -- scan --phase2-configs vless://... --phase2-fragment medium
+Serve (tray):     cargo run -- serve --tray --autostart   # Windows: tray + HKCU autostart
+Wizard:           cargo run -- wizard
+Ranges:           cargo run -- ranges refresh [--ipv6]
+Warp gen:         cargo run -- warp-config generate [--out wg.conf] [--license KEY]
+Warp export:      cargo run -- warp-config export [--out wg.conf]
+Export link:      cargo run -- export-config --config vless://... --ip 1.2.3.4 --port 443
 Install dist:     cargo install cargo-dist   (Arch: pacman -S cargo-dist)
 Release dry-run:  dist plan --tag=vX.Y.Z
 Release:          dist build --output-format=json "--artifacts=global" ... (CI only, on tag push)
@@ -71,29 +100,34 @@ Release:          dist build --output-format=json "--artifacts=global" ... (CI o
 src/
   main.rs            CLI entry (clap): serve | scan | ranges | wizard |
                      warp-config | export-config
-  server/{mod,state,error,guard,sse}.rs  axum app: API routes, SSE, static frontend (split from single file in v0.8.x)
+  server/{mod,state,error,guard,sse}.rs  axum app: API routes, SSE, static frontend via rust-embed
   engine/            ScanController: orchestration, stop conditions, progress
     mod.rs           controller, event stream re-sync, pool planning/sampling
     cdn.rs           CDN phase-1 probe loop + phase-2 handoff
-    phase2.rs        phase-2 real-config verification orchestration
+    phase2.rs        phase-2 real-config verification orchestration (hybrid routing)
     warp.rs          WARP UDP probe orchestration
-  ranges.rs          bundled CF ranges, refresh, custom CIDR, exclusions
+    plan.rs          plan + SplitMix64 sampling (dense /24 skip, lazy Every)
+  ranges/{mod,pool,official,http}.rs  bundled CF ranges, pool, refresh, custom CIDR, exclusions
   xray.rs            xray binary management: download/cache/checksum, spawn,
                      config build (fragment/sockopt), per-IP verdict
+  verify.rs          HybridTunnelProbe (inline vs xray) + per-attempt trial dirs, socks probe
+  inline_verify.rs   in-process vless/trojan verifier (no xray spawn)
+  socks.rs           SOCKS5 GET through the tunnel
+  tray.rs            Windows tray-icon + HKCU autostart (stub elsewhere)
   configs.rs         parse vless:// trojan:// vmess:// ss:// URIs, sub URLs,
                      Xray JSON → normalized outbound spec
-  warp.rs            WARP pools, UDP probe (boringtun), loss/latency
+  warp.rs            WARP pools, UDP probe (boringtun), loss/latency, SocketCache
   warpgen.rs         registration API client (v0a884), wgconf builder,
                      WARP+ license binding
-  verify.rs          phase-2 tunnel + wgconf verification
   wgconf.rs          WireGuard/AmneziaWG config parse + render
-  paths.rs           platform data-dir paths
+  dgst.rs            strict .dgst SHA2-256 parser (shared with build.rs)
+  paths.rs           platform data-dir paths (0600 secrets, write gate)
   probe.rs           TLS handshake probe + scoring (latency)
-   geo.rs             mmdb lookup (country), /cdn-cgi/trace colo parse
-   cli_wizard.rs      interactive prompts over the same API
-   api/               request/response types (the contract all UIs share)
-embed/               (superseded: the frontend is `ui/src` (Svelte 5) built
-                     to committed `ui/dist`, embedded via rust-embed)
+  geo.rs             mmdb lookup (country), /cdn-cgi/trace colo parse
+  cli_wizard.rs      interactive prompts over the same API
+  api/{types,limits,validate,error}.rs  request/response contract + caps
+ui/src               Svelte 5 (runes-only) + Tailwind 4 + Vite SPA
+ui/dist              committed build output embedded via rust-embed
 data/
   cf-ranges.txt      official IPv4 CIDRs
   cf-ranges-v6.txt   official IPv6 CIDRs (opt-in since v0.2.0)
@@ -120,6 +154,10 @@ wix/                 MSI installer source
   domain → API (no serialization in engine).
 - Every public async function that touches the network takes a timeout;
   no unbounded loops — all scan loops check stop conditions every iteration.
+- Caps are single-sourced in `src/api/limits.rs`; `ScanConfig::validate()`
+  enforces them before any scan starts. New request fields use
+  `#[serde(default)]` so additive evolution stays compatible; `deny_unknown_fields`
+  keeps unknown keys at 422 (`invalid_config`).
 - Naming: snake_case; verbs for tasks (`probe`, `verify`), nouns for types
   (`Verdict`, `ScanConfig`).
 - No comments unless explaining WHY (doubt-driven style); no dead code;
@@ -172,9 +210,10 @@ pub struct Verdict {
 
 - **Always:** run `cargo test` + `cargo clippy -D warnings` + `cargo fmt
   --check` before committing; validate every user input (ports 1-65535, valid
-  CIDRs, URI schemes); check `.dgst` checksums for downloaded xray binaries;
-  bind 127.0.0.1 only unless an explicit flag changes it; keep challenge
-  content (configs, generated keys) out of logs.
+  CIDRs, URI schemes, caps from §2) and reject over-cap requests (413 for
+  profiles, 422 `invalid_config` for scan caps); check `.dgst` checksums for
+  downloaded xray binaries; bind 127.0.0.1 only unless an explicit flag changes
+  it; keep challenge content (configs, generated keys) out of logs.
 - **Ask first:** adding dependencies; changing the API contract
   (`src/api/`); modifying dist/release config; bundling a new binary or data
   file; changing the default scan behavior.
@@ -187,10 +226,12 @@ pub struct Verdict {
 
 - [ ] `cargo run` starts the server on 127.0.0.1, prints URL, offers browser
 - [ ] CDN phase-1 scan runs with presets + custom count, ports, exclusions,
-      stop-after-N + cap; results live in frontend and API
-- [ ] Phase 2 verifies a candidate IP through embedded Xray with the user's
-      config; verdict includes fragment preset + SNI; xray binary bundled in
-      release archives (fallback: checksum-verified runtime download)
+      stop-after-N + cap; results live in frontend and API; caps enforced
+      (ports ≤64, count ≤100k, stop ≤100M)
+- [ ] Phase 2 hybrid verification: plain vless/trojan verifies in-process,
+      everything else through embedded Xray with the user's config; verdict
+      includes fragment preset + SNI + `verifier` (inline|xray); xray binary
+      bundled in release archives (fallback: checksum-verified runtime download)
 - [ ] WARP mode probes known pools × ports with WG Init; working = open +
       zero probe loss (latency + 0% loss); works with user wgconf (incl.
       AmneziaWG-style)
@@ -198,11 +239,16 @@ pub struct Verdict {
       exported as text/.conf; WARP+ binding option present
 - [ ] Results: last-scan-only + reset; sort by latency/country/datacenter/loss;
       copy with ports / raw IPs (one per line, no trailing whitespace); save
+- [ ] Profiles: up to 50 presaved ScanConfigs, wgconf stripped on persist, 0600
+      on Unix, round-tripped via `/api/profiles`
 - [ ] GeoIP: country via embedded mmdb offline; datacenter colo via
       /cdn-cgi/trace in phase 2
+- [ ] Frontend: Svelte 5 SPA in `ui/` → committed `ui/dist` via rust-embed,
+      `npm run check && npm run build` before commit; `ui/dist` drift fails CI
 - [ ] `dist plan` passes for the 3-target matrix (linux x86_64/aarch64 +
-      windows x86_64); PR CI runs test+clippy+fmt
+      windows x86_64); PR CI runs test+clippy+fmt+coverage+ui:a11y+version-parity
 - [ ] README documents Termux musl caveat + xray glibc note + SmartScreen note
+- [ ] Tray: `serve --tray` + `--autostart` (Windows) covered in README + QA runbook
 
 ## 9. Decisions (confirmed 2026-08-12)
 
