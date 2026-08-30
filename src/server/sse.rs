@@ -1,7 +1,9 @@
 //! SSE event streaming: slot accounting, the lag-surviving terminal-bounded
 //! stream, and the engine-event to wire-event mapping.
 
+use std::collections::{HashSet, VecDeque};
 use std::convert::Infallible;
+use std::net::IpAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -56,6 +58,9 @@ pub(crate) async fn events(
             replay: replay.map(|ev| (ev, false)),
             last_terminal: Arc::clone(&state.last_terminal),
             epoch: current_epoch,
+            controller: Arc::clone(&state.controller),
+            seen: HashSet::new(),
+            pending: VecDeque::new(),
         });
     Ok(Sse::new(stream).keep_alive(axum::response::sse::KeepAlive::default()))
 }
@@ -77,6 +82,9 @@ pub(crate) struct TerminalBounded {
     pub(super) replay: Option<(ScanEvent, bool)>,
     pub(super) last_terminal: Arc<Mutex<Option<(u64, ScanEvent)>>>,
     pub(super) epoch: u64,
+    pub(super) controller: Arc<crate::engine::ScanController>,
+    pub(super) seen: HashSet<(IpAddr, u16)>,
+    pub(super) pending: VecDeque<ScanEvent>,
 }
 
 #[allow(clippy::ref_option)]
@@ -101,8 +109,17 @@ impl Stream for TerminalBounded {
             }
         }
         loop {
+            if let Some(ev) = self.pending.pop_front() {
+                if let Some(event) = map_event(ev) {
+                    return std::task::Poll::Ready(Some(Ok(event)));
+                }
+                continue;
+            }
             match Pin::new(&mut self.rx).poll_next(cx) {
                 std::task::Poll::Ready(Some(Ok(ev))) => {
+                    if let ScanEvent::Result(v) = &ev {
+                        self.seen.insert((v.ip, v.port));
+                    }
                     let terminal = matches!(ev, ScanEvent::Finished(_) | ScanEvent::Failed(_));
                     match map_event(ev) {
                         Some(event) => {
@@ -119,10 +136,25 @@ impl Stream for TerminalBounded {
                         }
                     }
                 }
-                // Lagged: avoid closing the stream (reconnect storm). Emit a
-                // fresh terminal snapshot if one exists for this epoch, then
+                // Lagged: avoid closing the stream (reconnect storm). Re-sync
+                // missed verdicts from the store (deduped by ip/port) and emit
+                // a fresh terminal snapshot if one exists for this epoch, then
                 // keep listening for live events.
                 std::task::Poll::Ready(Some(Err(_lagged))) => {
+                    let mut to_add = Vec::new();
+                    self.controller.for_each_result(|v| {
+                        to_add.push(v.clone());
+                    });
+                    for v in to_add {
+                        if self.seen.insert((v.ip, v.port)) {
+                            self.pending.push_back(ScanEvent::Result(Box::new(v)));
+                        }
+                    }
+                    if let Some(ev) = self.pending.pop_front()
+                        && let Some(event) = map_event(ev)
+                    {
+                        return std::task::Poll::Ready(Some(Ok(event)));
+                    }
                     if let Some(ev) = self
                         .last_terminal
                         .lock()

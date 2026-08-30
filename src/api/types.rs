@@ -113,6 +113,7 @@ pub enum Verifier {
 
 /// Free-form Xray fragment values (Int32Range strings).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CustomFragment {
     /// `"tlshello"` or `"1-3"`
     pub packets: String,
@@ -222,7 +223,9 @@ pub struct ScanConfig {
     /// entirely (requires `phase2` configs and a store with candidates).
     #[serde(default)]
     pub phase2_only: bool,
+    #[serde(default)]
     pub phase2: Option<Phase2Config>,
+    #[serde(default)]
     pub warp: Option<WarpConfig>,
 }
 
@@ -320,6 +323,80 @@ pub enum ScanEvent {
     /// The run aborted before finishing (e.g. phase-2 setup failed); the
     /// message is redacted and safe for the UI/stderr. No `Finished` follows.
     Failed(FailedPayload),
+}
+
+// ── Wire payloads (server ↔ clients); kept here so the contract is one
+// place. All are deny_unknown_fields so newkeys are rejected (422) per the
+// v0.8.0 invariant.
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ResultsPayload {
+    pub results: Vec<Verdict>,
+    pub summary: Option<ScanSummary>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StatusPayload {
+    pub version: String,
+    pub is_running: bool,
+    pub has_candidates: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RangesPayload {
+    pub host_count: u64,
+    pub last_updated: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct XrayStatusPayload {
+    pub found: bool,
+    pub path: Option<String>,
+    pub data_dir: String,
+    pub version: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct XrayDownloadResponse {
+    pub success: bool,
+    pub path: Option<String>,
+    pub error: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RegisterRequest {
+    #[serde(default)]
+    pub license: Option<String>,
+    #[serde(default)]
+    pub overwrite: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RegisterResponse {
+    pub wgconf: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExportConfigRequest {
+    pub config: String,
+    pub ip: String,
+    pub port: u16,
+    #[serde(default)]
+    pub sni: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExportConfigResponse {
+    pub uri: String,
 }
 
 impl ScanConfig {

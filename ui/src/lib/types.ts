@@ -1,8 +1,7 @@
 export type Mode = "Cdn" | "Warp";
 export type CdnPreset = "Quick" | "Normal" | "Full";
 export type FragmentPreset = "off" | "light" | "medium" | "heavy" | "custom";
-/** Wire form (serde PascalCase) — the form keeps lowercase, buildConfig maps. */
-export type FragmentWire = "Off" | "Light" | "Medium" | "Heavy" | "Custom";
+export type FragmentWire = "off" | "light" | "medium" | "heavy" | "custom";
 
 export interface Phase2Config {
   configs: string[];
