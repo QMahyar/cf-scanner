@@ -6,7 +6,7 @@
   import type { FormState } from "../formState";
 
   let {
-    form,
+    form = $bindable(),
   }: {
     form: FormState;
   } = $props();
