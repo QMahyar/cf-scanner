@@ -301,18 +301,18 @@ pub fn effective_pool_from(
     Ok(pool.excluding(&excluded))
 }
 
-pub fn effective_pool(
+pub async fn effective_pool(
     custom_cidrs: &[String],
     exclude: &[String],
     include_v6: bool,
 ) -> Result<CidrPool> {
     let runtime_v4 = match paths::refreshed_ranges_path() {
-        Ok(p) => fs::read_to_string(p).ok(),
+        Ok(p) => tokio::fs::read_to_string(p).await.ok(),
         Err(_) => None,
     };
     let runtime_v6 = if include_v6 {
         match paths::refreshed_ranges_v6_path() {
-            Ok(p) => fs::read_to_string(p).ok(),
+            Ok(p) => tokio::fs::read_to_string(p).await.ok(),
             Err(_) => None,
         }
     } else {

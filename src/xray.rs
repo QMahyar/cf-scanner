@@ -481,22 +481,22 @@ pub async fn ensure_binary(fetch: &impl BinaryFetch) -> Result<PathBuf> {
     // Fast path: a memoized success (file still present) returns without
     // queueing behind the download lock.
     let snapshot = { state.lock().await.clone() };
-    if let Some(Ok(path)) = &snapshot {
-        if cached_ok(path) {
-            return Ok(path.clone());
-        }
-        // cached binary vanished or truncated: treat as miss
+    if let Some(Ok(path)) = &snapshot
+        && cached_ok(path)
+    {
+        return Ok(path.clone());
     }
+    // cached binary vanished or truncated: treat as miss
     if let Some(Err(message)) = &snapshot {
         return Err(anyhow!(message.clone()));
     }
     // Slow path: hold the async lock across resolution so concurrent
     // attempts share ONE download instead of stampeding the origin.
     let mut guard = state.lock().await;
-    if let Some(Ok(path)) = &*guard {
-        if cached_ok(path) {
-            return Ok(path.clone());
-        }
+    if let Some(Ok(path)) = &*guard
+        && cached_ok(path)
+    {
+        return Ok(path.clone());
     }
     let result = resolve_binary(fetch).await;
     match &result {
@@ -513,26 +513,26 @@ async fn resolve_binary(fetch: &impl BinaryFetch) -> Result<PathBuf> {
         return Ok(bundled);
     }
     if let Some(cached) = cached_in_data_dir() {
-        if cached_matches_dgst(&cached) {
+        if cached_matches_dgst(&cached).await {
             return Ok(cached);
         }
         tracing::warn!(path = %cached.display(), "cached xray binary failed its checksum; re-downloading");
-        let _ = std::fs::remove_file(dgst_path(&cached));
-        let _ = std::fs::remove_file(&cached);
+        let _ = tokio::fs::remove_file(dgst_path(&cached)).await;
+        let _ = tokio::fs::remove_file(&cached).await;
     }
     download_binary(fetch).await
 }
 
 /// SHA-256 of the on-disk binary vs its stored `.dgst`; a missing or
 /// unparsable `.dgst` counts as a mismatch (refuse the unverifiable cache).
-fn cached_matches_dgst(bin: &Path) -> bool {
-    let Ok(text) = std::fs::read_to_string(dgst_path(bin)) else {
+async fn cached_matches_dgst(bin: &Path) -> bool {
+    let Ok(text) = tokio::fs::read_to_string(dgst_path(bin)).await else {
         return false;
     };
     let Ok(expected) = parse_dgst(&text, exe_name()) else {
         return false;
     };
-    let Ok(bytes) = std::fs::read(bin) else {
+    let Ok(bytes) = tokio::fs::read(bin).await else {
         return false;
     };
     hex_lower(&Sha256::digest(&bytes)) == expected
@@ -691,10 +691,10 @@ impl BinaryFetch for RealFetch {
             .context("failed to start download")?
             .error_for_status()
             .context("download returned an error")?;
-        if let Some(len) = resp.content_length() {
-            if len > MAX_BODY_BYTES {
-                bail!("response body too large: {len} bytes exceeds 64 MiB cap");
-            }
+        if let Some(len) = resp.content_length()
+            && len > MAX_BODY_BYTES
+        {
+            bail!("response body too large: {len} bytes exceeds 64 MiB cap");
         }
         let bytes = resp.bytes().await.context("failed to read download body")?;
         if bytes.len() as u64 > MAX_BODY_BYTES {
@@ -1187,7 +1187,7 @@ mod tests {
         assert_eq!(resolved, bin);
         assert_eq!(std::fs::read(&bin).unwrap(), b"good xray payload");
         assert!(
-            cached_matches_dgst(&bin),
+            cached_matches_dgst(&bin).await,
             "re-download must leave a verifiable dgst"
         );
     }

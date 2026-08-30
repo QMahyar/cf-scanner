@@ -69,7 +69,7 @@ impl ScanController {
     pub fn new(transport: Arc<dyn Transport>) -> Self {
         let warp_cache = Arc::new(crate::warp::SocketCache::default());
         let warp_transport = Arc::new(
-            crate::warp::WarpTransport::with_cache(warp_cache.clone())
+            crate::warp::WarpTransport::from_cache(warp_cache.clone())
                 .expect("WARP server key must decode"),
         );
         let mut ctrl = Self::with_transports(transport, warp_transport);
@@ -426,7 +426,7 @@ impl ScanController {
     }
 
     async fn run_seeded_unguarded(&self, cfg: ScanConfig, seed: u64) -> Result<ScanSummary> {
-        let pool = ranges::effective_pool(&cfg.custom_cidrs, &cfg.exclude, cfg.include_v6)?;
+        let pool = ranges::effective_pool(&cfg.custom_cidrs, &cfg.exclude, cfg.include_v6).await?;
         self.run_seeded_with_pool(cfg, seed, pool).await
     }
 
