@@ -186,7 +186,11 @@ async fn start_scan(
     State(state): State<Arc<AppState>>,
     JsonBody(cfg): JsonBody<ScanConfig>,
 ) -> Result<StatusCode, ApiError> {
-    cfg.validate().map_err(ApiError::invalid_config)?;
+    cfg.validate().map_err(|e| {
+        let sanitized = crate::configs::sanitize_error_text(&e.to_string());
+        let truncated: String = sanitized.chars().take(512).collect();
+        ApiError::invalid_config(truncated)
+    })?;
     if let Some(phase2) = &cfg.phase2
         && let Some(local) = phase2.configs.iter().find(|c| {
             c.is_empty() || c.to_ascii_lowercase().starts_with("file://") || !c.contains("://")
@@ -526,7 +530,11 @@ async fn put_profile(
     JsonBody(cfg): JsonBody<ScanConfig>,
 ) -> Result<(StatusCode, Json<ProfilePayload>), ApiError> {
     validate_profile_name(&name).map_err(ApiError::bad_request)?;
-    cfg.validate().map_err(ApiError::invalid_config)?;
+    cfg.validate().map_err(|e| {
+        let sanitized = crate::configs::sanitize_error_text(&e.to_string());
+        let truncated: String = sanitized.chars().take(512).collect();
+        ApiError::invalid_config(truncated)
+    })?;
     let cfg = sanitize_config(cfg);
     let mut profiles = state.profiles.write().await;
     if !profiles.contains_key(&name) && profiles.len() >= MAX_PROFILES {

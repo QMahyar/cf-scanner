@@ -79,3 +79,6 @@ lto = "thin"
 [profile.release]
 lto = "thin"
 codegen-units = 1
+
+[lints.clippy]
+collapsible_if = "allow"

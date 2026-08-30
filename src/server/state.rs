@@ -61,19 +61,30 @@ pub(crate) async fn persist_profiles(
         // tmp + rename under the write gate: a concurrent reader (or the
         // next writer) must never observe a half-written profiles.json.
         let tmp = path.with_extension("json.tmp");
-        if std::fs::write(&tmp, json).is_ok() {
-            // Profiles can hold sensitive scan configs: keep the file
-            // user-only where the filesystem supports permissions (mirrors
-            // warpgen::write_private).
+        let write_ok = {
             #[cfg(unix)]
             {
-                use std::os::unix::fs::PermissionsExt as _;
-                let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600));
+                use std::io::Write as _;
+                use std::os::unix::fs::OpenOptionsExt as _;
+                std::fs::OpenOptions::new()
+                    .write(true)
+                    .create(true)
+                    .truncate(true)
+                    .mode(0o600)
+                    .open(&tmp)
+                    .and_then(|mut f| f.write_all(json.as_bytes()))
+                    .is_ok()
             }
             #[cfg(not(unix))]
             {
-                paths::lock_down_to_owner(&tmp).ok();
+                let ok = std::fs::write(&tmp, json.as_bytes()).is_ok();
+                if ok {
+                    let _ = paths::lock_down_to_owner(&tmp);
+                }
+                ok
             }
+        };
+        if write_ok {
             let _ = std::fs::rename(&tmp, &path);
         } else {
             let _ = std::fs::remove_file(&tmp);

@@ -51,7 +51,7 @@ pub(crate) fn reject_non_routable(cfg: &super::types::ScanConfig) -> Result<(), 
     match cfg.mode {
         super::types::Mode::Cdn => {
             for cidr in &cfg.custom_cidrs {
-                let net = cidr.split('/').next().unwrap_or(cidr);
+                let net = cidr.split('/').next().unwrap_or(cidr).trim();
                 if banned(net) {
                     return Err(ConfigError::NonRoutableCidr(cidr.clone()));
                 }
@@ -117,6 +117,14 @@ pub(crate) fn validate_phase2(p2: &super::types::Phase2Config) -> Result<(), Con
     }
     if p2.snis.iter().any(|s| s.len() > MAX_SNI_BYTES) {
         return Err(ConfigError::SniTooLong(MAX_SNI_BYTES));
+    }
+    for entry in &p2.configs {
+        if entry.contains("://") {
+            let lower = entry.to_ascii_lowercase();
+            if lower.starts_with("http://") {
+                return Err(ConfigError::InvalidProbeUrl);
+            }
+        }
     }
     // SNI is embedded into generated xray configs and TLS hellos verbatim:
     // restrict it to well-formed hostnames or raw IPs so a crafted value

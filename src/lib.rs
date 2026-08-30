@@ -6,6 +6,8 @@
 //! consume. `geo`, `socks`, and `inline_verify` are internal plumbing and
 //! stay crate-private; reach them through their owners (engine/verify).
 
+#![allow(clippy::collapsible_if)]
+
 pub mod api;
 pub mod cli_wizard;
 pub mod configs;

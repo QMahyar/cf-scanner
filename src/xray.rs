@@ -675,6 +675,7 @@ pub struct RealFetch;
 
 impl BinaryFetch for RealFetch {
     async fn bytes(&self, url: &str) -> Result<Vec<u8>> {
+        crate::ranges::validate_fetch_url(url)?;
         const MAX_BODY_BYTES: u64 = 64 * 1024 * 1024; // 64 MiB
         let resp = crate::ranges::HTTP_CLIENT
             .get(url)
