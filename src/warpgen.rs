@@ -616,22 +616,14 @@ fn write_stdout(text: &str) {
 
 /// The `tos` field of the register request: a full RFC3339-style timestamp
 /// with milliseconds and UTC offset (wgcf's working clients send this; a
-/// bare date is rejected with "Invalid registration request"). Civil date
-/// from epoch days (Howard Hinnant's algorithm; no chrono dependency).
+/// bare date is rejected with "Invalid registration request"). Reuses the
+/// canonical `ranges::rfc3339_utc` civil-date logic instead of duplicating
+/// Howard Hinnant's algorithm.
 fn tos_timestamp() -> String {
-    let now = unix_now();
-    let days = now / 86_400;
-    let z = days as i64 + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z.rem_euclid(146_097);
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
-    let (h, mi, s) = ((now % 86_400) / 3600, (now % 3600) / 60, now % 60);
-    format!("{y:04}-{m:02}-{d:02}T{h:02}:{mi:02}:{s:02}.00+00:00")
+    let base = crate::ranges::rfc3339_utc(crate::ranges::unix_now());
+    // base is "YYYY-MM-DDTHH:MM:SSZ" -> "YYYY-MM-DDTHH:MM:SS.00+00:00"
+    let without_z = base.strip_suffix('Z').unwrap_or(&base);
+    format!("{without_z}.00+00:00")
 }
 
 #[cfg(test)]

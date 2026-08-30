@@ -64,7 +64,7 @@ pub fn validate_fetch_url(url: &str) -> Result<()> {
                 }
             }
             url::Host::Domain(domain) => {
-                let decoded = percent_encoding::percent_decode_str(domain).decode_utf8_lossy();
+                let decoded = crate::util::percent_decode(domain);
                 let lower = decoded.to_ascii_lowercase();
                 lower == "localhost"
                     || lower.ends_with(".localhost")
@@ -138,7 +138,9 @@ async fn fetch_tls_inner(url: &str, extra_headers: &str) -> Result<Vec<u8>> {
         if name.is_empty() || value.is_empty() {
             continue;
         }
-        if !is_valid_header_name(name) || !is_valid_header_value(value) {
+        if http::header::HeaderName::from_bytes(name.as_bytes()).is_err()
+            || http::header::HeaderValue::from_bytes(value.as_bytes()).is_err()
+        {
             continue;
         }
         request = request.header(name, value);
@@ -148,10 +150,10 @@ async fn fetch_tls_inner(url: &str, extra_headers: &str) -> Result<Vec<u8>> {
         .await
         .with_context(|| format!("fetch failed for {}", sanitize_url_for_error(url)))?;
     const MAX_BODY_BYTES: usize = 64 * 1024 * 1024;
-    if let Some(len) = response.content_length() {
-        if len > MAX_BODY_BYTES as u64 {
-            bail!("response body exceeds the {MAX_BODY_BYTES} byte cap (Content-Length {len})");
-        }
+    if let Some(len) = response.content_length()
+        && len > MAX_BODY_BYTES as u64
+    {
+        bail!("response body exceeds the {MAX_BODY_BYTES} byte cap (Content-Length {len})");
     }
     let bytes = response.bytes().await.with_context(|| {
         format!(
@@ -163,34 +165,6 @@ async fn fetch_tls_inner(url: &str, extra_headers: &str) -> Result<Vec<u8>> {
         bail!("response body exceeded the {MAX_BODY_BYTES} byte cap");
     }
     Ok(bytes.to_vec())
-}
-
-fn is_valid_header_name(name: &str) -> bool {
-    !name.is_empty()
-        && name.bytes().all(|b| {
-            b.is_ascii_alphanumeric()
-                || matches!(
-                    b,
-                    b'!' | b'#'
-                        | b'$'
-                        | b'%'
-                        | b'&'
-                        | b'\''
-                        | b'*'
-                        | b'+'
-                        | b'-'
-                        | b'.'
-                        | b'^'
-                        | b'_'
-                        | b'`'
-                        | b'|'
-                        | b'~'
-                )
-        })
-}
-
-fn is_valid_header_value(value: &str) -> bool {
-    !value.bytes().any(|b| b == b'\r' || b == b'\n' || b == 0)
 }
 
 /// One HTTPS GET, boxed so the seam is dyn-compatible and Send (the server

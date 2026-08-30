@@ -111,7 +111,7 @@ fn refresh_cache(cache: &Path) {
         );
         std::process::exit(1);
     };
-    let actual = hex_lower(&Sha256::digest(&bytes));
+    let actual = dgst::hex_lower(&Sha256::digest(&bytes));
     if actual != geoip_pin().to_ascii_lowercase() {
         eprintln!(
             "error: db-ip mmdb checksum mismatch: got {actual}, want {}",
@@ -130,7 +130,7 @@ fn refresh_cache(cache: &Path) {
         std::process::exit(1);
     }
     let sidecar = sidecar_path(cache);
-    let digest = hex_lower(&Sha256::digest(&raw));
+    let digest = dgst::hex_lower(&Sha256::digest(&raw));
     if let Err(err) = write_atomic(&sidecar, format!("{digest}\n").as_bytes()) {
         eprintln!(
             "error: could not write digest sidecar {}: {err}",
@@ -162,7 +162,7 @@ fn cache_intact(cache: &Path) -> bool {
     let Ok(bytes) = std::fs::read(cache) else {
         return false;
     };
-    hex_lower(&Sha256::digest(&bytes)) == expected
+    dgst::hex_lower(&Sha256::digest(&bytes)) == expected
 }
 
 /// Sidecar holds just the lowercase hex digest; trailing newline tolerated.
@@ -242,7 +242,7 @@ fn bundle_xray_if_requested() {
         eprintln!("error: no SHA-256 in .dgst for {asset}");
         std::process::exit(1)
     });
-    let actual = hex_lower(&Sha256::digest(&zip));
+    let actual = dgst::hex_lower(&Sha256::digest(&zip));
     if actual != expected {
         eprintln!("error: xray checksum mismatch: got {actual}, want {expected}");
         std::process::exit(1);
@@ -339,16 +339,6 @@ fn xray_asset(target: &str) -> Option<String> {
         return None;
     };
     Some(format!("Xray-{os}-{arch}.zip"))
-}
-
-/// Digest extraction lives in the shared src/dgst.rs (also included by
-/// src/xray.rs) — keep it the single spec of the `.dgst` format.
-fn hex_lower(bytes: &[u8]) -> String {
-    let mut s = String::with_capacity(bytes.len() * 2);
-    for b in bytes {
-        s.push_str(&format!("{b:02x}"));
-    }
-    s
 }
 
 #[cfg(unix)]

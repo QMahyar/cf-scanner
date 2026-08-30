@@ -34,9 +34,9 @@ jobs:
         run: cargo test --doc --locked
       - name: Clippy
         run: cargo clippy --all-targets --locked -- -D warnings
+      - name: Check all features (dist-bundle-xray parity on main)
+        run: cargo check --all-features --locked
       - name: Format
-        # fmt is workspace-wide; rustfmt honors .gitattributes so Windows CI now matches.
-        if: ${{ runner.os != 'Windows' }}
         run: cargo fmt --check
 
   coverage:
@@ -52,7 +52,7 @@ jobs:
         with:
           cache-on-failure: true
       - name: Measure coverage + gate
-        run: cargo llvm-cov --all-targets --locked --lcov --output-path lcov.info --fail-under-lines 70
+        run: cargo llvm-cov --all-targets --doc --locked --lcov --output-path lcov.info --fail-under-lines 70
       - uses: actions/upload-artifact@v4
         with:
           name: lcov.info
@@ -80,13 +80,10 @@ jobs:
       - name: Build
         run: npm run build
         working-directory: ui
-      - name: Check dist drift (warning only — Node 22 vs 25 hash differs)
-        # TODO: make Vite/Tailwind output deterministic across Node 22/25 +
-        # Windows/Linux (hash currently differs: DM4UxQVz vs DbrwvqFV vs 4UPsNv20).
-        # Warning keeps main green while we pin the build env (see ui/package.json
-        # engines + .nvmrc). Real drift (missing rebuild) still shows as warning.
-        run: |
-          git diff --exit-code ui/dist || echo "::warning::dist drift — rebuild locally with npx -p node@22 npm run build"
+      - name: Check dist drift
+        # Fails when ui/src changed without a rebuild; run `cd ui && npm run build`
+        # and commit ui/dist together with ui/src (see docs/development.md).
+        run: git diff --exit-code ui/dist
 
   ui-a11y:
     name: ui a11y (axe, desktop + mobile)

@@ -69,7 +69,7 @@ fn write_fake_xray(bin_path: &Path, marker_env_key: &str) -> std::io::Result<()>
 
     use sha2::Digest as _;
     let bytes = std::fs::read(bin_path)?;
-    let digest = hex_lower(&sha2::Sha256::digest(&bytes));
+    let digest = cf_scanner::dgst::hex_lower(&sha2::Sha256::digest(&bytes));
     std::fs::write(dgst_path(bin_path), format!("SHA2-256= {digest}\n"))?;
     // The fake reads its marker path from the environment it inherits.
     // SAFETY-free process env mutation happens in the parent test below.
@@ -89,14 +89,6 @@ fn tmp_sibling(bin: &Path, name: &str) -> PathBuf {
 
 fn dgst_path(bin: &Path) -> PathBuf {
     bin.with_extension("dgst")
-}
-
-fn hex_lower(bytes: &[u8]) -> String {
-    let mut s = String::with_capacity(bytes.len() * 2);
-    for b in bytes {
-        s.push_str(&format!("{b:02x}"));
-    }
-    s
 }
 
 fn unique_dir(name: &str) -> PathBuf {

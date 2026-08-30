@@ -2,6 +2,15 @@
 //! in build.rs) and the runtime downloader (src/xray.rs). One canonical copy
 //! so the two parsers cannot silently diverge. Std-only: build-deps are fixed.
 
+/// Lowercase hex encoding of `bytes`, matching `Sha256` hex output.
+pub fn hex_lower(bytes: &[u8]) -> String {
+    let mut s = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        s.push_str(&format!("{b:02x}"));
+    }
+    s
+}
+
 /// Digest from `.dgst` text: strict `SHA2-256= <64 hex>[ <filename>]` line
 /// grammar. A loose "first 64-char hex run" scan could grab a substring of a
 /// longer digest on a comment line, so the value must be a clean 64-hex token.

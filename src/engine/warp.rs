@@ -49,15 +49,12 @@ impl ScanController {
             let wg = crate::wgconf::parse_wg_entry(text)
                 .map_err(|e| anyhow!("invalid wgconf: {e:#}"))?;
             if let Some(cache) = &self.warp_cache {
-                Arc::new(crate::warp::WgVerifyTransport::with_cache(
-                    cache.clone(),
-                    &wg,
-                )?)
+                Arc::new(crate::warp::WgVerifyTransport::with_cache(cache.clone(), &wg).await?)
             } else {
                 Arc::new(crate::warp::WgVerifyTransport::from_config(&wg)?)
             }
         } else if let Some(cache) = &self.warp_cache {
-            Arc::new(crate::warp::WarpTransport::with_cache(cache.clone())?)
+            Arc::new(crate::warp::WarpTransport::with_cache(cache.clone()).await?)
         } else {
             self.warp_transport.clone()
         };
@@ -143,9 +140,12 @@ impl ScanController {
                     if ctx.should_stop() {
                         break;
                     }
-                    let task = match rx.recv().await {
-                        Some(task) => task,
-                        None => break,
+                    let task = tokio::select! {
+                        maybe = rx.recv() => match maybe {
+                            Some(task) => task,
+                            None => break,
+                        },
+                        _ = ctx.cancelled() => break,
                     };
                     let mut latency_ms: Option<u32> = None;
                     let mut failed = 0u64;

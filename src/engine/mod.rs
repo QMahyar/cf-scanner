@@ -69,7 +69,7 @@ impl ScanController {
     pub fn new(transport: Arc<dyn Transport>) -> Self {
         let warp_cache = Arc::new(crate::warp::SocketCache::default());
         let warp_transport = Arc::new(
-            crate::warp::WarpTransport::with_cache(warp_cache.clone())
+            crate::warp::WarpTransport::from_cache(warp_cache.clone())
                 .expect("WARP server key must decode"),
         );
         let mut ctrl = Self::with_transports(transport, warp_transport);
@@ -129,32 +129,35 @@ impl ScanController {
     /// The only legitimate full-snapshot read: prefer [`Self::has_results`]
     /// for emptiness checks, [`Self::for_each_result`] for iteration.
     pub fn results(&self) -> Vec<Verdict> {
-        sort_if_dirty(&self.store, &self.store_dirty);
-        self.store.lock().unwrap_or_else(|e| e.into_inner()).clone()
+        self.snapshot_sorted()
     }
 
     /// True once the last scan produced at least one working endpoint.
     pub fn has_results(&self) -> bool {
-        sort_if_dirty(&self.store, &self.store_dirty);
-        !self
-            .store
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .is_empty()
+        !self.snapshot_sorted().is_empty()
     }
 
     /// Iterate sorted results after taking a snapshot under the lock, so the
     /// callback runs without holding the mutex. The snapshot is dropped once
     /// iteration finishes.
     pub fn for_each_result(&self, mut f: impl FnMut(&Verdict)) {
-        sort_if_dirty(&self.store, &self.store_dirty);
-        let snapshot = {
-            let store = self.store.lock().unwrap_or_else(|e| e.into_inner());
-            store.clone()
-        };
+        let snapshot = self.snapshot_sorted();
         for v in &snapshot {
             f(v);
         }
+    }
+
+    fn snapshot_sorted(&self) -> Vec<Verdict> {
+        let mut guard = self.store.lock().unwrap_or_else(|e| e.into_inner());
+        if self.store_dirty.swap(false, Ordering::AcqRel) {
+            guard.sort_unstable_by(|a, b| {
+                a.latency_ms
+                    .cmp(&b.latency_ms)
+                    .then_with(|| a.ip.cmp(&b.ip))
+                    .then_with(|| a.port.cmp(&b.port))
+            });
+        }
+        guard.clone()
     }
 
     /// Rows that passed phase-2 verification (phase2_only summary semantics).
@@ -290,7 +293,7 @@ impl ScanController {
         // Rows this consumer already saw; every branch records into it so the
         // end-of-run store re-sync only emits rows the consumer truly missed
         // (fast consumers get exactly-once, lagging ones get a deduped tail).
-        let mut seen: HashSet<(IpAddr, u16)> = HashSet::new();
+        let mut seen: HashSet<(IpAddr, u16, bool)> = HashSet::new();
         loop {
             tokio::select! {
                 done = &mut handle => {
@@ -304,7 +307,7 @@ impl ScanController {
                         match rx.try_recv() {
                             Ok(event) => {
                                 if let ScanEvent::Result(verdict) = &event {
-                                    seen.insert((verdict.ip, verdict.port));
+                                    seen.insert((verdict.ip, verdict.port, verdict.phase2.is_some()));
                                 }
                                 on_event(event);
                             }
@@ -315,9 +318,9 @@ impl ScanController {
                     // Verdicts still in worker-local batches when the
                     // broadcast window overflowed are in the store, not the
                     // stream: re-emit any row the consumer never saw (deduped
-                    // by (ip, port)) so a lagging consumer never loses one.
+                    // by (ip, port, phase2)) so a lagging consumer never loses one.
                     self.for_each_result(|v| {
-                        if seen.insert((v.ip, v.port)) {
+                        if seen.insert((v.ip, v.port, v.phase2.is_some())) {
                             on_event(ScanEvent::Result(Box::new(v.clone())));
                         }
                     });
@@ -331,7 +334,7 @@ impl ScanController {
                         // not covered by an earlier re-sync) must still reach
                         // the consumer exactly once.
                         self.for_each_result(|v| {
-                            if seen.insert((v.ip, v.port)) {
+                            if seen.insert((v.ip, v.port, v.phase2.is_some())) {
                                 on_event(ScanEvent::Result(Box::new(v.clone())));
                             }
                         });
@@ -339,7 +342,7 @@ impl ScanController {
                     }
                     Ok(event) => {
                         if let ScanEvent::Result(verdict) = &event {
-                            seen.insert((verdict.ip, verdict.port));
+                            seen.insert((verdict.ip, verdict.port, verdict.phase2.is_some()));
                         }
                         on_event(event);
                     }
@@ -350,9 +353,9 @@ impl ScanController {
                         // store is flushed before Finished, so this can only
                         // under-report mid-run verdicts, never over-report).
                         // Duplicate rows are possible after a re-sync;
-                        // consumers keyed on (ip, port) dedupe naturally.
+                        // consumers keyed on (ip, port, phase2) dedupe naturally.
                         self.for_each_result(|v| {
-                            if seen.insert((v.ip, v.port)) {
+                            if seen.insert((v.ip, v.port, v.phase2.is_some())) {
                                 on_event(ScanEvent::Result(Box::new(v.clone())));
                             }
                         });
@@ -426,7 +429,7 @@ impl ScanController {
     }
 
     async fn run_seeded_unguarded(&self, cfg: ScanConfig, seed: u64) -> Result<ScanSummary> {
-        let pool = ranges::effective_pool(&cfg.custom_cidrs, &cfg.exclude, cfg.include_v6)?;
+        let pool = ranges::effective_pool(&cfg.custom_cidrs, &cfg.exclude, cfg.include_v6).await?;
         self.run_seeded_with_pool(cfg, seed, pool).await
     }
 
@@ -446,14 +449,12 @@ impl ScanController {
     }
 
     fn finish(&self, started: Instant, scanned: u64, found: u64) -> ScanSummary {
-        let cancel_tx = self
+        // Borrow, don't take: ResetGuard owns the clear. Taking here raced
+        // with the guard and hid cancels that fired after `finish` read.
+        let cancelled = self
             .cancel_tx
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .take();
-        // A live cancel slot holds the watch value: `true` once `cancel()`
-        // fired, so the summary can distinguish stop-from-cancel.
-        let cancelled = cancel_tx
             .as_ref()
             .map(|tx| *tx.subscribe().borrow())
             .unwrap_or(false);
@@ -473,40 +474,12 @@ impl ScanController {
     }
 }
 
-/// Concrete hosts a plan item yields, streamed lazily so a Full scan never
-/// materializes an entire `Every` range. `Sample` rolls fresh random hosts
-/// with a per-port seed so multi-port scans don't repeat the same host.
-/// v6 host spaces need u128 sampling (see `SplitMix64::below_u128`).
-enum PlanHosts<I1, I2, I3> {
-    Every(I1),
-    Sample(I2),
-    Hosts(I3),
-}
-
-impl<I1, I2, I3> Iterator for PlanHosts<I1, I2, I3>
-where
-    I1: Iterator<Item = IpAddr>,
-    I2: Iterator<Item = IpAddr>,
-    I3: Iterator<Item = IpAddr>,
-{
-    type Item = IpAddr;
-    fn next(&mut self) -> Option<IpAddr> {
-        match self {
-            Self::Every(i) => i.next(),
-            Self::Sample(i) => i.next(),
-            Self::Hosts(i) => i.next(),
-        }
-    }
-}
-
 fn plan_hosts_iter<'a>(
     item: &'a PlanItem,
     rng: &'a mut SplitMix64,
-) -> impl Iterator<Item = IpAddr> + 'a {
+) -> Box<dyn Iterator<Item = IpAddr> + Send + 'a> {
     match item {
-        PlanItem::Every { cidr } => {
-            PlanHosts::Every((0..cidr.host_count()).map(move |i| cidr.host(i)))
-        }
+        PlanItem::Every { cidr } => Box::new((0..cidr.host_count()).map(move |i| cidr.host(i))),
         PlanItem::Sample { cidr, count } => {
             let count = (*count as u128).min(cidr.host_count());
             // Dense v4 blocks (/24 and tighter) skip network and broadcast
@@ -518,7 +491,7 @@ fn plan_hosts_iter<'a>(
             };
             let mut seen = std::collections::HashSet::new();
             let mut emitted = 0u128;
-            PlanHosts::Sample(std::iter::from_fn(move || {
+            Box::new(std::iter::from_fn(move || {
                 // Draws are deduped per block: sampling with replacement
                 // produced duplicate verdicts and inflated `found` counts.
                 if emitted >= count || seen.len() as u128 >= draw_max {
@@ -537,9 +510,7 @@ fn plan_hosts_iter<'a>(
                 }
             }))
         }
-        PlanItem::Hosts { cidr, offsets } => {
-            PlanHosts::Hosts(offsets.iter().map(move |&o| cidr.host(o)))
-        }
+        PlanItem::Hosts { cidr, offsets } => Box::new(offsets.iter().map(move |&o| cidr.host(o))),
     }
 }
 
@@ -606,11 +577,11 @@ impl ProbeContext {
     /// (each worker holds at most one in-flight probe past the check).
     fn should_stop(&self) -> bool {
         *self.cancel.borrow()
-            || self.found.load(Ordering::Relaxed) >= u64::from(self.stop.found)
+            || self.found.load(Ordering::Acquire) >= u64::from(self.stop.found)
             || self
                 .stop
                 .cap
-                .is_some_and(|cap| self.scanned.load(Ordering::Relaxed) >= u64::from(cap))
+                .is_some_and(|cap| self.scanned.load(Ordering::Acquire) >= u64::from(cap))
     }
 
     async fn cancelled(&self) {
@@ -640,19 +611,6 @@ fn merge_sorted(store: &Store, dirty: &AtomicBool, batch: Vec<Verdict>) {
     let mut results = store.lock().unwrap_or_else(|e| e.into_inner());
     results.extend(batch);
     dirty.store(true, Ordering::Release);
-}
-
-fn sort_if_dirty(store: &Store, dirty: &AtomicBool) {
-    if !dirty.swap(false, Ordering::AcqRel) {
-        return;
-    }
-    let mut results = store.lock().unwrap_or_else(|e| e.into_inner());
-    results.sort_unstable_by(|a, b| {
-        a.latency_ms
-            .cmp(&b.latency_ms)
-            .then_with(|| a.ip.cmp(&b.ip))
-            .then_with(|| a.port.cmp(&b.port))
-    });
 }
 
 #[cfg(test)]

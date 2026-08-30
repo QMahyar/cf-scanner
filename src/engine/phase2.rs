@@ -81,6 +81,7 @@ impl ScanController {
         let terminal_sent = Arc::new(AtomicBool::new(false));
         let first_error: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
         let cap = cfg.stop.cap;
+        let stop_found = cfg.stop.found as usize;
 
         let specs = Arc::new(specs);
         let snis = Arc::new(snis);
@@ -109,6 +110,7 @@ impl ScanController {
                 loop {
                     if *cancel.borrow()
                         || cap.is_some_and(|c| attempts.load(Ordering::Relaxed) >= u64::from(c))
+                        || passed.lock().unwrap_or_else(|e| e.into_inner()).len() >= stop_found
                     {
                         break;
                     }
@@ -127,6 +129,9 @@ impl ScanController {
                         .contains(&(ip, port))
                     {
                         continue;
+                    }
+                    if passed.lock().unwrap_or_else(|e| e.into_inner()).len() >= stop_found {
+                        break;
                     }
                     attempts.fetch_add(1, Ordering::Relaxed);
                     let probe_result = tokio::select! {
@@ -163,6 +168,14 @@ impl ScanController {
                                     .unwrap_or_else(|e| e.into_inner())
                                     .insert((ip, port));
                             }
+                            if passed.lock().unwrap_or_else(|e| e.into_inner()).len() >= stop_found
+                                && !result.passed
+                            {
+                                break;
+                            }
+                            if passed.lock().unwrap_or_else(|e| e.into_inner()).len() > stop_found {
+                                break;
+                            }
                             if let Some(updated) =
                                 update_verdict_phase2(&store, ip, port, verdict, colo)
                             {
@@ -170,6 +183,10 @@ impl ScanController {
                             }
                         }
                         Err(err) => {
+                            if passed.lock().unwrap_or_else(|e| e.into_inner()).len() >= stop_found
+                            {
+                                break;
+                            }
                             // Local failures (spawn, config build) are kept
                             // redacted and surfaced on the row so clients see
                             // why the candidate did not verify.
@@ -187,6 +204,10 @@ impl ScanController {
                                 config_index: Some(*config_idx),
                                 verifier: None,
                             };
+                            if passed.lock().unwrap_or_else(|e| e.into_inner()).len() >= stop_found
+                            {
+                                break;
+                            }
                             if let Some(updated) =
                                 update_verdict_phase2(&store, ip, port, verdict, None)
                             {
@@ -407,10 +428,11 @@ fn redact_entry(entry: &str) -> String {
         let _ = url.set_username("***");
         let _ = url.set_password(Some("***"));
     }
-    if let Some(host) = url.host_str() {
-        if host.len() > 24 && !host.contains('.') {
-            let _ = url.set_host(Some("redacted"));
-        }
+    if let Some(host) = url.host_str()
+        && host.len() > 24
+        && !host.contains('.')
+    {
+        let _ = url.set_host(Some("redacted"));
     }
     url.set_query(None);
     url.set_fragment(None);
@@ -497,15 +519,15 @@ mod tests {
                 if this.always_err.load(Ordering::Relaxed) {
                     return Err(anyhow!("simulated spawn failure"));
                 }
-                if let Some(want) = this.sni_pass {
-                    if sni.as_deref() != Some(want) {
-                        return Ok(TunnelResult {
-                            passed: false,
-                            latency_ms: None,
-                            colo: None,
-                            verifier: None,
-                        });
-                    }
+                if let Some(want) = this.sni_pass
+                    && sni.as_deref() != Some(want)
+                {
+                    return Ok(TunnelResult {
+                        passed: false,
+                        latency_ms: None,
+                        colo: None,
+                        verifier: None,
+                    });
                 }
                 let passed = this
                     .passed
@@ -600,10 +622,10 @@ mod tests {
 
         let mut phase2_events = 0;
         while let Ok(e) = rx.try_recv() {
-            if let ScanEvent::Result(v) = e {
-                if v.phase2.is_some() {
-                    phase2_events += 1;
-                }
+            if let ScanEvent::Result(v) = e
+                && v.phase2.is_some()
+            {
+                phase2_events += 1;
             }
         }
         assert_eq!(phase2_events, 2, "updated verdicts must be re-emitted");
@@ -873,10 +895,10 @@ mod tests {
         run_local(&c, cfg, 1).await.unwrap();
         let mut terminal = 0u32;
         while let Ok(e) = rx.try_recv() {
-            if let ScanEvent::Phase2Progress(p) = e {
-                if p.done == p.total {
-                    terminal += 1;
-                }
+            if let ScanEvent::Phase2Progress(p) = e
+                && p.done == p.total
+            {
+                terminal += 1;
             }
         }
         assert_eq!(terminal, 1, "terminal progress must fire exactly once");

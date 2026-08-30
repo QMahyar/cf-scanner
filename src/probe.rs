@@ -6,8 +6,9 @@
 //! verifier is bypassed on purpose; real configuration validation is what
 //! phase-2 (Task 11) exists for.
 //! `FakeTransport` (and its `Scripted` scripting type) exist only for tests
-//! and are `#[cfg(test)]`-gated, so the public transport items stay the
-//! lib's API surface.
+//! and are `#[cfg(any(test, feature = "test-helpers"))]`-gated, so the public transport
+//! items stay the lib's API surface but integration tests (e.g.
+//! `tests/cli_scan_agent.rs`) can enable them via `--features test-helpers`.
 
 use std::future::Future;
 use std::net::IpAddr;
@@ -177,7 +178,7 @@ impl ServerCertVerifier for NoVerify {
 
 /// A scripted outcome plus an optional artificial delay so tests can
 /// exercise cancellation while a probe is in flight.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-helpers"))]
 #[derive(Clone)]
 struct Scripted {
     /// Falls back to the last sequence entry once the queue is drained.
@@ -189,19 +190,19 @@ struct Scripted {
 /// Scripted transport for engine tests: each (ip, port) maps to a scripted
 /// outcome. Latencies are returned verbatim so stop-condition math is
 /// observable.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-helpers"))]
 pub struct FakeTransport {
     script: std::sync::Mutex<std::collections::HashMap<(IpAddr, u16), Scripted>>,
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-helpers"))]
 impl Default for FakeTransport {
     fn default() -> Self {
         Self::new()
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-helpers"))]
 impl FakeTransport {
     pub fn new() -> Self {
         Self {
@@ -261,14 +262,14 @@ impl FakeTransport {
         self.script.lock().unwrap().clear();
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-helpers"))]
     pub fn fail(self, ip: IpAddr, port: u16, err: ProbeError) -> Self {
         self.insert(ip, port, Err(err));
         self
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-helpers"))]
 impl Transport for FakeTransport {
     fn probe(
         &self,

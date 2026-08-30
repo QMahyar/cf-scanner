@@ -11,7 +11,7 @@
   import { t } from "../i18n.svelte";
 
   let {
-    form,
+    form = $bindable(),
     onload,
   }: {
     form: FormState;
@@ -33,7 +33,7 @@
   function loadSelectedProfile() {
     const p = profiles.find((x) => x.name === selectedProfile);
     if (!p) return;
-    Object.assign(form, formStateFromConfig(p.config));
+    form = formStateFromConfig(p.config);
     onload();
   }
 

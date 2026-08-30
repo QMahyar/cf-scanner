@@ -71,20 +71,12 @@ exec env CF_SCANNER_FAKE_PORT="$port" "{child}" --exact fake_xray_child --nocapt
     std::fs::set_permissions(bin_path, perm)?;
 
     use sha2::Digest as _;
-    let digest = hex_lower(&sha2::Sha256::digest(script.as_bytes()));
+    let digest = cf_scanner::dgst::hex_lower(&sha2::Sha256::digest(script.as_bytes()));
     std::fs::write(dgst_path(bin_path), format!("SHA2-256= {digest}\n"))
 }
 
 fn dgst_path(bin: &Path) -> PathBuf {
     bin.with_extension("dgst")
-}
-
-fn hex_lower(bytes: &[u8]) -> String {
-    let mut s = String::with_capacity(bytes.len() * 2);
-    for b in bytes {
-        s.push_str(&format!("{b:02x}"));
-    }
-    s
 }
 
 fn unique_dir(name: &str) -> PathBuf {

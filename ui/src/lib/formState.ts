@@ -460,10 +460,7 @@ export function buildConfig(f: FormState): ScanConfig {
   if (phase2Wanted) {
     cfg.phase2 = {
       configs: phase2Configs,
-      // Wire contract is PascalCase (serde default for FragmentPreset); the
-      // form stores lowercase for friendlier selects/persistence.
-      fragment: (f.fragment.charAt(0).toUpperCase() +
-        f.fragment.slice(1)) as FragmentWire,
+      fragment: f.fragment as FragmentWire,
       snis: csv(f.snis),
       probe_url: f.probeUrl,
       probe_urls: [],

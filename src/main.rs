@@ -387,19 +387,28 @@ fn build_scan_config(args: &ScanArgs) -> Result<ScanConfig> {
     // accidental `--warp-wgconf-file /dev/zero` must not OOM before that.
     let wgconf = match args.warp_wgconf_file.as_deref() {
         Some(path) => {
-            use std::io::Read as _;
-            let file = std::fs::File::open(path)
-                .map_err(|e| anyhow!("could not open --warp-wgconf-file: {e}"))?;
-            let mut buf = String::new();
-            file.take(api::types::MAX_WGCONF_BYTES as u64 + 1)
-                .read_to_string(&mut buf)
-                .map_err(|e| anyhow!("could not read --warp-wgconf-file: {e}"))?;
-            if buf.len() > api::types::MAX_WGCONF_BYTES {
-                bail!(
-                    "--warp-wgconf-file exceeds {} bytes",
-                    api::types::MAX_WGCONF_BYTES
-                );
-            }
+            let path = path.to_owned();
+            let read = || -> Result<String> {
+                use std::io::Read as _;
+                let file = std::fs::File::open(&path)
+                    .map_err(|e| anyhow!("could not open --warp-wgconf-file: {e}"))?;
+                let mut buf = String::new();
+                file.take(api::types::MAX_WGCONF_BYTES as u64 + 1)
+                    .read_to_string(&mut buf)
+                    .map_err(|e| anyhow!("could not read --warp-wgconf-file: {e}"))?;
+                if buf.len() > api::types::MAX_WGCONF_BYTES {
+                    bail!(
+                        "--warp-wgconf-file exceeds {} bytes",
+                        api::types::MAX_WGCONF_BYTES
+                    );
+                }
+                Ok(buf)
+            };
+            let buf = if tokio::runtime::Handle::try_current().is_ok() {
+                tokio::task::block_in_place(read)?
+            } else {
+                read()?
+            };
             Some(buf)
         }
         None => None,
@@ -642,14 +651,9 @@ async fn run_scan(args: ScanArgs) -> Result<()> {
         }
     };
     let stderr_is_tty = std::io::stderr().is_terminal();
-    let streaming = |e: ScanEvent| match e {
-        ScanEvent::Result(v) => {
-            if let Some(line) = serialize_event(&v) {
-                write_line(&line);
-            }
-        }
-        ScanEvent::Finished(s) => {
-            if let Some(line) = serialize_event(&s) {
+    let streaming = |e: ScanEvent| match &e {
+        ScanEvent::Result(_) | ScanEvent::Finished(_) | ScanEvent::Failed(_) => {
+            if let Some(line) = serialize_event(&e) {
                 write_line(&line);
             }
         }
@@ -658,7 +662,6 @@ async fn run_scan(args: ScanArgs) -> Result<()> {
                 eprintln!("phase 2: {}/{} verified", p.done, p.total);
             }
         }
-        ScanEvent::Failed(_) => {}
         ScanEvent::Progress(p) => {
             // TTY-only ticker: NDJSON consumers get clean stdout, humans see
             // live progress instead of silence between results.

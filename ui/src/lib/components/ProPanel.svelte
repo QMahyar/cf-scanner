@@ -525,7 +525,7 @@
   <section class="shell">
     <div class="core px-6 py-8 sm:px-8 sm:py-10">
     <!-- profiles bar: outside the <form> so Enter here never starts a scan -->
-    <ProfilesBar form={form} onload={() => { touched = {}; serverFieldErrors = {}; validationErrors = []; }} />
+    <ProfilesBar bind:form onload={() => { touched = {}; serverFieldErrors = {}; validationErrors = []; }} />
 
     <!-- delegated touched/server-error tracking + Ctrl+Enter accelerator -->
     <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
@@ -538,8 +538,8 @@
         <div class="fade-in mt-3 text-xs" role="alert" style="color: var(--bad)">
           <p class="font-semibold">{t("pro.validation.fixBefore")}</p>
           <ul class="mt-1 list-inside list-disc space-y-0.5">
-            {#each validationErrors as msg (msg)}
-              <li>{msg}</li>
+            {#each validationErrors as issue}
+              <li>{t(issue.key as MsgKey, issue.params)}</li>
             {/each}
           </ul>
         </div>
@@ -866,13 +866,13 @@
 
           <div class="mt-3 grid gap-4 grid-form">
           <WarpIdentityCard
-            form={form}
+            bind:form
             fieldErrors={fieldErrors}
-            touched={touched}
-            serverFieldErrors={serverFieldErrors}
+            bind:touched
+            bind:serverFieldErrors
           />
 
-          <WarpRegistrationCard form={form} />
+          <WarpRegistrationCard bind:form />
           </div>
         </div>
       {:else}

@@ -113,6 +113,7 @@ pub enum Verifier {
 
 /// Free-form Xray fragment values (Int32Range strings).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CustomFragment {
     /// `"tlshello"` or `"1-3"`
     pub packets: String,
@@ -222,7 +223,9 @@ pub struct ScanConfig {
     /// entirely (requires `phase2` configs and a store with candidates).
     #[serde(default)]
     pub phase2_only: bool,
+    #[serde(default)]
     pub phase2: Option<Phase2Config>,
+    #[serde(default)]
     pub warp: Option<WarpConfig>,
 }
 
@@ -322,84 +325,192 @@ pub enum ScanEvent {
     Failed(FailedPayload),
 }
 
+// ── Wire payloads (server ↔ clients); kept here so the contract is one
+// place. All are deny_unknown_fields so newkeys are rejected (422) per the
+// v0.8.0 invariant.
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ResultsPayload {
+    pub results: Vec<Verdict>,
+    pub summary: Option<ScanSummary>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StatusPayload {
+    pub version: String,
+    pub is_running: bool,
+    pub has_candidates: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RangesPayload {
+    pub host_count: u64,
+    pub last_updated: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct XrayStatusPayload {
+    pub found: bool,
+    pub path: Option<String>,
+    pub data_dir: String,
+    pub version: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct XrayDownloadResponse {
+    pub success: bool,
+    pub path: Option<String>,
+    pub error: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RegisterRequest {
+    #[serde(default)]
+    pub license: Option<String>,
+    #[serde(default)]
+    pub overwrite: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RegisterResponse {
+    pub wgconf: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExportConfigRequest {
+    pub config: String,
+    pub ip: String,
+    pub port: u16,
+    #[serde(default)]
+    pub sni: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExportConfigResponse {
+    pub uri: String,
+}
+
 impl ScanConfig {
     pub fn validate(&self) -> Result<(), ConfigError> {
-        validate_ports(&self.ports)?;
-        if let ScanTarget::Count(n) = self.target {
-            if n == 0 {
-                return Err(ConfigError::InvalidCount(0));
-            }
-            // The engine spawns one probe task per sampled host and the plan
-            // pre-allocates a set of 2n entries: cap the count so an
-            // unauthenticated API call cannot abort the process (OOM).
-            if n > MAX_SCAN_COUNT {
-                return Err(ConfigError::InvalidCount(n));
-            }
-        }
-        if self.stop.found == 0 {
-            return Err(ConfigError::InvalidFound(0));
-        }
-        // The frontend caps both stop fields at MAX_STOP_VALUE; the server
-        // enforces the same bound so an agent cannot request a stop condition
-        // the UI never offers (contract parity).
-        if self.stop.found > MAX_STOP_VALUE {
-            return Err(ConfigError::InvalidFoundUpper(self.stop.found));
-        }
-        if let Some(cap) = self.stop.cap {
-            // cap 0 would stop before the first probe: the engine compares
-            // scanned >= cap, which holds trivially.
-            if cap == 0 || cap > MAX_STOP_VALUE {
-                return Err(ConfigError::InvalidCap(cap));
-            }
-        }
-        if self.exclude.len() > MAX_CIDRS {
-            return Err(ConfigError::TooManyExcludes(self.exclude.len()));
-        }
-        if self.custom_cidrs.len() > MAX_CIDRS {
-            return Err(ConfigError::TooManyCidrs(self.custom_cidrs.len()));
-        }
-        if !(1..=1000).contains(&self.concurrency) {
-            return Err(ConfigError::InvalidConcurrency(self.concurrency));
-        }
-        if !(100..=30_000).contains(&self.timeout_ms) {
-            return Err(ConfigError::InvalidTimeout(self.timeout_ms));
-        }
-        for cidr in self.exclude.iter().chain(self.custom_cidrs.iter()) {
-            parse_cidr(cidr)?;
-        }
-        match self.mode {
-            Mode::Cdn => {
-                if self.warp.is_some() {
-                    return Err(ConfigError::WarpWrongMode);
+        let result = (|| -> Result<(), ConfigError> {
+            validate_ports(&self.ports)?;
+            if let ScanTarget::Count(n) = self.target {
+                if n == 0 {
+                    return Err(ConfigError::InvalidCount(0));
                 }
-                if self.phase2_only && self.phase2.is_none() {
-                    return Err(ConfigError::Phase2OnlyNeedsConfigs);
-                }
-                if let Some(p2) = &self.phase2 {
-                    validate_phase2(p2)?;
+                // The engine spawns one probe task per sampled host and the plan
+                // pre-allocates a set of 2n entries: cap the count so an
+                // unauthenticated API call cannot abort the process (OOM).
+                if n > MAX_SCAN_COUNT {
+                    return Err(ConfigError::InvalidCount(n));
                 }
             }
-            Mode::Warp => {
-                if self.phase2_only {
-                    return Err(ConfigError::Phase2OnlyWrongMode);
-                }
-                if self.phase2.is_some() {
-                    return Err(ConfigError::Phase2WrongMode);
-                }
-                if let ScanTarget::Preset(_) = self.target {
-                    return Err(ConfigError::WarpPresetNotAllowed);
-                }
-                if !self.custom_cidrs.is_empty() {
-                    return Err(ConfigError::WarpCidrsNotAllowed);
-                }
-                if let Some(w) = &self.warp {
-                    w.validate()?;
+            if self.stop.found == 0 {
+                return Err(ConfigError::InvalidFound(0));
+            }
+            // The frontend caps both stop fields at MAX_STOP_VALUE; the server
+            // enforces the same bound so an agent cannot request a stop condition
+            // the UI never offers (contract parity).
+            if self.stop.found > MAX_STOP_VALUE {
+                return Err(ConfigError::InvalidFoundUpper(self.stop.found));
+            }
+            if let Some(cap) = self.stop.cap {
+                // cap 0 would stop before the first probe: the engine compares
+                // scanned >= cap, which holds trivially.
+                if cap == 0 || cap > MAX_STOP_VALUE {
+                    return Err(ConfigError::InvalidCap(cap));
                 }
             }
-        }
-        reject_default_warp_ports(self)?;
-        reject_non_routable(self)?;
-        Ok(())
+            if self.exclude.len() > MAX_CIDRS {
+                return Err(ConfigError::TooManyExcludes(self.exclude.len()));
+            }
+            if self.custom_cidrs.len() > MAX_CIDRS {
+                return Err(ConfigError::TooManyCidrs(self.custom_cidrs.len()));
+            }
+            if !(1..=1000).contains(&self.concurrency) {
+                return Err(ConfigError::InvalidConcurrency(self.concurrency));
+            }
+            if !(100..=30_000).contains(&self.timeout_ms) {
+                return Err(ConfigError::InvalidTimeout(self.timeout_ms));
+            }
+            for cidr in self.exclude.iter().chain(self.custom_cidrs.iter()) {
+                parse_cidr(cidr)?;
+            }
+            match self.mode {
+                Mode::Cdn => {
+                    if self.warp.is_some() {
+                        return Err(ConfigError::WarpWrongMode);
+                    }
+                    if self.phase2_only && self.phase2.is_none() {
+                        return Err(ConfigError::Phase2OnlyNeedsConfigs);
+                    }
+                    if let Some(p2) = &self.phase2 {
+                        validate_phase2(p2)?;
+                    }
+                }
+                Mode::Warp => {
+                    if self.phase2_only {
+                        return Err(ConfigError::Phase2OnlyWrongMode);
+                    }
+                    if self.phase2.is_some() {
+                        return Err(ConfigError::Phase2WrongMode);
+                    }
+                    if let ScanTarget::Preset(_) = self.target {
+                        return Err(ConfigError::WarpPresetNotAllowed);
+                    }
+                    if !self.custom_cidrs.is_empty() {
+                        return Err(ConfigError::WarpCidrsNotAllowed);
+                    }
+                    if let Some(w) = &self.warp {
+                        w.validate()?;
+                    }
+                }
+            }
+            reject_default_warp_ports(self)?;
+            reject_non_routable(self)?;
+            Ok(())
+        })();
+        result.map_err(|e| {
+            let sanitize = |s: String| {
+                let san = crate::configs::sanitize_error_text(&s);
+                san.chars().take(512).collect::<String>()
+            };
+            match e {
+                ConfigError::InvalidCidr(s, reason) => {
+                    ConfigError::InvalidCidr(sanitize(s), sanitize(reason))
+                }
+                ConfigError::InvalidEndpoint(s, reason) => {
+                    ConfigError::InvalidEndpoint(sanitize(s), sanitize(reason))
+                }
+                ConfigError::InvalidSni(s, reason) => {
+                    ConfigError::InvalidSni(sanitize(s), sanitize(reason))
+                }
+                ConfigError::InvalidFragment(field, val) => {
+                    ConfigError::InvalidFragment(field, sanitize(val))
+                }
+                ConfigError::InvalidFragmentRange(field, val) => {
+                    ConfigError::InvalidFragmentRange(field, sanitize(val))
+                }
+                ConfigError::NonRoutableCidr(s) => ConfigError::NonRoutableCidr(sanitize(s)),
+                ConfigError::NonRoutableEndpoint(s) => {
+                    ConfigError::NonRoutableEndpoint(sanitize(s))
+                }
+                other => {
+                    let sanitized = crate::configs::sanitize_error_text(&other.to_string());
+                    let _: String = sanitized.chars().take(512).collect();
+                    other
+                }
+            }
+        })
     }
 }
 

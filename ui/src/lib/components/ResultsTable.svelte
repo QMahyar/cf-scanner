@@ -381,13 +381,11 @@
               </label>
             </th>
             <th class="sticky left-0 z-10 bg-[var(--paper-2)] px-4 py-2 font-medium border-e" scope="col" style="border-color: oklch(100% 0 0 / 9%)" aria-sort={view.sortCol === "ip" ? (view.sortDir === "asc" ? "ascending" : "descending") : undefined}>
-              <!-- svelte-ignore a11y_role_supports_aria_props_implicit -->
-              <button class="uppercase tracking-wider" onclick={() => view.cycleSort("ip")} aria-sort={view.sortCol === "ip" ? (view.sortDir === "asc" ? "ascending" : "descending") : undefined} aria-label={view.sortCol === "ip" ? `${t("table.col.endpoint")} ${view.sortDir === "asc" ? "ascending" : "descending"}` : t("table.col.endpoint")}>{t("table.col.endpoint")}<span aria-hidden="true">{view.sortCol === "ip" ? (view.sortDir === "asc" ? " ▲" : " ▼") : ""}</span>
+              <button class="uppercase tracking-wider" onclick={() => view.cycleSort("ip")} aria-label={view.sortCol === "ip" ? `${t("table.col.endpoint")} ${view.sortDir === "asc" ? "ascending" : "descending"}` : t("table.col.endpoint")}>{t("table.col.endpoint")}<span aria-hidden="true">{view.sortCol === "ip" ? (view.sortDir === "asc" ? " ▲" : " ▼") : ""}</span>
               </button>
             </th>
             <th class="px-4 py-2 font-medium" scope="col" aria-sort={view.sortCol === "latency" ? (view.sortDir === "asc" ? "ascending" : "descending") : undefined}>
-              <!-- svelte-ignore a11y_role_supports_aria_props_implicit -->
-              <button class="uppercase tracking-wider" onclick={() => view.cycleSort("latency")} aria-sort={view.sortCol === "latency" ? (view.sortDir === "asc" ? "ascending" : "descending") : undefined} aria-label={view.sortCol === "latency" ? `${t("table.col.latency")} ${view.sortDir === "asc" ? "ascending" : "descending"}` : t("table.col.latency")}>{t("table.col.latency")}<span aria-hidden="true">{view.sortCol === "latency" ? (view.sortDir === "asc" ? " ▲" : " ▼") : ""}</span>
+              <button class="uppercase tracking-wider" onclick={() => view.cycleSort("latency")} aria-label={view.sortCol === "latency" ? `${t("table.col.latency")} ${view.sortDir === "asc" ? "ascending" : "descending"}` : t("table.col.latency")}>{t("table.col.latency")}<span aria-hidden="true">{view.sortCol === "latency" ? (view.sortDir === "asc" ? " ▲" : " ▼") : ""}</span>
               </button>
             </th>
             <th class="px-4 py-2 font-medium" scope="col">{t("table.col.country")}</th>
