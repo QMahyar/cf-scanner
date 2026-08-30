@@ -21,11 +21,14 @@ allow-dirty = ["msi", "ci"]
 targets = ["aarch64-unknown-linux-gnu", "x86_64-unknown-linux-gnu", "x86_64-pc-windows-msvc"]
 
 # Archives carry the per-platform xray binary next to cf-scanner itself:
-# build.rs overwrites the committed placeholder with the checksum-verified
-# download whenever the `dist-bundle-xray` feature is on (dist builds only)
-# and deletes the other platform's placeholder, so the directory include
+# build.rs overwrites the committed 0-byte placeholder with the checksum-
+# verified download whenever the `dist-bundle-xray` feature is on (dist builds
+# only) and deletes the other platform's placeholder, so the directory include
 # ships exactly one xray binary per target. The directory lands as
 # `bundled/<exe>` inside the archive; find_bundled() covers that layout.
+# Tracked placeholders stay 0 bytes; never commit the real binary (see ADR-001
+# and the placeholder-guard job in checks.yml). Treat `cargo-dist-version` as
+# the release toolchain pin: bump only with CI/tooling updates.
 # NOTE: dist-workspace.toml is parsed as the flat v0 schema - no nested
 # [dist.artifacts.archives] / [dist.builds.cargo] tables (they're ignored).
 include = ["data/bundled"]
