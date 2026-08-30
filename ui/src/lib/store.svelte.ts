@@ -27,64 +27,215 @@ export interface UiState {
   statusHasCandidates: boolean;
 }
 
-const app = $state<UiState>({
-  running: false,
-  startedAt: null,
-  progress: { scanned: 0, found: 0, total: null },
-  phase2: null,
-  results: [],
-  summary: null,
-  error: null,
-  proMode: localStorage.getItem("cf-pro-mode") === "1",
-  lastScanConfigs: [],
-  lastScanVerified: false,
-  frozenPhase1: null,
-  statusHasCandidates: false,
-});
+function readProMode(): boolean {
+  try {
+    return localStorage.getItem("cf-pro-mode") === "1";
+  } catch {
+    return false;
+  }
+}
+
+function initialState(): UiState {
+  return {
+    running: false,
+    startedAt: null,
+    progress: { scanned: 0, found: 0, total: null },
+    phase2: null,
+    results: [],
+    summary: null,
+    error: null,
+    proMode: readProMode(),
+    lastScanConfigs: [],
+    lastScanVerified: false,
+    frozenPhase1: null,
+    statusHasCandidates: false,
+  };
+}
+
+export class UiStore {
+  state = $state<UiState>(initialState());
+  #index = new Map<string, number>();
+  #tickWindow: { scanned: number; found: number }[] = [];
+
+  ui(): UiState {
+    return this.state;
+  }
+
+  setProMode(on: boolean): void {
+    this.state.proMode = on;
+    try {
+      localStorage.setItem("cf-pro-mode", on ? "1" : "0");
+    } catch {
+      /* storage unavailable */
+    }
+  }
+
+  applyResult(verdict: Verdict): void {
+    const key = `${verdict.ip}:${verdict.port}`;
+    const idx = this.#index.get(key);
+    if (idx !== undefined) {
+      this.state.results[idx] = verdict;
+    } else {
+      this.#index.set(key, this.state.results.length);
+      this.state.results.push(verdict);
+    }
+    markDirty();
+  }
+
+  setResults(rows: Verdict[]): void {
+    this.#index.clear();
+    for (let i = 0; i < rows.length; i++) this.#index.set(`${rows[i].ip}:${rows[i].port}`, i);
+    this.state.results = rows;
+    markDirty();
+  }
+
+  resetResults(): void {
+    this.#index.clear();
+    this.state.results = [];
+    this.state.summary = null;
+    this.state.progress = { scanned: 0, found: 0, total: null };
+    this.state.phase2 = null;
+    this.state.error = null;
+    this.state.startedAt = null;
+    this.state.lastScanConfigs = [];
+    this.state.lastScanVerified = false;
+    this.state.frozenPhase1 = null;
+    this.resetTicks();
+    markDirty();
+  }
+
+  resetForTests(): void {
+    this.#index.clear();
+    this.#tickWindow.length = 0;
+    const init = initialState();
+    // keep singleton identity — mutate fields instead of replacing $state proxy
+    this.state.running = init.running;
+    this.state.startedAt = init.startedAt;
+    this.state.progress = init.progress;
+    this.state.phase2 = init.phase2;
+    this.state.results = init.results;
+    this.state.summary = init.summary;
+    this.state.error = init.error;
+    this.state.proMode = init.proMode;
+    this.state.lastScanConfigs = init.lastScanConfigs;
+    this.state.lastScanVerified = init.lastScanVerified;
+    this.state.frozenPhase1 = init.frozenPhase1;
+    this.state.statusHasCandidates = init.statusHasCandidates;
+    markDirty();
+  }
+
+  recordTick(p: { scanned: number; found: number }): void {
+    const last = this.#tickWindow[this.#tickWindow.length - 1];
+    if (last && p.scanned < last.scanned) this.#tickWindow.length = 0;
+    this.#tickWindow.push({ scanned: p.scanned, found: p.found });
+    while (this.#tickWindow.length > 2 && last.scanned - this.#tickWindow[0].scanned > 500)
+      this.#tickWindow.shift();
+  }
+
+  resetTicks(): void {
+    this.#tickWindow.length = 0;
+  }
+
+  lowYieldWindow(minFound = 12, floor = 0.03): boolean | null {
+    if (this.#tickWindow.length < 2) return null;
+    const first = this.#tickWindow[0];
+    const lastTick = this.#tickWindow[this.#tickWindow.length - 1];
+    const dScanned = lastTick.scanned - first.scanned;
+    if (dScanned < 100) return null;
+    const dFound = lastTick.found - first.found;
+    return lastTick.found >= minFound && dFound / dScanned < floor;
+  }
+
+  allCandidates(): readonly Verdict[] {
+    return this.state.results;
+  }
+
+  verifiedOnly(): Verdict[] {
+    return this.state.results.filter(phase2Only);
+  }
+
+  hasCandidates(): boolean {
+    return this.state.results.length > 0 || this.state.statusHasCandidates;
+  }
+
+  async startScan(cfg: ScanConfig, opts?: { preserveResults?: boolean }): Promise<StartOutcome> {
+    const preserve = opts?.preserveResults === true && cfg.phase2_only === true;
+    if (preserve) this.state.frozenPhase1 = this.state.results.slice();
+    try {
+      await api.scan(cfg);
+      if (!preserve) this.resetResults();
+      this.state.lastScanConfigs = cfg.phase2?.configs ?? [];
+      this.state.lastScanVerified = cfg.mode === "Warp" && cfg.warp?.verify_with_wgconf === true;
+      this.state.running = true;
+      this.state.startedAt = Date.now();
+      return { ok: true, rejected: null };
+    } catch (e) {
+      this.state.error = errorText(e);
+      const rejected =
+        e instanceof ApiError && (e.status === 400 || e.status === 422)
+          ? { status: e.status, detail: e.detail || e.message }
+          : null;
+      return { ok: false, rejected };
+    }
+  }
+
+  async stopScan(): Promise<void> {
+    try {
+      await api.cancel();
+    } catch (e) {
+      this.state.error = errorText(e);
+    }
+  }
+}
+
+const _store = new UiStore();
 
 export function ui(): UiState {
-  return app;
+  return _store.ui();
 }
 
-export function setProMode(on: boolean) {
-  app.proMode = on;
-  localStorage.setItem("cf-pro-mode", on ? "1" : "0");
+export function setProMode(on: boolean): void {
+  return _store.setProMode(on);
 }
 
-const resultIndexByKey = new Map<string, number>();
-
-export function applyResult(verdict: Verdict) {
-  const key = `${verdict.ip}:${verdict.port}`;
-  const idx = resultIndexByKey.get(key);
-  if (idx !== undefined) {
-    app.results[idx] = verdict;
-  } else {
-    resultIndexByKey.set(key, app.results.length);
-    app.results.push(verdict);
-  }
-  markDirty();
+export function applyResult(verdict: Verdict): void {
+  return _store.applyResult(verdict);
 }
 
-export function setResults(rows: Verdict[]) {
-  resultIndexByKey.clear();
-  for (let i = 0; i < rows.length; i++) resultIndexByKey.set(`${rows[i].ip}:${rows[i].port}`, i);
-  app.results = rows;
-  markDirty();
+export function setResults(rows: Verdict[]): void {
+  return _store.setResults(rows);
 }
 
-export function resetResults() {
-  resultIndexByKey.clear();
-  app.results = [];
-  app.summary = null;
-  app.progress = { scanned: 0, found: 0, total: null };
-  app.phase2 = null;
-  app.error = null;
-  app.startedAt = null;
-  app.lastScanConfigs = [];
-  app.lastScanVerified = false;
-  app.frozenPhase1 = null;
-  resetTicks();
-  markDirty();
+export function resetResults(): void {
+  return _store.resetResults();
+}
+
+export function resetForTests(): void {
+  return _store.resetForTests();
+}
+
+export function recordTick(p: { scanned: number; found: number }): void {
+  return _store.recordTick(p);
+}
+
+export function resetTicks(): void {
+  return _store.resetTicks();
+}
+
+export function lowYieldWindow(minFound = 12, floor = 0.03): boolean | null {
+  return _store.lowYieldWindow(minFound, floor);
+}
+
+export function allCandidates(): readonly Verdict[] {
+  return _store.allCandidates();
+}
+
+export function verifiedOnly(): Verdict[] {
+  return _store.verifiedOnly();
+}
+
+export function hasCandidates(): boolean {
+  return _store.hasCandidates();
 }
 
 export function errorText(e: unknown): string {
@@ -106,71 +257,11 @@ export async function startScan(
   cfg: ScanConfig,
   opts?: { preserveResults?: boolean },
 ): Promise<StartOutcome> {
-  // A banked-candidates verify keeps the phase-1 list alive instead of
-  // wiping it: snapshot the rows into frozenPhase1 and let applyResult's
-  // upsert-by-ip:port refill the live list with tunnel-test verdicts.
-  // Banked-verify snapshots the phase-1 list instead of wiping it.
-  const preserve = opts?.preserveResults === true && cfg.phase2_only === true;
-  if (preserve) app.frozenPhase1 = app.results.slice();
-  // Do not wipe previous results before the server accepts the scan — a 400
-  // or network error would otherwise erase a completed scan from the UI.
-  try {
-    await api.scan(cfg);
-    // api.scan resolved (HTTP 200 before the first Result event) — now reset.
-    if (!preserve) resetResults();
-    app.lastScanConfigs = cfg.phase2?.configs ?? [];
-    app.lastScanVerified = cfg.mode === "Warp" && cfg.warp?.verify_with_wgconf === true;
-    app.running = true;
-    app.startedAt = Date.now();
-    return { ok: true, rejected: null };
-  } catch (e) {
-    app.error = errorText(e);
-    const rejected =
-      e instanceof ApiError && (e.status === 400 || e.status === 422)
-        ? { status: e.status, detail: e.detail || e.message }
-        : null;
-    return { ok: false, rejected };
-  }
+  return _store.startScan(cfg, opts);
 }
 
-export async function stopScan() {
-  try {
-    await api.cancel();
-  } catch (e) {
-    app.error = errorText(e);
-  }
-}
-
-/** Rolling window over phase-1 progress ticks, kept long enough to span
- * ~500 probes — the evidence base for the skip-to-phase-2 suggestion
- * (research §9: survivors ≥ threshold AND sliding success rate < floor). */
-const tickWindow: { scanned: number; found: number }[] = [];
-
-export function recordTick(p: { scanned: number; found: number }): void {
-  const last = tickWindow[tickWindow.length - 1];
-  // Progress ticks can repeat/reset between runs; only monotonic growth is
-  // meaningful evidence.
-  if (last && p.scanned < last.scanned) tickWindow.length = 0;
-  tickWindow.push({ scanned: p.scanned, found: p.found });
-  while (tickWindow.length > 2 && last.scanned - tickWindow[0].scanned > 500)
-    tickWindow.shift();
-}
-
-export function resetTicks(): void {
-  tickWindow.length = 0;
-}
-
-/** True when the recent window shows diminishing returns worth escaping:
- * enough survivors banked (≥ minFound) and a hit rate below `floor` over
- * ≥100 probes of evidence. Null = not enough data to judge. */
-export function lowYieldWindow(minFound = 12, floor = 0.03): boolean | null {
-  if (tickWindow.length < 2) return null;
-  const first = tickWindow[0];
-  const lastTick = tickWindow[tickWindow.length - 1];
-  const dScanned = lastTick.scanned - first.scanned;
-  if (dScanned < 100) return null;
-  const dFound = lastTick.found - first.found;
-  return lastTick.found >= minFound && dFound / dScanned < floor;
+export async function stopScan(): Promise<void> {
+  return _store.stopScan();
 }
 
 /** Default simple-mode configs: best defaults for a first-run user, per the
@@ -218,22 +309,6 @@ export function simpleConfig(
   };
 }
 
-/** Read-side phase splits over the one results store (never duplicate rows):
- * candidates = everything banked, verified = rows the tunnel test touched.
- * hasCandidates also trusts the server's /api/status flag so an F5 mid-run
- * still knows banked candidates exist before hydration finishes. */
-export function allCandidates(): readonly Verdict[] {
-  return app.results;
-}
-
-export function verifiedOnly(): Verdict[] {
-  return app.results.filter(phase2Only);
-}
-
-export function hasCandidates(): boolean {
-  return app.results.length > 0 || app.statusHasCandidates;
-}
-
 export function filteredEndpoints(results: Verdict[], maxLatency: number | null): string {
   return results
     .filter((r) => maxLatency === null || (r.latency_ms ?? 9e9) <= maxLatency)
@@ -271,3 +346,6 @@ export async function exportText(text: string, filename: string): Promise<Export
   setTimeout(() => URL.revokeObjectURL(url), 5_000);
   return "download";
 }
+
+// Expose the singleton for tests that need direct access
+export const _uiStore = _store;

@@ -72,42 +72,81 @@ async function unwrap<T>(res: Response): Promise<T> {
 }
 
 export const api = {
-  status: () => fetch("/api/status").then(unwrap<StatusPayload>),
-  results: () => fetch("/api/results").then(unwrap<ResultsPayload>),
+  status: () =>
+    fetch("/api/status", { cache: "no-store", signal: AbortSignal.timeout(8000) }).then(
+      unwrap<StatusPayload>,
+    ),
+  results: () =>
+    fetch("/api/results", { cache: "no-store", signal: AbortSignal.timeout(8000) }).then(
+      unwrap<ResultsPayload>,
+    ),
   scan: (cfg: ScanConfig) =>
     fetch("/api/scan", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(cfg),
+      cache: "no-store",
+      signal: AbortSignal.timeout(8000),
     }).then(unwrap<unknown>),
-  cancel: () => fetch("/api/cancel", { method: "POST" }),
-  reset: () => fetch("/api/reset", { method: "POST" }),
-  profiles: () => fetch("/api/profiles").then(unwrap<ProfilePayload[]>),
+  cancel: () =>
+    fetch("/api/cancel", {
+      method: "POST",
+      cache: "no-store",
+      signal: AbortSignal.timeout(8000),
+    }).then(assertOk),
+  reset: () =>
+    fetch("/api/reset", {
+      method: "POST",
+      cache: "no-store",
+      signal: AbortSignal.timeout(8000),
+    }).then(assertOk),
+  profiles: () =>
+    fetch("/api/profiles", { cache: "no-store", signal: AbortSignal.timeout(8000) }).then(
+      unwrap<ProfilePayload[]>,
+    ),
   saveProfile: (name: string, cfg: unknown) =>
     fetch(`/api/profiles/${encodeURIComponent(name)}`, {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(cfg),
+      cache: "no-store",
+      signal: AbortSignal.timeout(8000),
     }),
   deleteProfile: (name: string) =>
-    fetch(`/api/profiles/${encodeURIComponent(name)}`, { method: "DELETE" }),
+    fetch(`/api/profiles/${encodeURIComponent(name)}`, {
+      method: "DELETE",
+      cache: "no-store",
+      signal: AbortSignal.timeout(8000),
+    }),
   exportUri: (config: string, ip: string, port: number) =>
     fetch("/api/config/export", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ config, ip, port }),
+      cache: "no-store",
+      signal: AbortSignal.timeout(8000),
     }).then(unwrap<{ uri: string }>),
-  xrayStatus: () => fetch("/api/xray/status").then(unwrap<XrayStatusPayload>),
-  xrayDownload: () =>
-    fetch("/api/xray/download", { method: "POST" }).then(
-      unwrap<{ success: boolean; path?: string | null; error?: string | null }>,
+  xrayStatus: () =>
+    fetch("/api/xray/status", { cache: "no-store", signal: AbortSignal.timeout(8000) }).then(
+      unwrap<XrayStatusPayload>,
     ),
-  ranges: () => fetch("/api/ranges").then(unwrap<RangesPayload>),
+  xrayDownload: () =>
+    fetch("/api/xray/download", {
+      method: "POST",
+      cache: "no-store",
+      signal: AbortSignal.timeout(8000),
+    }).then(unwrap<{ success: boolean; path?: string | null; error?: string | null }>),
+  ranges: () =>
+    fetch("/api/ranges", { cache: "no-store", signal: AbortSignal.timeout(8000) }).then(
+      unwrap<RangesPayload>,
+    ),
   warpRegister: (license: string | null, overwrite: boolean) =>
     fetch("/api/warp/register", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ license: license || null, overwrite }),
+      cache: "no-store",
+      signal: AbortSignal.timeout(8000),
     }).then(unwrap<{ wgconf: string }>),
 };
 

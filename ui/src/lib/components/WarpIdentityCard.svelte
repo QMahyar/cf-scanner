@@ -5,10 +5,10 @@
   import WgNoiseEditor from "./WgNoiseEditor.svelte";
 
   let {
-    form,
+    form = $bindable(),
     fieldErrors,
-    touched,
-    serverFieldErrors,
+    touched = $bindable(),
+    serverFieldErrors = $bindable(),
   }: {
     form: FormState;
     fieldErrors: Partial<Record<FormField, string>>;

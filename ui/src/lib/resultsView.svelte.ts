@@ -11,14 +11,6 @@ export const phase2Only = (r: Verdict) => r.phase2 != null;
 
 const DEFAULT_RENDER_CAP = 500;
 
-// Module-level dirty flag: set by store mutations (applyResult, resetResults,
-// setResults) and view parameter changes (cycleSort, setMaxLatency); cleared
-// by ResultsView lazy getters on recompute. Avoids O(n) filter+sort per tick.
-let _dirty = true;
-export function markDirty(): void {
-  _dirty = true;
-}
-
 export interface ResultsViewOptions {
   /** Overrides the default render cap; ResultsTable keeps owning its
    * RENDER_CAP constant and passes it in. */
@@ -61,6 +53,7 @@ export class ResultsView {
   maxLatency = $state<number | null>(null);
   selected = $state(new Set<string>());
   renderLimit = $state(DEFAULT_RENDER_CAP);
+  #dirty = $state(true);
 
   readonly #source: () => readonly Verdict[];
   readonly #predicate: (r: Verdict) => boolean;
@@ -80,7 +73,7 @@ export class ResultsView {
     this.#renderCap = opts?.renderCap ?? DEFAULT_RENDER_CAP;
     this.renderLimit = this.#renderCap;
     // Eagerly populate caches so the instance is valid before the first
-    // _dirty cycle — avoids stale reads when the module-level flag is
+    // dirty cycle — avoids stale reads when the module-level flag is
     // already false (e.g. a second ResultsView in the same test suite).
     this.#matchedCache = this.#source().filter(
       (r) =>
@@ -93,6 +86,12 @@ export class ResultsView {
         : [...this.#matchedCache].sort((a, b) => this.#compare(a, b));
     this.#visibleCache = this.#rowsCache.slice(0, this.renderLimit);
     this.#cappedCache = this.#rowsCache.length > this.renderLimit;
+    this.#dirty = false;
+    _instances.add(this);
+  }
+
+  markDirty(): void {
+    this.#dirty = true;
   }
 
   get renderCap(): number {
@@ -103,11 +102,11 @@ export class ResultsView {
   // keep it $derived so the component re-renders when items arrive.
   total = $derived.by(() => this.#source().length);
 
-  // Lazy cached fields: recomputed only when _dirty is set. Avoids O(n)
+  // Lazy cached fields: recomputed only when #dirty is set. Avoids O(n)
   // filter+sort on every applyResult tick during live scans.
 
   get matched(): Verdict[] {
-    if (_dirty) {
+    if (this.#dirty) {
       this.#matchedCache = this.#source().filter(
         (r) =>
           this.#predicate(r) &&
@@ -119,24 +118,24 @@ export class ResultsView {
           : [...this.#matchedCache].sort((a, b) => this.#compare(a, b));
       this.#visibleCache = this.#rowsCache.slice(0, this.renderLimit);
       this.#cappedCache = this.#rowsCache.length > this.renderLimit;
-      _dirty = false;
+      this.#dirty = false;
     }
     return this.#matchedCache;
   }
 
   get rows(): Verdict[] {
     // Recomputed together with matched above.
-    if (_dirty) void this.matched;
+    if (this.#dirty) void this.matched;
     return this.#rowsCache;
   }
 
   get visible(): Verdict[] {
-    if (_dirty) void this.matched;
+    if (this.#dirty) void this.matched;
     return this.#visibleCache;
   }
 
   get capped(): boolean {
-    if (_dirty) void this.matched;
+    if (this.#dirty) void this.matched;
     return this.#cappedCache;
   }
 
@@ -168,12 +167,12 @@ export class ResultsView {
     } else {
       this.sortCol = null;
     }
-    markDirty();
+    this.markDirty();
   }
 
   setMaxLatency(n: number | null): void {
     this.maxLatency = n;
-    markDirty();
+    this.markDirty();
   }
 
   toggleRow(r: Verdict, on: boolean): void {
@@ -190,4 +189,10 @@ export class ResultsView {
   resetSelection(): void {
     this.selected = new Set();
   }
+}
+
+const _instances = new Set<ResultsView>();
+
+export function markDirty(): void {
+  for (const v of _instances) v.markDirty();
 }

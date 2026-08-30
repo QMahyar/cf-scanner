@@ -22,17 +22,23 @@
   let copiedAll = $state<ExportHow | null>(null);
   let tick = $state(0);
 
-  // Throttled screen-reader announcement: update at most every 10 s or when
-  // working count changes, so an aria-live region doesn't chatter on every tick.
+  // Throttled screen-reader announcement: update at most every 10 s so the
+  // aria-live region doesn't chatter on every tick. Side-effect moved to
+  // $effect — $derived must stay pure.
   let lastAnnounce = 0;
-  let announced = "";
-  const progressAnnounce = $derived.by(() => {
-    void tick; // re-evaluated via the existing interval tick state
+  let announced = $state("");
+  const progressAnnounce = $derived(announced);
+  $effect(() => {
+    void tick;
+    void app.progress.found;
+    void app.progress.scanned;
     const now = Date.now();
-    if (now - lastAnnounce < 10_000) return announced;
+    if (announced !== "" && now - lastAnnounce < 10_000) return;
     lastAnnounce = now;
-    announced = t("simple.progressAnnounce", { working: app.progress.found, checked: app.progress.scanned });
-    return announced;
+    announced = t("simple.progressAnnounce", {
+      working: app.progress.found,
+      checked: app.progress.scanned,
+    });
   });
 
   // Preset sample sizes; CDN samples candidates on 443, WARP sweeps
