@@ -15,10 +15,12 @@ use axum::middleware::{self};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock as TokioRwLock;
 
-use crate::api::types::{ScanConfig, ScanEvent, ScanSummary, Verdict};
+use crate::api::types::{
+    ExportConfigRequest, ExportConfigResponse, RangesPayload, RegisterRequest, RegisterResponse,
+    ResultsPayload, ScanConfig, ScanEvent, StatusPayload, XrayDownloadResponse, XrayStatusPayload,
+};
 use crate::engine::ScanController;
 use crate::paths;
 use crate::ranges;
@@ -41,9 +43,11 @@ use self::state::{
 const EMBEDDED_INDEX: &str = "index.html";
 
 /// The compiled Svelte UI (`ui/dist`, committed so a plain `cargo build`
-/// works without Node). Release builds embed it into the binary; debug
-/// builds read from disk on every request, so `npm run build` output shows
-/// up on browser refresh.
+/// works without Node). Release builds serve the embedded assets; debug
+/// builds prefer live `ui/dist` files on disk (via `cfg(debug_assertions)`
+/// fallback) so `npm run build` output shows up on browser refresh without
+/// a cargo rebuild, falling back to the embedded copy when the file is
+/// absent (e.g. in tests or a pure `cargo run` without a prior UI build).
 #[derive(rust_embed::RustEmbed)]
 #[folder = "ui/dist"]
 struct UiAssets;
@@ -150,6 +154,32 @@ async fn fallback(uri: Uri) -> Response {
 }
 
 fn ui_response(file: &str) -> Option<Response> {
+    #[cfg(debug_assertions)]
+    {
+        // Debug prefers live disk files so `cd ui && npm run build` is visible
+        // without a cargo rebuild; falls back to embedded when absent.
+        if !file.contains("..") {
+            let disk_path = std::path::Path::new("ui/dist").join(file);
+            if let Ok(bytes) = std::fs::read(&disk_path) {
+                let mime = match file.rsplit('.').next().unwrap_or("") {
+                    "html" => "text/html; charset=utf-8",
+                    "js" | "mjs" => "text/javascript",
+                    "css" => "text/css",
+                    "woff2" => "font/woff2",
+                    "woff" => "font/woff",
+                    "svg" => "image/svg+xml",
+                    "json" => "application/json",
+                    _ => "application/octet-stream",
+                };
+                let mut headers = axum::http::HeaderMap::new();
+                headers.insert(axum::http::header::CONTENT_TYPE, mime.parse().unwrap());
+                headers.insert("content-security-policy", SECURITY_CSP.parse().unwrap());
+                headers.insert("x-content-type-options", "nosniff".parse().unwrap());
+                headers.insert("referrer-policy", "no-referrer".parse().unwrap());
+                return Some((headers, bytes).into_response());
+            }
+        }
+    }
     let data = UiAssets::get(file)?;
     let mime = match file.rsplit('.').next().unwrap_or("") {
         "html" => "text/html; charset=utf-8",
@@ -187,14 +217,14 @@ async fn start_scan(
     JsonBody(cfg): JsonBody<ScanConfig>,
 ) -> Result<StatusCode, ApiError> {
     cfg.validate().map_err(ApiError::invalid_config)?;
-    if let Some(phase2) = &cfg.phase2 {
-        if let Some(local) = phase2.configs.iter().find(|c| {
+    if let Some(phase2) = &cfg.phase2
+        && let Some(local) = phase2.configs.iter().find(|c| {
             c.is_empty() || c.to_ascii_lowercase().starts_with("file://") || !c.contains("://")
-        }) {
-            return Err(ApiError::bad_request(format!(
-                "phase2 config {local:?} is not a URL; local file paths are CLI-only"
-            )));
-        }
+        })
+    {
+        return Err(ApiError::invalid_config(format!(
+            "phase2 config {local:?} is not a URL; local file paths are CLI-only"
+        )));
     }
     state
         .controller
@@ -228,12 +258,6 @@ async fn start_scan(
     Ok(StatusCode::ACCEPTED)
 }
 
-#[derive(Serialize)]
-struct ResultsPayload {
-    results: Vec<Verdict>,
-    summary: Option<ScanSummary>,
-}
-
 async fn results(State(state): State<Arc<AppState>>) -> Json<ResultsPayload> {
     Json(ResultsPayload {
         results: state.controller.results(),
@@ -254,22 +278,6 @@ async fn reset(State(state): State<Arc<AppState>>) -> StatusCode {
         .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
     state.run_epoch.fetch_add(1, Ordering::SeqCst);
     StatusCode::NO_CONTENT
-}
-
-/// `POST /api/warp/register` body: the optional WARP+ license key; null or
-/// missing means a free account. `overwrite: true` is required to replace an
-/// identity that is already persisted (a first registration never needs it).
-#[derive(Deserialize)]
-struct RegisterRequest {
-    #[serde(default)]
-    license: Option<String>,
-    #[serde(default)]
-    overwrite: bool,
-}
-
-#[derive(Serialize)]
-struct RegisterResponse {
-    wgconf: String,
 }
 
 /// Production registrar: the Cloudflare flow has its own per-attempt timeout
@@ -332,23 +340,6 @@ async fn warp_register(
     Ok(Json(RegisterResponse { wgconf }))
 }
 
-/// `POST /api/config/export` body: one of the user's ORIGINAL config URIs as
-/// submitted to the scan, plus the verified candidate's dial endpoint. Never
-/// touches the engine — pure parse/render over the submitted URI.
-#[derive(Deserialize)]
-struct ExportConfigRequest {
-    config: String,
-    ip: String,
-    port: u16,
-    #[serde(default)]
-    sni: Option<String>,
-}
-
-#[derive(Serialize)]
-struct ExportConfigResponse {
-    uri: String,
-}
-
 /// Renders a verified candidate as a ready-to-use vless/trojan URI the user
 /// can drop straight into v2rayN/Hiddify. The candidate IP/port replace the
 /// config's original server; the id, security, SNI, fingerprint and ws
@@ -391,30 +382,12 @@ async fn export_config(
     Ok(Json(ExportConfigResponse { uri }))
 }
 
-#[derive(Serialize)]
-struct StatusPayload {
-    version: &'static str,
-    is_running: bool,
-    /// True while banked candidates exist server-side; lets the UI offer a
-    /// phase-2-only verify after a page reload, when the client store is
-    /// empty but the controller still holds last-scan results.
-    has_candidates: bool,
-}
-
 async fn status_handler(State(state): State<Arc<AppState>>) -> Json<StatusPayload> {
     Json(StatusPayload {
-        version: env!("CARGO_PKG_VERSION"),
+        version: env!("CARGO_PKG_VERSION").to_owned(),
         is_running: state.controller.is_running(),
         has_candidates: state.controller.has_results(),
     })
-}
-
-#[derive(Serialize)]
-struct XrayStatusPayload {
-    found: bool,
-    path: Option<String>,
-    data_dir: String,
-    version: &'static str,
 }
 
 async fn xray_status() -> Json<XrayStatusPayload> {
@@ -426,15 +399,8 @@ async fn xray_status() -> Json<XrayStatusPayload> {
         found: found.is_some(),
         path: found.map(|p| p.display().to_string()),
         data_dir,
-        version: xray::VERSION.trim(),
+        version: xray::VERSION.trim().to_owned(),
     })
-}
-
-#[derive(Serialize)]
-struct XrayDownloadResponse {
-    success: bool,
-    path: Option<String>,
-    error: Option<String>,
 }
 
 async fn xray_download(
@@ -471,14 +437,6 @@ async fn xray_download(
     }
 }
 
-#[derive(Serialize)]
-struct RangesPayload {
-    host_count: u64,
-    /// RFC3339 UTC of the last successful refresh (or the embedded-list load
-    /// time); None before anything has been loaded.
-    last_updated: Option<String>,
-}
-
 async fn ranges(State(state): State<Arc<AppState>>) -> Json<RangesPayload> {
     let (pool, last_updated) = state.ranges.snapshot();
     Json(RangesPayload {
@@ -507,10 +465,10 @@ fn sanitize_config(mut cfg: ScanConfig) -> ScanConfig {
     // wgconf is stripped on the way in and the verification flag that depends
     // on it is cleared, so stored/returned profiles stay valid. The scan path
     // (POST /api/scan) still accepts wgconf-bearing configs.
-    if let Some(warp) = &mut cfg.warp {
-        if warp.wgconf.take().is_some() {
-            warp.verify_with_wgconf = false;
-        }
+    if let Some(warp) = &mut cfg.warp
+        && warp.wgconf.take().is_some()
+    {
+        warp.verify_with_wgconf = false;
     }
     cfg
 }

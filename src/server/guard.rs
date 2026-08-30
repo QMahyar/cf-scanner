@@ -68,15 +68,16 @@ pub(crate) async fn localhost_only(
     if !host_allowed(host) {
         return Err(ApiError::forbidden("Host header not allowed"));
     }
-    if let Some(origin) = headers.get("origin").and_then(|h| h.to_str().ok()) {
-        if origin == "null" || !origin_allowed(origin, cfg) {
-            return Err(ApiError::forbidden("Origin not allowed"));
-        }
+    if let Some(origin) = headers.get("origin").and_then(|h| h.to_str().ok())
+        && (origin == "null" || !origin_allowed(origin, cfg))
+    {
+        return Err(ApiError::forbidden("Origin not allowed"));
     }
-    if let Some(site) = headers.get("sec-fetch-site").and_then(|h| h.to_str().ok()) {
-        if site != "same-origin" && site != "none" {
-            return Err(ApiError::forbidden("cross-site request rejected"));
-        }
+    if let Some(site) = headers.get("sec-fetch-site").and_then(|h| h.to_str().ok())
+        && site != "same-origin"
+        && site != "none"
+    {
+        return Err(ApiError::forbidden("cross-site request rejected"));
     }
     Ok(next.run(request).await)
 }

@@ -642,14 +642,9 @@ async fn run_scan(args: ScanArgs) -> Result<()> {
         }
     };
     let stderr_is_tty = std::io::stderr().is_terminal();
-    let streaming = |e: ScanEvent| match e {
-        ScanEvent::Result(v) => {
-            if let Some(line) = serialize_event(&v) {
-                write_line(&line);
-            }
-        }
-        ScanEvent::Finished(s) => {
-            if let Some(line) = serialize_event(&s) {
+    let streaming = |e: ScanEvent| match &e {
+        ScanEvent::Result(_) | ScanEvent::Finished(_) | ScanEvent::Failed(_) => {
+            if let Some(line) = serialize_event(&e) {
                 write_line(&line);
             }
         }
@@ -658,7 +653,6 @@ async fn run_scan(args: ScanArgs) -> Result<()> {
                 eprintln!("phase 2: {}/{} verified", p.done, p.total);
             }
         }
-        ScanEvent::Failed(_) => {}
         ScanEvent::Progress(p) => {
             // TTY-only ticker: NDJSON consumers get clean stdout, humans see
             // live progress instead of silence between results.

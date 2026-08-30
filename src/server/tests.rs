@@ -8,7 +8,9 @@ use tokio_stream::StreamExt as _;
 use tokio_stream::wrappers::BroadcastStream;
 
 use crate::api::types::{DEFAULT_WARP_PORTS, MAX_STOP_VALUE, Port};
-use crate::api::types::{Mode, Phase2Config, ScanTarget, StopCondition, WarpConfig};
+use crate::api::types::{
+    Mode, Phase2Config, ScanEvent, ScanSummary, ScanTarget, StopCondition, WarpConfig,
+};
 use crate::probe::FakeTransport;
 use crate::ranges::BUNDLED_RANGES;
 use crate::ranges::HttpGet;
@@ -542,6 +544,11 @@ async fn terminal_bounded_stream_stops_after_finished() {
         replay: None,
         last_terminal: Arc::new(Mutex::new(None)),
         epoch: 0,
+        controller: Arc::new(crate::engine::ScanController::new(Arc::new(
+            crate::probe::FakeTransport::new(),
+        ))),
+        seen: std::collections::HashSet::new(),
+        pending: std::collections::VecDeque::new(),
     };
     tx.send(ScanEvent::Progress(crate::api::types::ScanProgress {
         scanned: 1,
@@ -597,6 +604,11 @@ async fn replayed_terminal_does_not_close_the_stream() {
         )),
         last_terminal: Arc::new(Mutex::new(None)),
         epoch: 0,
+        controller: Arc::new(crate::engine::ScanController::new(Arc::new(
+            crate::probe::FakeTransport::new(),
+        ))),
+        seen: std::collections::HashSet::new(),
+        pending: std::collections::VecDeque::new(),
     };
     let first = tokio::time::timeout(Duration::from_secs(1), stream.next())
         .await
@@ -1077,7 +1089,7 @@ async fn phase2_file_paths_are_rejected_over_http() {
         ..Phase2Config::default()
     });
     let status = post_scan(addr, &serde_json::to_string(&c).unwrap()).await;
-    assert_eq!(status, 400);
+    assert_eq!(status, 422);
     c.phase2 = Some(Phase2Config {
         configs: vec!["vless://uuid@example.com:443".to_owned()],
         ..Phase2Config::default()
@@ -2056,6 +2068,11 @@ async fn lagged_stream_stays_alive_with_terminal_snapshot() {
         replay: None,
         last_terminal: Arc::clone(&last),
         epoch: 1,
+        controller: Arc::new(crate::engine::ScanController::new(Arc::new(
+            crate::probe::FakeTransport::new(),
+        ))),
+        seen: std::collections::HashSet::new(),
+        pending: std::collections::VecDeque::new(),
     };
     // Fill and overflow the 2-slot channel so the receiver lags.
     tx.send(ScanEvent::Progress(crate::api::types::ScanProgress {
@@ -2261,6 +2278,11 @@ async fn lagged_stream_with_cap_8_stays_alive_with_terminal() {
         replay: None,
         last_terminal: Arc::clone(&last),
         epoch: 42,
+        controller: Arc::new(crate::engine::ScanController::new(Arc::new(
+            crate::probe::FakeTransport::new(),
+        ))),
+        seen: std::collections::HashSet::new(),
+        pending: std::collections::VecDeque::new(),
     };
     for i in 0..16 {
         let _ = tx.send(ScanEvent::Progress(crate::api::types::ScanProgress {
