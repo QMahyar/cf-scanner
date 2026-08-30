@@ -132,7 +132,6 @@ jobs:
   # dist-bundle-xray, so build.rs also validates the xray asset naming +
   # checksum path for each target on every PR.
   cross-check:
-    if: ${{ github.event_name == 'pull_request' }}
     runs-on: "ubuntu-22.04"
     steps:
       - uses: actions/checkout@v6
