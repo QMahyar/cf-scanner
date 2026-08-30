@@ -61,6 +61,10 @@ rcgen = "0.13"
 # dist-only: build.rs bundles the checksum-verified xray binary into release
 # archives (see dist-workspace.toml). Dev builds never enable this.
 dist-bundle-xray = []
+# test-only helpers: exposes `FakeTransport` / `FakeTunnelProbe` for
+# integration tests (e.g. `tests/cli_scan_agent.rs`) without needing `#[cfg(test)]`.
+# No runtime code depends on this; it is never enabled in release builds.
+test-helpers = []
 
 [build-dependencies]
 flate2 = "1"

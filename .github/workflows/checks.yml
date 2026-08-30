@@ -34,9 +34,9 @@ jobs:
         run: cargo test --doc --locked
       - name: Clippy
         run: cargo clippy --all-targets --locked -- -D warnings
+      - name: Check all features (dist-bundle-xray parity on main)
+        run: cargo check --all-features --locked
       - name: Format
-        # fmt is workspace-wide; rustfmt honors .gitattributes so Windows CI now matches.
-        if: ${{ runner.os != 'Windows' }}
         run: cargo fmt --check
 
   coverage:
@@ -52,7 +52,7 @@ jobs:
         with:
           cache-on-failure: true
       - name: Measure coverage + gate
-        run: cargo llvm-cov --all-targets --locked --lcov --output-path lcov.info --fail-under-lines 70
+        run: cargo llvm-cov --all-targets --doc --locked --lcov --output-path lcov.info --fail-under-lines 70
       - uses: actions/upload-artifact@v4
         with:
           name: lcov.info

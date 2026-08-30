@@ -78,7 +78,7 @@ gate        → the release workflow's own job: test + clippy + fmt + audit
                 (--locked) on the exact tagged commit (fail = no artifacts;
                 a leaner subset than checks.yml — no build/doc-tests/
                 coverage/placeholder guard)
-  cross-check → PRs only: cargo check --all-features on every release target
+  cross-check → cargo check --all-features on every release target (PRs + main/tags; ensures dist-bundle-xray is visible outside PRs)
   plan        → resolves the 3-target matrix + manifest
   build-local → per target: dist build (bundles checksum-verified xray),
                 archives + .sha256 + MSI (windows runner ships WiX)
@@ -92,12 +92,13 @@ gate        → the release workflow's own job: test + clippy + fmt + audit
 ```
 
 Pushes to `main` and every PR trigger the `Checks` workflow. It runs test +
-clippy + fmt on both `ubuntu-latest` and `windows-latest`. The fmt step is
-skipped on Windows because a CRLF working tree would diff spuriously.
-`Checks` also runs doc tests, coverage, `cargo audit`, the xray-parity job
-(which fails fast if the pinned XTLS release disappears), and the
-placeholder guard. Tag pushes and PRs additionally run the Release workflow
-in plan mode.
+clippy + fmt (unconditionally; CRLF is normalized via `.gitattributes`) and
+`cargo check --all-features` (so `dist-bundle-xray` is visible on `main`, not
+only on PRs) on `ubuntu-latest`, `windows-latest`, and `macos-latest`.
+`Checks` also runs doc tests, coverage (`--all-targets --doc`; doc tests are
+included in the llvm-cov gate), `cargo audit`, the xray-parity job (which
+fails fast if the pinned XTLS release disappears), and the placeholder guard.
+Tag pushes and PRs additionally run the Release workflow in plan mode.
 
 ## First-time npm setup (one time)
 
@@ -149,14 +150,14 @@ setup. An automation token is required because it bypasses the interactive
 OTP that npm 2FA demands on publish. Nothing runs locally. The only action
 happens in the release commit, before tagging:
 
-1. Bump `version` in `npm/cf-scanner/package.json` (a patch bump is fine)
-   and set `RELEASE_TAG` in `install.js` to the tag about to be pushed. The
-   two may differ: `RELEASE_TAG` selects the GitHub release that the binary
-   downloads from, while the npm `version` matters only for registry
-   bookkeeping.
+1. Bump `version` in `npm/cf-scanner/package.json` and set `RELEASE_TAG`
+    in `install.js` to the tag about to be pushed. The two MUST match and
+    MUST equal `Cargo.toml` `version`: the `version-parity` job enforces
+    `Cargo.toml == npm package.json == RELEASE_TAG` (all three). A wrapper
+    pointing at the wrong release must not publish.
 2. The job verifies alignment: a grep step fails the job unless `RELEASE_TAG`
-   equals the released tag. A wrapper pointing at the wrong release must not
-   publish.
+    equals the released tag, and `version-parity` fails unless all three
+    versions match.
 3. Smoke-test after the release: run `npm i -g @qmahyar/cf-scanner` on the
    three supported platforms (linux x64/arm64, win32 x64). macOS is
    unsupported for the same reason the release matrix dropped it (ADR-009).

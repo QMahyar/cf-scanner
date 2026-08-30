@@ -148,10 +148,10 @@ async fn fetch_tls_inner(url: &str, extra_headers: &str) -> Result<Vec<u8>> {
         .await
         .with_context(|| format!("fetch failed for {}", sanitize_url_for_error(url)))?;
     const MAX_BODY_BYTES: usize = 64 * 1024 * 1024;
-    if let Some(len) = response.content_length() {
-        if len > MAX_BODY_BYTES as u64 {
-            bail!("response body exceeds the {MAX_BODY_BYTES} byte cap (Content-Length {len})");
-        }
+    if let Some(len) = response.content_length()
+        && len > MAX_BODY_BYTES as u64
+    {
+        bail!("response body exceeds the {MAX_BODY_BYTES} byte cap (Content-Length {len})");
     }
     let bytes = response.bytes().await.with_context(|| {
         format!(

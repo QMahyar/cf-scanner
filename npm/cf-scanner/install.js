@@ -23,10 +23,10 @@ const path = require("path");
 // ---------------------------------------------------------------------------
 
 const REPO = "qmahyar/cf-scanner";
-// npm package version (display only) and the GitHub release tag the binary
-// is downloaded from. These CAN differ: the wrapper is republishable (bug
-// fixes like this one) without a new binary release. Bump RELEASE_TAG with
-// every new binary release; bump version with every npm publish.
+// npm package version and the GitHub release tag the binary is downloaded
+// from. These MUST match `Cargo.toml` version per docs/release-process.md
+// (parity job enforces Cargo.toml == npm version == RELEASE_TAG). Bump all
+// three together on every release; never republish the wrapper alone.
 const VERSION = require("./package.json").version;
 const RELEASE_TAG = "v0.12.2";
 

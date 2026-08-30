@@ -187,14 +187,14 @@ async fn start_scan(
     JsonBody(cfg): JsonBody<ScanConfig>,
 ) -> Result<StatusCode, ApiError> {
     cfg.validate().map_err(ApiError::invalid_config)?;
-    if let Some(phase2) = &cfg.phase2 {
-        if let Some(local) = phase2.configs.iter().find(|c| {
+    if let Some(phase2) = &cfg.phase2
+        && let Some(local) = phase2.configs.iter().find(|c| {
             c.is_empty() || c.to_ascii_lowercase().starts_with("file://") || !c.contains("://")
-        }) {
-            return Err(ApiError::bad_request(format!(
-                "phase2 config {local:?} is not a URL; local file paths are CLI-only"
-            )));
-        }
+        })
+    {
+        return Err(ApiError::bad_request(format!(
+            "phase2 config {local:?} is not a URL; local file paths are CLI-only"
+        )));
     }
     state
         .controller
@@ -507,10 +507,10 @@ fn sanitize_config(mut cfg: ScanConfig) -> ScanConfig {
     // wgconf is stripped on the way in and the verification flag that depends
     // on it is cleared, so stored/returned profiles stay valid. The scan path
     // (POST /api/scan) still accepts wgconf-bearing configs.
-    if let Some(warp) = &mut cfg.warp {
-        if warp.wgconf.take().is_some() {
-            warp.verify_with_wgconf = false;
-        }
+    if let Some(warp) = &mut cfg.warp
+        && warp.wgconf.take().is_some()
+    {
+        warp.verify_with_wgconf = false;
     }
     cfg
 }

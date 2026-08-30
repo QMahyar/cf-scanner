@@ -711,12 +711,10 @@ mod tests {
                 if matches!(
                     Tunn::parse_incoming_packet(&buf[..n]),
                     Ok(boringtun::noise::Packet::HandshakeInit(_))
-                ) {
-                    if let TunnResult::WriteToNetwork(resp) =
-                        tunn.decapsulate(None, &buf[..n], &mut out)
-                    {
-                        server_socket.send_to(resp, peer).await.unwrap();
-                    }
+                ) && let TunnResult::WriteToNetwork(resp) =
+                    tunn.decapsulate(None, &buf[..n], &mut out)
+                {
+                    server_socket.send_to(resp, peer).await.unwrap();
                 }
                 // Data packets: silently dropped, like an unregistered peer.
             }

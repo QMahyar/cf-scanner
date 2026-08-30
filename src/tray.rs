@@ -195,11 +195,11 @@ mod imp {
             run_key
                 .set_value(RUN_VALUE_NAME, &autostart_command(&exe))
                 .with_context(|| format!("could not write {RUN_VALUE_NAME} autostart value"))?;
-        } else if let Err(err) = run_key.delete_value(RUN_VALUE_NAME) {
-            if err.kind() != std::io::ErrorKind::NotFound {
-                return Err(err)
-                    .with_context(|| format!("could not remove {RUN_VALUE_NAME} autostart value"));
-            }
+        } else if let Err(err) = run_key.delete_value(RUN_VALUE_NAME)
+            && err.kind() != std::io::ErrorKind::NotFound
+        {
+            return Err(err)
+                .with_context(|| format!("could not remove {RUN_VALUE_NAME} autostart value"));
         }
         Ok(())
     }

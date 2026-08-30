@@ -92,12 +92,12 @@ impl Stream for TerminalBounded {
         }
         // The replayed terminal goes out first, exactly once; it does not
         // end the stream (see the field docs).
-        if let Some((ev, delivered)) = &mut self.replay {
-            if !*delivered {
-                *delivered = true;
-                if let Some(event) = map_event(ev.clone()) {
-                    return std::task::Poll::Ready(Some(Ok(event)));
-                }
+        if let Some((ev, delivered)) = &mut self.replay
+            && !*delivered
+        {
+            *delivered = true;
+            if let Some(event) = map_event(ev.clone()) {
+                return std::task::Poll::Ready(Some(Ok(event)));
             }
         }
         loop {
@@ -130,10 +130,9 @@ impl Stream for TerminalBounded {
                         .clone()
                         .filter(|(epoch, _)| *epoch == self.epoch)
                         .map(|(_, ev)| ev)
+                        && let Some(event) = map_event(ev)
                     {
-                        if let Some(event) = map_event(ev) {
-                            return std::task::Poll::Ready(Some(Ok(event)));
-                        }
+                        return std::task::Poll::Ready(Some(Ok(event)));
                     }
                     // No terminal to replay; stay alive and wait for next live event.
                     continue;

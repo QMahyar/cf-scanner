@@ -407,10 +407,11 @@ fn redact_entry(entry: &str) -> String {
         let _ = url.set_username("***");
         let _ = url.set_password(Some("***"));
     }
-    if let Some(host) = url.host_str() {
-        if host.len() > 24 && !host.contains('.') {
-            let _ = url.set_host(Some("redacted"));
-        }
+    if let Some(host) = url.host_str()
+        && host.len() > 24
+        && !host.contains('.')
+    {
+        let _ = url.set_host(Some("redacted"));
     }
     url.set_query(None);
     url.set_fragment(None);
@@ -497,15 +498,15 @@ mod tests {
                 if this.always_err.load(Ordering::Relaxed) {
                     return Err(anyhow!("simulated spawn failure"));
                 }
-                if let Some(want) = this.sni_pass {
-                    if sni.as_deref() != Some(want) {
-                        return Ok(TunnelResult {
-                            passed: false,
-                            latency_ms: None,
-                            colo: None,
-                            verifier: None,
-                        });
-                    }
+                if let Some(want) = this.sni_pass
+                    && sni.as_deref() != Some(want)
+                {
+                    return Ok(TunnelResult {
+                        passed: false,
+                        latency_ms: None,
+                        colo: None,
+                        verifier: None,
+                    });
                 }
                 let passed = this
                     .passed
@@ -600,10 +601,10 @@ mod tests {
 
         let mut phase2_events = 0;
         while let Ok(e) = rx.try_recv() {
-            if let ScanEvent::Result(v) = e {
-                if v.phase2.is_some() {
-                    phase2_events += 1;
-                }
+            if let ScanEvent::Result(v) = e
+                && v.phase2.is_some()
+            {
+                phase2_events += 1;
             }
         }
         assert_eq!(phase2_events, 2, "updated verdicts must be re-emitted");
@@ -873,10 +874,10 @@ mod tests {
         run_local(&c, cfg, 1).await.unwrap();
         let mut terminal = 0u32;
         while let Ok(e) = rx.try_recv() {
-            if let ScanEvent::Phase2Progress(p) = e {
-                if p.done == p.total {
-                    terminal += 1;
-                }
+            if let ScanEvent::Phase2Progress(p) = e
+                && p.done == p.total
+            {
+                terminal += 1;
             }
         }
         assert_eq!(terminal, 1, "terminal progress must fire exactly once");
