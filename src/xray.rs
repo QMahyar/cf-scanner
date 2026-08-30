@@ -535,7 +535,7 @@ fn cached_matches_dgst(bin: &Path) -> bool {
     let Ok(bytes) = std::fs::read(bin) else {
         return false;
     };
-    hex_lower(&Sha256::digest(&bytes)) == expected
+    hex::encode(&Sha256::digest(&bytes)) == expected
 }
 
 /// Downloads the pinned release, verifies its `.dgst` SHA-256, extracts the
@@ -552,7 +552,7 @@ pub async fn download_binary(fetch: &impl BinaryFetch) -> Result<PathBuf> {
     let zip = zip?;
     let dgst = dgst?;
     let expected = parse_dgst(&String::from_utf8_lossy(&dgst), asset)?;
-    let actual = hex_lower(&Sha256::digest(&zip));
+    let actual = hex::encode(&Sha256::digest(&zip));
     if actual != expected {
         bail!("xray checksum mismatch: got {actual}, want {expected}");
     }
@@ -591,21 +591,13 @@ pub async fn download_binary(fetch: &impl BinaryFetch) -> Result<PathBuf> {
         make_executable(&tmp)?;
         let _gate = crate::paths::data_write_guard();
         std::fs::rename(&tmp, &install_dest)?;
-        let digest = hex_lower(&Sha256::digest(&std::fs::read(&install_dest)?));
+        let digest = hex::encode(&Sha256::digest(&std::fs::read(&install_dest)?));
         std::fs::write(dgst_dest, format!("SHA2-256= {digest}\n"))?;
         Ok(())
     })
     .await
     .context("xray install task failed")??;
     Ok(dest)
-}
-
-fn hex_lower(bytes: &[u8]) -> String {
-    let mut s = String::with_capacity(bytes.len() * 2);
-    for b in bytes {
-        s.push_str(&format!("{b:02x}"));
-    }
-    s
 }
 
 fn random_u32() -> u32 {
@@ -682,6 +674,7 @@ pub struct RealFetch;
 
 impl BinaryFetch for RealFetch {
     async fn bytes(&self, url: &str) -> Result<Vec<u8>> {
+        crate::ranges::validate_fetch_url(url)?;
         const MAX_BODY_BYTES: u64 = 64 * 1024 * 1024; // 64 MiB
         let resp = crate::ranges::HTTP_CLIENT
             .get(url)
@@ -1001,7 +994,7 @@ mod tests {
             w.finish().unwrap();
         }
         let zip_bytes = buf.into_inner();
-        let dgst = format!("SHA2-256= {}", hex_lower(&Sha256::digest(&zip_bytes)));
+        let dgst = format!("SHA2-256= {}", hex::encode(&Sha256::digest(&zip_bytes)));
 
         struct FakeFetch(Vec<u8>, String);
         impl BinaryFetch for FakeFetch {
@@ -1017,7 +1010,7 @@ mod tests {
 
         // Test the internals directly (data dir is not writable in CI).
         let expected = parse_dgst(&fetch.1, "Xray-windows-64.zip").unwrap();
-        assert_eq!(expected, hex_lower(&Sha256::digest(&zip_bytes)));
+        assert_eq!(expected, hex::encode(&Sha256::digest(&zip_bytes)));
 
         // Extract into a temp file and confirm contents.
         let tmp = std::env::temp_dir().join("cf-scanner-xray-test.bin");
@@ -1043,7 +1036,7 @@ mod tests {
         let fetch = FakeFetch(bad_zip.clone(), dgst.clone());
         // The verifier logic is what matters offline.
         let expected = parse_dgst(&fetch.1, "Xray-windows-64.zip").unwrap();
-        let actual = hex_lower(&Sha256::digest(&bad_zip));
+        let actual = hex::encode(&Sha256::digest(&bad_zip));
         assert_ne!(actual, expected);
     }
 
@@ -1059,7 +1052,7 @@ mod tests {
             w.finish().unwrap();
         }
         let zip_bytes = buf.into_inner();
-        let dgst = format!("SHA2-256= {}", hex_lower(&Sha256::digest(&zip_bytes)));
+        let dgst = format!("SHA2-256= {}", hex::encode(&Sha256::digest(&zip_bytes)));
         (zip_bytes, dgst)
     }
 
@@ -1147,7 +1140,7 @@ mod tests {
         let _isolated = isolated_data_dir().await;
         let bin = paths::xray_binary_path().unwrap();
         std::fs::write(&bin, b"fake xray payload").unwrap();
-        let digest = hex_lower(&Sha256::digest(b"fake xray payload"));
+        let digest = hex::encode(&Sha256::digest(b"fake xray payload"));
         std::fs::write(dgst_path(&bin), format!("SHA2-256= {digest}\n")).unwrap();
         reset_binary_state().await;
 

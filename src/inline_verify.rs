@@ -18,7 +18,9 @@ use std::time::{Duration, Instant};
 use anyhow::{Context as _, Result, anyhow, bail};
 use rustls::pki_types::ServerName;
 use sha2::{Digest as _, Sha224};
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use std::io::Cursor;
+
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, Chain};
 use tokio::net::TcpStream;
 use tokio::time::timeout;
 use tokio_rustls::TlsConnector;
@@ -450,54 +452,49 @@ async fn read_response_marker(
 }
 
 /// Yields `prefix` before delegating to `inner`, so a peek that turned out
-/// to be HTTP data is never lost.
-struct PrefixedReader<R> {
-    prefix: Vec<u8>,
-    pos: usize,
-    inner: R,
+/// to be HTTP data is never lost. Backed by `Cursor::chain` so the read
+/// side replays the prefix without manual position tracking; writes go
+/// straight to the inner tunnel.
+struct PrefixedReader {
+    chain: Chain<Cursor<Vec<u8>>, Box<dyn AsyncStream>>,
 }
 
-impl<R> PrefixedReader<R> {
-    fn new(prefix: Vec<u8>, inner: R) -> Self {
+impl PrefixedReader {
+    fn new(prefix: Vec<u8>, inner: Box<dyn AsyncStream>) -> Self {
         Self {
-            prefix,
-            pos: 0,
-            inner,
+            chain: Cursor::new(prefix).chain(inner),
         }
     }
 }
 
-impl<R: AsyncRead + Unpin> AsyncRead for PrefixedReader<R> {
+impl AsyncRead for PrefixedReader {
     fn poll_read(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
         buf: &mut tokio::io::ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
-        if self.pos < self.prefix.len() {
-            let n = buf.remaining().min(self.prefix.len() - self.pos);
-            buf.put_slice(&self.prefix[self.pos..self.pos + n]);
-            self.pos += n;
-            return Poll::Ready(Ok(()));
-        }
-        Pin::new(&mut self.inner).poll_read(cx, buf)
+        Pin::new(&mut self.chain).poll_read(cx, buf)
     }
 }
 
-impl<R: AsyncWrite + Unpin> AsyncWrite for PrefixedReader<R> {
+impl AsyncWrite for PrefixedReader {
     fn poll_write(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
-        Pin::new(&mut self.inner).poll_write(cx, buf)
+        let (_, second) = self.chain.get_mut();
+        Pin::new(second).poll_write(cx, buf)
     }
 
     fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        Pin::new(&mut self.inner).poll_flush(cx)
+        let (_, second) = self.chain.get_mut();
+        Pin::new(second).poll_flush(cx)
     }
 
     fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        Pin::new(&mut self.inner).poll_shutdown(cx)
+        let (_, second) = self.chain.get_mut();
+        Pin::new(second).poll_shutdown(cx)
     }
 }
 

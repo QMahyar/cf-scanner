@@ -146,8 +146,8 @@ fn parse_awg_uri(entry: &str) -> Result<WgConfig> {
                 .filter_map(|pair| {
                     let (k, v) = pair.split_once('=')?;
                     Some((
-                        wg_percent_decode(k).to_ascii_lowercase(),
-                        wg_percent_decode(v),
+                        crate::configs::percent_decode(k).to_ascii_lowercase(),
+                        crate::configs::percent_decode(v),
                     ))
                 })
                 .collect()
@@ -219,11 +219,7 @@ fn required(q: &BTreeMap<String, String>, key: &str) -> Result<String> {
         .ok_or_else(|| anyhow!("wg URI missing {key}"))
 }
 
-fn wg_percent_decode(s: &str) -> String {
-    percent_encoding::percent_decode_str(s)
-        .decode_utf8_lossy()
-        .into_owned()
-}
+
 
 fn parse_opt<T: std::str::FromStr>(q: &BTreeMap<String, String>, key: &str) -> Result<Option<T>> {
     match q.get(key).filter(|v| !v.is_empty()) {
