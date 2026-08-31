@@ -32,7 +32,6 @@
   } from "../formState";
   import CustomCidrsCard from "./CustomCidrsCard.svelte";
   import Phase2TunnelCard from "./Phase2TunnelCard.svelte";
-  import ProfilesBar from "./ProfilesBar.svelte";
   import WarpIdentityCard from "./WarpIdentityCard.svelte";
   import WarpRegistrationCard from "./WarpRegistrationCard.svelte";
   import {
@@ -487,6 +486,8 @@
   });
 
   onDestroy(() => {
+    candidatesView.destroy();
+    verifiedView.destroy();
     if (pendingPersist !== null) {
       try {
         localStorage.setItem(FORM_PERSIST_KEY, pendingPersist);
@@ -540,9 +541,6 @@
   <!-- scan form -->
   <section class="shell">
     <div class="core px-6 py-8 sm:px-8 sm:py-10">
-    <!-- profiles bar: outside the <form> so Enter here never starts a scan -->
-    <ProfilesBar bind:form onload={() => { touched = {}; serverFieldErrors = {}; validationErrors = []; }} />
-
     <!-- delegated touched/server-error tracking + Ctrl+Enter accelerator -->
     <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
     <form onsubmit={onFormSubmit} oninput={markTouched} onchange={markTouched} onkeydown={onFormKeydown}>
@@ -917,14 +915,14 @@
         {/if}
       {/if}
 
-      <div aria-hidden="true" class="h-14 sm:h-16"></div>
+      <div aria-hidden="true" class="h-[7.25rem] sm:h-20"></div>
       <!-- sticky actions: one canonical Start/Stop pair, visible even with
            phase-2/WARP textareas expanded -->
       <div
-        class="sticky bottom-0 z-10 -mx-6 sm:-mx-8 -mb-8 sm:-mb-10 mt-5 rounded-b-2xl px-6 sm:px-8 pt-3 backdrop-blur-md"
-        style="background: color-mix(in oklab, var(--paper-2) 88%, transparent); border-top: 1px solid oklch(100% 0 0 / 6%); box-shadow: 0 -8px 16px oklch(0% 0 0 / 20%); padding-bottom: max(1rem, env(safe-area-inset-bottom));"
+        class="sticky bottom-0 z-10 -ms-6 sm:-ms-8 -me-6 sm:-me-8 -mb-8 sm:-mb-10 mt-5 border-t-2 px-6 sm:px-8 pt-3"
+        style="border-color: var(--ink); background: var(--paper); padding-bottom: max(1rem, env(safe-area-inset-bottom));"
       >
-        <div class="flex flex-wrap items-center justify-end gap-2">
+        <div class="flex flex-wrap items-stretch justify-end gap-2">
           {#if app.running}
             {#if canSkipToPhase2}
               <button
@@ -975,7 +973,7 @@
           {/if}
         </div>
         {#if !form.capText.trim() && form.concurrency >= 512}
-          <p class="fade-in mt-2 text-[11px]" role="note" style="color: oklch(80% 0.13 85)">
+          <p class="fade-in mt-2 text-[11px]" role="note" style="color: var(--ink-muted)">
             {t("pro.hint.noCap")}
           </p>
         {/if}

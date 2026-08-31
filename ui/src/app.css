@@ -54,37 +54,52 @@
 }
 
 /*
- * Ethereal Glass shell · OLED near-black paper, violet/emerald mesh orbs,
- * brand orange reserved for CTAs. Display: Space Grotesk. Body: Plus Jakarta
- * Sans; fa falls through to Vazirmatn Variable. Data: JetBrains Mono.
- * Motion: one spring cubic-bezier everywhere, transform/opacity only,
+ * Editorial "Field Notes" shell · warm paper, ink text, thick-thin newspaper
+ * rules, vermilion reserved for CTAs + "fastest" tags, black = selected.
+ * Display: Space Grotesk. Body: Plus Jakarta Sans; fa falls through to
+ * Vazirmatn Variable. Data: JetBrains Mono.
+ * One selected-state language everywhere: `[aria-pressed="true"]` and
+ * `.btn-state-on` render as ink fill (paper text). No glow, no glass, no mesh.
+ * Motion: one spring cubic-bezier, transform/opacity only,
  * prefers-reduced-motion flattens all of it.
- * Contrast: body ink 15.2:1 on paper; muted 7.1:1 on paper-3 (AA 4.5:1), 7.7:1 on paper (AA 7:1).
+ * Contrast: body ink on paper ≈ 12:1 (AAA); muted 7:1 (AA 7:1).
  */
 
 :root {
-  color-scheme: dark;
-  --paper: oklch(10% 0.008 260);
-  --paper-2: oklch(13.5% 0.01 260);
-  --paper-3: oklch(17.5% 0.012 260);
-  --ink: oklch(90% 0.008 40);
-  --ink-muted: oklch(70% 0.012 40);
-  --accent: oklch(70% 0.15 45);
-  --accent-strong: oklch(76% 0.17 48);
-  --accent-ink: oklch(18% 0.05 45);
-  --good: oklch(75% 0.15 155);
-  --bad: oklch(66% 0.19 25);
-  /* latency data ramp — decoupled from brand so orange stays CTA-only */
-  --lat-fast: oklch(75% 0.14 155);
-  --lat-mid: oklch(78% 0.12 85);
-  --lat-slow: var(--bad);
-  /* mesh orbs: violet + emerald behind the glass */
-  --orb-a: oklch(52% 0.19 300 / 11%);
-  --orb-b: oklch(64% 0.14 165 / 8%);
-  --orb-c: oklch(60% 0.13 45 / 7%);
-  --hairline: oklch(100% 0 0 / 9%);
-  --ring: oklch(70% 0.15 45 / 55%);
+  color-scheme: light;
+  --paper: oklch(96.5% 0.008 85);
+  --wash: oklch(92.5% 0.012 85);
+  --ink: oklch(24% 0.012 60);
+  --ink-muted: oklch(40% 0.014 60);
+  --ink-3: oklch(52% 0.012 60);
+  --verm: oklch(52% 0.17 35);
+  --verm-soft: oklch(52% 0.17 35 / 12%);
+  --good: oklch(46% 0.11 155);
+  --lat-mid: oklch(52% 0.1 75);
+  --bad: oklch(50% 0.16 25);
+  --rule: oklch(24% 0.012 60 / 36%);
+  --rule-strong: oklch(24% 0.012 60 / 55%);
+  --ring: oklch(52% 0.17 35 / 80%);
   --ease-spring: cubic-bezier(0.32, 0.72, 0, 1);
+
+  /* ── Editorial semantic aliases ──
+     Old glass-theme tokens still referenced by component inline styles are
+     mapped to editorial values so the swap is safe with no logic changes.
+     `--accent` = ink + ink text: selected chips/tabs render BLACK (the
+     single selected language on paper) and emphasis icons read as ink.
+     Vermilion stays reserved for CTAs + "fastest" tags via --verm. */
+  --accent: var(--ink);
+  --accent-ink: var(--paper);
+  --accent-strong: var(--ink);
+  --paper-2: var(--wash);
+  --paper-3: var(--wash);
+  --hairline: var(--rule);
+  --hairline-strong: var(--rule-strong);
+  --orb-a: transparent;
+  --orb-b: transparent;
+  --orb-c: transparent;
+  --lat-fast: var(--good);
+  --lat-slow: var(--bad);
 }
 
 html,
@@ -101,29 +116,27 @@ body {
   min-height: 100dvh;
 }
 
-/* Display cuts get the wide geometric grotesk */
 /* Canonical form grid + numeric field: consolidate scattered layout patterns. */
-.grid-form { display: grid; gap: 0.75rem 1rem; grid-template-columns: 1fr; }
+.grid-form { display: grid; gap: 0.75rem 1rem; grid-template-columns: minmax(0, 1fr); }
 @media (min-width: 640px) { .grid-form { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
-@media (min-width: 1024px) { .grid-form { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+@media (min-width: 1024px) { .grid-form { grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr); } }
 .span-all { grid-column: 1 / -1; }
-.field-num { width: 10ch; text-align: center; }
+.field-num { width: 10ch; min-width: 10ch; max-width: 100%; text-align: center; font-family: "JetBrains Mono", ui-monospace, monospace; font-weight: 600; }
+.field.field-num { width: 10ch; }
 
 h1,
 h2,
 h3,
 .display {
   font-family: "Space Grotesk Variable", "Plus Jakarta Sans Variable", "Vazirmatn Variable", sans-serif;
-}
-
-/* Ultra-light icon lines across the whole app */
-svg.lucide {
-  stroke-width: 1.5;
+  font-style: normal;
+  overflow-wrap: anywhere;
+  min-width: 0;
 }
 
 /* Arabic script needs taller leading and no tracking tricks (research §8) */
 html[lang="fa"] body {
-  line-height: 1.75;
+  line-height: 1.8;
 }
 html[lang="fa"] .tracking-wider,
 html[lang="fa"] .tracking-widest,
@@ -136,109 +149,86 @@ html[lang="fa"] .tracking-tight {
   unicode-bidi: isolate;
 }
 
-/* Fixed-position layer paints the mesh once per viewport instead of
- * repainting background-attachment: fixed on every phone scroll frame */
-body::before {
-  content: "";
-  position: fixed;
-  inset: 0;
-  z-index: -1;
-  pointer-events: none;
-  background-image:
-    radial-gradient(46% 38% at 16% -4%, var(--orb-a), transparent 70%),
-    radial-gradient(40% 34% at 92% 8%, var(--orb-c), transparent 72%),
-    radial-gradient(52% 44% at 78% 108%, var(--orb-b), transparent 74%);
-}
-
 .mono {
   font-family: "JetBrains Mono", ui-monospace, monospace;
   font-variant-numeric: tabular-nums;
 }
 
 /*
- * Double-bezel architecture: a machined outer shell holds an inset inner
- * core with concentric radii. Use `.shell > .core`; both are display blocks.
+ * Flat ruled panel: replaces the glass double-bezel. `.shell > .core` keeps
+ * working as a nested surface with a hairline border and a wash fill.
  */
 .shell {
-  border-radius: 2rem;
-  padding: 0.375rem;
-  background: oklch(100% 0 0 / 4%);
-  box-shadow:
-    0 0 0 1px oklch(100% 0 0 / 7%),
-    0 24px 60px oklch(0% 0 0 / 35%);
+  border: 1px solid var(--rule);
+  border-radius: 0.375rem;
+  background: transparent;
 }
 .core {
-  border-radius: calc(2rem - 0.375rem);
-  background: linear-gradient(180deg, oklch(100% 0 0 / 3%), transparent 32%), var(--paper-2);
-  box-shadow:
-    0 1px 1px oklch(100% 0 0 / 12%) inset,
-    0 12px 36px oklch(0% 0 0 / 28%);
+  border-radius: 0.25rem;
+  background: var(--paper);
+  padding: 0.375rem;
 }
-.core-tight {
-  border-radius: calc(1.25rem - 0.25rem);
-}
-/* Compact bezel for small cards (result tiles, banners) */
+.core-tight { border-radius: 0.25rem; }
 .shell-sm {
-  border-radius: 1.25rem;
-  padding: 0.25rem;
-  background: oklch(100% 0 0 / 4%);
-  box-shadow: 0 0 0 1px oklch(100% 0 0 / 7%), 0 10px 28px oklch(0% 0 0 / 30%);
+  border: 1px solid var(--rule);
+  border-radius: 0.375rem;
 }
 
-/* Legacy single-card look = just the core, hover lifts on a spring */
+/* Single flat card = bordered paper panel */
 .card {
-  border-radius: 1rem;
-  background: var(--paper-2);
-  box-shadow:
-    0 1px 0 oklch(100% 0 0 / 3%) inset,
-    0 8px 24px oklch(0% 0 0 / 35%);
+  border: 1px solid var(--rule);
+  border-radius: 0.375rem;
+  background: var(--paper);
 }
 .card-lift {
-  transition:
-    transform 500ms var(--ease-spring),
-    box-shadow 500ms var(--ease-spring);
+  transition: border-color 200ms var(--ease-spring), transform 300ms var(--ease-spring);
 }
 .card-lift:hover {
-  transform: translateY(-2px);
-  box-shadow:
-    0 1px 0 oklch(100% 0 0 / 4%) inset,
-    0 14px 40px oklch(0% 0 0 / 45%),
-    0 0 32px var(--orb-a);
+  transform: translateY(-1px);
+  border-color: var(--rule-strong);
 }
 
-/* Micro eyebrow tag preceding major headings */
+/* Micro eyebrow tag preceding major headings: label + a trailing rule */
 .eyebrow {
-  display: inline-flex;
+  display: flex;
   align-items: center;
-  gap: 0.4rem;
-  border-radius: 9999px;
-  padding: 0.25rem 0.7rem;
+  gap: 0.6rem;
+  border-radius: 0;
+  padding: 0;
+  font-family: "JetBrains Mono", ui-monospace, monospace;
   font-size: 10px;
   line-height: 1;
   font-weight: 600;
   text-transform: uppercase;
-  letter-spacing: 0.2em;
-  color: var(--ink-muted);
-  background: oklch(100% 0 0 / 5%);
-  box-shadow: 0 0 0 1px oklch(100% 0 0 / 8%) inset;
+  letter-spacing: 0.14em;
+  color: var(--ink-3);
+  background: transparent;
+  box-shadow: none;
 }
+.eyebrow::after { content: ""; flex: 1; height: 1px; background: var(--rule); }
 
-/* Controls — every state styled */
+/* Controls — one language for every state.
+   Default: flat bordered rect. Selected: ink fill. Primary CTA: vermilion. */
 .btn {
   display: inline-flex;
   align-items: center;
+  justify-content: center;
   gap: 0.5rem;
-  border-radius: 9999px;
-  padding: 0.55rem 1.25rem;
+  border-radius: 0.25rem;
+  padding: 0.55rem 1.1rem;
   font-weight: 600;
   font-size: 0.875rem;
   line-height: 1.2;
   cursor: pointer;
+  background: transparent;
+  border: 1px solid var(--rule-strong);
+  color: var(--ink);
+  white-space: nowrap;
   transition:
-    transform 450ms var(--ease-spring),
-    box-shadow 350ms var(--ease-spring),
-    background-color 250ms var(--ease-spring),
-    color 250ms var(--ease-spring);
+    transform 250ms var(--ease-spring),
+    background-color 150ms var(--ease-spring),
+    color 150ms var(--ease-spring),
+    border-color 150ms var(--ease-spring);
 }
 .btn:focus-visible {
   outline: 2px solid var(--ring);
@@ -246,44 +236,57 @@ body::before {
 }
 .btn:active:not(:disabled),
 .btn.is-active:not(:disabled) {
-  transform: scale(0.97);
+  transform: scale(0.98);
 }
 .btn:disabled {
-  opacity: 0.65;
+  opacity: 0.5;
   cursor: not-allowed;
 }
 .btn-sm {
-  padding: 0.375rem 0.75rem;
+  padding: 0.4rem 0.7rem;
   font-size: 0.75rem;
 }
 .btn-lg {
-  padding: 1rem 1.75rem;
+  padding: 0.8rem 1.5rem;
   font-size: 1rem;
+  font-weight: 700;
 }
 .btn-primary {
-  background: var(--accent);
-  color: var(--accent-ink);
+  background: var(--verm);
+  border-color: var(--verm);
+  color: oklch(98% 0.005 85);
 }
 .btn-primary:hover:not(:disabled),
 .btn-primary.is-hover:not(:disabled) {
-  background: var(--accent-strong);
-  box-shadow: 0 0 32px var(--orb-c);
+  background: oklch(48% 0.17 35);
+  border-color: oklch(48% 0.17 35);
 }
 .btn-secondary {
-  background: var(--paper-3);
+  background: transparent;
+  border: 1px solid var(--rule-strong);
   color: var(--ink);
 }
 .btn-secondary:hover:not(:disabled),
 .btn-secondary.is-hover:not(:disabled) {
-  background: oklch(22% 0.014 260);
+  background: var(--wash);
 }
 .btn-ghost {
   background: transparent;
-  color: var(--ink-muted);
+  border-color: transparent;
+  color: var(--ink-3);
 }
 .btn-ghost:hover:not(:disabled) {
   color: var(--ink);
-  background: var(--paper-3);
+  background: var(--wash);
+}
+/* toggle-on state: reads as selected — ink fill, paper text (ONE language) */
+.btn-state-on {
+  background: var(--ink);
+  border-color: var(--ink);
+  color: var(--paper);
+}
+.btn-state-on:hover:not(:disabled) {
+  background: var(--ink);
 }
 .btn[data-state="loading"] {
   pointer-events: none;
@@ -291,23 +294,14 @@ body::before {
 }
 .btn[data-state="error"] {
   background: var(--bad);
-  color: white;
+  color: oklch(98% 0.005 85);
 }
 .btn[data-state="success"] {
   background: var(--good);
-  color: oklch(18% 0.04 155);
-}
-/* toggle-on state: reads as mode, not primary action — accent ring, no fill */
-.btn-state-on {
-  color: var(--accent);
-  box-shadow: 0 0 0 1px var(--ring);
-}
-.btn-state-on:hover:not(:disabled) {
-  background: oklch(22% 0.014 260);
+  color: oklch(98% 0.005 85);
 }
 
-/* Trailing-icon chip inside a CTA ("button-in-button"): the icon never sits
-   naked next to the label; it rides in its own flush circular well. */
+/* Trailing-icon chip inside a CTA: rides in its own flush circular well */
 .icon-chip {
   display: inline-flex;
   align-items: center;
@@ -315,11 +309,14 @@ body::before {
   width: 1.75rem;
   height: 1.75rem;
   border-radius: 9999px;
-  background: oklch(0% 0 0 / 18%);
-  box-shadow: 0 1px 1px oklch(100% 0 0 / 18%) inset;
+  background: #fff;
+  color: var(--verm);
   transition:
-    transform 450ms var(--ease-spring),
-    background-color 250ms var(--ease-spring);
+    transform 250ms var(--ease-spring),
+    background-color 150ms var(--ease-spring);
+}
+.icon-chip svg {
+  stroke-width: 2.5;
 }
 .group:hover .icon-chip {
   transform: translateX(2px) translateY(-1px) scale(1.06);
@@ -330,35 +327,41 @@ body::before {
   display: inline-flex;
   align-items: center;
   gap: 0.4rem;
-  border-radius: 9999px;
-  box-shadow: 0 0 0 1px var(--hairline) inset;
-  background: oklch(100% 0 0 / 4%);
-  padding: 0.3rem 0.7rem;
+  border-radius: 0.25rem;
+  border: 1px solid var(--rule-strong);
+  background: transparent;
+  padding: 0.3rem 0.6rem;
+  font-family: "JetBrains Mono", ui-monospace, monospace;
   font-size: 0.72rem;
   font-weight: 600;
-  letter-spacing: 0.02em;
+  letter-spacing: 0.04em;
   color: var(--ink-muted);
 }
 
+/* Text/number fields: flat, underlined hairline border, vermilion focus ring */
 .field {
   width: 100%;
-  border-radius: 0.85rem;
-  background: var(--paper-3);
-  border: 1px solid transparent;
+  border-radius: 0.25rem;
+  background: transparent;
+  border: 1px solid var(--rule-strong);
   color: var(--ink);
-  padding: 0.55rem 0.8rem;
+  padding: 0.55rem 0.7rem;
   font-size: 0.875rem;
+  min-width: 0;
   transition:
-    border-color 250ms var(--ease-spring),
-    box-shadow 250ms var(--ease-spring);
+    border-color 150ms var(--ease-spring);
 }
 .field:hover:not(:disabled) {
-  border-color: oklch(100% 0 0 / 7%);
+  border-color: var(--ink-3);
 }
 .field:focus-visible {
   outline: none;
-  border-color: var(--accent);
-  box-shadow: 0 0 0 3px var(--ring);
+  border-color: var(--verm);
+  box-shadow: 0 0 0 2px var(--ring);
+}
+.field::placeholder {
+  color: var(--ink-3);
+  opacity: 1;
 }
 .field:user-invalid,
 .field[aria-invalid="true"] {
@@ -366,8 +369,10 @@ body::before {
 }
 .field[aria-invalid="true"]:focus-visible {
   outline-color: var(--bad);
-  box-shadow: 0 0 0 3px oklch(66% 0.19 25 / 40%);
+  box-shadow: 0 0 0 2px oklch(50% 0.16 25 / 40%);
 }
+select.field { cursor: pointer; }
+textarea.field { font-family: "JetBrains Mono", ui-monospace, monospace; font-size: 0.78rem; line-height: 1.55; }
 
 /* iOS Safari zooms the viewport when focusing inputs under 16px */
 @media (max-width: 639px) {
@@ -379,17 +384,14 @@ body::before {
 /* Scroll entry reveal: IntersectionObserver toggles .revealed once. */
 .reveal {
   opacity: 0;
-  transform: translateY(18px);
-  filter: blur(10px);
+  transform: translateY(12px);
   transition:
-    opacity 800ms var(--ease-spring),
-    transform 800ms var(--ease-spring),
-    filter 800ms var(--ease-spring);
+    opacity 500ms var(--ease-spring),
+    transform 500ms var(--ease-spring);
 }
 .reveal.revealed {
   opacity: 1;
   transform: translateY(0);
-  filter: blur(0);
 }
 
 @keyframes fade-in {
@@ -401,7 +403,7 @@ body::before {
   }
 }
 .fade-in {
-  animation: fade-in 260ms var(--ease-spring) both;
+  animation: fade-in 200ms var(--ease-spring) both;
 }
 @media (prefers-reduced-motion: reduce) {
   *,
@@ -411,21 +413,25 @@ body::before {
     transition-duration: 0.01ms !important;
   }
   .reveal {
-    filter: none;
     transform: none;
     opacity: 1;
   }
 }
 
+/* Small labelled pill / chip used for filters, tags and inline buttons */
 .pill {
   display: inline-flex;
   align-items: center;
+  justify-content: center;
   gap: 0.375rem;
-  border-radius: 9999px;
-  padding: 0.2rem 0.65rem;
+  border-radius: 0.25rem;
+  padding: 0.3rem 0.6rem;
   font-size: 0.72rem;
   font-weight: 600;
   letter-spacing: 0.02em;
+  border: 1px solid var(--rule-strong);
+  color: var(--ink-muted);
+  background: transparent;
 }
 
 /* Progress fill grows via scaleX (GPU-safe); origin flips with the RTL dir */
@@ -438,15 +444,16 @@ body::before {
 button.pill {
   cursor: pointer;
   transition:
-    background-color 250ms var(--ease-spring),
-    color 250ms var(--ease-spring),
-    transform 450ms var(--ease-spring);
+    background-color 150ms var(--ease-spring),
+    color 150ms var(--ease-spring),
+    transform 250ms var(--ease-spring);
 }
 button.pill:hover:not(:disabled) {
-  background: oklch(22% 0.014 260);
+  background: var(--wash);
+  color: var(--ink);
 }
 button.pill:active:not(:disabled) {
-  transform: scale(0.97);
+  transform: scale(0.98);
 }
 button.pill:focus-visible {
   outline: 2px solid var(--ring);
@@ -456,6 +463,46 @@ button.pill:focus-visible {
 input[type="checkbox"]:focus-visible {
   outline: 2px solid var(--ring);
   outline-offset: 2px;
+}
+input[type="checkbox"] {
+  accent-color: var(--ink);
+}
+
+/* Disclosures (Advanced settings / tunnel advanced) */
+details.disc {
+  border: 1px solid var(--rule);
+  border-radius: 0.375rem;
+}
+details.disc > summary {
+  cursor: pointer;
+  font-weight: 600;
+  font-size: 0.8rem;
+  color: var(--ink-muted);
+  padding: 0.65rem 0.9rem;
+  list-style: none;
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+}
+details.disc > summary::-webkit-details-marker { display: none; }
+details.disc > summary::before {
+  content: "+";
+  font-family: "JetBrains Mono", ui-monospace, monospace;
+  color: var(--verm);
+  font-weight: 600;
+}
+details.disc[open] > summary::before { content: "–"; }
+details.disc .dbody {
+  padding: 0.35rem 0.9rem 1rem;
+}
+
+/* Focus visibility for semantic links + disclosure summaries (masthead/footer
+   links, details.disc) so keyboard users get the same vermilion ring as buttons. */
+a:focus-visible,
+summary:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
+  border-radius: 0.25rem;
 }
 
 /* Coarse pointers need ~44px hit targets; desktop keeps its compact density */

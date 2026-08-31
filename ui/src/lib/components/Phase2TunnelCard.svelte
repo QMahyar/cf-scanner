@@ -42,7 +42,7 @@
 
 <div
   class="fade-in mt-4 rounded-md border px-4 py-4"
-  style="border-color: oklch(100% 0 0 / 8%)"
+  style="border-color: var(--rule)"
 >
   <div class="mb-3 flex flex-wrap items-center justify-between gap-2">
     <span class="eyebrow">{t("table.tunnel.col")}</span>
@@ -52,8 +52,8 @@
           class="pill"
           title={xray.found ? (xray.path ?? t("pro.xray.foundFallback")) : t("pro.xray.missingUnder", { dir: xray.data_dir ?? "" })}
           style={xray.found
-            ? "background: oklch(30% .06 155); color: var(--good)"
-            : "background: oklch(30% .09 25); color: var(--bad)"}
+            ? "background: oklch(46% 0.11 155 / 12%); color: var(--good)"
+            : "background: var(--bad); color: var(--bad)"}
         >
           xray {xray.found ? xray.version : t("pro.xray.missing")}
         </span>

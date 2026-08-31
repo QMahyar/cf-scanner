@@ -180,7 +180,7 @@
       {#if app.lastScanVerified}
         <span
           class="pill ms-2 align-middle"
-          style="background: oklch(30% .06 155); color: var(--good)"
+          style="background: oklch(46% 0.11 155 / 12%); color: var(--good)"
           title={t("table.verifiedTitle")}
         >
           <ShieldCheck class="size-3.5" />
@@ -225,7 +225,6 @@
       <label
         class="me-1 flex items-center gap-1.5 whitespace-nowrap"
         style="color: var(--ink-muted)"
-        title={t("table.maxLatency.hide")}
       >
         {t("table.maxLatency")}
         <!-- WHY select not free input: three meaningful ceilings match the
@@ -249,6 +248,7 @@
         style={view.sortCol === "latency"
           ? "background: var(--paper-3); color: var(--accent)"
           : "background: var(--paper-3); color: var(--ink-muted)"}
+        aria-pressed={view.sortCol === "latency"}
         onclick={() => view.cycleSort("latency")}
       >
         {t("table.sort.latency")}{view.sortCol === "latency" ? (view.sortDir === "asc" ? " ▲" : " ▼") : ""}
@@ -258,6 +258,7 @@
         style={view.sortCol === "ip"
           ? "background: var(--paper-3); color: var(--accent)"
           : "background: var(--paper-3); color: var(--ink-muted)"}
+        aria-pressed={view.sortCol === "ip"}
         onclick={() => view.cycleSort("ip")}
       >
         {t("table.sort.ip")}{view.sortCol === "ip" ? (view.sortDir === "asc" ? " ▲" : " ▼") : ""}
@@ -291,20 +292,20 @@
   {#if tunnelSummary}
     <p
       class="border-t px-4 py-1.5 text-xs"
-      style="border-color: oklch(100% 0 0 / 6%); color: var(--ink-muted)"
+      style="border-color: var(--rule); color: var(--ink-muted)"
     >
       {tunnelSummary}
     </p>
   {/if}
   {#if toast}
-    <p class="fade-in border-t px-4 py-1.5 text-xs" role="status" style="border-color: oklch(100% 0 0 / 6%); color: var(--good)">
+    <p class="fade-in border-t px-4 py-1.5 text-xs" role="status" style="border-color: var(--rule); color: var(--good)">
       {toast}
     </p>
   {/if}
   {#if view.picked.length > 0}
     <div
       class="fade-in flex flex-wrap items-center gap-2 border-t px-4 py-2 text-xs"
-      style="border-color: oklch(100% 0 0 / 6%)"
+      style="border-color: var(--rule)"
     >
       <span class="mono font-semibold">{t("table.selected", { n: view.picked.length })}</span>
       <button
@@ -364,11 +365,11 @@
     </div>
   {:else}
     <div class="max-h-[26rem] overflow-x-auto overflow-y-auto">
-      <table class="w-full min-w-[38rem] border-collapse text-sm">
+      <table class="w-full min-w-[34rem] border-collapse text-sm">
         <caption class="sr-only">Scan results</caption>
         <thead class="sticky top-0 z-10" style="background: var(--paper-2)">
           <tr class="text-start text-[11px] uppercase tracking-wider" style="color: var(--ink-muted)">
-            <th class="w-11 px-1 py-2">
+            <th class="w-9 px-0 py-2 sm:w-11 sm:px-1">
               <label class="mx-auto grid size-8 cursor-pointer place-items-center sm:size-9">
                 <input
                   type="checkbox"
@@ -380,7 +381,7 @@
                 />
               </label>
             </th>
-            <th class="sticky left-0 z-10 bg-[var(--paper-2)] px-4 py-2 font-medium border-e" scope="col" style="border-color: oklch(100% 0 0 / 9%)" aria-sort={view.sortCol === "ip" ? (view.sortDir === "asc" ? "ascending" : "descending") : undefined}>
+            <th class="sticky start-0 z-10 bg-[var(--paper-2)] px-4 py-2 font-medium border-e" scope="col" style="border-color: var(--rule-strong); box-shadow: 2px 0 4px rgba(0,0,0,0.04)" aria-sort={view.sortCol === "ip" ? (view.sortDir === "asc" ? "ascending" : "descending") : undefined}>
               <button class="uppercase tracking-wider" onclick={() => view.cycleSort("ip")} aria-label={view.sortCol === "ip" ? `${t("table.col.endpoint")} ${view.sortDir === "asc" ? "ascending" : "descending"}` : t("table.col.endpoint")}>{t("table.col.endpoint")}<span aria-hidden="true">{view.sortCol === "ip" ? (view.sortDir === "asc" ? " ▲" : " ▼") : ""}</span>
               </button>
             </th>
@@ -395,8 +396,8 @@
         </thead>
         <tbody>
           {#each visibleRows as r, i (r.ip + ":" + r.port)}
-            <tr class="border-t" style="border-color: oklch(100% 0 0 / 4%)">
-              <td class="px-1 py-2 align-middle">
+            <tr class="border-t" style="border-color: var(--rule)">
+              <td class="px-0 py-2 align-middle sm:px-1">
                 <label class="mx-auto grid size-8 cursor-pointer place-items-center sm:size-9">
                   <input
                     type="checkbox"
@@ -407,7 +408,7 @@
                   />
                 </label>
               </td>
-              <td class="sticky left-0 z-10 bg-[var(--paper-2)] mono px-4 py-2 border-e" style="border-color: oklch(100% 0 0 / 9%)"><span dir="ltr">{r.ip}<span style="color: var(--ink-muted)">:{r.port}</span></span></td>
+              <td class="sticky start-0 z-10 bg-[var(--paper-2)] mono px-4 py-2 border-e" style="border-color: var(--rule-strong); box-shadow: 2px 0 4px rgba(0,0,0,0.04)"><span dir="ltr">{r.ip}<span style="color: var(--ink-muted)">:{r.port}</span></span></td>
               <td class="mono px-4 py-2 text-end" style="color: {latencyClass(r.latency_ms)}">
                 <span dir="ltr">{r.latency_ms}ms</span>
               </td>
@@ -420,7 +421,7 @@
                     class="pill"
                     title={r.phase2.error ?? undefined}
                     style={r.phase2.passed
-                      ? "background: oklch(30% .06 155); color: var(--good)"
+                      ? "background: oklch(46% 0.11 155 / 12%); color: var(--good)"
                       : "background: var(--paper-3); color: var(--ink-muted)"}>
                     {r.phase2.passed ? t("table.tunnel.pass", { ms: r.phase2.latency_ms ?? "?" }) : t("table.tunnel.fail")}
                   </span>
@@ -436,9 +437,9 @@
                   onclick={() => copyUri(r, i)}
                 >
                   {#if copiedIdx === i}
-                    <Check class="size-4" style="color: var(--good)" />
+                    <Check class="size-4" aria-hidden="true" style="color: var(--good)" />
                   {:else}
-                    <Copy class="size-4" />
+                    <Copy class="size-4" aria-hidden="true" />
                   {/if}
                 </button>
                 {#if exportableConfig(r)}
@@ -449,9 +450,9 @@
                     onclick={() => copyImportable(r, i)}
                   >
                     {#if copiedUriIdx === i}
-                      <Check class="size-4" style="color: var(--good)" />
+                      <Check class="size-4" aria-hidden="true" style="color: var(--good)" />
                     {:else}
-                      <Link2 class="size-4" />
+                      <Link2 class="size-4" aria-hidden="true" />
                     {/if}
                   </button>
                 {/if}
@@ -463,7 +464,7 @@
     </div>
   {/if}
   {#if capped}
-    <div class="flex flex-wrap items-center justify-between gap-2 border-t px-4 py-2 text-xs" style="border-color: oklch(100% 0 0 / 6%); color: var(--ink-muted)">
+    <div class="flex flex-wrap items-center justify-between gap-2 border-t px-4 py-2 text-xs" style="border-color: var(--rule); color: var(--ink-muted)">
       <span class="mono">
         {t("table.renderCap", { visible: visibleRows.length, total: chipRows.length })}
       </span>

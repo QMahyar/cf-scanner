@@ -189,7 +189,7 @@
 {#if container}
   <div
     class="fade-in rounded-md border px-3 py-3"
-    style="border-color: oklch(100% 0 0 / 8%)"
+    style="border-color: var(--rule)"
   >
     <div class="flex flex-wrap items-center justify-between gap-2">
       <span class="mono text-[11px] font-semibold uppercase tracking-wider" style="color: var(--ink-muted)">
@@ -204,7 +204,7 @@
             title={t("wgnoise.presetTitle", { preset: p })}
             onclick={() => applyPreset(p as keyof typeof PRESETS)}
           >
-            <RotateCcw class="size-3" /> {p}
+            <RotateCcw class="size-3" aria-hidden="true" /> {p}
           </button>
         {/each}
       </span>

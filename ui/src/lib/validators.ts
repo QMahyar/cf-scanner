@@ -22,7 +22,9 @@ export const WARP_SWEEP_CAP = 5000;
 export type Verdict<T> = { ok: true; value: T } | { ok: false; message: string };
 
 const IPV4_OCTET = /^(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)$/;
-const DECIMAL = /^\d+$/;
+// Rust's u8/u16 from_str accepts a single leading '+', so the numeric
+// mirrors do too (fixture-pinned).
+const DECIMAL = /^\+?\d+$/;
 
 /** Strict dotted-quad IPv4: four octets 0–255, leading zeros rejected
  * (mirrors Rust's std Ipv4Addr parse). */
@@ -60,8 +62,10 @@ function isIp(s: string): boolean {
 export function parseEndpoint(line: string): Verdict<string> {
   const s = line.trim();
   const colon = s.lastIndexOf(":");
-  const host = colon === -1 ? s : s.slice(0, colon);
-  const portStr = colon === -1 ? null : s.slice(colon + 1);
+  // The server trims host and port segments independently (" 1.2.3.4 : 443 "
+  // is valid there); mirror that, not whole-line trim only.
+  const host = (colon === -1 ? s : s.slice(0, colon)).trim();
+  const portStr = colon === -1 ? null : s.slice(colon + 1).trim();
   if (host.includes(":")) {
     return { ok: false, message: `${line}: IPv6 is not supported (WARP dials raw IPv4)` };
   }
@@ -91,8 +95,10 @@ export function parseCidr(line: string): Verdict<string> {
   if (slash === -1) {
     return { ok: false, message: `${line}: needs a /prefix (e.g. 1.2.3.0/24)` };
   }
-  const addr = s.slice(0, slash);
-  const prefixStr = s.slice(slash + 1);
+  // The server trims the address and prefix segments independently
+  // (" 1.2.3.0 / 24 " is valid there); mirror that.
+  const addr = s.slice(0, slash).trim();
+  const prefixStr = s.slice(slash + 1).trim();
   const v6 = addr.includes(":");
   if (v6 ? !isIpv6(addr) : !isIpv4(addr)) {
     return { ok: false, message: `${line}: invalid address` };
@@ -114,12 +120,13 @@ export function parseCidr(line: string): Verdict<string> {
 /** Mirror of `validate_sni` (api/types.rs): a raw IP or an RFC 1035-style
  * hostname (per-label ≤63, total ≤253, alnum + hyphen, no edge hyphens). */
 export function validateSni(s: string): Verdict<string> {
-  const v = s.trim();
-  if (isIp(v)) return { ok: true, value: v };
-  if (v.length > 253) return { ok: false, message: `${s}: hostname exceeds 253 characters` };
+  // The server does NOT trim: surrounding whitespace makes the value
+  // invalid there, so the mirror rejects it too (fixture-pinned parity).
+  if (isIp(s)) return { ok: true, value: s };
+  if (s.length > 253) return { ok: false, message: `${s}: hostname exceeds 253 characters` };
   const ok =
-    v.length > 0 &&
-    v.split(".").every(
+    s.length > 0 &&
+    s.split(".").every(
       (label) =>
         label.length > 0 &&
         label.length <= 63 &&
@@ -128,7 +135,7 @@ export function validateSni(s: string): Verdict<string> {
         /^[a-zA-Z0-9-]+$/.test(label),
     );
   return ok
-    ? { ok: true, value: v }
+    ? { ok: true, value: s }
     : { ok: false, message: `${s}: must be a hostname (a-z 0-9 -) or an IP` };
 }
 

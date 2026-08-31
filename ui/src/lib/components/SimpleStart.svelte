@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { onDestroy } from "svelte";
   import { Check, Copy, Download, Gauge, Play, Share2, Square } from "@lucide/svelte";
   import {
     exportText,
@@ -79,6 +80,7 @@
 
   const unfilteredBest = $derived(app.results.filter(passOrUntested));
   const bestView = new ResultsView(() => unfilteredBest, "candidates");
+  onDestroy(() => bestView.destroy());
 
   const best = $derived(bestView.rows);
 
@@ -119,7 +121,7 @@
 <section class="shell fade-in">
   <div class="core px-6 py-8 sm:px-8 sm:py-10">
     <div class="flex flex-col gap-6 lg:flex-row lg:items-end lg:justify-between">
-      <div class="min-w-0 flex-1">
+      <div class="min-w-0 flex-1 lg:min-w-[320px]">
         <div
           class="mb-4 inline-flex items-center rounded-full p-1"
           style="background: var(--paper-3)"
@@ -252,7 +254,7 @@
                 : t("simple.start.cdn")}
           </button>
         </div>
-        <span class="mono text-[11px]" style="color: var(--ink-muted)">
+        <span class="mono max-w-prose text-xs leading-snug" style="color: var(--ink-3)">
           {t("simple.finishHint")} · {t("simple.overshootHint")}
         </span>
       </div>
@@ -329,12 +331,12 @@
       <Play class="size-3.5" />
       {t("howto.scan")}
     </span>
-    <span aria-hidden="true" class="h-0 w-6 sm:w-10 border-t border-dashed" style="border-color: oklch(100% 0 0 / 15%)"></span>
+    <span aria-hidden="true" class="h-0 w-6 sm:w-10 border-t border-dashed" style="border-color: var(--rule)"></span>
     <span class="flex items-center gap-1.5 text-xs whitespace-nowrap" style="color: var(--ink-muted)">
       <Gauge class="size-3.5" />
       {t("howto.rank")}
     </span>
-    <span aria-hidden="true" class="h-0 w-6 sm:w-10 border-t border-dashed" style="border-color: oklch(100% 0 0 / 15%)"></span>
+    <span aria-hidden="true" class="h-0 w-6 sm:w-10 border-t border-dashed" style="border-color: var(--rule)"></span>
     <span class="flex items-center gap-1.5 text-xs whitespace-nowrap" style="color: var(--ink-muted)">
       <Copy class="size-3.5" />
       {t("howto.copy")}
@@ -363,7 +365,7 @@
       <button
         class="pill shrink-0 cursor-pointer"
         style={copiedAll !== null
-          ? "background: oklch(30% .06 155); color: var(--good)"
+          ? "background: oklch(46% 0.11 155 / 12%); color: var(--good)"
           : "background: var(--paper-3); color: var(--ink-muted)"}
         title={t("table.copyAllTitle")}
         onclick={copyAll}
@@ -392,8 +394,11 @@
           <div class="core core-tight flex min-w-0 flex-1 items-center justify-between gap-3 px-4 py-3">
             <div class="min-w-0">
               <p class="mono truncate text-sm font-semibold"><span dir="ltr">{r.ip}:{r.port}</span></p>
-              <p class="text-xs" style="color: var(--ink-muted)">
-                <span dir="ltr">{r.latency_ms}ms</span>{r.country ? ` · ${r.country}` : ""}{i === 0 ? ` · ${t("card.fastest")}` : ""}
+              <p class="mono mt-0.5 text-xs" style="color: var(--ink-3)">
+                <span dir="ltr">{r.latency_ms}ms</span>{r.country ? ` — ${r.country}` : ""}
+                {#if i === 0}
+                  <span class="ms-1.5 rounded-full px-1.5 py-0.5 align-middle text-[10px] font-semibold uppercase tracking-wider" style="background: var(--ink); color: var(--paper)">{t("card.fastest")}</span>
+                {/if}
               </p>
             </div>
             <button
@@ -412,7 +417,7 @@
                 }
               }}
             >
-              <Copy class="size-4" />
+              <Copy class="size-4" aria-hidden="true" />
             </button>
           </div>
         </article>

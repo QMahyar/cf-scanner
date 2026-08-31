@@ -46,7 +46,7 @@
 
 <div
   class="rounded-md border px-3 py-3 span-all"
-  style="border-color: oklch(100% 0 0 / 8%); background: oklch(100% 0 0 / 2%)"
+  style="border-color: var(--rule); background: var(--wash)"
 >
   <p class="mb-2 text-xs font-semibold" style="color: var(--ink)">{t("pro.warp.identityGroup")}</p>
   <div class="text-xs" style="color: var(--ink-muted)">

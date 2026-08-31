@@ -53,7 +53,7 @@
 
 <div
   class="fade-in rounded-md border px-3 py-3 span-all"
-  style="border-color: oklch(100% 0 0 / 8%)"
+  style="border-color: var(--rule)"
 >
   <div class="flex flex-wrap items-end gap-2">
     <label class="text-xs" style="color: var(--ink-muted)">

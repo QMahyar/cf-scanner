@@ -8,11 +8,6 @@ import type {
   Verdict,
 } from "./types";
 
-export interface ProfilePayload {
-  name: string;
-  config: ScanConfig;
-}
-
 export interface XrayStatusPayload {
   found: boolean;
   path: string | null;
@@ -55,9 +50,9 @@ async function apiErrorFrom(res: Response): Promise<ApiError> {
   return new ApiError(res.status, summary, detail);
 }
 
-/** saveProfile/deleteProfile answer 200/201/204 with no useful body but
- * still use the ApiError envelope on failure — pass their Response through
- * this to get unwrap()-style thrown Errors. */
+/** 202 (scan accepted) and 204 carry no body but still use the ApiError
+ * envelope on failure — pass their Response through this to get
+ * unwrap()-style thrown Errors. */
 export async function assertOk(res: Response): Promise<Response> {
   if (!res.ok) throw await apiErrorFrom(res);
   return res;
@@ -100,24 +95,6 @@ export const api = {
       cache: "no-store",
       signal: AbortSignal.timeout(8000),
     }).then(assertOk),
-  profiles: () =>
-    fetch("/api/profiles", { cache: "no-store", signal: AbortSignal.timeout(8000) }).then(
-      unwrap<ProfilePayload[]>,
-    ),
-  saveProfile: (name: string, cfg: unknown) =>
-    fetch(`/api/profiles/${encodeURIComponent(name)}`, {
-      method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(cfg),
-      cache: "no-store",
-      signal: AbortSignal.timeout(8000),
-    }),
-  deleteProfile: (name: string) =>
-    fetch(`/api/profiles/${encodeURIComponent(name)}`, {
-      method: "DELETE",
-      cache: "no-store",
-      signal: AbortSignal.timeout(8000),
-    }),
   exportUri: (config: string, ip: string, port: number) =>
     fetch("/api/config/export", {
       method: "POST",

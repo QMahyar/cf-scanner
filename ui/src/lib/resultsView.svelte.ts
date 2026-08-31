@@ -53,7 +53,11 @@ export class ResultsView {
   maxLatency = $state<number | null>(null);
   selected = $state(new Set<string>());
   renderLimit = $state(DEFAULT_RENDER_CAP);
-  #dirty = $state(true);
+  /** Bumped by markDirty() to invalidate the cache; read but NEVER written
+   * inside a getter (Svelte 5 throws state_unsafe_mutation on writes during
+   * derived/template evaluation — the old #dirty flag broke Simple-mode
+   * results on the first live-scan tick). */
+  #version = $state(0);
 
   readonly #source: () => readonly Verdict[];
   readonly #predicate: (r: Verdict) => boolean;
@@ -62,6 +66,7 @@ export class ResultsView {
   #rowsCache: Verdict[] = [];
   #visibleCache: Verdict[] = [];
   #cappedCache = false;
+  #cachedVersion = -1;
 
   constructor(
     source: () => readonly Verdict[],
@@ -72,26 +77,18 @@ export class ResultsView {
     this.#predicate = PHASE_PREDICATE[phase];
     this.#renderCap = opts?.renderCap ?? DEFAULT_RENDER_CAP;
     this.renderLimit = this.#renderCap;
-    // Eagerly populate caches so the instance is valid before the first
-    // dirty cycle — avoids stale reads when the module-level flag is
-    // already false (e.g. a second ResultsView in the same test suite).
-    this.#matchedCache = this.#source().filter(
-      (r) =>
-        this.#predicate(r) &&
-        (this.maxLatency === null || (r.latency_ms ?? 9e9) <= this.maxLatency),
-    );
-    this.#rowsCache =
-      this.sortCol === null
-        ? [...this.#matchedCache]
-        : [...this.#matchedCache].sort((a, b) => this.#compare(a, b));
-    this.#visibleCache = this.#rowsCache.slice(0, this.renderLimit);
-    this.#cappedCache = this.#rowsCache.length > this.renderLimit;
-    this.#dirty = false;
     _instances.add(this);
   }
 
   markDirty(): void {
-    this.#dirty = true;
+    this.#version++;
+  }
+
+  /** Detach from the module-level dirty fan-out: a destroyed component's
+   * view (the Pro toggle recreates both views) must stop being retained —
+   * and stop receiving markDirty — via _instances. */
+  destroy(): void {
+    _instances.delete(this);
   }
 
   get renderCap(): number {
@@ -102,11 +99,14 @@ export class ResultsView {
   // keep it $derived so the component re-renders when items arrive.
   total = $derived.by(() => this.#source().length);
 
-  // Lazy cached fields: recomputed only when #dirty is set. Avoids O(n)
-  // filter+sort on every applyResult tick during live scans.
+  // Lazy cached fields: recomputed only when #version changes. The version is
+  // a $state read (so templates re-run on markDirty) but the write happens
+  // ONLY in markDirty(), never inside these getters — Svelte 5 forbids writing
+  // state during derived/template evaluation (see the constructor comment).
 
   get matched(): Verdict[] {
-    if (this.#dirty) {
+    void this.#version;
+    if (this.#cachedVersion !== this.#version) {
       this.#matchedCache = this.#source().filter(
         (r) =>
           this.#predicate(r) &&
@@ -118,24 +118,24 @@ export class ResultsView {
           : [...this.#matchedCache].sort((a, b) => this.#compare(a, b));
       this.#visibleCache = this.#rowsCache.slice(0, this.renderLimit);
       this.#cappedCache = this.#rowsCache.length > this.renderLimit;
-      this.#dirty = false;
+      this.#cachedVersion = this.#version;
     }
     return this.#matchedCache;
   }
 
   get rows(): Verdict[] {
     // Recomputed together with matched above.
-    if (this.#dirty) void this.matched;
+    void this.matched;
     return this.#rowsCache;
   }
 
   get visible(): Verdict[] {
-    if (this.#dirty) void this.matched;
+    void this.matched;
     return this.#visibleCache;
   }
 
   get capped(): boolean {
-    if (this.#dirty) void this.matched;
+    void this.matched;
     return this.#cappedCache;
   }
 
