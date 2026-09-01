@@ -5,7 +5,8 @@
 (function () {
   try {
     var a = localStorage.getItem("cfs_accent");
-    if (a && a !== "cyan") document.documentElement.dataset.accent = a;
+    if (a === "violet" || a === "green" || a === "amber")
+      document.documentElement.dataset.accent = a;
   } catch (e) {}
   try {
     var k = "cfs_theme";

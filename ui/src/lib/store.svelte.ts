@@ -1,4 +1,5 @@
 import { ApiError, api } from "./api";
+import { t } from "./i18n.svelte";
 import { markDirty, phase2Only } from "./resultsView.svelte";
 import type { Mode, ScanConfig, ScanSummary, Verdict } from "./types";
 
@@ -241,7 +242,13 @@ export function hasCandidates(): boolean {
 }
 
 export function errorText(e: unknown): string {
-  return e instanceof Error ? e.message : String(e);
+  const msg = e instanceof Error ? e.message : String(e);
+  // Raw fetch failures read like a bug; tell the user what "network error"
+  // means in this app's topology (engine on localhost).
+  if (/failed to fetch|networkerror|load failed|fetch failed/i.test(msg)) {
+    return `${msg} — ${t("error.networkHint")}`;
+  }
+  return msg;
 }
 
 /** The one place a scan starts: resets last-scan results (unless the caller

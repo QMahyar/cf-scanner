@@ -249,6 +249,13 @@
       </button>
       <button
         class="pill"
+        aria-pressed={view.sortCol === "country"}
+        onclick={() => view.cycleSort("country")}
+      >
+        {t("table.col.country")}{view.sortCol === "country" ? (view.sortDir === "asc" ? " ▲" : " ▼") : ""}
+      </button>
+      <button
+        class="pill"
         class:pill-on={copiedAll}
         title={t("table.copyAllTitle")}
         onclick={copyAll}
@@ -347,7 +354,7 @@
     <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
     <div class="max-h-[26rem] overflow-x-auto overflow-y-auto" tabindex="0" role="region" aria-label={t(headingKey)}>
       <table class="tbl w-full min-w-[34rem]">
-        <caption class="sr-only">Scan results</caption>
+        <caption class="sr-only">{t("table.caption")}</caption>
         <thead class="sticky top-0 z-10" style="background: var(--bg-raised)">
           <tr>
             <th class="w-9 px-0 sm:w-11 sm:px-1">
@@ -369,7 +376,10 @@
               <button class="uppercase tracking-wider" onclick={() => view.cycleSort("latency")} aria-label={view.sortCol === "latency" ? `${t("table.col.latency")} ${view.sortDir === "asc" ? "ascending" : "descending"}` : t("table.col.latency")}>{t("table.col.latency")}<span aria-hidden="true">{view.sortCol === "latency" ? (view.sortDir === "asc" ? " ▲" : " ▼") : ""}</span>
               </button>
             </th>
-            <th class="px-4" scope="col">{t("table.col.country")}</th>
+            <th class="px-4" scope="col" aria-sort={view.sortCol === "country" ? (view.sortDir === "asc" ? "ascending" : "descending") : undefined}>
+              <button class="uppercase tracking-wider" onclick={() => view.cycleSort("country")} aria-label={t("table.col.country")}>{t("table.col.country")}<span aria-hidden="true">{view.sortCol === "country" ? (view.sortDir === "asc" ? " ▲" : " ▼") : ""}</span>
+              </button>
+            </th>
             <th class="px-4" scope="col">{t("table.tunnel.col")}</th>
             <th class="px-2"><span class="sr-only">{t("table.actions")}</span></th>
           </tr>
@@ -387,14 +397,19 @@
                   />
                 </label>
               </td>
-              <td class="sticky start-0 z-10 mono px-4 border-e" style="background: var(--bg-raised); border-color: var(--border)"><span dir="ltr">{r.ip}<span style="color: var(--text-dim)">:{r.port}</span></span></td>
-              <td class="mono px-4 text-end" style="color: {latencyClass(r.latency_ms)}">
-                <span dir="ltr">{r.latency_ms}ms</span>
+              <td class="sticky start-0 z-10 mono px-4 border-e" data-l={t("table.col.endpoint")} style="background: var(--bg-raised); border-color: var(--border)"><span dir="ltr">{r.ip}<span style="color: var(--text-dim)">:{r.port}</span></span></td>
+              <td class="mono px-4 text-end" data-l={t("table.col.latency")}>
+                <span class="lat-cell" style="color: {latencyClass(r.latency_ms)}">
+                  <span class="lat-bar" aria-hidden="true">
+                    <i style="width: {r.latency_ms === null ? 0 : Math.max(4, Math.min(100, Math.round((1 - Math.min(r.latency_ms, 900) / 900) * 100)))}%; background: {latencyClass(r.latency_ms)}"></i>
+                  </span>
+                  <span dir="ltr">{r.latency_ms}ms</span>
+                </span>
               </td>
-              <td class="px-4" style="color: var(--text-dim)">
+              <td class="px-4" data-l={t("table.col.country")} style="color: var(--text-dim)">
                 {r.country ?? "—"}{r.colo ? ` · ${r.colo}` : ""}
               </td>
-              <td class="px-4">
+              <td class="px-4" data-l={t("table.tunnel.col")}>
                 {#if r.phase2}
                   <span
                     class="chip-status"

@@ -1,6 +1,7 @@
 <script lang="ts">
   import { Download } from "@lucide/svelte";
   import { t } from "../i18n.svelte";
+  import HelpPop from "./HelpPop.svelte";
   import type { FormField, FormState } from "../formState";
   import type { XrayStatusPayload } from "../api";
   import { defaultFormState } from "../formState";
@@ -106,7 +107,10 @@
     </summary>
     <div class="mt-3 grid gap-4 grid-form">
       <label class="text-xs" style="color: var(--ink-muted)">
-        {t("pro.phase2.fragment")}
+        <span class="field__label-row">
+          <span class="field__label">{t("pro.phase2.fragment")}</span>
+          <HelpPop tip={t("tooltip.fragment")} />
+        </span>
         <select class="field mt-1" name="fragment" bind:value={form.fragment}>
           <option>off</option><option>light</option><option>medium</option><option>heavy</option>
         </select>
@@ -120,7 +124,10 @@
         {/if}
       </label>
       <label class="text-xs span-all" style="color: var(--ink-muted)">
-        {t("pro.phase2.sniLabel")}
+        <span class="field__label-row">
+          <span class="field__label">{t("pro.phase2.sniLabel")}</span>
+          <HelpPop tip={t("tooltip.snis")} />
+        </span>
         <input
           class="field mono mt-1"
           name="snis"
@@ -139,7 +146,10 @@
         {/if}
       </label>
       <label class="text-xs span-all" style="color: var(--ink-muted)">
-        {t("pro.phase2.probeLabel")}
+        <span class="field__label-row">
+          <span class="field__label">{t("pro.phase2.probeLabel")}</span>
+          <HelpPop tip={t("tooltip.probeUrl")} />
+        </span>
         <input
           class="field mono mt-1"
           name="probeUrl"

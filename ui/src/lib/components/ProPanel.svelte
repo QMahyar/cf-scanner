@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onDestroy, onMount } from "svelte";
   import Segmented from "./Segmented.svelte";
+  import HelpPop from "./HelpPop.svelte";
   import {
     Play,
     ShieldCheck,
@@ -340,6 +341,13 @@
   }
 
   async function start() {
+    // Prompt once, on a user gesture (browser requirement); see SimpleStart.
+    try {
+      if (typeof Notification !== "undefined" && Notification.permission === "default")
+        void Notification.requestPermission();
+    } catch {
+      /* Notification unavailable */
+    }
     starting = true;
     serverFieldErrors = {};
     try {
@@ -593,7 +601,7 @@
                     form.useCount = false;
                   }}
                 >
-                  {preset}
+                  {t(`pro.preset.${preset.toLowerCase()}` as MsgKey)}
                   <span class="mono text-[10px]" style="color: var(--ink-muted)">{amount}</span>
                 </button>
               {/each}
@@ -642,9 +650,12 @@
 
         <div class="text-xs span-all">
           <div class="flex flex-wrap items-center justify-between gap-x-2 gap-y-1">
-            <span style="color: var(--ink-muted)">
-              {t("pro.field.ports")}{#if form.mode === "Warp"}<span class="mono text-[10px]">{t("pro.field.ports.warpNote")}</span>{:else}<span class="mono text-[10px]">{t("pro.field.ports.cdnNote")}</span>
-              {/if}
+            <span class="inline-flex items-center gap-1.5" style="color: var(--ink-muted)">
+              <span>
+                {t("pro.field.ports")}{#if form.mode === "Warp"}<span class="mono text-[10px]">{t("pro.field.ports.warpNote")}</span>{:else}<span class="mono text-[10px]">{t("pro.field.ports.cdnNote")}</span>
+                {/if}
+              </span>
+              <HelpPop tip={t("tooltip.ports")} />
             </span>
             <span class="flex items-center gap-1">
               <button
@@ -743,7 +754,11 @@
               {t("pro.section.scanAdvanced")}
             </summary>
             <div class="mt-3 grid gap-4 grid-form">
-              <label class="text-xs" style="color: var(--ink-muted)">{t("pro.field.concurrency")}
+              <label class="text-xs" style="color: var(--ink-muted)">
+                <span class="field__label-row">
+                  <span class="field__label">{t("pro.field.concurrency")}</span>
+                  <HelpPop tip={t("tooltip.concurrency")} />
+                </span>
                 <input
                   class="field mono mt-1"
                   type="number"
@@ -757,7 +772,11 @@
                 {@render fieldError("concurrency")}
               </label>
 
-              <label class="text-xs" style="color: var(--ink-muted)">{t("pro.field.timeout")}
+              <label class="text-xs" style="color: var(--ink-muted)">
+                <span class="field__label-row">
+                  <span class="field__label">{t("pro.field.timeout")}</span>
+                  <HelpPop tip={t("tooltip.timeout")} />
+                </span>
                 <input
                   class="field mono mt-1"
                   type="number"
@@ -772,7 +791,10 @@
               </label>
 
               <label class="text-xs" style="color: var(--ink-muted)">
-                {t("pro.field.hardCap")}
+                <span class="field__label-row">
+                  <span class="field__label">{t("pro.field.hardCap")}</span>
+                  <HelpPop tip={t("tooltip.hardCap")} />
+                </span>
                 <input
                   class="field mono mt-1"
                   type="text"
@@ -787,9 +809,10 @@
               </label>
 
               {#if form.mode === "Cdn"}
-                <label class="flex items-end gap-2 pb-1 text-xs" style="color: var(--ink-muted)">
-                  <input type="checkbox" name="includeV6" bind:checked={form.includeV6} class="accent-[var(--accent)]" />
-                  {t("pro.field.includeV6")}
+                <label class="flex items-end gap-2 pb-1 text-xs switch" style="color: var(--ink-muted)">
+                  <input type="checkbox" name="includeV6" bind:checked={form.includeV6} />
+                  <span class="switch__track"><span class="switch__thumb"></span></span>
+                  <span class="switch__label">{t("pro.field.includeV6")}</span>
                 </label>
               {/if}
             </div>
@@ -878,10 +901,13 @@
         </div>
       {:else}
         <!-- phase-2 toggle sits above the section it reveals -->
-        <label class="mt-4 flex items-center gap-2 text-xs" style="color: var(--ink-muted)">
-          <input type="checkbox" name="phase2On" bind:checked={form.phase2On} class="accent-[var(--accent)]" />
-          <ShieldCheck class="size-3.5" style="color: var(--accent)" />
-          {t("pro.tunnel.toggle")}
+        <label class="mt-4 switch" style="color: var(--ink-muted)">
+          <input type="checkbox" name="phase2On" bind:checked={form.phase2On} />
+          <span class="switch__track"><span class="switch__thumb"></span></span>
+          <span class="switch__label flex items-center gap-2 text-xs">
+            <ShieldCheck class="size-3.5" style="color: var(--accent)" aria-hidden="true" />
+            {t("pro.tunnel.toggle")}
+          </span>
         </label>
         {#if xray && !xray.found}
           <p class="mt-1 ps-6 text-[11px]" style="color: var(--ink-muted)">
@@ -1006,7 +1032,7 @@
       {#if showCandidatesCard && showVerifiedCard}
         <div class="flex justify-center">
           <!-- Same segmented pattern as the simple-mode CDN/WARP switch. -->
-          <div class="seg" role="group" aria-label={t("results.heading")}>
+          <div class="seg" role="radiogroup" aria-label={t("results.heading")}>
             <button
               type="button"
               role="radio"

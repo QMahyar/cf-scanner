@@ -69,6 +69,14 @@
   });
 
   async function start() {
+    // Prompt once, on a user gesture (browser requirement); denied/unavailable
+    // is fine — completion notification is a nicety, not a feature gate.
+    try {
+      if (typeof Notification !== "undefined" && Notification.permission === "default")
+        void Notification.requestPermission();
+    } catch {
+      /* Notification unavailable */
+    }
     starting = true;
     await startScan(simpleConfig(findUpTo, scanMode, effectiveTest));
     starting = false;
@@ -146,7 +154,7 @@
           {t("simple.intro")}
         </p>
         <div class="mt-4 flex flex-wrap items-center gap-2" role="group" aria-label={t("simple.target")}>
-          <div class="seg" role="group" aria-label={t("simple.target")}>
+          <div class="seg" role="radiogroup" aria-label={t("simple.target")}>
             <button
               type="button"
               role="radio"
@@ -353,6 +361,16 @@
     <p class="empty-msg">
       {t("empty.body")}
     </p>
+    <div class="empty-actions">
+      {#if scanMode === "Cdn"}
+        <button type="button" class="btn btn-primary btn-sm" onclick={() => (sizeChoice = "big")}>
+          {t("empty.action.tryFull")}
+        </button>
+      {/if}
+      <button type="button" class="btn btn-secondary btn-sm" onclick={() => (scanMode = scanMode === "Warp" ? "Cdn" : "Warp")}>
+        {t("empty.action.switchWarp")}
+      </button>
+    </div>
   </section>
 {/if}
 

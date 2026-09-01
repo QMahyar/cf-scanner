@@ -12,7 +12,9 @@ export const ACCENTS: ReadonlyArray<{ id: Accent; label: string }> = [
 
 /** Mirrors Q Proxy's head bootstrap: stored value wins, otherwise the OS
  * preference decides light vs dark. Runs at mount and again from the
- * inline <head> script (index.html) so no flash happens before hydration. */
+ * external <head> script /cfs-theme.js (CSP keeps script-src 'self', so the
+ * pre-paint bootstrap cannot be inline) so no flash happens before
+ * hydration. */
 export function resolveInitialTheme(): Theme {
   try {
     const s = localStorage.getItem(THEME_KEY);

@@ -227,6 +227,33 @@ const EN = {
   "app.footer.geoSuffix": "(CC BY 4.0)",
   "app.themeToggle": "Toggle theme",
   "app.accent": "Accent",
+  "app.skip": "Skip to content",
+  "error.networkHint":
+    "the scanner engine is unreachable — make sure cf-scanner is running on 127.0.0.1 and reload this page.",
+  "app.footer.localOnly": "local-only · no telemetry · results stay on this device",
+  "pro.preset.quick": "Quick",
+  "pro.preset.normal": "Normal",
+  "pro.preset.full": "Full",
+  "table.caption": "Scan results",
+  "tooltip.ports":
+    "Which ports to try. CDN uses Cloudflare HTTPS ports (443 always). WARP uses WireGuard UDP (2408, 500, 1701, 4500). Add custom ones separated by commas. WARP rejects 443 — UDP 443 is MASQUE, not WireGuard.",
+  "tooltip.concurrency":
+    "How many probes run at once. Higher = faster but more load on your router. Above 512 without a hard cap can run very long.",
+  "tooltip.timeout":
+    "How long to wait for each probe (ms). Lower = faster but drops distant IPs. Allowed 100–30000.",
+  "tooltip.hardCap":
+    "Total probe budget. Blank = run until the sample or stop-after target is hit. Set a number to guarantee the scan stops even if no working IP is found.",
+  "tooltip.fragment":
+    "DPI bypass: splits the first TLS ClientHello into fragments so DPI that inspects SNI can't block it. off = none; light/medium/heavy = stronger but slower. Only affects tunnel verification.",
+  "tooltip.snis":
+    "Fake SNI values sent alongside fragmentation. Blank = use each config's own server name. Add comma-separated front domains, up to 256 bytes each.",
+  "tooltip.probeUrl":
+    "HTTPS URL fetched through each tunnel to prove it really works. Default fetches cloudflare.com/cdn-cgi/trace and checks for 200 OK. Must be https.",
+  "tooltip.wgconf":
+    "Your WireGuard/AmneziaWG config. Paste the whole .conf or an awg:// / wg:// link. Enables verify-with-real-keypair — the probe proves your key connects, not just that the port is open. Never saved to disk.",
+  "empty.action.tryFull": "Try Full preset",
+  "empty.action.widenPorts": "Add common ports",
+  "empty.action.switchWarp": "Switch to WARP",
   "table.copyUriAria": "Copy ip:port",
   "table.copyExportAria": "Copy importable URI",
   // Step 4 new keys
@@ -304,7 +331,7 @@ const FA: Record<keyof typeof EN, string> = {
   "simple.size.endpointsShort": "اندپوینت",
   "table.filter.untested": "تست‌نشده",
   "simple.overshootHint":
-    "توقف بی‌درنگ نیست — ممکن است چند IP سالم اضافه بعد از رسیدن به هدف پیدا شود",
+    "توقف آنی نیست — پس از رسیدن به هدف ممکن است چند IP سالم دیگر هم پیدا شود",
   "simple.reassure":
     "این برگه را باز نگه دارید — IPهای سالم همین‌جا ظاهر می‌شوند.",
   "progress.working": "سالم",
@@ -366,8 +393,8 @@ const FA: Record<keyof typeof EN, string> = {
   "pro.field.target": "هدف",
   "pro.field.candidates": "تعداد کاندید برای آزمون",
   "pro.field.ports": "پورت‌های کلادفلر",
-  "pro.field.ports.warpNote": "(WireGuard UDP · رسمی)",
-  "pro.field.ports.cdnNote": "(TLS · بر اساس مستندات network-ports کلادفلر)",
+  "pro.field.ports.warpNote": "(UDP وایرگارد — رسمی)",
+  "pro.field.ports.cdnNote": "(TLS — مطابق مستندات پورت‌های کلادفلر)",
   "pro.field.ports.allTitle": "انتخاب همه پورت‌های کاتالوگ این حالت (شامل extended)",
   "pro.field.ports.all": "همه",
   "pro.field.ports.noneTitle": "پاک کردن انتخاب پورت‌ها",
@@ -378,8 +405,8 @@ const FA: Record<keyof typeof EN, string> = {
   "pro.field.concurrency": "همزمانی",
   "pro.field.timeout": "تایم‌اوت (ms)",
   "pro.field.stopAfter": "توقف پس از یافتن N مورد سالم",
-  "pro.field.hardCap": "سقف سخت تعداد تست (خالی = نامحدود)",
-  "pro.field.hardCap.placeholder": "بدون سقف",
+  "pro.field.hardCap": "حداکثر تعداد آزمون (خالی = بدون محدودیت)",
+  "pro.field.hardCap.placeholder": "بدون محدودیت",
   "pro.field.includeV6": "شامل بازه‌های IPv6",
   "pro.section.customCidrs": "CIDRهای دلخواه و استثناها",
   "pro.section.scanAdvanced": "تنظیمات پیشرفته اسکن (تعداد همزمان · مهلت · سقف پروب)",
@@ -392,7 +419,7 @@ const FA: Record<keyof typeof EN, string> = {
   "pro.field.importList": "ورود فایل فهرست",
   "pro.field.clearTitle": "خالی کردن فهرست استثنا",
   "pro.field.clear": "پاک کردن",
-  "pro.warp.probes": "تعداد تست handshake برای هر endpoint (بیشتر = سخت‌گیری بیشتر)",
+  "pro.warp.probes": "تعداد آزمون دست‌دهی (handshake) برای هر اندپوینت (بیشتر = سخت‌گیری بیشتر)",
   "pro.warp.endpoints": "endpointهای دلخواه (ip یا ip:port، هر خط یکی)",
   "pro.warp.endpointsImportTitle": "خواندن فهرست منتشرشده endpoint/IP (هر خط یکی) در فیلد بالا",
   "pro.warp.wgconfLabel": "wgconf (مقدار wg:// URI، INI نوع wg-quick یا کانفیگ Amnezia را بچسبانید — تأیید با کلید واقعی فعال می‌شود)",
@@ -404,7 +431,7 @@ const FA: Record<keyof typeof EN, string> = {
   "pro.warp.rangesEmpty": "«{name}» هیچ خط IP یا CIDR نداشت",
   "pro.warp.rangesImported": "{count} خط وارد شد",
   "pro.warp.rangesImportedSkipped": "{count} خط وارد شد · {skipped} رد شد",
-  "pro.warp.identityGroup": "هویت و تأیید",
+  "pro.warp.identityGroup": "هویت و تأیید WARP",
   "pro.warp.verifyHint": "برای تأیید واقعی به wgconf بالا نیاز دارد",
   "pro.warp.verify": "تأیید با کلید واقعی این هویت",
   "pro.warp.licenseLabel": "لایسنس +WARP (اختیاری — خالی = حساب رایگان)",
@@ -431,7 +458,7 @@ const FA: Record<keyof typeof EN, string> = {
   "pro.action.skipTitle": "توقف اسکن مرحله ۱ و تأیید اندپوینت‌های سالمِ یافته‌شده با کانفیگ‌های شما (مرحله ۲)",
   "pro.action.skip": "پرش به مرحله ۲",
   "pro.action.skipWithCount": "پرش به مرحله ۲ ({n})",
-  "pro.hint.noCap": "بدون سقف در همزمانی بالا ممکن است خیلی طولانی شود",
+  "pro.hint.noCap": "بدون حداکثر، با هم‌زمانی بالا اسکن ممکن است بسیار طولانی شود",
   "pro.hint.skipSuggestion": "نرخ موفقیت رو به کاهش است — تاکنون {found} مورد سالم. از پرش به مرحله ۲ برای تأیید استفاده کنید.",
   "pro.status.phase2Progress": "مرحله ۲: {done}/{total} تأیید شد…",
   "pro.confirm.skipLow": "تاکنون فقط {found} اندپوینت سالم — ممکن است تأیید چیزی پیدا نکند. باز هم به مرحله ۲ برویم؟",
@@ -474,7 +501,7 @@ const FA: Record<keyof typeof EN, string> = {
   "wgnoise.presetTitle": "نوشتن همه کلیدهای نویز از پیش‌تنظیم {preset}",
   "wgnoise.placeholder.lohi": "lo-hi",
   "wgnoise.placeholder.dash": "—",
-  "wgnoise.limits": "Jc ۰–۱۲۸ · Jmin<Jmax<۱۲۸۰ · S1≤۱۱۳۲، S2≤۱۱۸۸، S1+۵۶≠S2 · H ۵–۲۱۴۷۴۸۳۶۴۷ یکتا",
+  "wgnoise.limits": "Jc ۰–۱۲۸ · Jmin<Jmax<۱۲۸۰ · S1≤۱۱۳۲، S2≤۱۱۸۸، S1+۵۶≠S2 · H ۵–۲۱۴۷۴۸۳۶۴۷ بدون هم‌پوشانی",
   "app.live.liveTitle": "متصل به موتور اسکن محلی — نتایج روی همین دستگاه می‌ماند",
   "app.live.offlineTitle": "موتور در دسترس نیست — آخرین وضعیت ذخیره نمایش داده می‌شود",
   "app.live.connectingTitle": "در حال اتصال به موتور اسکن محلی…",
@@ -488,6 +515,33 @@ const FA: Record<keyof typeof EN, string> = {
   "app.footer.geoSuffix": "(CC BY 4.0)",
   "app.themeToggle": "تغییر تم",
   "app.accent": "رنگ تأکیدی",
+  "app.skip": "پرش به محتوا",
+  "error.networkHint":
+    "موتور اسکنر در دسترس نیست — مطمئن شوید cf-scanner روی 127.0.0.1 اجرا می‌شود و صفحه را تازه کنید.",
+  "app.footer.localOnly": "فقط محلی — بدون تله‌متری — نتایج روی همین دستگاه می‌ماند",
+  "pro.preset.quick": "سریع",
+  "pro.preset.normal": "معمولی",
+  "pro.preset.full": "کامل",
+  "table.caption": "نتایج اسکن",
+  "tooltip.ports":
+    "کدام پورت‌ها امتحان شوند. CDN با پورت‌های HTTPS کلادفلر (همیشه ۴۴۳)؛ WARP با UDP وایرگارد (۲۴۰۸، ۵۰۰، ۱۷۰۱، ۴۵۰۰). پورت دلخواه را با کاما اضافه کنید. WARP پورت ۴۴۳ را نمی‌پذیرد — UDP ۴۴۳ مال MASQUE است نه وایرگارد.",
+  "tooltip.concurrency":
+    "چند پروب هم‌زمان اجرا شود. بیشتر = سریع‌تر اما فشار بیشتر روی روتر. بالای ۵۱۲ بدون حداکثر ممکن است اسکن بسیار طولانی شود.",
+  "tooltip.timeout":
+    "مهلت انتظار برای هر پروب (میلی‌ثانیه). کمتر = سریع‌تر ولی IPهای دورتر حذف می‌شوند. بازه ۱۰۰ تا ۳۰۰۰۰.",
+  "tooltip.hardCap":
+    "سقف کل پروب‌ها. خالی = تا رسیدن به نمونه یا هدف «توقف پس از» ادامه بده. عدد بدهید تا حتی اگر IP سالمی پیدا نشد اسکن حتماً تمام شود.",
+  "tooltip.fragment":
+    "دورزدن DPI: بستهٔ اول TLS را تکه‌تکه می‌فرستد تا DPI نتواند SNI را تشخیص دهد. off یعنی بدون؛ light/medium/heavy قوی‌تر اما کندتر. فقط روی آزمون تونل اثر دارد.",
+  "tooltip.snis":
+    "مقادیر SNI جعلی همراه با قطعه‌قطعه‌سازی. خالی = از نام سرور خود هر کانفیگ استفاده می‌شود. چند دامنهٔ جلویی را با کاما جدا کنید؛ هر کدام حداکثر ۲۵۶ بایت.",
+  "tooltip.probeUrl":
+    "آدرس HTTPS که از درون هر تونل فراخوانی می‌شود تا سلامت واقعی‌اش ثابت شود. پیش‌فرض cloudflare.com/cdn-cgi/trace با بررسی 200 OK است. حتماً https باشد.",
+  "tooltip.wgconf":
+    "کانفیگ WireGuard/AmneziaWG شما. کل ‎.conf‎ یا لینک awg://‎ و wg://‎ را بچسبانید. با «تأیید با کلید واقعی» پروب ثابت می‌کند کلید خود شما وصل می‌شود، نه فقط باز بودن پورت. هرگز روی دیسک ذخیره نمی‌شود.",
+  "empty.action.tryFull": "امتحان با Full",
+  "empty.action.widenPorts": "افزودن پورت‌های پرکاربرد",
+  "empty.action.switchWarp": "تغییر به WARP",
   "table.copyUriAria": "کپی ip:port",
   "table.copyExportAria": "کپی URI قابل‌ورود",
   // Step 4 new keys
@@ -495,7 +549,7 @@ const FA: Record<keyof typeof EN, string> = {
   // Issue keys (FieldIssue → i18n)
   "issue.ports.noneSelected": "پورت‌ها: حداقل یک پورت انتخاب کنید یا پورت دلخواه وارد کنید",
   "issue.ports.tooMany": "پورت‌ها: حداکثر {max} پورت یکتا (باز شده {got})",
-  "issue.ports.warpUdp443": "WARP از WireGuard استفاده می‌کند، MASQUE نیست \u2014 UDP 443 فقط MASQUE را سرو می‌کند (2408، 500، 1701 یا 4500 را امتحان کنید)",
+  "issue.ports.warpUdp443": "WARP با WireGuard کار می‌کند نه MASQUE — پورت ۴۴۳ روی UDP فقط MASQUE است (۲۴۰۸، ۵۰۰، ۱۷۰۱ یا ۴۵۰۰ را امتحان کنید)",
   "issue.customPorts.emptyEntry": "پورت‌های دلخواه: ورودی خالی بین کاماها",
   "issue.customPorts.invalid": "پورت‌های دلخواه: \"{token}\" پورت معتبری نیست (عدد صحیح ۱\u2013۶۵۵۳۵)",
   "issue.capText.invalid": "سقف سخت: \"{token}\" عدد صحیح مثبت نیست (فیلد را برای نامحدود خالی کنید)",

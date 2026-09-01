@@ -1,6 +1,7 @@
 <script lang="ts">
   import { FolderOpen } from "@lucide/svelte";
   import { t } from "../i18n.svelte";
+  import HelpPop from "./HelpPop.svelte";
   import type { FormField, FormState } from "../formState";
   import WgNoiseEditor from "./WgNoiseEditor.svelte";
 
@@ -51,7 +52,10 @@
   <p class="mb-2 text-xs font-semibold" style="color: var(--ink)">{t("pro.warp.identityGroup")}</p>
   <div class="text-xs" style="color: var(--ink-muted)">
     <label class="block">
-      {t("pro.warp.wgconfLabel")}
+      <span class="field__label-row">
+        <span class="field__label">{t("pro.warp.wgconfLabel")}</span>
+        <HelpPop tip={t("tooltip.wgconf")} />
+      </span>
     <textarea
       class="field mono mt-1"
       rows="3"
@@ -115,9 +119,10 @@
     onchange={loadWgconfFile}
   />
   </div>
-  <label class="flex items-center gap-2 text-xs" style="color: var(--ink-muted)">
-    <input type="checkbox" name="verifyWarp" bind:checked={form.verifyWarp} disabled={!form.wgconf} class="accent-[var(--accent)]" />
-    {t("pro.warp.verify")}
+  <label class="switch" style="color: var(--ink-muted)">
+    <input type="checkbox" name="verifyWarp" bind:checked={form.verifyWarp} disabled={!form.wgconf} />
+    <span class="switch__track"><span class="switch__thumb"></span></span>
+    <span class="switch__label text-xs">{t("pro.warp.verify")}</span>
   </label>
   <p class="mt-1 text-[11px]" style="color: var(--ink-muted)">{t("pro.warp.verifyHint")}</p>
 </div>

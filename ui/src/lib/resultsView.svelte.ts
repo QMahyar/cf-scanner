@@ -1,7 +1,7 @@
 import type { Verdict } from "./types";
 
 export type Phase = "candidates" | "verified";
-export type SortCol = "latency" | "ip";
+export type SortCol = "latency" | "ip" | "country";
 
 export function keyOf(r: Verdict): string {
   return `${r.ip}:${r.port}`;
@@ -152,6 +152,12 @@ export class ResultsView {
   #compare(a: Verdict, b: Verdict): number {
     const dir = this.sortDir === "asc" ? 1 : -1;
     if (this.sortCol === "ip") return dir * compareIp(a.ip, b.ip);
+    if (this.sortCol === "country") {
+      // Missing country sinks last; colo breaks ties.
+      const ac = a.country ?? "\uffff";
+      const bc = b.country ?? "\uffff";
+      return dir * (ac.localeCompare(bc) || (a.colo ?? "").localeCompare(b.colo ?? ""));
+    }
     const cmp = compareLatency(a.latency_ms, b.latency_ms);
     // Missing latency sinks to the bottom whichever way the sort runs.
     return a.latency_ms === null || b.latency_ms === null ? cmp : dir * cmp;

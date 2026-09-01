@@ -8,7 +8,7 @@
   }: { options: Option[]; value: string; onchange: (v: string) => void; label: string } = $props();
 </script>
 
-<div class="seg" role="group" aria-label={label}>
+<div class="seg" role="radiogroup" aria-label={label}>
   {#each options as opt (opt.value)}
     <button
       type="button"
