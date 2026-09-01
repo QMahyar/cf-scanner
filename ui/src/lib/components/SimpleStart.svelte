@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onDestroy } from "svelte";
-  import { Check, Copy, Download, Gauge, Play, Share2, Square } from "@lucide/svelte";
+  import { Check, Copy, Download, Gauge, Play, Radar, Share2, Square } from "@lucide/svelte";
   import {
     exportText,
     filteredEndpoints,
@@ -13,6 +13,7 @@
   import { ResultsView } from "../resultsView.svelte";
   import { t } from "../i18n.svelte";
   import { humanizeSeconds } from "../validators";
+  import { toast } from "../toast.svelte";
   import type { Mode, Verdict } from "../types";
 
   const app = ui();
@@ -114,7 +115,23 @@
   async function copyAll() {
     const lines = filteredEndpoints(unfilteredBest, bestView.maxLatency);
     copiedAll = await exportText(lines, "cf-scanner-endpoints.txt");
+    toast(copiedAll === "clipboard"
+      ? t("results.copied")
+      : copiedAll === "share"
+        ? t("results.shared")
+        : t("results.saved"));
     setTimeout(() => (copiedAll = null), 1600);
+  }
+
+  async function copyOne(r: Verdict) {
+    try {
+      await navigator.clipboard.writeText(`${r.ip}:${r.port}`);
+      toast(t("results.copied"));
+    } catch {
+      // Clipboard API can fail (e.g. insecure context); the bulk export path
+      // has a download fallback, but per-card copy has no fallback.
+      toast(t("simple.copyFailed"), "err");
+    }
   }
 </script>
 
@@ -122,43 +139,34 @@
   <div class="core px-6 py-8 sm:px-8 sm:py-10">
     <div class="flex flex-col gap-6 lg:flex-row lg:items-end lg:justify-between">
       <div class="min-w-0 flex-1 lg:min-w-[320px]">
-        <div
-          class="mb-4 inline-flex items-center rounded-full p-1"
-          style="background: var(--paper-3)"
-          role="group"
-          aria-label={t("simple.target")}
-        >
-          <button
-            type="button"
-            class="btn btn-sm btn-secondary"
-            class:btn-state-on={scanMode === "Cdn"}
-            aria-pressed={scanMode === "Cdn"}
-            onclick={() => (scanMode = "Cdn")}
-          >
-            CDN
-          </button>
-          <button
-            type="button"
-            class="btn btn-sm btn-secondary"
-            class:btn-state-on={scanMode === "Warp"}
-            aria-pressed={scanMode === "Warp"}
-            onclick={() => (scanMode = "Warp")}
-          >
-            WARP
-          </button>
-        </div>
-        <h2
-          class="text-3xl font-semibold sm:text-[2.75rem] sm:leading-[1.05]"
-          style="letter-spacing:-0.03em"
-        >
+        <h1 class="view-title" style="margin-block: 0 12px">
           {scanMode === "Warp" ? t("simple.heading.warp") : t("simple.heading.cdn")}
-        </h2>
-        <p class="mt-3 max-w-lg text-sm leading-relaxed" style="color: var(--ink-muted)">
+        </h1>
+        <p class="max-w-lg text-sm leading-relaxed" style="color: var(--text-faint)">
           {t("simple.intro")}
         </p>
+        <div class="mt-4 flex flex-wrap items-center gap-2" role="group" aria-label={t("simple.target")}>
+          <div class="seg" role="group" aria-label={t("simple.target")}>
+            <button
+              type="button"
+              role="radio"
+              aria-checked={scanMode === "Cdn"}
+              onclick={() => (scanMode = "Cdn")}
+            >
+              CDN
+            </button>
+            <button
+              type="button"
+              role="radio"
+              aria-checked={scanMode === "Warp"}
+              onclick={() => (scanMode = "Warp")}
+            >
+              WARP
+            </button>
+          </div>
+        </div>
         <div
-          class="mt-4 flex flex-wrap items-center gap-1.5 rounded-2xl p-1.5"
-          style="background: var(--paper-3)"
+          class="mt-3 flex flex-wrap items-center gap-2"
           role="group"
           aria-label={t("simple.sizeGroup")}
         >
@@ -166,8 +174,7 @@
             {@const sKey = key as SizeKey}
             <button
               type="button"
-              class="btn btn-sm btn-secondary"
-              class:btn-state-on={sizeChoice === sKey}
+              class="pill"
               aria-pressed={sizeChoice === sKey}
               title={sKey === "custom"
                 ? undefined
@@ -180,7 +187,7 @@
             >
               {t(`simple.size.${sKey}`)}
               {#if sKey !== "custom"}
-                <span class="mono text-[10px]" style="color: var(--ink-muted)">
+                <span class="mono" style="font-size: 10px; color: var(--text-dim)">
                   ~{kFmt(scanMode === "Warp" ? amounts.warp : amounts.cdn)}
                 </span>
               {/if}
@@ -200,7 +207,7 @@
               }}
               aria-label={t("simple.testUpTo")}
             />
-            <span class="mono text-[10px]" style="color: var(--ink-muted)">
+            <span class="mono" style="font-size: 10px; color: var(--text-dim)">
               {scanMode === "Warp"
                 ? t("simple.size.endpointsShort")
                 : t("simple.size.candidatesShort")}
@@ -208,7 +215,7 @@
           {/if}
         </div>
         {#if scanMode === "Warp" && testUpTo >= 5000}
-          <p class="mt-1 text-[11px]" style="color: var(--ink-muted)">{t("simple.warpCapHint")}</p>
+          <p class="field__hint mt-1">{t("simple.warpCapHint")}</p>
         {/if}
       </div>
     {#if app.running}
@@ -221,7 +228,7 @@
         <div class="flex flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-center sm:gap-x-4 sm:gap-y-2">
           <label
             class="flex items-center gap-2 text-xs whitespace-nowrap"
-            style="color: var(--ink-muted)"
+            style="color: var(--text-dim)"
           >
             {t("simple.stopAfter")}
             <input
@@ -254,7 +261,7 @@
                 : t("simple.start.cdn")}
           </button>
         </div>
-        <span class="mono max-w-prose text-xs leading-snug" style="color: var(--ink-3)">
+        <span class="mono max-w-prose text-xs leading-snug" style="color: var(--text-ghost)">
           {t("simple.finishHint")} · {t("simple.overshootHint")}
         </span>
       </div>
@@ -274,43 +281,39 @@
               ? t("done.cancelled")
               : t("done.complete", { n: app.summary.found })}
           </p>
-          <span class="mono text-xs" style="color: var(--ink-muted)">
+          <span class="mono text-xs" style="color: var(--text-dim)">
             {t("done.in", { s: (app.summary.duration_ms / 1000).toFixed(1) })}
           </span>
         </div>
       {:else}
-        <div class="flex items-baseline justify-between text-sm">
-          <span>
-            <span class="mono font-semibold" style="color: var(--accent)">
-              {app.progress.found}</span>
-            <span title={t("simple.handshakeTitle")}>{t("progress.working")}</span>
-            <span style="color: var(--ink-muted)">· {app.progress.scanned} {scanMode === "Warp" ? t("progress.endpointsChecked") : t("progress.checked")}{pct !== null ? ` · ${pct}%` : ""}</span>
+        <div class="flex flex-wrap items-baseline justify-between gap-2 text-sm">
+          <span class="flex flex-wrap items-center gap-2">
+            <span class="stat-chip">
+              <span class="dot dot-cyan"></span>
+              <span class="mono font-semibold" style="color: var(--cyan)">
+                {app.progress.found}</span>
+              {t("progress.working")}
+            </span>
+            <span class="stat-chip">
+              <span class="dot" style="background: var(--text-ghost)"></span>
+              {app.progress.scanned}
+              {scanMode === "Warp" ? t("progress.endpointsChecked") : t("progress.checked")}{pct !== null
+                ? ` · ${pct}%`
+                : ""}
+            </span>
           </span>
           {#if pace}
-            <span class="mono text-xs" style="color: var(--ink-muted)">
+            <span class="mono text-xs" style="color: var(--text-dim)">
               ≈{pace.rate}/s{pace.eta !== null ? ` · ~${humanizeSeconds(pace.eta)}` : ""}
             </span>
           {/if}
         </div>
       {/if}
-      <div
-        class="mt-2 h-1.5 overflow-hidden rounded-full"
-        style="background: var(--paper-3)"
-      >
-        {#if pct != null}
-          <div
-            class="bar-fill h-full w-full rounded-full transition-transform duration-500"
-            style="transform: scaleX({pct / 100}); background: var(--accent);"
-          ></div>
-        {:else}
-          <div
-            class="bar-fill h-full w-1/3 rounded-full animate-pulse"
-            style="background: var(--accent);"
-          ></div>
-        {/if}
+      <div class="progress mt-2">
+        <i style="width: {pct ?? 33}%"></i>
       </div>
       {#if app.running}
-        <p class="mt-2 text-xs" style="color: var(--ink-muted)">
+        <p class="field__hint mt-2">
           {t("simple.reassure")}
         </p>
       {/if}
@@ -323,31 +326,31 @@
 </section>
 
 {#if !app.running && app.summary === null && best.length === 0}
-  <section
-    class="card fade-in flex flex-wrap items-center justify-center gap-x-3 gap-y-2 px-4 py-3"
-    aria-label={t("simple.howtoAria")}
-  >
-    <span class="flex items-center gap-1.5 text-xs whitespace-nowrap" style="color: var(--ink-muted)">
-      <Play class="size-3.5" />
-      {t("howto.scan")}
-    </span>
-    <span aria-hidden="true" class="h-0 w-6 sm:w-10 border-t border-dashed" style="border-color: var(--rule)"></span>
-    <span class="flex items-center gap-1.5 text-xs whitespace-nowrap" style="color: var(--ink-muted)">
-      <Gauge class="size-3.5" />
-      {t("howto.rank")}
-    </span>
-    <span aria-hidden="true" class="h-0 w-6 sm:w-10 border-t border-dashed" style="border-color: var(--rule)"></span>
-    <span class="flex items-center gap-1.5 text-xs whitespace-nowrap" style="color: var(--ink-muted)">
-      <Copy class="size-3.5" />
-      {t("howto.copy")}
-    </span>
+  <section class="card fade-in" aria-label={t("simple.howtoAria")} style="padding: 12px 16px">
+    <div class="flex flex-wrap items-center justify-center gap-x-3 gap-y-2">
+      <span class="flex items-center gap-1.5 text-xs whitespace-nowrap" style="color: var(--text-dim)">
+        <Play class="size-3.5" />
+        {t("howto.scan")}
+      </span>
+      <span aria-hidden="true" class="h-0 w-6 border-t border-dashed sm:w-10" style="border-color: var(--border)"></span>
+      <span class="flex items-center gap-1.5 text-xs whitespace-nowrap" style="color: var(--text-dim)">
+        <Gauge class="size-3.5" />
+        {t("howto.rank")}
+      </span>
+      <span aria-hidden="true" class="h-0 w-6 border-t border-dashed sm:w-10" style="border-color: var(--border)"></span>
+      <span class="flex items-center gap-1.5 text-xs whitespace-nowrap" style="color: var(--text-dim)">
+        <Copy class="size-3.5" />
+        {t("howto.copy")}
+      </span>
+    </div>
   </section>
 {/if}
 
 {#if finishedIdle && app.results.length === 0}
-  <section class="card fade-in px-6 py-6"     aria-label={t("simple.emptyGuidanceAria")}>
-    <h3 class="text-base font-semibold">{t("empty.title")}</h3>
-    <p class="mt-2 max-w-lg text-sm" style="color: var(--ink-muted)">
+  <section class="empty-card fade-in" aria-label={t("simple.emptyGuidanceAria")}>
+    <div class="empty-icon"><Radar class="size-6" /></div>
+    <h3 class="empty-title">{t("empty.title")}</h3>
+    <p class="empty-msg">
       {t("empty.body")}
     </p>
   </section>
@@ -357,16 +360,14 @@
   <section class="fade-in flex flex-col gap-3" aria-label={t("results.heading")}>
     <div class="flex flex-wrap items-end justify-between gap-2 px-1">
       <div class="min-w-0">
-        <h3 class="text-sm font-semibold">{t("results.heading")}</h3>
-        <p class="mt-0.5 text-xs" style="color: var(--ink-muted)">
+        <h2 class="card__title text-base">{t("results.heading")}</h2>
+        <p class="field__hint mt-0.5">
           {t("results.sub")}
         </p>
       </div>
       <button
-        class="pill shrink-0 cursor-pointer"
-        style={copiedAll !== null
-          ? "background: oklch(46% 0.11 155 / 12%); color: var(--good)"
-          : "background: var(--paper-3); color: var(--ink-muted)"}
+        class="pill shrink-0"
+        class:pill-on={copiedAll !== null}
         title={t("table.copyAllTitle")}
         onclick={copyAll}
         aria-live="polite"
@@ -388,54 +389,42 @@
     <div class="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
       {#each best.slice(0, SHOWN) as r, i (r.ip + ":" + r.port)}
         <article
-          class="shell-sm fade-in flex items-center justify-between gap-3"
-          style="animation-delay: {Math.min(i, 8) * 45}ms"
+          class="shell-sm fade-in flex items-center justify-between gap-3 px-4 py-3"
+          style="animation-delay: {Math.min(i, 8) * 45}ms; transition: border-color .2s var(--ease), box-shadow .2s var(--ease)"
         >
-          <div class="core core-tight flex min-w-0 flex-1 items-center justify-between gap-3 px-4 py-3">
-            <div class="min-w-0">
-              <p class="mono truncate text-sm font-semibold"><span dir="ltr">{r.ip}:{r.port}</span></p>
-              <p class="mono mt-0.5 text-xs" style="color: var(--ink-3)">
-                <span dir="ltr">{r.latency_ms}ms</span>{r.country ? ` — ${r.country}` : ""}
-                {#if i === 0}
-                  <span class="ms-1.5 rounded-full px-1.5 py-0.5 align-middle text-[10px] font-semibold uppercase tracking-wider" style="background: var(--ink); color: var(--paper)">{t("card.fastest")}</span>
-                {/if}
-              </p>
-            </div>
-            <button
-              class="btn btn-ghost btn-sm shrink-0"
-              title={t("card.copyTitle")}
-              aria-label={t("card.copyTitle")}
-              onclick={async () => {
-                try {
-                  await navigator.clipboard.writeText(`${r.ip}:${r.port}`);
-                } catch {
-                  // Clipboard API can fail (e.g. insecure context); the
-                  // bulk export path has a download fallback, but per-card
-                  // copy has no fallback — surface it via the existing toast.
-                  ui().error = t("simple.copyFailed");
-                  setTimeout(() => { if (ui().error === t("simple.copyFailed")) ui().error = null; }, 3000);
-                }
-              }}
-            >
-              <Copy class="size-4" aria-hidden="true" />
-            </button>
+          <div class="min-w-0">
+            <p class="mono truncate text-sm font-semibold" style="color: var(--cyan-pale)"><span dir="ltr">{r.ip}:{r.port}</span></p>
+            <p class="mono mt-0.5 text-xs" style="color: var(--text-ghost)">
+              <span dir="ltr">{r.latency_ms}ms</span>{r.country ? ` — ${r.country}` : ""}
+              {#if i === 0}
+                <span class="chip-status ok ms-1.5 align-middle">{t("card.fastest")}</span>
+              {/if}
+            </p>
           </div>
+          <button
+            class="btn btn-ghost btn-sm shrink-0"
+            title={t("card.copyTitle")}
+            aria-label={t("card.copyTitle")}
+            onclick={() => copyOne(r)}
+          >
+            <Copy class="size-4" aria-hidden="true" />
+          </button>
         </article>
       {/each}
     </div>
     {#if hiddenCount > 0 || copiedAll === "download"}
       <div class="flex flex-wrap items-center justify-between gap-2 px-1">
-        <p class="mono text-[11px]" style="color: var(--ink-muted)">
+        <p class="mono text-[11px]" style="color: var(--text-dim)">
           {hiddenCount > 0
             ? t("results.showing", { shown: Math.min(SHOWN, best.length), total: best.length })
             : ""}
         </p>
         {#if copiedAll === "download"}
-          <span class="pill fade-in" style="background: var(--paper-3); color: var(--good)">
+          <span class="pill pill-on fade-in">
             <Download class="size-3.5" /> cf-scanner-endpoints.txt
           </span>
         {:else if copiedAll === "share"}
-          <span class="pill fade-in" style="background: var(--paper-3); color: var(--good)">
+          <span class="pill pill-on fade-in">
             <Share2 class="size-3.5" />
           </span>
         {/if}
@@ -444,6 +433,6 @@
   </section>
 {/if}
 
-<p class="mono px-1 text-[11px]" style="color: var(--ink-muted)">
+<p class="field__hint px-1">
   {t("pro.hint")}
 </p>

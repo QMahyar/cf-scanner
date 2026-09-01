@@ -49,11 +49,10 @@
     <div class="flex items-center gap-2">
       {#if xray}
         <span
-          class="pill"
+          class="chip-status"
+          class:ok={xray.found}
+          class:bad={!xray.found}
           title={xray.found ? (xray.path ?? t("pro.xray.foundFallback")) : t("pro.xray.missingUnder", { dir: xray.data_dir ?? "" })}
-          style={xray.found
-            ? "background: oklch(46% 0.11 155 / 12%); color: var(--good)"
-            : "background: var(--bad); color: var(--bad)"}
         >
           xray {xray.found ? xray.version : t("pro.xray.missing")}
         </span>

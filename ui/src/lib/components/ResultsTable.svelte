@@ -179,11 +179,10 @@
       </span>
       {#if app.lastScanVerified}
         <span
-          class="pill ms-2 align-middle"
-          style="background: oklch(46% 0.11 155 / 12%); color: var(--good)"
+          class="chip-status ok ms-2 align-middle"
           title={t("table.verifiedTitle")}
         >
-          <ShieldCheck class="size-3.5" />
+          <ShieldCheck class="size-3" />
           {t("table.verified")}
         </span>
       {/if}
@@ -192,31 +191,22 @@
       {#if emptyKind === "candidates"}
         {@const verifiedCount = passedRows.length}
         <button
-          class="pill cursor-pointer"
+          class="pill"
           aria-pressed={chip === "all"}
-          style={chip === "all"
-            ? "background: var(--paper-3); color: var(--accent)"
-            : "background: var(--paper-3); color: var(--ink-muted)"}
           onclick={() => (chip = "all")}
         >
           {t("pro.field.ports.all")} {view.matched.length}
         </button>
         <button
-          class="pill cursor-pointer"
+          class="pill"
           aria-pressed={chip === "verified"}
-          style={chip === "verified"
-            ? "background: var(--paper-3); color: var(--accent)"
-            : "background: var(--paper-3); color: var(--ink-muted)"}
           onclick={() => (chip = "verified")}
         >
           {t("table.filter.passingOnly")} {verifiedCount}
         </button>
         <button
-          class="pill cursor-pointer"
+          class="pill"
           aria-pressed={chip === "unverified"}
-          style={chip === "unverified"
-            ? "background: var(--paper-3); color: var(--accent)"
-            : "background: var(--paper-3); color: var(--ink-muted)"}
           onclick={() => (chip = "unverified")}
         >
           {t("table.filter.untested")} {view.matched.length - verifiedCount}
@@ -245,9 +235,6 @@
       </label>
       <button
         class="pill"
-        style={view.sortCol === "latency"
-          ? "background: var(--paper-3); color: var(--accent)"
-          : "background: var(--paper-3); color: var(--ink-muted)"}
         aria-pressed={view.sortCol === "latency"}
         onclick={() => view.cycleSort("latency")}
       >
@@ -255,9 +242,6 @@
       </button>
       <button
         class="pill"
-        style={view.sortCol === "ip"
-          ? "background: var(--paper-3); color: var(--accent)"
-          : "background: var(--paper-3); color: var(--ink-muted)"}
         aria-pressed={view.sortCol === "ip"}
         onclick={() => view.cycleSort("ip")}
       >
@@ -265,9 +249,7 @@
       </button>
       <button
         class="pill"
-        style={copiedAll
-          ? "background: var(--paper-3); color: var(--good)"
-          : "background: var(--paper-3); color: var(--ink-muted)"}
+        class:pill-on={copiedAll}
         title={t("table.copyAllTitle")}
         onclick={copyAll}
       >
@@ -276,9 +258,7 @@
       {#if passedRows.length > 0}
         <button
           class="pill"
-          style={copiedPassing
-            ? "background: var(--paper-3); color: var(--good)"
-            : "background: var(--paper-3); color: var(--ink-muted)"}
+          class:pill-on={copiedPassing}
           title={t("table.copyAll.passingTitle")}
           onclick={copyPassing}
         >
@@ -309,16 +289,16 @@
     >
       <span class="mono font-semibold">{t("table.selected", { n: view.picked.length })}</span>
       <button
-        class="pill cursor-pointer"
-        style="background: var(--paper-3); color: {copiedPickedIps ? "var(--good)" : "var(--ink-muted)"}"
+        class="pill"
+        class:pill-on={copiedPickedIps}
         title={t("table.copySelectedIps")}
         onclick={copyPickedIps}
       >
         {copiedPickedIps ? `${t("results.copied")} ✓` : t("table.copySelectedIps")}
       </button>
       <button
-        class="pill cursor-pointer"
-        style="background: var(--paper-3); color: {copiedPickedUris ? "var(--good)" : "var(--ink-muted)"}"
+        class="pill"
+        class:pill-on={copiedPickedUris}
         title={t("table.copySelectedUris")}
         onclick={copyPickedUris}
       >
@@ -331,26 +311,26 @@
        never show "no records" mid-run). -->
   {#if view.total === 0 && app.running}
     <div class="px-4 py-3 text-xs" aria-busy="true">
-      <p class="mono" style="color: var(--ink-muted)">{t("table.skeleton")}</p>
+      <p class="mono" style="color: var(--text-dim)">{t("table.skeleton")}</p>
       {#each Array(SKELETON_ROWS) as _, i (i)}
-        <div class="mt-2 h-6 animate-pulse rounded" style="background: var(--paper-3); width: {88 - (i % 3) * 12}%"></div>
+        <div class="skeleton mt-2 h-6" style="width: {88 - (i % 3) * 12}%"></div>
       {/each}
     </div>
   {:else if view.total === 0 && emptyKind === "verified"}
     <div class="px-4 py-5 text-sm">
-      <p style="color: var(--ink-muted)">{t("pro.tunnel.toggle")}</p>
+      <p style="color: var(--text-dim)">{t("pro.tunnel.toggle")}</p>
     </div>
   {:else if view.total === 0}
     <div class="px-4 py-5 text-sm">
       <p class="font-semibold">{t("empty.title")}</p>
-      <p class="mt-1 max-w-lg text-xs" style="color: var(--ink-muted)">
+      <p class="mt-1 max-w-lg text-xs" style="color: var(--text-dim)">
         {t("empty.body")}
       </p>
     </div>
   {:else if chipRows.length === 0}
     <div class="px-4 py-5 text-sm">
       <p class="font-semibold">{t("empty.filtered.title")}</p>
-      <p class="mt-1 text-xs" style="color: var(--ink-muted)">
+      <p class="mt-1 text-xs" style="color: var(--text-dim)">
         {t("empty.filtered.body", { hidden: view.total })}
       </p>
       <button
@@ -364,16 +344,16 @@
       </button>
     </div>
   {:else}
-    <div class="max-h-[26rem] overflow-x-auto overflow-y-auto">
-      <table class="w-full min-w-[34rem] border-collapse text-sm">
+    <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
+    <div class="max-h-[26rem] overflow-x-auto overflow-y-auto" tabindex="0" role="region" aria-label={t(headingKey)}>
+      <table class="tbl w-full min-w-[34rem]">
         <caption class="sr-only">Scan results</caption>
-        <thead class="sticky top-0 z-10" style="background: var(--paper-2)">
-          <tr class="text-start text-[11px] uppercase tracking-wider" style="color: var(--ink-muted)">
-            <th class="w-9 px-0 py-2 sm:w-11 sm:px-1">
+        <thead class="sticky top-0 z-10" style="background: var(--bg-raised)">
+          <tr>
+            <th class="w-9 px-0 sm:w-11 sm:px-1">
               <label class="mx-auto grid size-8 cursor-pointer place-items-center sm:size-9">
                 <input
                   type="checkbox"
-                  class="size-4 accent-[var(--accent)]"
                   bind:this={headCheckbox}
                   checked={view.allPicked}
                   onchange={(e) => view.setAll(e.currentTarget.checked)}
@@ -381,55 +361,53 @@
                 />
               </label>
             </th>
-            <th class="sticky start-0 z-10 bg-[var(--paper-2)] px-4 py-2 font-medium border-e" scope="col" style="border-color: var(--rule-strong); box-shadow: 2px 0 4px rgba(0,0,0,0.04)" aria-sort={view.sortCol === "ip" ? (view.sortDir === "asc" ? "ascending" : "descending") : undefined}>
+            <th class="sticky start-0 z-10 px-4 border-e" scope="col" style="background: var(--bg-raised); border-color: var(--border)" aria-sort={view.sortCol === "ip" ? (view.sortDir === "asc" ? "ascending" : "descending") : undefined}>
               <button class="uppercase tracking-wider" onclick={() => view.cycleSort("ip")} aria-label={view.sortCol === "ip" ? `${t("table.col.endpoint")} ${view.sortDir === "asc" ? "ascending" : "descending"}` : t("table.col.endpoint")}>{t("table.col.endpoint")}<span aria-hidden="true">{view.sortCol === "ip" ? (view.sortDir === "asc" ? " ▲" : " ▼") : ""}</span>
               </button>
             </th>
-            <th class="px-4 py-2 font-medium" scope="col" aria-sort={view.sortCol === "latency" ? (view.sortDir === "asc" ? "ascending" : "descending") : undefined}>
+            <th class="px-4" scope="col" aria-sort={view.sortCol === "latency" ? (view.sortDir === "asc" ? "ascending" : "descending") : undefined}>
               <button class="uppercase tracking-wider" onclick={() => view.cycleSort("latency")} aria-label={view.sortCol === "latency" ? `${t("table.col.latency")} ${view.sortDir === "asc" ? "ascending" : "descending"}` : t("table.col.latency")}>{t("table.col.latency")}<span aria-hidden="true">{view.sortCol === "latency" ? (view.sortDir === "asc" ? " ▲" : " ▼") : ""}</span>
               </button>
             </th>
-            <th class="px-4 py-2 font-medium" scope="col">{t("table.col.country")}</th>
-            <th class="px-4 py-2 font-medium" scope="col">{t("table.tunnel.col")}</th>
-            <th class="px-2 py-2"><span class="sr-only">{t("table.actions")}</span></th>
+            <th class="px-4" scope="col">{t("table.col.country")}</th>
+            <th class="px-4" scope="col">{t("table.tunnel.col")}</th>
+            <th class="px-2"><span class="sr-only">{t("table.actions")}</span></th>
           </tr>
         </thead>
         <tbody>
           {#each visibleRows as r, i (r.ip + ":" + r.port)}
-            <tr class="border-t" style="border-color: var(--rule)">
-              <td class="px-0 py-2 align-middle sm:px-1">
+            <tr>
+              <td class="px-0 align-middle sm:px-1">
                 <label class="mx-auto grid size-8 cursor-pointer place-items-center sm:size-9">
                   <input
                     type="checkbox"
-                    class="size-4 accent-[var(--accent)]"
                     checked={view.selected.has(keyOf(r))}
                     onchange={(e) => view.toggleRow(r, e.currentTarget.checked)}
                     aria-label={t("table.row.select", { ep: keyOf(r) })}
                   />
                 </label>
               </td>
-              <td class="sticky start-0 z-10 bg-[var(--paper-2)] mono px-4 py-2 border-e" style="border-color: var(--rule-strong); box-shadow: 2px 0 4px rgba(0,0,0,0.04)"><span dir="ltr">{r.ip}<span style="color: var(--ink-muted)">:{r.port}</span></span></td>
-              <td class="mono px-4 py-2 text-end" style="color: {latencyClass(r.latency_ms)}">
+              <td class="sticky start-0 z-10 mono px-4 border-e" style="background: var(--bg-raised); border-color: var(--border)"><span dir="ltr">{r.ip}<span style="color: var(--text-dim)">:{r.port}</span></span></td>
+              <td class="mono px-4 text-end" style="color: {latencyClass(r.latency_ms)}">
                 <span dir="ltr">{r.latency_ms}ms</span>
               </td>
-              <td class="px-4 py-2" style="color: var(--ink-muted)">
+              <td class="px-4" style="color: var(--text-dim)">
                 {r.country ?? "—"}{r.colo ? ` · ${r.colo}` : ""}
               </td>
-              <td class="px-4 py-2">
+              <td class="px-4">
                 {#if r.phase2}
                   <span
-                    class="pill"
-                    title={r.phase2.error ?? undefined}
-                    style={r.phase2.passed
-                      ? "background: oklch(46% 0.11 155 / 12%); color: var(--good)"
-                      : "background: var(--paper-3); color: var(--ink-muted)"}>
+                    class="chip-status"
+                    class:ok={r.phase2.passed}
+                    class:bad={!r.phase2.passed}
+                    title={r.phase2.error ?? undefined}>
                     {r.phase2.passed ? t("table.tunnel.pass", { ms: r.phase2.latency_ms ?? "?" }) : t("table.tunnel.fail")}
                   </span>
                 {:else}
-                  <span style="color: var(--ink-muted)">—</span>
+                  <span style="color: var(--text-dim)">—</span>
                 {/if}
               </td>
-              <td class="px-2 py-2 text-end whitespace-nowrap">
+              <td class="px-2 text-end whitespace-nowrap">
                 <button
                   class="btn btn-ghost btn-sm"
                   title={t("table.copyUriTitle")}
@@ -437,7 +415,7 @@
                   onclick={() => copyUri(r, i)}
                 >
                   {#if copiedIdx === i}
-                    <Check class="size-4" aria-hidden="true" style="color: var(--good)" />
+                    <Check class="size-4" aria-hidden="true" style="color: var(--success)" />
                   {:else}
                     <Copy class="size-4" aria-hidden="true" />
                   {/if}
@@ -450,7 +428,7 @@
                     onclick={() => copyImportable(r, i)}
                   >
                     {#if copiedUriIdx === i}
-                      <Check class="size-4" aria-hidden="true" style="color: var(--good)" />
+                      <Check class="size-4" aria-hidden="true" style="color: var(--success)" />
                     {:else}
                       <Link2 class="size-4" aria-hidden="true" />
                     {/if}
@@ -464,11 +442,11 @@
     </div>
   {/if}
   {#if capped}
-    <div class="flex flex-wrap items-center justify-between gap-2 border-t px-4 py-2 text-xs" style="border-color: var(--rule); color: var(--ink-muted)">
+    <div class="flex flex-wrap items-center justify-between gap-2 border-t px-4 py-2 text-xs" style="border-color: var(--border); color: var(--text-dim)">
       <span class="mono">
         {t("table.renderCap", { visible: visibleRows.length, total: chipRows.length })}
       </span>
-      <button class="pill cursor-pointer" style="background: var(--paper-3); color: var(--ink)" onclick={() => (view.renderLimit += view.renderCap)}>
+      <button class="pill" onclick={() => (view.renderLimit += view.renderCap)}>
         {t("table.showMore", { n: Math.min(view.renderCap, chipRows.length - visibleRows.length) })}
       </button>
     </div>

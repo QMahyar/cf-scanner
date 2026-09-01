@@ -1,12 +1,23 @@
 <script lang="ts">
   import { onDestroy, onMount } from "svelte";
-  import { Languages, SlidersHorizontal } from "@lucide/svelte";
+  import { Moon, Sun } from "@lucide/svelte";
   import { api, subscribe, type LiveStatus } from "./lib/api";
   import { currentLocale, t, toggleLocale } from "./lib/i18n.svelte";
   import { applyResult, recordTick, setProMode, setResults, ui } from "./lib/store.svelte";
   import { reveal } from "./lib/reveal";
+  import {
+    ACCENTS,
+    accent,
+    initTheme,
+    setAccent,
+    theme,
+    toggleTheme,
+  } from "./lib/theme.svelte";
+  import { dismissToast, toasts } from "./lib/toast.svelte";
   import SimpleStart from "./lib/components/SimpleStart.svelte";
   import ProPanel from "./lib/components/ProPanel.svelte";
+
+  initTheme();
 
   const app = ui();
   let version = $state("");
@@ -17,6 +28,9 @@
       : live === "offline"
         ? t("live.offline")
         : t("live.connecting"),
+  );
+  const liveColor = $derived(
+    live === "live" ? "var(--success)" : live === "offline" ? "var(--danger)" : "var(--text-ghost)",
   );
 
   /** F5 mid-scan: the engine keeps last-scan state in memory, so pull it
@@ -77,118 +91,198 @@
 
   onDestroy(() => es?.close());
 
-  function togglePro() {
-    setProMode(!app.proMode);
+  function setMode(pro: boolean) {
+    setProMode(pro);
   }
+
+  const toastList = $derived(toasts());
+  const themeNow = $derived(theme());
+  const accentNow = $derived(accent());
 </script>
 
-<a href="#main" class="sr-only focus:not-sr-only focus:absolute focus:top-2 focus:left-2 focus:z-50 focus:rounded focus:bg-[var(--paper)] focus:px-3 focus:py-1 focus:text-sm">Skip to content</a>
-<div
-  class="mx-auto flex min-h-dvh max-w-6xl flex-col ps-[max(1rem,env(safe-area-inset-left))] pe-[max(1rem,env(safe-area-inset-right))] sm:ps-[max(1.5rem,env(safe-area-inset-left))] sm:pe-[max(1.5rem,env(safe-area-inset-right))]"
->
-  <header
-    class="sticky top-0 z-30 border-b-[3px] border-[var(--ink)] bg-[var(--paper)]"
-    style="border-bottom: 3px solid var(--ink)"
-  >
-    <div class="flex w-full flex-wrap items-center gap-x-4 gap-y-2 px-4 py-3 sm:px-8">
-      <div class="min-w-0 shrink-0">
-        <h1 class="display text-xl font-semibold leading-tight" style="letter-spacing:-0.02em">
-          CF-Scanner
-        </h1>
-        <p class="mono hidden text-[11px] sm:block" style="color: var(--ink-3); letter-spacing:0.03em">
-          {t("app.tagline")}
-        </p>
-      </div>
-      <div class="flex min-w-0 flex-wrap items-center justify-end gap-2">
-        <span
-          class="version-badge mono"
-          title={live === "live" ? t("app.live.liveTitle") : live === "offline" ? t("app.live.offlineTitle") : t("app.live.connectingTitle")}
-        >
-          <span
-            class="size-1.5 rounded-full"
-            style="background: {live === 'live'
-              ? 'var(--good)'
-              : live === 'offline'
-                ? 'var(--bad)'
-                : 'var(--ink-3)'}"
-          ></span>
-          {liveLabel}
-        </span>
-        <span class="mono ms-1 text-[11px]" style="color: var(--ink-3)" aria-hidden="false">v{version || "…"}</span>
-        <button
-          type="button"
-          class="btn btn-secondary btn-sm"
-          onclick={toggleLocale}
-          title="فارسی / English"
-          aria-label={t("app.switchLanguage")}
-        >
-          <Languages class="size-4" />
-          {currentLocale() === "fa" ? "EN" : "فا"}
-        </button>
-        <button
-          type="button"
-          class="btn btn-secondary"
-          class:btn-state-on={app.proMode}
-          onclick={togglePro}
-          aria-pressed={app.proMode}
-          title={t("mode.pro.title")}
-        >
-          <SlidersHorizontal class="size-4" />
-          {t("mode.pro")}
-        </button>
-      </div>
-    </div>
-  </header>
+<a
+  href="#main"
+  class="sr-only focus:not-sr-only focus:absolute focus:top-2 focus:left-2 focus:z-50 focus:rounded focus:bg-[var(--bg-raised)] focus:px-3 focus:py-1 focus:text-sm"
+>{t("app.tagline")}</a>
+<div class="texture-wrap" aria-hidden="true">
+  <div class="dotgrid"></div>
+  <div class="noise"></div>
+  <div class="blob blob-a"></div>
+  <div class="blob blob-b"></div>
+</div>
 
+<header class="topbar">
+  <div class="brand">
+    <span class="logo-tile" aria-hidden="true">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7" /><path d="m15.5 15.5 5 5" /></svg>
+    </span>
+    CF-Scanner
+  </div>
+  <div class="tabs" role="tablist" aria-label={t("mode.pro.title")}>
+    <button
+      type="button"
+      class="tab"
+      role="tab"
+      aria-selected={!app.proMode}
+      onclick={() => setMode(false)}
+    >
+      {t("mode.simple")}
+    </button>
+    <button
+      type="button"
+      class="tab"
+      role="tab"
+      aria-selected={app.proMode}
+      onclick={() => setMode(true)}
+      title={t("mode.pro.title")}
+    >
+      {t("mode.pro")}
+    </button>
+  </div>
+  <div class="topbar__end">
+    <span
+      class="stat-chip"
+      title={live === "live" ? t("app.live.liveTitle") : live === "offline" ? t("app.live.offlineTitle") : t("app.live.connectingTitle")}
+    >
+      <span class="dot" style="background: {liveColor}"></span>
+      {liveLabel}
+    </span>
+    <span class="stat-chip" aria-hidden="false">v{version || "…"}</span>
+    <div class="swatches" role="group" aria-label={t("app.accent")}>
+      {#each ACCENTS as a (a.id)}
+        <button
+          type="button"
+          class="swatch swatch--{a.id}"
+          data-action="accent"
+          data-accent={a.id}
+          aria-pressed={accentNow === a.id}
+          aria-label={a.label}
+          title={a.label}
+          onclick={() => setAccent(a.id)}
+        ></button>
+      {/each}
+    </div>
+    <div class="seg" role="group" aria-label={t("app.switchLanguage")}>
+      <button
+        type="button"
+        role="radio"
+        aria-checked={currentLocale() === "en"}
+        onclick={() => {
+          if (currentLocale() !== "en") toggleLocale();
+        }}
+      >
+        EN
+      </button>
+      <button
+        type="button"
+        role="radio"
+        aria-checked={currentLocale() === "fa"}
+        onclick={() => {
+          if (currentLocale() !== "fa") toggleLocale();
+        }}
+      >
+        فا
+      </button>
+    </div>
+    <button
+      type="button"
+      class="btn btn-ghost"
+      style="width:36px;height:36px;padding:0;border-radius:0.7rem"
+      onclick={toggleTheme}
+      aria-label={t("app.themeToggle")}
+      title={t("app.themeToggle")}
+    >
+      {#if themeNow === "light"}
+        <Moon class="size-4" />
+      {:else}
+        <Sun class="size-4" />
+      {/if}
+    </button>
+  </div>
+</header>
+
+<main id="main" class="flex flex-1 flex-col gap-4">
   {#if showReconnecting}
     <div
-      class="fade-in mb-2 flex items-center justify-between gap-2 rounded-md border px-3 py-2 text-xs"
-      style="border-color: var(--rule); background: var(--wash); color: var(--ink-muted)"
+      class="fade-in flex items-center justify-between gap-2 rounded-xl border px-3 py-2 text-xs"
+      style="border-color: rgba(251, 191, 36, 0.25); background: var(--warning-bg); color: var(--warning)"
       role="status"
       aria-live="polite"
     >
       <span>{live === "offline" ? t("live.offline") : t("live.connecting")} · {live === "offline"
         ? t("app.live.offlineTitle")
         : t("app.live.connectingTitle")}</span>
-      <button class="btn btn-ghost btn-sm shrink-0" onclick={() => (bannerDismissed = true)} aria-label={t("error.dismiss")}>×</button>
+      <button
+        class="btn btn-ghost btn-sm shrink-0"
+        style="color: inherit"
+        onclick={() => (bannerDismissed = true)}
+        aria-label={t("error.dismiss")}>×</button
+      >
     </div>
   {/if}
 
-  <main id="main" class="flex flex-1 flex-col gap-8 pb-16">
-    {#if app.error}
-      <div
-        class="fade-in shell-sm flex items-start gap-2 px-4 py-3 text-sm"
-        style="background: var(--verm-soft); color: var(--bad);"
-        role="alert"
+  {#if app.error}
+    <div
+      class="fade-in card card--danger flex items-start gap-2 text-sm"
+      style="padding: 12px 16px"
+      role="alert"
+    >
+      <span class="flex-1">{app.error}</span>
+      <button class="btn btn-ghost btn-sm" onclick={() => (app.error = null)}>
+        {t("error.dismiss")}
+      </button>
+    </div>
+  {/if}
+
+  {#if app.proMode}
+    <div use:reveal>
+      <ProPanel />
+    </div>
+  {:else}
+    <div use:reveal>
+      <SimpleStart />
+    </div>
+  {/if}
+</main>
+
+<footer
+  class="relative z-[1] pb-[max(1.25rem,env(safe-area-inset-bottom))] pt-2 text-xs"
+  style="color: var(--text-ghost); max-width: 1080px; margin-inline: auto; padding-inline: 16px"
+>
+  <span>{t("app.footer.geoPrefix")} <a
+      class="underline"
+      style="color: var(--text-dim); text-underline-offset: 3px; text-decoration-color: var(--border-strong)"
+      href="https://db-ip.com"
+      rel="noopener noreferrer"
+      target="_blank">db-ip.com</a> {t("app.footer.geoSuffix")}
+  </span>
+</footer>
+
+<div class="toasts" role="status" aria-live="polite">
+  {#each toastList as entry (entry.id)}
+    <div
+      class="toast"
+      class:toast--err={entry.kind === "err"}
+      class:toast--out={entry.leaving}
+      role={entry.kind === "err" ? "alert" : undefined}
+    >
+      <svg class="ticon" aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+        {#if entry.kind === "err"}
+          <path d="M18 6 6 18M6 6l12 12" />
+        {:else}
+          <path d="M20 6 9 17l-5-5" />
+        {/if}
+      </svg>
+      <span class="toast__msg">{entry.msg}</span>
+      <button
+        type="button"
+        class="toast__close"
+        aria-label={t("error.dismiss")}
+        onclick={() => dismissToast(entry.id)}
       >
-        <span class="flex-1">{app.error}</span>
-        <button class="btn btn-ghost btn-sm" onclick={() => (app.error = null)}>
-          {t("error.dismiss")}
-        </button>
-      </div>
-    {/if}
-
-    {#if app.proMode}
-      <div use:reveal>
-        <ProPanel />
-      </div>
-    {:else}
-      <div use:reveal>
-        <SimpleStart />
-      </div>
-    {/if}
-  </main>
-
-  <footer
-    class="border-t-[3px] border-[var(--ink)] pt-5 pb-[max(1.25rem,env(safe-area-inset-bottom))] text-xs"
-    style="color: var(--ink-3);"
-  >
-    <span>{t("app.footer.geoPrefix")} <a
-        class="underline"
-        style="color: var(--ink-muted); text-underline-offset: 3px; text-decoration-color: var(--rule-strong)"
-        href="https://db-ip.com"
-        rel="noopener noreferrer"
-        target="_blank">db-ip.com</a> {t("app.footer.geoSuffix")}
-    </span>
-  </footer>
+        <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12" /></svg>
+      </button>
+      <i class="toast-bar" style="animation-duration: {entry.total}ms"></i>
+    </div>
+  {/each}
 </div>

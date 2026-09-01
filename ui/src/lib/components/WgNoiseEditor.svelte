@@ -199,8 +199,7 @@
         {#each Object.keys(PRESETS) as p (p)}
           <button
             type="button"
-            class="pill cursor-pointer"
-            style="background: var(--paper-3); color: var(--ink-muted)"
+            class="pill"
             title={t("wgnoise.presetTitle", { preset: p })}
             onclick={() => applyPreset(p as keyof typeof PRESETS)}
           >

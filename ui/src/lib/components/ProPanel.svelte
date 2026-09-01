@@ -2,7 +2,6 @@
   import { onDestroy, onMount } from "svelte";
   import Segmented from "./Segmented.svelte";
   import {
-    Gauge,
     Play,
     ShieldCheck,
     Square,
@@ -245,11 +244,11 @@
   );
   const verifiedView = new ResultsView(() => app.results, "verified");
 
-  /** lg breakpoint mirror for JS-side card switching; CSS still owns layout
+  /** xl breakpoint mirror for JS-side card switching; CSS still owns layout
    * via grid-cols-2 so a missed event can only affect which cards render. */
   let wide = $state(false);
   $effect(() => {
-    const mq = window.matchMedia("(min-width: 1024px)");
+    const mq = window.matchMedia("(min-width: 1280px)");
     wide = mq.matches;
     const onChange = (e: MediaQueryListEvent) => (wide = e.matches);
     mq.addEventListener("change", onChange);
@@ -544,9 +543,9 @@
     <!-- delegated touched/server-error tracking + Ctrl+Enter accelerator -->
     <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
     <form onsubmit={onFormSubmit} oninput={markTouched} onchange={markTouched} onkeydown={onFormKeydown}>
-      <h2 class="flex items-center gap-2 text-sm font-semibold">
-        <Gauge class="size-4" style="color: var(--accent)" /> {t("pro.section.scanConfig")}
-      </h2>
+      <h1 class="view-title" style="margin-block: 0 16px; font-size: 1.25rem">
+        {t("pro.section.scanConfig")}
+      </h1>
 
       {#if validationErrors.length > 0}
         <div class="fade-in mt-3 text-xs" role="alert" style="color: var(--bad)">
@@ -650,15 +649,13 @@
             <span class="flex items-center gap-1">
               <button
                 type="button"
-                class="pill cursor-pointer"
-                style="background: var(--paper-3); color: var(--ink-muted)"
+                class="pill"
                 title={t("pro.field.ports.allTitle")}
                 onclick={selectAllPorts}
               >{t("pro.field.ports.all")}</button>
               <button
                 type="button"
-                class="pill cursor-pointer"
-                style="background: var(--paper-3); color: var(--ink-muted)"
+                class="pill"
                 title={t("pro.field.ports.noneTitle")}
                 onclick={clearPorts}
               >{t("pro.field.ports.none")}</button>
@@ -669,24 +666,18 @@
               <button
                 type="button"
                 class="pill"
-                style={form.selectedPorts.includes(p)
-                  ? "background: var(--accent); color: var(--accent-ink)"
-                  : "background: var(--paper-3); color: var(--ink)"}
                 aria-pressed={form.selectedPorts.includes(p)}
                 onclick={() => togglePort(p)}
               >
                 {p}
               </button>
             {/each}
-            <button
-              type="button"
-              class="pill"
-              style={customPortsOpen
-                ? "background: var(--accent); color: var(--accent-ink)"
-                : "background: var(--paper-3); color: var(--ink)"}
-              aria-pressed={customPortsOpen}
-              onclick={() => (customPortsOpen = !customPortsOpen)}
-            >
+              <button
+                type="button"
+                class="pill"
+                aria-pressed={customPortsOpen}
+                onclick={() => (customPortsOpen = !customPortsOpen)}
+              >
               {t("simple.size.custom")}
             </button>
           </div>
@@ -714,9 +705,6 @@
                   <button
                     type="button"
                     class="pill"
-                    style={form.selectedPorts.includes(p)
-                      ? "background: var(--accent); color: var(--accent-ink)"
-                      : "background: var(--paper-3); color: var(--ink)"}
                     aria-pressed={form.selectedPorts.includes(p)}
                     onclick={() => togglePort(p)}
                   >
@@ -853,8 +841,7 @@
               <div class="flex flex-wrap items-center gap-1.5 span-all">
                 <button
                   type="button"
-                  class="pill cursor-pointer"
-                  style="background: var(--paper-3); color: var(--ink)"
+                  class="pill"
                   title={t("pro.warp.endpointsImportTitle")}
                   onclick={() => warpRangesFileInput?.click()}
                 >{t("pro.field.importList")}</button>
@@ -915,12 +902,12 @@
         {/if}
       {/if}
 
-      <div aria-hidden="true" class="h-[7.25rem] sm:h-20"></div>
+      <div aria-hidden="true" class="h-[7.5rem] sm:h-20"></div>
       <!-- sticky actions: one canonical Start/Stop pair, visible even with
            phase-2/WARP textareas expanded -->
       <div
-        class="sticky bottom-0 z-10 -ms-6 sm:-ms-8 -me-6 sm:-me-8 -mb-8 sm:-mb-10 mt-5 border-t-2 px-6 sm:px-8 pt-3"
-        style="border-color: var(--ink); background: var(--paper); padding-bottom: max(1rem, env(safe-area-inset-bottom));"
+        class="sticky bottom-0 z-10 -ms-6 sm:-ms-8 -me-6 sm:-me-8 -mb-8 sm:-mb-10 mt-5 px-6 sm:px-8 pt-3"
+        style="background: color-mix(in srgb, var(--bg) 88%, transparent); backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px); border-block-start: 1px solid var(--border); padding-bottom: max(1rem, env(safe-area-inset-bottom));"
       >
         <div class="flex flex-wrap items-stretch justify-end gap-2">
           {#if app.running}
@@ -997,9 +984,9 @@
 
   {#if showCandidatesCard || showVerifiedCard}
     {#if wide}
-      <!-- lg+: bento — both lists side by side, each independently
+      <!-- xl+: bento — both lists side by side, each independently
            sortable/copyable via its own ResultsView. -->
-      <div class="grid items-start gap-4 lg:grid-cols-2">
+      <div class="grid items-start gap-4 xl:grid-cols-2">
         {#if showCandidatesCard}
           <ResultsTable
             view={candidatesView}
@@ -1019,26 +1006,19 @@
       {#if showCandidatesCard && showVerifiedCard}
         <div class="flex justify-center">
           <!-- Same segmented pattern as the simple-mode CDN/WARP switch. -->
-          <div
-            class="inline-flex items-center rounded-full p-1"
-            style="background: var(--paper-3)"
-            role="group"
-            aria-label={t("results.heading")}
-          >
+          <div class="seg" role="group" aria-label={t("results.heading")}>
             <button
               type="button"
-              class="btn btn-sm btn-secondary"
-              class:btn-state-on={activeList === "all"}
-              aria-pressed={activeList === "all"}
+              role="radio"
+              aria-checked={activeList === "all"}
               onclick={() => (activeList = "all")}
             >
               {t("results.candidatesHeading")}
             </button>
             <button
               type="button"
-              class="btn btn-sm btn-secondary"
-              class:btn-state-on={activeList === "verified"}
-              aria-pressed={activeList === "verified"}
+              role="radio"
+              aria-checked={activeList === "verified"}
               onclick={() => (activeList = "verified")}
             >
               {t("results.verifiedHeading")}

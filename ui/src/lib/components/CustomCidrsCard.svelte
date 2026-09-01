@@ -171,24 +171,21 @@
   <div class="mt-2 flex flex-wrap items-center gap-1.5">
     <button
       type="button"
-      class="pill cursor-pointer"
-      style="background: var(--paper-3); color: var(--ink)"
+      class="pill"
       title={t("pro.field.excludeWarpTitle")}
       onclick={excludeWarpIngress}
     >{t("pro.field.excludeWarp")}</button>
     {#if form.mode === "Cdn"}
       <button
         type="button"
-        class="pill cursor-pointer"
-        style="background: var(--paper-3); color: var(--ink)"
+        class="pill"
         title={t("pro.field.importListTitle")}
         onclick={() => rangesFileInput?.click()}
       >{t("pro.field.importList")}</button>
     {/if}
     <button
       type="button"
-      class="pill cursor-pointer"
-      style="color: var(--ink-muted)"
+      class="pill"
       title={t("pro.field.clearTitle")}
       onclick={clearExclusions}
     >{t("pro.field.clear")}</button>

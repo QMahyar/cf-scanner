@@ -225,6 +225,8 @@ const EN = {
   "app.switchLanguage": "Switch language",
   "app.footer.geoPrefix": "GeoIP data by",
   "app.footer.geoSuffix": "(CC BY 4.0)",
+  "app.themeToggle": "Toggle theme",
+  "app.accent": "Accent",
   "table.copyUriAria": "Copy ip:port",
   "table.copyExportAria": "Copy importable URI",
   // Step 4 new keys
@@ -484,6 +486,8 @@ const FA: Record<keyof typeof EN, string> = {
   "app.switchLanguage": "تغییر زبان",
   "app.footer.geoPrefix": "داده GeoIP از",
   "app.footer.geoSuffix": "(CC BY 4.0)",
+  "app.themeToggle": "تغییر تم",
+  "app.accent": "رنگ تأکیدی",
   "table.copyUriAria": "کپی ip:port",
   "table.copyExportAria": "کپی URI قابل‌ورود",
   // Step 4 new keys
