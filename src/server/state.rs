@@ -1,105 +1,20 @@
-//! Shared server state: the profiles store, ranges snapshot with its
-//! background refresh, SSE accounting, and the WARP registration gate.
+//! Shared server state: the ranges snapshot with its background refresh, SSE
+//! accounting, and the WARP registration gate.
 
-use std::collections::HashMap;
-use std::path::PathBuf;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
-use serde::Serialize;
-use tokio::sync::RwLock as TokioRwLock;
-
-use crate::api::types::ScanConfig;
 use crate::engine::ScanController;
 use crate::paths;
 use crate::ranges::{self, CidrPool, HttpGet};
 
 pub(crate) const DEFAULT_RANGES_REFRESH_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
-/// Cap on saved profiles so an unauthenticated local caller cannot grow the
-/// in-memory map without bound (memory-DoS guard; review Domain 7).
-pub(crate) const MAX_PROFILES: usize = 50;
 /// WARP registration hits Cloudflare's registration endpoint; one attempt per
 /// 60 s keeps a stuck page from hammering it (process-wide, single-user app).
 pub(crate) const REGISTER_COOLDOWN: Duration = Duration::from_secs(60);
 /// Xray download endpoint: same 60 s gate so a stuck client cannot loop
 /// download attempts indefinitely (mirrors the register-cooldown pattern).
 pub(crate) const XRAY_DOWNLOAD_COOLDOWN: Duration = Duration::from_secs(60);
-/// Persisted profiles file inside the data dir (identity.json lives
-/// alongside it); written on every mutation, loaded at serve start so saved
-/// profiles survive restarts (review Domain 2, rec 10).
-pub(crate) const PROFILES_FILE: &str = "profiles.json";
-
-pub(crate) fn load_profiles(dir: &std::path::Path) -> HashMap<String, ScanConfig> {
-    let path = dir.join(PROFILES_FILE);
-    let Ok(text) = std::fs::read_to_string(path) else {
-        return HashMap::new();
-    };
-    match serde_json::from_str(&text) {
-        Ok(profiles) => profiles,
-        Err(err) => {
-            tracing::warn!("profiles: ignoring unreadable {PROFILES_FILE}: {err:#}");
-            HashMap::new()
-        }
-    }
-}
-
-/// Best-effort disk write on a blocking thread; a failure is logged, never
-/// fatal (the in-memory store stays authoritative for the session).
-pub(crate) async fn persist_profiles(
-    dir: &std::path::Path,
-    profiles: &HashMap<String, ScanConfig>,
-) {
-    let path = dir.join(PROFILES_FILE);
-    let Ok(json) = serde_json::to_string_pretty(profiles) else {
-        return;
-    };
-    let _ = tokio::task::spawn_blocking(move || {
-        let _gate = paths::data_write_guard();
-        if let Some(parent) = path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        // tmp + rename under the write gate: a concurrent reader (or the
-        // next writer) must never observe a half-written profiles.json.
-        let tmp = path.with_extension("json.tmp");
-        let write_ok = {
-            #[cfg(unix)]
-            {
-                use std::io::Write as _;
-                use std::os::unix::fs::OpenOptionsExt as _;
-                std::fs::OpenOptions::new()
-                    .write(true)
-                    .create(true)
-                    .truncate(true)
-                    .mode(0o600)
-                    .open(&tmp)
-                    .and_then(|mut f| f.write_all(json.as_bytes()))
-                    .is_ok()
-            }
-            #[cfg(not(unix))]
-            {
-                let ok = std::fs::write(&tmp, json.as_bytes()).is_ok();
-                if ok {
-                    let _ = paths::lock_down_to_owner(&tmp);
-                }
-                ok
-            }
-        };
-        if write_ok {
-            let _ = std::fs::rename(&tmp, &path);
-        } else {
-            let _ = std::fs::remove_file(&tmp);
-        }
-    })
-    .await;
-}
-
-/// A named ScanConfig persisted to profiles.json (wgconf stripped via
-/// sanitize_config) and held in memory for the session; loaded at serve start.
-#[derive(Serialize)]
-pub(crate) struct ProfilePayload {
-    pub(crate) name: String,
-    pub(crate) config: crate::api::types::ScanConfig,
-}
 
 /// WARP registration seam: production drives warpgen::register (the
 /// Cloudflare v0a884 flow) on a blocking thread; tests inject a fake so the
@@ -114,13 +29,9 @@ pub(crate) type XrayFetcher = Arc<dyn Fn() -> anyhow::Result<std::path::PathBuf>
 
 pub(crate) struct AppState {
     pub(crate) controller: Arc<ScanController>,
-    pub(crate) profiles: TokioRwLock<HashMap<String, crate::api::types::ScanConfig>>,
     pub(crate) ranges: Arc<RangesState>,
     pub(crate) sse_connections: Arc<std::sync::atomic::AtomicUsize>,
     pub(crate) warp_register: WarpRegistrar,
-    /// Where profiles.json lives; production = the data dir, tests = an
-    /// isolated temp dir so no test touches a real user's profiles.
-    pub(crate) profiles_dir: PathBuf,
     /// Epoch of the latest started run; terminal events are tagged with it
     /// so an SSE reconnect replays the current run's terminal only.
     pub(crate) run_epoch: Arc<std::sync::atomic::AtomicU64>,

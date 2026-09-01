@@ -382,7 +382,21 @@ pub fn has_identity() -> bool {
 /// hand-edited identity degrades to `None` and callers fall back to the
 /// bundled constant instead of panicking on decode.
 pub fn persisted_server_public_key() -> Option<String> {
-    let key = load_identity().ok()?.peer_public_key;
+    let identity = match load_identity() {
+        Ok(identity) => identity,
+        Err(err) => {
+            // A missing file is the normal no-registration case and stays
+            // silent; an existing but unreadable/corrupt one must warn —
+            // the bundled-key fallback may never be silent.
+            if identity_path().map(|p| p.exists()).unwrap_or(false) {
+                tracing::warn!(
+                    "persisted WARP identity unreadable; falling back to the bundled server key: {err:#}"
+                );
+            }
+            return None;
+        }
+    };
+    let key = identity.peer_public_key;
     if key.as_deref().map(str::is_empty) != Some(false) {
         return None;
     }

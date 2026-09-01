@@ -98,13 +98,18 @@ impl TunnelProbe for XrayTunnelProbe {
             // guard removes them even when the attempt dies mid-flight (the
             // explicit cleanup below handles the normal resolve path).
             let _guard = TrialDirGuard(trial_dir.clone());
-            let outcome: Result<TunnelResult> = match tokio::time::timeout(
-                Duration::from_millis(timeout_ms),
-                async {
-                    let fetch = xray::RealFetch;
-                    let xray_bin = xray::ensure_binary(&fetch).await.with_context(|| {
-                        "no verified xray binary (cached copy failed its checksum or the download failed)"
-                    })?;
+            // Binary resolution is bounded by its own step — the download
+            // carries a 60 s HTTP timeout and concurrent attempts share one
+            // download — NOT by the per-probe budget: on a cold cache a slow
+            // link cannot pull the zip inside one probe timeout, and the
+            // timeout arm below would silently convert the abort into a
+            // failed verdict for every xray-routed combo.
+            let fetch = xray::RealFetch;
+            let xray_bin = xray::ensure_binary(&fetch).await.with_context(|| {
+                "no verified xray binary (cached copy failed its checksum or the download failed)"
+            })?;
+            let outcome: Result<TunnelResult> =
+                match tokio::time::timeout(Duration::from_millis(timeout_ms), async {
                     // The picked port can be stolen between the ephemeral bind
                     // probe and xray's own bind; retry with a fresh port instead
                     // of failing the whole probe on that race.
@@ -145,7 +150,16 @@ impl TunnelProbe for XrayTunnelProbe {
                             Ok(body) if colo.is_none() => colo = crate::geo::parse_colo(&body),
                             Ok(_) => {}
                             Err(err) => {
-                                tracing::debug!(%err, ip = %dial_ip, %url, "phase-2 probe did not deliver 200");
+                                // Probe URLs are user-supplied and may carry
+                                // tokens in their query: strip query/fragment
+                                // and sanitize the error text before logging.
+                                let clean_url = url.split(['?', '#']).next().unwrap_or(url);
+                                tracing::debug!(
+                                    err = %crate::configs::sanitize_error_text(&err.to_string()),
+                                    ip = %dial_ip,
+                                    url = %clean_url,
+                                    "phase-2 probe did not deliver 200"
+                                );
                                 all_ok = false;
                             }
                         }
@@ -168,21 +182,20 @@ impl TunnelProbe for XrayTunnelProbe {
                             verifier: Some("xray"),
                         })
                     }
-                },
-            )
-            .await
-            {
-                Ok(res) => res,
-                Err(_) => {
-                    tracing::debug!(ip = %dial_ip, "xray probe timed out");
-                    Ok(TunnelResult {
-                        passed: false,
-                        latency_ms: None,
-                        colo: None,
-                        verifier: Some("xray"),
-                    })
-                }
-            };
+                })
+                .await
+                {
+                    Ok(res) => res,
+                    Err(_) => {
+                        tracing::debug!(ip = %dial_ip, "xray probe timed out");
+                        Ok(TunnelResult {
+                            passed: false,
+                            latency_ms: None,
+                            colo: None,
+                            verifier: Some("xray"),
+                        })
+                    }
+                };
 
             cleanup_trial_dir(&trial_dir).await;
             outcome
@@ -190,9 +203,19 @@ impl TunnelProbe for XrayTunnelProbe {
     }
 }
 
-/// One dir per trial so concurrent probes never race on config.json.
+/// One dir per trial so concurrent probes never race on config.json. The
+/// name carries the per-process counter plus pid + randomness so two app
+/// instances sharing a data dir cannot collide on `trial-N` (one instance's
+/// sweep/guard must never delete the other's credential-bearing dir).
 fn fresh_trial_dir(work_dir: &Path) -> PathBuf {
-    let dir = work_dir.join(format!("trial-{}", next_trial_id()));
+    // rand_core (already a dependency) supplies the salt — no new crate.
+    use rand_core::RngCore;
+    let salt = rand_core::OsRng.next_u32();
+    let dir = work_dir.join(format!(
+        "trial-{}-{}-{salt:08x}",
+        next_trial_id(),
+        std::process::id()
+    ));
     let _ = std::fs::create_dir_all(&dir);
     dir
 }

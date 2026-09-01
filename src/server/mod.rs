@@ -4,18 +4,16 @@
 //! serialized.
 
 use std::net::Ipv4Addr;
-use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use axum::extract::{DefaultBodyLimit, Path, State};
+use axum::extract::{DefaultBodyLimit, State};
 use axum::http::{StatusCode, Uri};
 use axum::middleware::{self};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use tokio::sync::RwLock as TokioRwLock;
 
 use crate::api::types::{
     ExportConfigRequest, ExportConfigResponse, RangesPayload, RegisterRequest, RegisterResponse,
@@ -28,6 +26,7 @@ use crate::warpgen;
 use crate::xray;
 
 mod error;
+mod export;
 mod guard;
 mod sse;
 mod state;
@@ -36,8 +35,7 @@ use self::error::{ApiError, map_register_error};
 use self::guard::{JsonBody, SECURITY_CSP, localhost_only, security_headers};
 use self::sse::events;
 use self::state::{
-    AppState, MAX_PROFILES, ProfilePayload, REGISTER_COOLDOWN, RangesState, WarpRegistrar,
-    XRAY_DOWNLOAD_COOLDOWN, XrayFetcher, load_profiles, persist_profiles,
+    AppState, REGISTER_COOLDOWN, RangesState, WarpRegistrar, XRAY_DOWNLOAD_COOLDOWN, XrayFetcher,
 };
 
 const EMBEDDED_INDEX: &str = "index.html";
@@ -55,8 +53,6 @@ struct UiAssets;
 pub fn router(controller: Arc<ScanController>, bound_port: u16) -> Router {
     let ranges = RangesState::load();
     ranges.spawn_refresh(None, Arc::new(ranges::RealHttp));
-    let profiles_dir =
-        paths::data_dir().unwrap_or_else(|_| std::env::temp_dir().join("cf-scanner-profiles"));
     let xray_fetch: XrayFetcher = Arc::new(|| {
         let rt = tokio::runtime::Handle::current();
         rt.block_on(xray::ensure_binary(&xray::RealFetch))
@@ -65,42 +61,23 @@ pub fn router(controller: Arc<ScanController>, bound_port: u16) -> Router {
         controller,
         ranges,
         default_registrar(),
-        profiles_dir,
         bound_port,
         xray_fetch,
     )
-}
-
-/// Every test server persists to its own throwaway dir, so no test can read
-/// another test's profiles (and none touches a real user's data dir).
-#[cfg(test)]
-fn unique_test_profiles_dir() -> PathBuf {
-    use std::fs;
-    static COUNTER: AtomicUsize = AtomicUsize::new(0);
-    let dir = std::env::temp_dir().join(format!(
-        "cf-scanner-server-profiles-{}-{}",
-        std::process::id(),
-        COUNTER.fetch_add(1, Ordering::Relaxed)
-    ));
-    let _ = fs::create_dir_all(&dir);
-    dir
 }
 
 fn router_with_dir(
     controller: Arc<ScanController>,
     ranges_state: Arc<RangesState>,
     registrar: WarpRegistrar,
-    profiles_dir: PathBuf,
     bound_port: u16,
     xray_fetch: XrayFetcher,
 ) -> Router {
     let state = Arc::new(AppState {
         controller,
-        profiles: TokioRwLock::new(load_profiles(&profiles_dir)),
         ranges: ranges_state,
         sse_connections: Arc::new(AtomicUsize::new(0)),
         warp_register: registrar,
-        profiles_dir,
         run_epoch: Arc::new(AtomicU64::new(0)),
         last_terminal: Arc::new(Mutex::new(None)),
         register_gate: tokio::sync::Mutex::new(None),
@@ -120,11 +97,8 @@ fn router_with_dir(
         .route("/api/ranges", get(ranges))
         .route("/api/warp/register", post(warp_register))
         .route("/api/config/export", post(export_config))
-        .route("/api/profiles", get(list_profiles))
-        .route(
-            "/api/profiles/{name}",
-            get(get_profile).put(put_profile).delete(delete_profile),
-        )
+        .route("/api/bundle", get(export::bundle))
+        .route("/api/results/export", get(export::result_export))
         .with_state(state)
         .fallback(fallback)
         .method_not_allowed_fallback(method_not_allowed)
@@ -157,8 +131,19 @@ fn ui_response(file: &str) -> Option<Response> {
     #[cfg(debug_assertions)]
     {
         // Debug prefers live disk files so `cd ui && npm run build` is visible
-        // without a cargo rebuild; falls back to embedded when absent.
-        if !file.contains("..") {
+        // without a cargo rebuild; falls back to embedded when absent. The
+        // disk read is restricted to plain relative paths: besides `..`, any
+        // absolute/rooted/drive-prefixed component is rejected — on Windows,
+        // `Path::join` with e.g. `C:/x` or `\x` replaces the base and would
+        // escape ui/dist entirely.
+        let escapes = file.contains("..")
+            || std::path::Path::new(file).components().any(|c| {
+                matches!(
+                    c,
+                    std::path::Component::Prefix(_) | std::path::Component::RootDir
+                )
+            });
+        if !escapes {
             let disk_path = std::path::Path::new("ui/dist").join(file);
             if let Ok(bytes) = std::fs::read(&disk_path) {
                 let mime = match file.rsplit('.').next().unwrap_or("") {
@@ -379,10 +364,11 @@ async fn export_config(
     if let Some(sni) = &req.sni {
         crate::api::types::validate_sni(sni).map_err(ApiError::bad_request)?;
     }
-    let uri = crate::configs::export_config_uri(&req.config, ip, req.port, req.sni.as_deref())
-        .map_err(|err| {
-            ApiError::bad_request(crate::configs::sanitize_error_text(&format!("{err:#}")))
-        })?;
+    let uri =
+        crate::configs::export_config_uri(&req.config, ip, req.port, req.sni.as_deref(), None)
+            .map_err(|err| {
+                ApiError::bad_request(crate::configs::sanitize_error_text(&format!("{err:#}")))
+            })?;
     Ok(Json(ExportConfigResponse { uri }))
 }
 
@@ -447,120 +433,6 @@ async fn ranges(State(state): State<Arc<AppState>>) -> Json<RangesPayload> {
         host_count: pool.host_count().min(u64::MAX as u128) as u64,
         last_updated,
     })
-}
-
-/// Session-lifetime profiles in name order (inert data; the UI decides how to
-/// load them into the scan form).
-async fn list_profiles(State(state): State<Arc<AppState>>) -> Json<Vec<ProfilePayload>> {
-    let profiles = state.profiles.read().await;
-    let mut out: Vec<ProfilePayload> = profiles
-        .iter()
-        .map(|(name, config)| ProfilePayload {
-            name: name.clone(),
-            config: config.clone(),
-        })
-        .collect();
-    out.sort_by(|a, b| a.name.cmp(&b.name));
-    Json(out)
-}
-
-fn sanitize_config(mut cfg: ScanConfig) -> ScanConfig {
-    // Profiles must never carry WARP key material (review Domain 7): the
-    // wgconf is stripped on the way in and the verification flag that depends
-    // on it is cleared, so stored/returned profiles stay valid. The scan path
-    // (POST /api/scan) still accepts wgconf-bearing configs.
-    if let Some(warp) = &mut cfg.warp
-        && warp.wgconf.take().is_some()
-    {
-        warp.verify_with_wgconf = false;
-    }
-    cfg
-}
-
-/// Upsert: 201 when the name is new, 200 when it replaces an existing
-/// profile; the body is always the stored profile. New names are rejected
-/// with 413 once MAX_PROFILES is reached; updating an existing name stays
-/// allowed. The check and insert share the write lock, so concurrent PUTs
-/// cannot exceed the cap.
-async fn put_profile(
-    State(state): State<Arc<AppState>>,
-    Path(name): Path<String>,
-    JsonBody(cfg): JsonBody<ScanConfig>,
-) -> Result<(StatusCode, Json<ProfilePayload>), ApiError> {
-    validate_profile_name(&name).map_err(ApiError::bad_request)?;
-    cfg.validate().map_err(|e| {
-        let sanitized = crate::configs::sanitize_error_text(&e.to_string());
-        let truncated: String = sanitized.chars().take(512).collect();
-        ApiError::invalid_config(truncated)
-    })?;
-    let cfg = sanitize_config(cfg);
-    let mut profiles = state.profiles.write().await;
-    if !profiles.contains_key(&name) && profiles.len() >= MAX_PROFILES {
-        return Err(ApiError::payload_too_large(format!(
-            "profile limit reached ({MAX_PROFILES} max)"
-        )));
-    }
-    let created = profiles.insert(name.clone(), cfg.clone()).is_none();
-    let status = if created {
-        StatusCode::CREATED
-    } else {
-        StatusCode::OK
-    };
-    let snapshot = profiles.clone();
-    drop(profiles);
-    persist_profiles(&state.profiles_dir, &snapshot).await;
-    Ok((status, Json(ProfilePayload { name, config: cfg })))
-}
-
-async fn delete_profile(
-    State(state): State<Arc<AppState>>,
-    Path(name): Path<String>,
-) -> Result<StatusCode, ApiError> {
-    validate_profile_name(&name).map_err(ApiError::bad_request)?;
-    let (removed, snapshot) = {
-        let mut profiles = state.profiles.write().await;
-        let removed = profiles.remove(&name).is_some();
-        (removed, profiles.clone())
-    };
-    if removed {
-        persist_profiles(&state.profiles_dir, &snapshot).await;
-        Ok(StatusCode::NO_CONTENT)
-    } else {
-        Err(ApiError::not_found(format!(
-            "profile {name:?} does not exist"
-        )))
-    }
-}
-
-/// One stored profile, or 404. The UI loads a saved profile by name.
-async fn get_profile(
-    State(state): State<Arc<AppState>>,
-    Path(name): Path<String>,
-) -> Result<Json<ProfilePayload>, ApiError> {
-    validate_profile_name(&name).map_err(ApiError::bad_request)?;
-    let cfg = state.profiles.read().await.get(&name).cloned();
-    match cfg {
-        Some(cfg) => Ok(Json(ProfilePayload { name, config: cfg })),
-        None => Err(ApiError::not_found(format!(
-            "profile {name:?} does not exist"
-        ))),
-    }
-}
-
-fn validate_profile_name(name: &str) -> Result<(), String> {
-    if name.is_empty() {
-        return Err("profile name must not be empty".to_owned());
-    }
-    if name.chars().count() > 64 {
-        return Err("profile name must be at most 64 characters".to_owned());
-    }
-    if name.chars().any(char::is_control) {
-        return Err("profile name must not contain control characters".to_owned());
-    }
-    if name.contains('/') {
-        return Err("profile name must not contain '/'".to_owned());
-    }
-    Ok(())
 }
 
 async fn index() -> Response {

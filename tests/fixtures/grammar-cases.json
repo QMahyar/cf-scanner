@@ -47,5 +47,10 @@
   {"kind": "sni", "input": "", "expect": "err"},
   {"kind": "sni", "input": "a.-b.example", "expect": "err"},
   {"kind": "sni", "input": "ünïcode.example", "expect": "err"},
-  {"kind": "sni", "input": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx.x", "expect": "err"}
+  {"kind": "sni", "input": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx.x", "expect": "err"},
+
+  {"kind": "cidr", "input": " 1.2.3.0 / 24 ", "expect": "ok"},
+  {"kind": "endpoint", "input": " 1.2.3.4 : 443 ", "expect": "ok"},
+  {"kind": "endpoint", "input": "1.2.3.4:+443", "expect": "ok"},
+  {"kind": "sni", "input": " sni.example.com ", "expect": "err"}
 ]

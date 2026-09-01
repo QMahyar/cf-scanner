@@ -52,6 +52,15 @@ fn grammar_fixture_cidr_cases_match_parse_cidr() {
     }
 }
 
+#[test]
+fn stop_condition_rejects_unknown_fields() {
+    // StopCondition is part of the strict serde contract: unknown keys
+    // inside "stop" must be rejected like every other request struct,
+    // not silently ignored.
+    let bad: serde_json::Value = serde_json::json!({"found": 10, "cap": null, "typo": 1});
+    assert!(serde_json::from_value::<StopCondition>(bad).is_err());
+}
+
 fn valid_config() -> ScanConfig {
     ScanConfig::default()
 }
@@ -945,6 +954,10 @@ fn rejects_non_routable_custom_cidrs() {
         "::ffff:169.254.0.1/128", // link-local, mapped
         "::ffff:10.0.0.0/104",    // RFC1918 10/8, mapped
         "::ffff:192.168.1.0/120", // RFC1918 /24, mapped
+        "224.0.0.0/4",            // multicast
+        "240.0.0.0/4",            // reserved
+        "255.255.255.255/32",     // broadcast
+        "::ffff:224.0.0.1/128",   // multicast, mapped
     ] {
         let mut c = valid_config();
         c.custom_cidrs = vec![cidr.to_owned()];
@@ -967,6 +980,12 @@ fn rejects_non_routable_warp_endpoints() {
         custom_endpoints: vec!["127.0.0.1".to_owned()],
         ..WarpConfig::default()
     });
+    assert!(matches!(
+        c.validate(),
+        Err(ConfigError::NonRoutableEndpoint(_))
+    ));
+    // Multicast endpoints must be rejected too.
+    c.warp.as_mut().unwrap().custom_endpoints = vec!["224.0.0.1".to_owned()];
     assert!(matches!(
         c.validate(),
         Err(ConfigError::NonRoutableEndpoint(_))

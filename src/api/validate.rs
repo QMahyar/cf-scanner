@@ -17,7 +17,15 @@ pub(crate) fn banned_ip(ip: &IpAddr) -> bool {
         return true;
     }
     match ip {
-        IpAddr::V4(v4) => v4.is_private() || v4.is_link_local() || v4.octets()[0] == 0,
+        IpAddr::V4(v4) => {
+            v4.is_private()
+                || v4.is_link_local()
+                || v4.is_multicast()
+                // `is_reserved` (240/4, incl. broadcast) is still unstable on
+                // the pinned toolchain; the mask spells the same range.
+                || v4.octets()[0] & 0xF0 == 240
+                || v4.octets()[0] == 0
+        }
         IpAddr::V6(v6) => {
             // Mapped-v6 spellings (::ffff:a.b.c.d) of v4 specials must not
             // pass this gate by hiding behind their v6 form: they connect
@@ -27,6 +35,8 @@ pub(crate) fn banned_ip(ip: &IpAddr) -> bool {
                     || v4.is_unspecified()
                     || v4.is_private()
                     || v4.is_link_local()
+                    || v4.is_multicast()
+                    || v4.octets()[0] & 0xF0 == 240
                     || v4.octets()[0] == 0;
             }
             // ULA is fc00::/7 = first segment 0xfc00..=0xfdff.
@@ -46,7 +56,8 @@ pub(crate) fn reject_default_warp_ports(cfg: &super::types::ScanConfig) -> Resul
 
 /// Guard against scanning non-routable custom input: custom CIDRs (CDN) and
 /// custom endpoints (WARP) must not name loopback, link-local, unspecified,
-/// private/RFC1918 or ULA space.
+/// private/RFC1918, multicast/reserved/broadcast or ULA space (the same
+/// non-routable set `validate_fetch_url` blocks for outbound fetches).
 pub(crate) fn reject_non_routable(cfg: &super::types::ScanConfig) -> Result<(), ConfigError> {
     match cfg.mode {
         super::types::Mode::Cdn => {

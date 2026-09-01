@@ -63,6 +63,10 @@ pub struct ScanController {
     summary: Mutex<Option<ScanSummary>>,
     cancel_tx: Mutex<Option<watch::Sender<bool>>>,
     running: Mutex<bool>,
+    /// Phase-2 configs of the last run, retained so export endpoints can
+    /// rewrite each verified candidate's original config into an importable
+    /// URI/subscription without the client re-sending it.
+    last_phase2_configs: Mutex<Vec<String>>,
 }
 
 impl ScanController {
@@ -97,6 +101,7 @@ impl ScanController {
             summary: Mutex::new(None),
             cancel_tx: Mutex::new(None),
             running: Mutex::new(false),
+            last_phase2_configs: Mutex::new(Vec::new()),
         }
     }
 
@@ -447,10 +452,34 @@ impl ScanController {
         pool: ranges::CidrPool,
     ) -> Result<ScanSummary> {
         cfg.validate()?;
+        self.retain_phase2_configs(&cfg);
         if cfg.mode == Mode::Warp {
             return self.run_warp(cfg, seed).await;
         }
         self.run_cdn(cfg, seed, pool).await
+    }
+
+    /// Snapshot the run's phase-2 configs so export endpoints can rewrite the
+    /// original config per verified candidate (the sub never requires the
+    /// client to resend the configs).
+    fn retain_phase2_configs(&self, cfg: &ScanConfig) {
+        let configs = cfg
+            .phase2
+            .as_ref()
+            .map(|p| p.configs.clone())
+            .unwrap_or_default();
+        *self
+            .last_phase2_configs
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = configs;
+    }
+
+    /// The last run's phase-2 configs (empty for WARP-only or no phase 2).
+    pub fn phase2_configs(&self) -> Vec<String> {
+        self.last_phase2_configs
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     fn finish(&self, started: Instant, scanned: u64, found: u64) -> ScanSummary {

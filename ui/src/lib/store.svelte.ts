@@ -356,5 +356,16 @@ export async function exportText(text: string, filename: string): Promise<Export
   return "download";
 }
 
+/** Unconditional file download of raw text (used for JSON/CSV/bundle files
+ * where a MIME type matters and the share sheet is less useful). */
+export function downloadFile(text: string, filename: string, mime = "text/plain"): void {
+  const url = URL.createObjectURL(new Blob([text], { type: `${mime};charset=utf-8` }));
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(url), 5_000);
+}
+
 // Expose the singleton for tests that need direct access
 export const _uiStore = _store;

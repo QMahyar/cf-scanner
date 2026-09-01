@@ -71,6 +71,7 @@ pub enum ScanTarget {
 
 /// What terminates a scan. `cap: None` = "don't stop" until `found` is met.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct StopCondition {
     pub found: u32,
     pub cap: Option<u32>,

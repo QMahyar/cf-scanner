@@ -6,7 +6,7 @@ use std::sync::{Mutex, MutexGuard};
 
 use anyhow::{Result, anyhow};
 
-/// Single-writer gate for every managed data-dir file (profiles.json,
+/// Single-writer gate for every managed data-dir file (identity.json,
 /// refreshed ranges, identity.json, xray binary + sidecar). These writes are
 /// rare and small; one process-wide lock is cheaper and easier to reason
 /// about than per-file locks, and it closes the interleaved/torn-write race

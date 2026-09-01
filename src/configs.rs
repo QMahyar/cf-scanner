@@ -187,11 +187,14 @@ impl Protocol {
 }
 
 /// Result of parsing subscription text: good specs plus how many lines were
-/// skipped (ads, comments, corrupt entries).
+/// skipped (ads, comments, corrupt entries) with a per-line reason (the
+/// 1-based line number, for actionable feedback).
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct SubscriptionParse {
     pub specs: Vec<OutboundSpec>,
     pub ignored: usize,
+    /// "line 3: <reason>" entries for every skipped line; empty when clean.
+    pub errors: Vec<String>,
 }
 
 /// Full HTTPS GET with a subscription-friendly User-Agent. BoxFuture style
@@ -253,25 +256,43 @@ pub fn parse_uri(entry: &str) -> Result<OutboundSpec> {
     }
 }
 
-/// Renders a ready-to-use vless/trojan URI for a verified candidate: the
-/// config's id, security, SNI, fingerprint and (vless) ws settings, dialing
-/// `dial_ip`:`port`. The inverse of `parse_uri` for the fields we support;
-/// vmess/ss and trojan-over-ws exports are out of scope.
+/// Renders a ready-to-use URI for a verified candidate: the config's id,
+/// security, SNI, fingerprint and (vless/vmess) ws settings, dialing
+/// `dial_ip`:`port`. The inverse of `parse_uri`. `remark`, when given, is
+/// appended as the fragment (the proxy client's display tag) — typically
+/// `CF-<COLO>-<latency>ms`.
 pub fn render_uri(
     spec: &OutboundSpec,
     dial_ip: Ipv4Addr,
     sni_override: Option<&str>,
+    remark: Option<&str>,
 ) -> Result<String> {
     match spec.protocol {
-        Protocol::Vless => {}
-        Protocol::Trojan => {
-            if spec.ws.is_some() {
-                bail!("export not supported for this protocol: trojan-over-ws");
-            }
-        }
-        _ => bail!("export not supported for this protocol"),
+        Protocol::Vless | Protocol::Trojan => render_sip002(spec, dial_ip, sni_override, remark),
+        Protocol::Vmess => render_vmess(spec, dial_ip, sni_override, remark),
+        Protocol::Shadowsocks => render_ss(spec, dial_ip, remark),
     }
-    let mut out = String::with_capacity(128);
+}
+
+fn fragment(remark: Option<&str>) -> String {
+    match remark {
+        Some(r) if !r.trim().is_empty() => {
+            let encoded = utf8_percent_encode(r, QUERY_VALUE_ENCODE_SET).to_string();
+            format!("#{encoded}")
+        }
+        _ => String::new(),
+    }
+}
+
+/// vless:// and trojan:// (including trojan-over-ws) share the SIP002 query
+/// shape; vmess builds a base64 JSON payload instead.
+fn render_sip002(
+    spec: &OutboundSpec,
+    dial_ip: Ipv4Addr,
+    sni_override: Option<&str>,
+    remark: Option<&str>,
+) -> Result<String> {
+    let mut out = String::with_capacity(160);
     out.push_str(spec.protocol.as_str());
     out.push_str("://");
     out.push_str(&utf8_percent_encode(&spec.user_id, USERINFO_ENCODE_SET).to_string());
@@ -279,67 +300,184 @@ pub fn render_uri(
     out.push_str(&dial_ip.to_string());
     out.push(':');
     out.push_str(&spec.port.to_string());
-    out.push('?');
-    let mut query = |key: &str, value: &str| {
-        out.push_str(key);
-        out.push('=');
-        out.push_str(&utf8_percent_encode(value, QUERY_VALUE_ENCODE_SET).to_string());
-        out.push('&');
+    // Build the query components, then join with '&' so no closure holds a
+    // borrow of `out` while `out.push_str` runs elsewhere.
+    let mut params: Vec<String> = Vec::new();
+    let mut add = |key: &str, value: &str| {
+        params.push(format!(
+            "{key}={}",
+            utf8_percent_encode(value, QUERY_VALUE_ENCODE_SET)
+        ));
     };
-    query("security", &spec.security);
+    add("security", &spec.security);
     let sni = sni_override
         .map(str::to_owned)
         .or_else(|| spec.tls_server_name.clone());
     if let Some(sni) = sni {
-        query("sni", &sni);
+        add("sni", &sni);
     }
     if let Some(fp) = &spec.fingerprint {
-        query("fp", fp);
+        add("fp", fp);
     }
     if let Some(ws) = &spec.ws {
-        query("type", WS);
-        query("path", &ws.path);
+        add("type", WS);
+        add("path", &ws.path);
         if let Some(host) = &ws.host {
-            query("host", host);
+            add("host", host);
         }
         if let Some(packet_encoding) = &ws.packet_encoding {
-            query("packetencoding", packet_encoding);
+            add("packetencoding", packet_encoding);
         }
     }
-    out.pop(); // the trailing '&' (security is always present)
+    out.push('?');
+    out.push_str(&params.join("&"));
+    out.push_str(&fragment(remark));
+    Ok(out)
+}
+
+fn render_vmess(
+    spec: &OutboundSpec,
+    dial_ip: Ipv4Addr,
+    sni_override: Option<&str>,
+    remark: Option<&str>,
+) -> Result<String> {
+    let mut payload = serde_json::Map::new();
+    payload.insert("v".into(), serde_json::json!("2"));
+    payload.insert(
+        "ps".into(),
+        serde_json::json!(remark.unwrap_or("").to_string()),
+    );
+    payload.insert("add".into(), serde_json::json!(dial_ip.to_string()));
+    payload.insert("port".into(), serde_json::json!(spec.port.to_string()));
+    payload.insert("id".into(), serde_json::json!(spec.user_id));
+    payload.insert("aid".into(), serde_json::json!(spec.alter_id.to_string()));
+    if let Some(scy) = &spec.vmess_security {
+        payload.insert("scy".into(), serde_json::json!(scy));
+    }
+    let net = if spec.ws.is_some() { "ws" } else { "tcp" };
+    payload.insert("net".into(), serde_json::json!(net));
+    payload.insert("type".into(), serde_json::json!("none"));
+    if let Some(ws) = &spec.ws {
+        payload.insert("path".into(), serde_json::json!(ws.path));
+        if let Some(host) = &ws.host {
+            payload.insert("host".into(), serde_json::json!(host));
+        }
+    }
+    let tls = if spec.security == "tls" {
+        "tls"
+    } else {
+        "none"
+    };
+    payload.insert("tls".into(), serde_json::json!(tls));
+    let sni = sni_override
+        .map(str::to_owned)
+        .or_else(|| spec.tls_server_name.clone());
+    if let Some(sni) = sni {
+        payload.insert("sni".into(), serde_json::json!(sni));
+    }
+    if let Some(fp) = &spec.fingerprint {
+        payload.insert("fp".into(), serde_json::json!(fp));
+    }
+    let json = serde_json::Value::Object(payload);
+    let b64 = base64::engine::general_purpose::STANDARD.encode(json.to_string());
+    Ok(format!("vmess://{b64}"))
+}
+
+fn render_ss(spec: &OutboundSpec, dial_ip: Ipv4Addr, remark: Option<&str>) -> Result<String> {
+    let method = spec.method.as_deref().unwrap_or("aes-128-gcm");
+    let userinfo = format!("{method}:{}", spec.user_id);
+    let b64 = base64::engine::general_purpose::STANDARD_NO_PAD.encode(userinfo);
+    let mut out = format!("ss://{b64}@{dial_ip}:{}", spec.port);
+    out.push_str(&fragment(remark));
     Ok(out)
 }
 
 /// One export path shared by the CLI and the API: parse the user's original
 /// config URI, point it at the verified candidate, render the ready URI.
-/// `sni_override` (when given) wins over the config's own SNI.
+/// `sni_override` (when given) wins over the config's own SNI. `remark`,
+/// when given, becomes the proxy client's display tag fragment.
 pub fn export_config_uri(
     original_config: &str,
     dial_ip: Ipv4Addr,
     port: u16,
     sni_override: Option<&str>,
+    remark: Option<&str>,
 ) -> Result<String> {
     let mut spec = parse_uri(original_config)?;
     spec.server = dial_ip.to_string();
     spec.port = port;
-    render_uri(&spec, dial_ip, sni_override)
+    render_uri(&spec, dial_ip, sni_override, remark)
 }
 
-/// Parses subscription text (one URI per line; blank lines and `#` comments
-/// are skipped, unparseable lines are counted, never errors the batch).
+/// Parses subscription text: one URI per line; blank lines and `#` comments
+/// are skipped, unparseable lines are counted (never errors the batch) and
+/// reported with their line number. When the whole body is a single base64
+/// blob (the common `base64(vless://...\n...)` subscription shape) it is
+/// decoded first and the lines re-parsed.
 pub fn parse_subscription(body: &str) -> SubscriptionParse {
+    let text = decode_subscription_body(body);
     let mut out = SubscriptionParse::default();
-    for line in body.lines() {
+    for (idx, line) in text.lines().enumerate() {
         let line = line.trim();
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
         match parse_uri(line) {
             Ok(spec) => out.specs.push(spec),
-            Err(_) => out.ignored += 1,
+            Err(err) => {
+                let reason = sanitize_error_text(&format!("{err:#}"));
+                out.errors.push(format!("line {}: {reason}", idx + 1));
+                out.ignored += 1;
+            }
         }
     }
     out
+}
+
+/// Detect a whole-body base64 subscription blob and decode it. A blob is a
+/// single non-whitespace line that base64-decodes into text containing URI
+/// lines (never a raw config line itself). Plain multi-line subscriptions are
+/// returned unchanged.
+fn decode_subscription_body(body: &str) -> String {
+    let trimmed = body.trim();
+    // Multi-line bodies are treated as line-based text directly.
+    if trimmed.lines().count() != 1 {
+        return body.to_owned();
+    }
+    let line = trimmed;
+    // A config line always starts with a scheme prefix (or, for vmess/ss, a
+    // scheme we recognise) — if it looks like one, don't try to base64 it.
+    let looks_like_uri = line
+        .split_once("://")
+        .map(|(s, _)| {
+            matches!(
+                s.to_ascii_lowercase().as_str(),
+                "vless" | "trojan" | "vmess" | "ss"
+            )
+        })
+        .unwrap_or(false);
+    if looks_like_uri {
+        return body.to_owned();
+    }
+    let Ok(decoded) = base64_any(line) else {
+        return body.to_owned();
+    };
+    let Ok(text) = String::from_utf8(decoded) else {
+        return body.to_owned();
+    };
+    // Only accept the decode when it actually produces parseable URIs; a
+    // random base64 string that decodes to prose must not be silently used.
+    if text.lines().any(|l| {
+        let l = l.trim();
+        l.starts_with("vless://")
+            || l.starts_with("trojan://")
+            || l.starts_with("vmess://")
+            || l.starts_with("ss://")
+    }) {
+        text
+    } else {
+        body.to_owned()
+    }
 }
 
 /// vless:// and trojan:// follow the SIP002 shape:
@@ -893,6 +1031,25 @@ mod tests {
         assert_eq!(parsed.specs.len(), 2);
         assert_eq!(parsed.ignored, 1);
         assert_eq!(parsed.specs[0].tag.as_deref(), Some("CF官方优选5"));
+        // Per-line error reports the skip reason, not just a count.
+        assert_eq!(parsed.errors.len(), 1);
+        assert!(
+            parsed.errors[0].starts_with("line 4:") && parsed.errors[0].contains("no scheme"),
+            "{:?}",
+            parsed.errors
+        );
+    }
+
+    #[test]
+    fn subscription_whole_body_base64_blob_is_decoded() {
+        let lines = format!("{FIXTURE}\nss://aaa@bad\n");
+        let blob = base64::engine::general_purpose::STANDARD.encode(lines);
+        let parsed = parse_subscription(&blob);
+        assert_eq!(parsed.specs.len(), 1);
+        assert_eq!(parsed.ignored, 1);
+        // A raw base64 blob that decodes to prose is NOT treated as a sub.
+        let prose = base64::engine::general_purpose::STANDARD.encode("just some random text");
+        assert_eq!(parse_subscription(&prose).specs.len(), 0);
     }
 
     #[tokio::test]
@@ -1233,7 +1390,7 @@ mod tests {
     /// identity-critical field survived.
     fn assert_round_trips(original: &str, sni_override: Option<&str>) {
         let spec = parse_uri(original).unwrap();
-        let uri = render_uri(&spec, DIAL_IP.parse().unwrap(), sni_override).unwrap();
+        let uri = render_uri(&spec, DIAL_IP.parse().unwrap(), sni_override, None).unwrap();
         let back = parse_uri(&uri).unwrap();
         assert_eq!(back.protocol, spec.protocol);
         assert_eq!(back.user_id, spec.user_id);
@@ -1285,7 +1442,7 @@ mod tests {
             let encoded = utf8_percent_encode(password, USERINFO_ENCODE_SET);
             let spec = parse_uri(&format!("trojan://{encoded}@1.2.3.4:443")).unwrap();
             assert_eq!(spec.user_id, password, "parse must decode the input");
-            let uri = render_uri(&spec, DIAL_IP.parse().unwrap(), None).unwrap();
+            let uri = render_uri(&spec, DIAL_IP.parse().unwrap(), None, None).unwrap();
             let back = parse_uri(&uri).unwrap();
             assert_eq!(back.user_id, password, "{uri}");
             assert_eq!(back.server, DIAL_IP);
@@ -1294,7 +1451,8 @@ mod tests {
     }
 
     #[test]
-    fn render_uri_rejects_unsupported_protocols_and_trojan_ws() {
+    fn render_uri_round_trips_vmess_ss_trojan_ws() {
+        // vmess renders a base64 JSON payload with remark in "ps"; re-parse.
         let vmess = parse_uri(&format!(
             "vmess://{}",
             base64::engine::general_purpose::STANDARD.encode(
@@ -1302,17 +1460,38 @@ mod tests {
             )
         ))
         .unwrap();
-        let err = render_uri(&vmess, DIAL_IP.parse().unwrap(), None).unwrap_err();
-        assert!(err.to_string().contains("export not supported"), "{err}");
+        let uri = render_uri(&vmess, DIAL_IP.parse().unwrap(), None, None).unwrap();
+        let back = parse_uri(&uri).unwrap();
+        assert_eq!(back.protocol, Protocol::Vmess);
+        assert_eq!(back.server, DIAL_IP);
+        assert_eq!(back.user_id, "u");
+
+        // Shadowsocks round-trips method:password.
         let ss = parse_uri(&format!(
             "ss://{}@1.2.3.4:8388",
             base64::engine::general_purpose::STANDARD.encode("aes-128-gcm:secret")
         ))
         .unwrap();
-        assert!(render_uri(&ss, DIAL_IP.parse().unwrap(), None).is_err());
+        let uri = render_uri(&ss, DIAL_IP.parse().unwrap(), None, None).unwrap();
+        let back = parse_uri(&uri).unwrap();
+        assert_eq!(back.protocol, Protocol::Shadowsocks);
+        assert_eq!(back.server, DIAL_IP);
+        assert_eq!(back.user_id, "secret");
+        assert_eq!(back.method.as_deref(), Some("aes-128-gcm"));
+
+        // trojan-over-ws now exports (was rejected).
         let trojan_ws = parse_uri("trojan://secret@1.2.3.4:443?type=ws&path=/api").unwrap();
-        let err = render_uri(&trojan_ws, DIAL_IP.parse().unwrap(), None).unwrap_err();
-        assert!(err.to_string().contains("trojan-over-ws"), "{err}");
+        let uri = render_uri(&trojan_ws, DIAL_IP.parse().unwrap(), None, None).unwrap();
+        let back = parse_uri(&uri).unwrap();
+        assert_eq!(back.protocol, Protocol::Trojan);
+        assert_eq!(back.server, DIAL_IP);
+        assert_eq!(back.ws.as_ref().unwrap().path, "/api");
+
+        // A remark lands as the fragment and round-trips as the tag.
+        let uri = render_uri(&ss, DIAL_IP.parse().unwrap(), None, Some("CF-LAX-42ms")).unwrap();
+        assert!(uri.ends_with("#CF-LAX-42ms"), "{uri}");
+        let back = parse_uri(&uri).unwrap();
+        assert_eq!(back.tag.as_deref(), Some("CF-LAX-42ms"));
     }
 
     #[test]
@@ -1322,6 +1501,7 @@ mod tests {
             DIAL_IP.parse().unwrap(),
             2096,
             Some("b.me"),
+            None,
         )
         .unwrap();
         assert!(
@@ -1341,10 +1521,11 @@ mod tests {
             DIAL_IP.parse().unwrap(),
             443,
             None,
+            None,
         )
         .unwrap();
         assert!(uri.contains("sni=orig.example.com"), "{uri}");
         // Garbage input errors instead of rendering something unusable.
-        assert!(export_config_uri("not a uri", DIAL_IP.parse().unwrap(), 443, None).is_err());
+        assert!(export_config_uri("not a uri", DIAL_IP.parse().unwrap(), 443, None, None).is_err());
     }
 }

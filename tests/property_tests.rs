@@ -525,7 +525,7 @@ proptest! {
             alter_id: 0,
             vmess_security: None,
         };
-        let uri = render_uri(&spec, "1.2.3.4".parse().unwrap(), None)
+        let uri = render_uri(&spec, "1.2.3.4".parse().unwrap(), None, None)
             .unwrap_or_else(|e| panic!("render_uri must succeed: {e}\nspec: {spec:?}"));
         let back = parse_uri(&uri)
             .unwrap_or_else(|e| panic!("parse_uri must succeed on rendered URI:\n{uri}\n{e:#}"));

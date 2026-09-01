@@ -1,10 +1,12 @@
 <script lang="ts">
-  import { Check, Copy, Link2, ShieldCheck } from "@lucide/svelte";
+  import { Check, Copy, Download, FileJson2, FileSpreadsheet, Link2, QrCode, ShieldCheck } from "@lucide/svelte";
   import { api } from "../api";
   import type { Verdict } from "../types";
-  import { errorText, filteredEndpoints, ui } from "../store.svelte";
+  import { downloadFile, errorText, exportText, filteredEndpoints, ui } from "../store.svelte";
   import { keyOf, type ResultsView } from "../resultsView.svelte";
   import { t, type MsgKey } from "../i18n.svelte";
+  import { toast as pushToast } from "../toast.svelte";
+  import QrModal from "./QrModal.svelte";
 
   let {
     view,
@@ -166,6 +168,95 @@
     return "var(--lat-slow)";
   }
 
+  // --- Bundle / metadata export + QR (competitor-derived) ------------------
+  let qrPayload = $state<string | null>(null);
+  let qrTitle = $state("");
+
+  function openQr(text: string, label: string) {
+    qrPayload = text;
+    qrTitle = label;
+  }
+
+  async function exportBundle(format: "base64" | "raw" | "singbox" | "clash") {
+    try {
+      const text = await api.bundle(format);
+      if (format === "singbox") {
+        downloadFile(text, "cf-scanner-singbox.json", "application/json");
+      } else if (format === "clash") {
+        downloadFile(text, "cf-scanner-clash.yaml", "text/yaml");
+      } else {
+        pushToast(t("export.subscription"));
+      }
+      if (format === "raw") pushToast(t("export.subscriptionRaw"));
+      if (format === "singbox" || format === "clash") pushToast(`${t("export.subscription")} ✓`);
+    } catch (e) {
+      pushToast(errorText(e), "err");
+    }
+  }
+
+  async function exportResults(format: "json" | "csv") {
+    try {
+      const text = await api.resultsExport(format);
+      const name = format === "json" ? "cf-scanner-results.json" : "cf-scanner-results.csv";
+      downloadFile(text, name, format === "json" ? "application/json" : "text/csv");
+      pushToast(`${format.toUpperCase()} ✓`);
+    } catch (e) {
+      pushToast(errorText(e), "err");
+    }
+  }
+
+  /** Base64 subscription copied to the clipboard (mobile clients accept a
+   * pasted blob directly). Falls back to a file download like exportText. */
+  async function copySubscription() {
+    try {
+      const text = await api.bundle("base64");
+      try {
+        await navigator.clipboard.writeText(text);
+        pushToast(`${t("export.subscription")} ✓`);
+      } catch {
+        const how = await exportText(text, "cf-scanner-sub.txt");
+        pushToast(how === "download" ? t("results.saved") : `${t("export.subscription")} ✓`);
+      }
+    } catch (e) {
+      pushToast(errorText(e), "err");
+    }
+  }
+
+  async function qrSubscription() {
+    try {
+      const text = await api.bundle("raw");
+      if (!text.trim()) {
+        pushToast(t("empty.title"), "err");
+        return;
+      }
+      openQr(text, t("export.subscription"));
+    } catch (e) {
+      pushToast(errorText(e), "err");
+    }
+  }
+
+  /** The importable URI for one verified row, or null when the row has no
+   * usable source config (fresh page after F5). */
+  async function rowUri(r: Verdict): Promise<string | null> {
+    const config = exportableConfig(r);
+    if (!config) return null;
+    try {
+      const { uri } = await api.exportUri(config, r.ip, r.port);
+      return uri;
+    } catch {
+      return null;
+    }
+  }
+
+  async function qrRow(r: Verdict) {
+    const uri = await rowUri(r);
+    if (!uri) {
+      pushToast(errorText(new Error("config unavailable — rerun the scan")), "err");
+      return;
+    }
+    openQr(uri, `${r.ip}:${r.port}`);
+  }
+
   const SKELETON_ROWS = 6;
 </script>
 
@@ -272,6 +363,35 @@
           {copiedPassing
             ? `${t("results.copied")} ✓`
             : `${t("results.copyAll")} · ${t("table.filter.passingOnly")}`}
+        </button>
+      {/if}
+      {#if passedRows.length > 0 && emptyKind === "candidates"}
+        <span class="mx-1 h-5 w-px" style="background: var(--border)" aria-hidden="true"></span>
+        <button
+          class="pill"
+          title={t("export.subscriptionTitle")}
+          onclick={copySubscription}
+        >
+          <Download class="size-3.5" aria-hidden="true" />
+          {t("export.subscription")}
+        </button>
+        <button class="pill" title={t("export.subscriptionSingbox")} onclick={() => exportBundle("singbox")}>
+          {t("export.subscriptionSingbox")}
+        </button>
+        <button class="pill" title={t("export.subscriptionClash")} onclick={() => exportBundle("clash")}>
+          {t("export.subscriptionClash")}
+        </button>
+        <button class="pill" title="JSON" onclick={() => exportResults("json")}>
+          <FileJson2 class="size-3.5" aria-hidden="true" />
+          {t("export.json")}
+        </button>
+        <button class="pill" title="CSV" onclick={() => exportResults("csv")}>
+          <FileSpreadsheet class="size-3.5" aria-hidden="true" />
+          {t("export.csv")}
+        </button>
+        <button class="pill" title={t("export.qr")} onclick={() => void qrSubscription()}>
+          <QrCode class="size-3.5" aria-hidden="true" />
+          {t("export.qr")}
         </button>
       {/if}
     </div>
@@ -448,6 +568,14 @@
                       <Link2 class="size-4" aria-hidden="true" />
                     {/if}
                   </button>
+                  <button
+                    class="btn btn-ghost btn-sm"
+                    title={t("export.qr")}
+                    aria-label={t("export.qr")}
+                    onclick={() => void qrRow(r)}
+                  >
+                    <QrCode class="size-4" aria-hidden="true" />
+                  </button>
                 {/if}
               </td>
             </tr>
@@ -468,3 +596,7 @@
   {/if}
   </div>
 </section>
+
+{#if qrPayload}
+  <QrModal payload={qrPayload} title={qrTitle} onclose={() => (qrPayload = null)} />
+{/if}

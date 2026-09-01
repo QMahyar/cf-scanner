@@ -131,6 +131,15 @@ impl Stream for TerminalBounded {
                         self.seen.insert((v.ip, v.port));
                     }
                     let terminal = matches!(ev, ScanEvent::Finished(_) | ScanEvent::Failed(_));
+                    // A terminal broadcast while this stream was subscribing
+                    // is both replayed from last_terminal and delivered live.
+                    // The replay went out first; drop the equal live copy but
+                    // still end the stream, so the terminal lands exactly once.
+                    if terminal && matches!(&self.replay, Some((replayed, true)) if *replayed == ev)
+                    {
+                        self.done = true;
+                        return std::task::Poll::Ready(None);
+                    }
                     match map_event(ev) {
                         Some(event) => {
                             self.done = terminal;

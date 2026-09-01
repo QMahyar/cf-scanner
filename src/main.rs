@@ -735,7 +735,7 @@ fn run_export_config(
     if port == 0 {
         return Err(anyhow!("--port must be in 1..=65535"));
     }
-    let uri = cf_scanner::configs::export_config_uri(config, ip, port, sni).map_err(|e| {
+    let uri = cf_scanner::configs::export_config_uri(config, ip, port, sni, None).map_err(|e| {
         anyhow!(
             "export failed: {}",
             cf_scanner::configs::sanitize_error_text(&format!("{e:#}"))

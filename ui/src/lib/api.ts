@@ -103,6 +103,18 @@ export const api = {
       cache: "no-store",
       signal: AbortSignal.timeout(8000),
     }).then(unwrap<{ uri: string }>),
+  /** Subscription bundle from the last scan's verified set. */
+  bundle: (format: "base64" | "raw" | "singbox" | "clash" = "base64") =>
+    fetch(`/api/bundle?format=${format}`, {
+      cache: "no-store",
+      signal: AbortSignal.timeout(8000),
+    }).then((res) => res.text()),
+  /** Metadata dump (json/csv) of the current results. */
+  resultsExport: (format: "json" | "csv" = "csv") =>
+    fetch(`/api/results/export?format=${format}`, {
+      cache: "no-store",
+      signal: AbortSignal.timeout(8000),
+    }).then((res) => res.text()),
   xrayStatus: () =>
     fetch("/api/xray/status", { cache: "no-store", signal: AbortSignal.timeout(8000) }).then(
       unwrap<XrayStatusPayload>,

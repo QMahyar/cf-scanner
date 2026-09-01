@@ -1132,6 +1132,75 @@ html[data-theme="light"] .empty-icon {
   line-height: 1.625;
 }
 
+/* ── Modals ── */
+.modal {
+  position: fixed;
+  inset: 0;
+  background: var(--overlay);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  z-index: 100;
+  animation: modalFadeIn 0.25s var(--ease);
+}
+@keyframes modalFadeIn {
+  from {
+    opacity: 0;
+  }
+}
+.modal__panel {
+  background: var(--bg-raised);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 20px 20px 0 0;
+  max-width: min(420px, 100vw);
+  width: 100%;
+  max-height: calc(100dvh - 2rem);
+  overflow-y: auto;
+  box-shadow: var(--shadow-modal);
+  padding: 24px;
+  padding-bottom: max(24px, env(safe-area-inset-bottom));
+  animation: mIn 0.28s var(--ease-out);
+}
+@media (min-width: 640px) {
+  .modal {
+    align-items: center;
+    padding: 16px;
+  }
+  .modal__panel {
+    border-radius: 20px;
+    max-width: min(420px, 94vw);
+  }
+}
+@keyframes mIn {
+  from {
+    opacity: 0;
+    scale: 0.94;
+    translate: 0 12px;
+  }
+}
+.modal__title {
+  font-size: var(--fs-lg);
+  font-weight: 700;
+  margin-block-end: 12px;
+}
+.modal__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-block-start: 16px;
+}
+.qr-wrap {
+  display: grid;
+  place-items: center;
+  background: #fff;
+  border-radius: var(--r-md);
+  padding: 10px;
+  margin-block-end: 12px;
+}
+
 /* ── Disclosures: Q Proxy accordion (▸ rotates on open) ── */
 details > summary {
   cursor: pointer;

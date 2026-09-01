@@ -15,8 +15,6 @@ use crate::probe::FakeTransport;
 use crate::ranges::BUNDLED_RANGES;
 use crate::ranges::HttpGet;
 use crate::server::sse::{MAX_SSE_CONNECTIONS, TerminalBounded, try_acquire_sse_slot};
-use crate::server::state::PROFILES_FILE;
-use base64::Engine as _;
 
 const OFFICIAL_FIXTURE: &str =
     r#"{"success":true,"result":{"ipv4_cidrs":["10.1.0.0/16"]},"errors":[]}"#;
@@ -65,21 +63,13 @@ async fn serve_with_registrar(
     ranges: Arc<RangesState>,
     registrar: WarpRegistrar,
 ) -> SocketAddr {
-    serve_with_dir(
-        t,
-        ranges,
-        registrar,
-        unique_test_profiles_dir(),
-        canned_xray_fetch(),
-    )
-    .await
+    serve_with_dir(t, ranges, registrar, canned_xray_fetch()).await
 }
 
 async fn serve_with_dir(
     t: FakeTransport,
     ranges: Arc<RangesState>,
     registrar: WarpRegistrar,
-    profiles_dir: PathBuf,
     xray_fetch: XrayFetcher,
 ) -> SocketAddr {
     let controller = Arc::new(ScanController::new(Arc::new(t)));
@@ -94,7 +84,6 @@ async fn serve_with_dir(
                 controller,
                 ranges,
                 registrar,
-                profiles_dir,
                 // Ephemeral test port; guard tests derive origins from it.
                 addr.port(),
                 xray_fetch,
@@ -215,38 +204,6 @@ async fn post_scan_full(addr: SocketAddr, body: &str) -> (u16, String) {
     );
     request(addr, &req, None).await
 }
-
-async fn get_profiles(addr: SocketAddr) -> (u16, String) {
-    request(
-        addr,
-        "GET /api/profiles HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n",
-        None,
-    )
-    .await
-}
-
-/// Response body without the HTTP header block.
-fn response_body(text: &str) -> &str {
-    text.split_once("\r\n\r\n").map(|(_, b)| b).unwrap_or(text)
-}
-
-async fn put_profile(addr: SocketAddr, name: &str, body: &str) -> (u16, String) {
-    let req = format!(
-        "PUT /api/profiles/{} HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-        name,
-        body.len(),
-        body
-    );
-    request(addr, &req, None).await
-}
-
-async fn delete_profile(addr: SocketAddr, name: &str) -> (u16, String) {
-    let req = format!(
-        "DELETE /api/profiles/{name} HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
-    );
-    request(addr, &req, None).await
-}
-
 async fn post_register(addr: SocketAddr, body: &str) -> (u16, String) {
     let req = format!(
         "POST /api/warp/register HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
@@ -772,92 +729,18 @@ async fn ranges_endpoint_reports_last_updated() {
 }
 
 #[tokio::test]
-async fn profiles_list_starts_empty() {
-    let addr = serve(FakeTransport::new()).await;
-    let (status, text) = get_profiles(addr).await;
-    assert_eq!(status, 200);
-    assert_eq!(response_body(&text).trim(), "[]", "{text}");
-}
-
-#[tokio::test]
-async fn put_creates_profile_with_201() {
-    let addr = serve(FakeTransport::new()).await;
-    let body = serde_json::to_string(&cfg(1, 1)).unwrap();
-    let (status, text) = put_profile(addr, "quick", &body).await;
-    assert_eq!(status, 201, "{text}");
-    assert!(text.contains("\"name\":\"quick\""), "{text}");
-    assert!(text.contains("\"mode\":\"Cdn\""), "{text}");
-    let (status, text) = get_profiles(addr).await;
-    assert_eq!(status, 200);
-    assert!(text.contains("\"name\":\"quick\""), "{text}");
-}
-
-#[tokio::test]
-async fn put_upserts_existing_profile_with_200() {
-    let addr = serve(FakeTransport::new()).await;
-    let first = serde_json::to_string(&cfg(1, 1)).unwrap();
-    let second = serde_json::to_string(&cfg(2, 1)).unwrap();
-    assert_eq!(put_profile(addr, "quick", &first).await.0, 201);
-    let (status, text) = put_profile(addr, "quick", &second).await;
-    assert_eq!(status, 200, "{text}");
-    assert!(text.contains("\"Count\":2"), "{text}");
-    let (_, text) = get_profiles(addr).await;
-    assert!(text.contains("\"Count\":2"), "{text}");
-}
-
-#[tokio::test]
-async fn delete_removes_profile_then_404s() {
-    let addr = serve(FakeTransport::new()).await;
-    let body = serde_json::to_string(&cfg(1, 1)).unwrap();
-    assert_eq!(put_profile(addr, "quick", &body).await.0, 201);
-    let (status, _) = delete_profile(addr, "quick").await;
-    assert_eq!(status, 204);
-    let (_, text) = get_profiles(addr).await;
-    assert_eq!(response_body(&text).trim(), "[]", "{text}");
-    let (status, _) = delete_profile(addr, "quick").await;
-    assert_eq!(status, 404);
-}
-
-#[tokio::test]
-async fn get_single_profile_returns_stored_config_then_404s() {
-    let addr = serve(FakeTransport::new()).await;
-    let body = serde_json::to_string(&cfg(7, 1)).unwrap();
-    assert_eq!(put_profile(addr, "quick", &body).await.0, 201);
-    let req = "GET /api/profiles/quick HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n";
-    let (status, text) = request(addr, req, None).await;
-    assert_eq!(status, 200, "{text}");
-    assert!(text.contains("\"name\":\"quick\""), "{text}");
-    assert!(text.contains("\"Count\":7"), "{text}");
-    let req = "GET /api/profiles/nope HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n";
-    let (status, _) = request(addr, req, None).await;
-    assert_eq!(status, 404);
-}
-#[tokio::test]
-async fn put_rejects_invalid_config() {
-    let addr = serve(FakeTransport::new()).await;
-    let mut bad = cfg(1, 1);
-    bad.ports = vec![Port::new(0)];
-    let body = serde_json::to_string(&bad).unwrap();
-    let (status, _) = put_profile(addr, "quick", &body).await;
-    assert_eq!(status, 422);
-    let (_, text) = get_profiles(addr).await;
-    assert_eq!(
-        response_body(&text).trim(),
-        "[]",
-        "invalid config must not be stored"
-    );
-}
-
-#[tokio::test]
 async fn background_refresh_populates_last_updated() {
-    let ranges = RangesState::load_text("203.0.113.0/24", None);
+    let ranges = RangesState::load_text(BUNDLED_RANGES, None);
     ranges.spawn_refresh(
         Some(Duration::from_millis(20)),
         Arc::new(FakeHttp(OFFICIAL_FIXTURE)),
     );
     let addr = serve_with_ranges(FakeTransport::new(), ranges).await;
-    for _ in 0..50 {
+    // Poll across several refresh cycles until the timestamp flips non-null.
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while std::time::Instant::now() < deadline {
         let (status, text) = get_ranges(addr).await;
+        assert_eq!(status, 200);
         if status == 200 {
             let payload: serde_json::Value =
                 serde_json::from_str(json_body(&text)).expect("ranges payload JSON");
@@ -891,75 +774,6 @@ async fn background_refresh_failure_keeps_last_good_data() {
             break;
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
-    }
-}
-
-#[tokio::test]
-async fn put_rejects_invalid_names() {
-    let addr = serve(FakeTransport::new()).await;
-    let body = serde_json::to_string(&cfg(1, 1)).unwrap();
-    // 65 characters.
-    let long = "a".repeat(65);
-    assert_eq!(put_profile(addr, &long, &body).await.0, 400);
-    // Percent-encoded control character.
-    assert_eq!(put_profile(addr, "bad%01name", &body).await.0, 400);
-    // Percent-encoded slash would make the name unroutable.
-    assert_eq!(put_profile(addr, "a%2Fb", &body).await.0, 400);
-    let (_, text) = get_profiles(addr).await;
-    assert_eq!(
-        response_body(&text).trim(),
-        "[]",
-        "invalid names must not be stored"
-    );
-}
-
-#[test]
-fn profile_name_validation() {
-    assert!(validate_profile_name("quick").is_ok());
-    assert!(validate_profile_name(&"a".repeat(64)).is_ok());
-    assert!(validate_profile_name("").is_err());
-    assert!(validate_profile_name(&"a".repeat(65)).is_err());
-    assert!(validate_profile_name("has\tcontrol").is_err());
-    assert!(validate_profile_name("a/b").is_err());
-}
-
-#[tokio::test]
-async fn concurrent_profile_access_is_safe() {
-    let addr = serve(FakeTransport::new()).await;
-    let body = serde_json::to_string(&cfg(1, 1)).unwrap();
-    let mut writers = Vec::new();
-    for i in 0..50 {
-        let body = body.clone();
-        writers.push(tokio::spawn(async move {
-            let name = format!("profile-{i:02}");
-            let (status, _) = put_profile(addr, &name, &body).await;
-            assert_eq!(status, 201);
-        }));
-    }
-    let reader = tokio::spawn(async move {
-        for _ in 0..20 {
-            let (status, text) = get_profiles(addr).await;
-            assert_eq!(status, 200);
-            let parsed: Vec<serde_json::Value> =
-                serde_json::from_str(response_body(&text)).unwrap();
-            assert!(parsed.len() <= 50, "{text}");
-            tokio::time::sleep(Duration::from_millis(1)).await;
-        }
-    });
-    for writer in writers {
-        writer.await.unwrap();
-    }
-    reader.await.unwrap();
-    let (status, text) = get_profiles(addr).await;
-    assert_eq!(status, 200);
-    let parsed: Vec<serde_json::Value> = serde_json::from_str(response_body(&text)).unwrap();
-    assert_eq!(parsed.len(), 50, "{text}");
-    for i in 0..50 {
-        let name = format!("profile-{i:02}");
-        assert!(
-            parsed.iter().any(|p| p["name"] == name),
-            "missing {name}: {text}"
-        );
     }
 }
 
@@ -1166,75 +980,6 @@ async fn sse_connection_cap_rejects_fifth_stream() {
     };
     assert_eq!(status, 429);
     drop(streams);
-}
-
-#[tokio::test]
-async fn profiles_persist_across_servers() {
-    // Two server instances sharing one profiles dir simulate a restart:
-    // the second must reload what the first stored.
-    let dir =
-        std::env::temp_dir().join(format!("cf-scanner-server-persist-{}", std::process::id()));
-    let _ = fs::remove_dir_all(&dir);
-    fs::create_dir_all(&dir).unwrap();
-    let addr = serve_with_dir(
-        FakeTransport::new(),
-        RangesState::load_text(BUNDLED_RANGES, None),
-        canned_registrar(),
-        dir.clone(),
-        canned_xray_fetch(),
-    )
-    .await;
-    let body = serde_json::to_string(&cfg(1, 1)).unwrap();
-    assert_eq!(put_profile(addr, "quick", &body).await.0, 201);
-    let addr2 = serve_with_dir(
-        FakeTransport::new(),
-        RangesState::load_text(BUNDLED_RANGES, None),
-        canned_registrar(),
-        dir.clone(),
-        canned_xray_fetch(),
-    )
-    .await;
-    let (status, text) = get_profiles(addr2).await;
-    assert_eq!(status, 200);
-    assert!(text.contains("\"name\":\"quick\""), "{text}");
-    let on_disk = fs::read_to_string(dir.join(PROFILES_FILE)).expect("profiles.json exists");
-    assert!(on_disk.contains("\"quick\""), "{on_disk}");
-    assert!(on_disk.contains("\"mode\": \"Cdn\""), "{on_disk}");
-}
-
-#[tokio::test]
-async fn persisted_profiles_are_masked() {
-    // Key material must not survive the round trip to disk.
-    let dir = std::env::temp_dir().join(format!("cf-scanner-server-mask-{}", std::process::id()));
-    let _ = fs::remove_dir_all(&dir);
-    fs::create_dir_all(&dir).unwrap();
-    let addr = serve_with_dir(
-        FakeTransport::new(),
-        RangesState::load_text(BUNDLED_RANGES, None),
-        canned_registrar(),
-        dir.clone(),
-        canned_xray_fetch(),
-    )
-    .await;
-    let mut c = cfg(1, 1);
-    c.mode = crate::api::types::Mode::Warp;
-    c.custom_cidrs = vec![]; // CDN-only; WARP takes custom_endpoints
-    c.ports = crate::api::types::DEFAULT_WARP_PORTS.to_vec();
-    c.warp = Some(crate::api::types::WarpConfig {
-        wgconf: Some(
-            "PrivateKey = SECRETKEY123\nAddress = 172.16.0.2/32\n[Peer]\nPublicKey = kkk\nAllowedIPs = 0.0.0.0/0"
-                .to_owned(),
-        ),
-        verify_with_wgconf: true,
-        ..Default::default()
-    });
-    let body = serde_json::to_string(&c).unwrap();
-    assert_eq!(put_profile(addr, "warpy", &body).await.0, 201);
-    let on_disk = fs::read_to_string(dir.join(PROFILES_FILE)).expect("profiles.json exists");
-    assert!(!on_disk.contains("SECRETKEY123"), "{on_disk}");
-    let (status, text) = get_profiles(addr).await;
-    assert_eq!(status, 200);
-    assert!(!text.contains("SECRETKEY123"), "{text}");
 }
 
 #[tokio::test]
@@ -1583,29 +1328,6 @@ async fn warp_scan_with_cdn_default_port_is_rejected_not_substituted() {
     );
 }
 
-#[tokio::test]
-async fn profile_cap_rejects_new_names_but_allows_updates() {
-    let addr = serve(FakeTransport::new()).await;
-    let body = serde_json::to_string(&cfg(1, 1)).unwrap();
-    for i in 0..MAX_PROFILES {
-        let (status, text) = put_profile(addr, &format!("p{i:02}"), &body).await;
-        assert_eq!(status, 201, "{text}");
-    }
-    let (status, text) = put_profile(addr, "overflow", &body).await;
-    assert_eq!(status, 413, "{text}");
-    let parsed: serde_json::Value =
-        serde_json::from_str(json_body(&text)).expect("error envelope is JSON");
-    assert_eq!(parsed["error"], "Payload Too Large");
-    // Updates of existing names stay allowed at the cap.
-    assert_eq!(put_profile(addr, "p00", &body).await.0, 200);
-    let (_, text) = get_profiles(addr).await;
-    let parsed: Vec<serde_json::Value> = serde_json::from_str(response_body(&text)).unwrap();
-    assert_eq!(parsed.len(), MAX_PROFILES, "{text}");
-    assert!(!parsed.iter().any(|p| p["name"] == "overflow"), "{text}");
-}
-
-/// A valid WARP-mode config carrying wgconf key material, as the UI sends
-/// it before masking.
 fn warp_cfg_with_wgconf() -> ScanConfig {
     let mut c = cfg(1, 1);
     c.mode = Mode::Warp;
@@ -1624,41 +1346,9 @@ fn warp_cfg_with_wgconf() -> ScanConfig {
 }
 
 #[tokio::test]
-async fn profiles_never_store_or_return_warp_wgconf() {
-    let addr = serve(FakeTransport::new()).await;
-    let body = serde_json::to_string(&warp_cfg_with_wgconf()).unwrap();
-    let (status, text) = put_profile(addr, "warp-verify", &body).await;
-    assert_eq!(status, 201, "{text}");
-    assert!(
-        !text.contains("TOP-SECRET-WG-KEY"),
-        "PUT response must not echo the wgconf: {text}"
-    );
-    assert!(text.contains("\"verify_with_wgconf\":false"), "{text}");
-    let (_, text) = get_profiles(addr).await;
-    assert!(
-        !text.contains("TOP-SECRET-WG-KEY"),
-        "profile list must not expose the wgconf: {text}"
-    );
-    let req =
-        "GET /api/profiles/warp-verify HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n";
-    let (status, text) = request(addr, req, None).await;
-    assert_eq!(status, 200, "{text}");
-    assert!(
-        !text.contains("TOP-SECRET-WG-KEY"),
-        "single profile must not expose the wgconf: {text}"
-    );
-    // The stored profile is valid and loadable without the key.
-    let parsed: serde_json::Value = serde_json::from_str(response_body(&text)).unwrap();
-    let stored: ScanConfig = serde_json::from_value(parsed["config"].clone()).unwrap();
-    assert_eq!(stored.validate(), Ok(()));
-    assert_eq!(stored.warp.unwrap().wgconf, None);
-}
-
-#[tokio::test]
 async fn scan_path_still_accepts_wgconf_configs() {
-    // Masking is profile-only: the engine's scan path keeps accepting
-    // verification configs (review Domain 7: the real config stays in the
-    // engine's scan path).
+    // The engine's scan path keeps accepting verification configs
+    // (review Domain 7: the real config stays in the engine's scan path).
     let addr = serve(FakeTransport::new()).await;
     let mut c = warp_cfg_with_wgconf();
     c.warp.as_mut().unwrap().verify_with_wgconf = false;
@@ -1666,26 +1356,6 @@ async fn scan_path_still_accepts_wgconf_configs() {
         post_scan(addr, &serde_json::to_string(&c).unwrap()).await,
         202
     );
-}
-
-#[test]
-fn sanitize_config_masks_wgconf_and_keeps_other_fields() {
-    let mut c = cfg(1, 1);
-    c.mode = Mode::Warp;
-    c.warp = Some(WarpConfig {
-        custom_endpoints: vec!["1.2.3.4:2408".to_owned()],
-        wgconf: Some("secret-key".to_owned()),
-        verify_with_wgconf: true,
-        ..WarpConfig::default()
-    });
-    let masked = sanitize_config(c);
-    let warp = masked.warp.unwrap();
-    assert_eq!(warp.wgconf, None);
-    assert!(!warp.verify_with_wgconf);
-    assert_eq!(warp.custom_endpoints, vec!["1.2.3.4:2408"]);
-    // Configs without a warp section pass through untouched.
-    let c = cfg(1, 1);
-    assert_eq!(sanitize_config(c.clone()), c);
 }
 
 async fn post_export(addr: SocketAddr, body: &str) -> (u16, String) {
@@ -1817,24 +1487,44 @@ async fn export_rejects_malformed_sni() {
 #[tokio::test]
 async fn export_rejects_unsupported_configs_with_a_redacted_envelope() {
     let addr = serve(FakeTransport::new()).await;
-    // vmess export is out of scope; the id inside the base64 must never
-    // leak into the error envelope.
-    let vmess = format!(
-        "vmess://{}",
-        base64::engine::general_purpose::STANDARD.encode(
-            r#"{"v":"2","add":"1.2.3.4","port":"443","id":"vmess-secret-id","net":"tcp","tls":"none"}"#
-        )
-    );
-    let body = serde_json::json!({"config": vmess, "ip": "203.0.113.7", "port": 443});
+    // Schemes xray cannot verify (hysteria) are rejected at parse time; the
+    // id inside the URI must never leak into the error envelope.
+    let body = serde_json::json!({
+        "config": "hysteria2://secret-hy2-id@1.2.3.4:443",
+        "ip": "203.0.113.7",
+        "port": 443
+    });
     let (status, text) = post_export(addr, &body.to_string()).await;
     assert_eq!(status, 400, "{text}");
-    assert!(text.contains("export not supported"), "{text}");
-    assert!(!text.contains("vmess-secret-id"), "{text}");
+    assert!(text.contains("unsupported scheme"), "{text}");
+    assert!(!text.contains("secret-hy2-id"), "{text}");
     // Garbage configs error through the same envelope with no echo.
     let body = serde_json::json!({"config": "http://evil.example/x?id=sec", "ip": "203.0.113.7", "port": 443});
     let (status, text) = post_export(addr, &body.to_string()).await;
     assert_eq!(status, 400, "{text}");
     assert!(!text.contains("sec"), "the config must never echo: {text}");
+}
+
+#[tokio::test]
+async fn bundle_endpoints_serve_subscription_and_metadata_formats() {
+    let addr = serve(FakeTransport::new()).await;
+    let client = reqwest::Client::new();
+    // No scan yet: every format is an empty-but-valid payload.
+    for (path, expect) in [
+        ("/api/bundle?format=base64", ""),
+        ("/api/bundle?format=raw", ""),
+        ("/api/results/export?format=csv", "ip,port,latency_ms"),
+        ("/api/results/export?format=json", "\"count\":0"),
+    ] {
+        let res = client.get(format!("http://{addr}{path}")).send().await.unwrap();
+        assert_eq!(res.status(), 200, "{path}");
+        assert!(
+            res.headers().get("cache-control").is_some(),
+            "{path} must be no-store"
+        );
+        let body = res.text().await.unwrap();
+        assert!(body.contains(expect), "{path}: {body}");
+    }
 }
 
 // --- A9 / A13 / A17 new coverage ---
@@ -1907,7 +1597,7 @@ async fn error_responses_carry_machine_readable_codes() {
     // 404 code
     let (status, text) = request(
         addr,
-        "GET /api/profiles/nope HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n",
+        "GET /api/nope HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n",
         None,
     )
     .await;

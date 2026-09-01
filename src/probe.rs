@@ -193,6 +193,9 @@ struct Scripted {
 #[cfg(any(test, feature = "test-helpers"))]
 pub struct FakeTransport {
     script: std::sync::Mutex<std::collections::HashMap<(IpAddr, u16), Scripted>>,
+    /// Optional gate every in-flight probe waits on before resolving, so
+    /// tests can hold concurrent probes open across a stop-condition check.
+    pub rendezvous: Option<std::sync::Arc<tokio::sync::Barrier>>,
 }
 
 #[cfg(any(test, feature = "test-helpers"))]
@@ -207,6 +210,7 @@ impl FakeTransport {
     pub fn new() -> Self {
         Self {
             script: std::sync::Mutex::new(std::collections::HashMap::new()),
+            rendezvous: None,
         }
     }
 
@@ -294,7 +298,11 @@ impl Transport for FakeTransport {
                 .sequence = scripted.sequence;
             scripted.outcome = next;
         }
+        let rendezvous = self.rendezvous.clone();
         Box::pin(async move {
+            if let Some(barrier) = &rendezvous {
+                barrier.wait().await;
+            }
             if scripted.delay_ms > 0 {
                 tokio::time::sleep(Duration::from_millis(scripted.delay_ms)).await;
             }

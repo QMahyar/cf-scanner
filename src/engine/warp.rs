@@ -62,7 +62,13 @@ impl ScanController {
         let started = Instant::now();
         self.clear_store();
         let groups = self.warp_groups(&cfg, &warp, seed)?;
-        let total = groups.len() as u64;
+        // `scanned` counts completed (endpoint, port) tasks, so the
+        // progress total must count the same unit: a multi-port endpoint
+        // contributes one task per port, not one.
+        let total = groups
+            .iter()
+            .map(|(_, ports)| ports.len() as u64)
+            .sum::<u64>();
         let cadence = progress_cadence(total);
         self.emit(ScanEvent::Progress(ScanProgress {
             scanned: 0,
@@ -251,15 +257,25 @@ impl ScanController {
                 }
             }
         } else {
-            // Identical (endpoint, ports) entries must not create duplicate
-            // groups: they would share one connected socket and skew the
-            // `scanned` count. Per-port overrides stay distinct groups.
-            let mut seen: HashSet<(std::net::Ipv4Addr, Arc<Vec<u16>>)> = HashSet::new();
+            // Dedupe at (ip, port) granularity: overlapping entries (a bare
+            // endpoint plus a port-suffixed twin, or two endpoints whose port
+            // lists intersect) must not create groups probing the same
+            // (ip, port) — they would share one connected socket and
+            // cross-receive each other's handshake replies (a false negative
+            // in FullSession). The first entry in input order claims a port.
+            let mut seen: HashSet<(std::net::Ipv4Addr, u16)> = HashSet::new();
             for ep in &warp.custom_endpoints {
                 let (ip, port) = parse_endpoint(ep)?;
-                let ep_ports = port.map_or_else(|| ports.clone(), |p| Arc::new(vec![p]));
-                if seen.insert((ip, ep_ports.clone())) {
-                    groups.push((ip, ep_ports));
+                let claimed = match port {
+                    Some(p) => vec![p],
+                    None => (*ports).clone(),
+                };
+                let fresh: Vec<u16> = claimed
+                    .into_iter()
+                    .filter(|p| seen.insert((ip, *p)))
+                    .collect();
+                if !fresh.is_empty() {
+                    groups.push((ip, Arc::new(fresh)));
                 }
             }
             if let ScanTarget::Count(n) = cfg.target {
@@ -469,6 +485,46 @@ mod tests {
         let summary = run_local(&c, cfg, 1).await.unwrap();
         assert_eq!(summary.scanned, 1, "duplicate endpoints must probe once");
         assert_eq!(summary.found, 1);
+    }
+
+    #[tokio::test]
+    async fn warp_overlapping_endpoint_entries_dedupe_at_port_granularity() {
+        let t = FakeTransport::new()
+            .ok("203.0.113.1".parse().unwrap(), 2408, 5)
+            .ok("203.0.113.1".parse().unwrap(), 2409, 5);
+        let (c, _) = warp_controller(t);
+        // A bare endpoint plus its port-suffixed twin over a multi-port scan
+        // list: (ip, 2408) must be probed exactly once — two groups hitting
+        // it would share one connected UDP socket and cross-receive
+        // handshake replies.
+        let mut cfg = warp_cfg(1, &["203.0.113.1", "203.0.113.1:2408"]);
+        cfg.ports = vec![Port::new(2408), Port::new(2409)];
+        let summary = run_local(&c, cfg, 1).await.unwrap();
+        assert_eq!(summary.scanned, 2, "(ip, 2408) once, (ip, 2409) once");
+        assert_eq!(summary.found, 2);
+    }
+
+    #[tokio::test]
+    async fn warp_progress_total_counts_endpoint_port_pairs() {
+        let t = FakeTransport::new()
+            .ok("203.0.113.1".parse().unwrap(), 2408, 5)
+            .ok("203.0.113.1".parse().unwrap(), 2409, 5);
+        let (c, mut rx) = warp_controller(t);
+        let mut cfg = warp_cfg(1, &["203.0.113.1"]);
+        cfg.ports = vec![Port::new(2408), Port::new(2409)];
+        let summary = run_local(&c, cfg, 1).await.unwrap();
+        assert_eq!(summary.scanned, 2, "scanned counts (endpoint, port) tasks");
+        let mut progress = Vec::new();
+        while let Ok(e) = rx.try_recv() {
+            if let ScanEvent::Progress(p) = e {
+                progress.push(p);
+            }
+        }
+        assert!(!progress.is_empty(), "the initial progress event must fire");
+        assert!(
+            progress.iter().all(|p| p.total == Some(2)),
+            "progress total must count (endpoint, port) tasks, got {progress:?}"
+        );
     }
 
     #[tokio::test]

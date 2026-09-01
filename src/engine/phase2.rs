@@ -200,13 +200,20 @@ impl ScanController {
                             {
                                 break;
                             }
-                            if passed.lock().unwrap_or_else(|e| e.into_inner()).len() > stop_found {
-                                break;
-                            }
+                            // An overshoot pass (concurrent passes pushed the
+                            // found count past the stop quota while this probe
+                            // was already in flight) must still be recorded:
+                            // the probe ran, the row counts as working, and
+                            // clients need the verdict. Record, then stop.
+                            let overshoot =
+                                passed.lock().unwrap_or_else(|e| e.into_inner()).len() > stop_found;
                             if let Some(updated) =
                                 update_verdict_phase2(&store, ip, port, verdict, colo, &pos_index)
                             {
                                 let _ = events.send(ScanEvent::Result(Box::new(updated)));
+                            }
+                            if overshoot {
+                                break;
                             }
                         }
                         Err(err) => {
@@ -531,6 +538,10 @@ mod tests {
         attempts: std::sync::Arc<AtomicU64>,
         sni_pass: Option<&'static str>,
         always_err: std::sync::Arc<AtomicBool>,
+        /// Optional barrier both in-flight probes wait on, so tests can hold
+        /// concurrent passes open until both workers are inside the
+        /// found-stop race window.
+        rendezvous: Option<Arc<tokio::sync::Barrier>>,
         /// Every URL list each probe call received (assert spells the
         /// multi-URL plumbing through the engine).
         url_lists: std::sync::Arc<std::sync::Mutex<Vec<Vec<String>>>>,
@@ -543,6 +554,7 @@ mod tests {
                 attempts: std::sync::Arc::new(AtomicU64::new(0)),
                 sni_pass: None,
                 always_err: std::sync::Arc::new(AtomicBool::new(false)),
+                rendezvous: None,
                 url_lists: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
             }
         }
@@ -566,6 +578,9 @@ mod tests {
             let dial_ip = req.dial_ip;
             let urls = req.probe_urls.to_vec();
             Box::pin(async move {
+                if let Some(barrier) = &this.rendezvous {
+                    barrier.wait().await;
+                }
                 this.attempts.fetch_add(1, Ordering::Relaxed);
                 this.url_lists
                     .lock()
@@ -972,6 +987,39 @@ mod tests {
             "phase-2 workers must see the phase-1 cancel signal"
         );
         assert!(summary.cancelled, "summary must report the cancel");
+    }
+
+    #[tokio::test]
+    async fn phase2_records_the_overshoot_pass_past_the_found_stop() {
+        // stop.found = 1 with two passes held in flight across the record
+        // point: the transport rendezvous keeps BOTH phase-1 probes open so
+        // both hosts become candidates, and the tunnel-probe rendezvous
+        // keeps both phase-2 probes in flight. The second pass crosses the
+        // quota while in flight and must still be recorded
+        // (record-then-stop), not dropped while the row counts as working.
+        // Hosts .0/.1: the Every-plan walk starts at the network address,
+        // and round-robin dispatch pairs them across the two workers.
+        let mut t = FakeTransport::new()
+            .ok("203.0.113.0".parse().unwrap(), 443, 50)
+            .ok("203.0.113.1".parse().unwrap(), 443, 50);
+        t.rendezvous = Some(Arc::new(tokio::sync::Barrier::new(2)));
+        let mut probe = FakeTunnelProbe::new()
+            .pass("203.0.113.0".parse().unwrap())
+            .pass("203.0.113.1".parse().unwrap());
+        probe.rendezvous = Some(Arc::new(tokio::sync::Barrier::new(2)));
+        let c = p2_controller(t, FakeSub(""), probe);
+        let mut cfg = ok_cfg(1, None);
+        cfg.phase2 = Some(p2_cfg(&[VLESS], &[]));
+        cfg.concurrency = 2;
+        run_local(&c, cfg, 1).await.unwrap();
+        let results = c.results();
+        assert_eq!(results.len(), 2);
+        assert!(
+            results
+                .iter()
+                .all(|v| v.phase2.as_ref().is_some_and(|p| p.passed)),
+            "every pass must land its verdict, even past the stop quota"
+        );
     }
 
     #[tokio::test]
