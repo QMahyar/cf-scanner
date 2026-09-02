@@ -217,7 +217,6 @@ impl FakeTransport {
         self.script.lock().unwrap().clear();
     }
 
-    #[cfg(any(test, feature = "test-helpers"))]
     pub fn fail(self, ip: IpAddr, port: u16, err: ProbeError) -> Self {
         self.insert(ip, port, Err(err));
         self
@@ -232,23 +231,22 @@ impl Transport for FakeTransport {
         port: u16,
         _timeout_ms: u64,
     ) -> Pin<Box<dyn Future<Output = Result<u32, ProbeError>> + Send + '_>> {
-        let mut scripted = match self.script.lock().unwrap().get(&(ip, port)) {
-            Some(s) => s.clone(),
-            None => Scripted {
-                outcome: Err(ProbeError::Refused("not scripted")),
-                delay_ms: 0,
-                sequence: std::collections::VecDeque::new(),
-            },
+        let scripted = {
+            let mut map = self.script.lock().unwrap();
+            match map.get_mut(&(ip, port)) {
+                Some(entry) => {
+                    if let Some(next) = entry.sequence.pop_front() {
+                        entry.outcome = next;
+                    }
+                    entry.clone()
+                }
+                None => Scripted {
+                    outcome: Err(ProbeError::Refused("not scripted")),
+                    delay_ms: 0,
+                    sequence: std::collections::VecDeque::new(),
+                },
+            }
         };
-        if let Some(next) = scripted.sequence.pop_front() {
-            self.script
-                .lock()
-                .unwrap()
-                .get_mut(&(ip, port))
-                .expect("scripted entry must still exist")
-                .sequence = scripted.sequence;
-            scripted.outcome = next;
-        }
         let rendezvous = self.rendezvous.clone();
         Box::pin(async move {
             if let Some(barrier) = &rendezvous {

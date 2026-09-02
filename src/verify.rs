@@ -370,6 +370,44 @@ impl TunnelProbe for HybridTunnelProbe {
 }
 
 #[cfg(test)]
+mod redaction_tests {
+    use super::*;
+    use crate::configs::parse_uri;
+
+    #[test]
+    fn inline_tunnel_result_never_carries_the_raw_user_id() {
+        let secret = "SecretUser:SecretPass123";
+        let trojan = parse_uri(&format!("trojan://{secret}@1.2.3.4:443?security=tls")).unwrap();
+        let probe = InlineTunnelProbe::new();
+        let result = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                probe
+                    .probe(ProbeRequest {
+                        spec: &trojan,
+                        dial_ip: "127.0.0.1".parse().unwrap(),
+                        preset: &FragmentPreset::Off,
+                        custom: None,
+                        sni: None,
+                        probe_urls: &["http://probe.test/x".to_owned()],
+                        timeout_ms: 150,
+                    })
+                    .await
+                    .unwrap()
+            });
+        let debug = format!("{result:?}");
+        assert!(
+            !debug.contains("SecretPass123"),
+            "a failed inline verdict must never echo the credential: {debug}"
+        );
+        assert!(!result.passed, "refused connection must fail the probe");
+        assert_eq!(result.verifier, Some("inline"));
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 

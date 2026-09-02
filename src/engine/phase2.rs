@@ -8,10 +8,8 @@ use tokio::sync::watch;
 use tokio::task::JoinSet;
 
 use super::{ScanController, Store, cancelled_signal, claim_milestone};
-#[allow(unused_imports)]
 use crate::api::types::{
-    FragmentPreset, Phase2Config, Phase2Progress, Phase2Verdict, ScanConfig, ScanEvent, Verdict,
-    Verifier,
+    Phase2Config, Phase2Progress, Phase2Verdict, ScanConfig, ScanEvent, Verdict, Verifier,
 };
 use crate::configs::{OutboundSpec, parse_subscription, parse_uri, parse_xray_json};
 use crate::verify::ProbeRequest;
@@ -63,6 +61,7 @@ impl ScanController {
         let passed: Arc<Mutex<HashSet<(Ipv4Addr, u16)>>> = Arc::new(Mutex::new(HashSet::new()));
         let attempts = Arc::new(AtomicU64::new(0));
         let completed = Arc::new(AtomicU64::new(0));
+        let errored = Arc::new(AtomicU64::new(0));
         let milestones = Arc::new(AtomicU64::new(0));
         let terminal_sent = Arc::new(AtomicBool::new(false));
         let first_error: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
@@ -82,6 +81,7 @@ impl ScanController {
             let passed = passed.clone();
             let attempts = attempts.clone();
             let completed = completed.clone();
+            let errored = errored.clone();
             let milestones = milestones.clone();
             let terminal_sent = terminal_sent.clone();
             let first_error = first_error.clone();
@@ -176,7 +176,8 @@ impl ScanController {
                             {
                                 break;
                             }
-                            let msg = crate::configs::sanitize_error_text(&err.to_string());
+                            errored.fetch_add(1, Ordering::Relaxed);
+                            let msg = crate::configs::sanitize_error_text(&format!("{err:#}"));
                             let mut slot = first_error.lock().unwrap_or_else(|e| e.into_inner());
                             if slot.is_none() {
                                 *slot = Some(msg.clone());
@@ -201,7 +202,7 @@ impl ScanController {
                             }
                         }
                     }
-                    let done = completed.load(Ordering::Relaxed);
+                    let done = completed.load(Ordering::Relaxed) + errored.load(Ordering::Relaxed);
                     let terminal = done == total;
                     if (terminal && !terminal_sent.swap(true, Ordering::Relaxed))
                         || (!terminal && claim_milestone(&milestones, done, PROGRESS_EVERY_P2))
@@ -216,7 +217,7 @@ impl ScanController {
         while let Some(res) = tasks.join_next().await {
             res.map_err(|e| anyhow!("phase-2 task panicked: {e}"))??;
         }
-        let done = completed.load(Ordering::Relaxed);
+        let done = completed.load(Ordering::Relaxed) + errored.load(Ordering::Relaxed);
         if (done > 0 || attempts.load(Ordering::Relaxed) > 0)
             && !terminal_sent.swap(true, Ordering::Relaxed)
         {
@@ -288,7 +289,7 @@ impl ScanController {
                 let path = entry.to_owned();
                 let text = tokio::task::spawn_blocking(move || std::fs::read_to_string(&path))
                     .await
-                    .context("config file read task panicked")?
+                    .unwrap_or_else(|e| Err(std::io::Error::other(e.to_string())))
                     .with_context(|| format!("config file {} unreadable", redact_entry(entry)));
                 text.and_then(|text| {
                     parse_xray_json(&text).with_context(|| {
@@ -454,6 +455,7 @@ mod tests {
         attempts: std::sync::Arc<AtomicU64>,
         sni_pass: Option<&'static str>,
         always_err: std::sync::Arc<AtomicBool>,
+        err_text: Option<&'static str>,
         rendezvous: Option<Arc<tokio::sync::Barrier>>,
         url_lists: std::sync::Arc<std::sync::Mutex<Vec<Vec<String>>>>,
     }
@@ -465,6 +467,7 @@ mod tests {
                 attempts: std::sync::Arc::new(AtomicU64::new(0)),
                 sni_pass: None,
                 always_err: std::sync::Arc::new(AtomicBool::new(false)),
+                err_text: None,
                 rendezvous: None,
                 url_lists: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
             }
@@ -499,6 +502,9 @@ mod tests {
                     .push(urls);
                 if this.always_err.load(Ordering::Relaxed) {
                     return Err(anyhow!("simulated spawn failure"));
+                }
+                if let Some(text) = this.err_text {
+                    return Err(anyhow!("{text}"));
                 }
                 if let Some(want) = this.sni_pass
                     && sni.as_deref() != Some(want)
@@ -1014,5 +1020,86 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(summary.cancelled, "summary must report the cancel");
+    }
+
+    #[tokio::test]
+    async fn phase2_error_attempts_count_into_progress_done() {
+        let t = FakeTransport::new()
+            .ok("203.0.113.1".parse().unwrap(), 443, 50)
+            .ok("203.0.113.2".parse().unwrap(), 443, 10);
+        let mut probe = FakeTunnelProbe::new();
+        probe.err_text = Some("dial vless://SecretUser:SecretPass123@1.2.3.4:443: refused");
+        let c = p2_controller(t, FakeSub(""), probe);
+        let mut rx = c.subscribe();
+        let mut cfg = ok_cfg(2, None);
+        cfg.phase2 = Some(p2_cfg(&[VLESS], &[]));
+        assert!(
+            run_local(&c, cfg, 1).await.is_err(),
+            "an all-error phase 2 must still fail the run"
+        );
+        let mut terminal_done = None;
+        while let Ok(e) = rx.try_recv() {
+            if let ScanEvent::Phase2Progress(p) = e
+                && p.done == p.total
+            {
+                terminal_done = Some(p.done);
+            }
+        }
+        assert_eq!(
+            terminal_done,
+            Some(2),
+            "errored attempts are executed combos and must reach done == total"
+        );
+    }
+
+    #[tokio::test]
+    async fn phase2_error_verdicts_redact_config_credentials() {
+        let t = FakeTransport::new().ok("203.0.113.1".parse().unwrap(), 443, 50);
+        let mut probe = FakeTunnelProbe::new();
+        probe.err_text = Some("dial vless://SecretUser:SecretPass123@1.2.3.4:443: refused");
+        let c = p2_controller(t, FakeSub(""), probe);
+        let mut cfg = ok_cfg(1, None);
+        cfg.phase2 = Some(p2_cfg(&[VLESS], &[]));
+        let _ = run_local(&c, cfg, 1).await;
+        let results = c.results();
+        let p2 = results[0].phase2.as_ref().expect("error verdict stored");
+        assert!(!p2.passed);
+        assert_eq!(
+            p2.config_index,
+            Some(0),
+            "error verdicts keep config attribution"
+        );
+        assert_eq!(
+            p2.verifier, None,
+            "a probe that never ran claims no verifier"
+        );
+        let err = p2.error.as_deref().expect("error text present");
+        assert!(!err.contains("SecretUser"), "{err}");
+        assert!(!err.contains("SecretPass123"), "{err}");
+        assert!(err.contains("***@1.2.3.4:443"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn phase2_only_summary_counts_verified_endpoints_only() {
+        let t = FakeTransport::new()
+            .ok("203.0.113.1".parse().unwrap(), 443, 50)
+            .ok("203.0.113.2".parse().unwrap(), 443, 10);
+        let probe = FakeTunnelProbe::new();
+        let c = p2_controller(t, FakeSub(""), probe.clone());
+        let mut cfg = ok_cfg(2, None);
+        run_local(&c, cfg.clone(), 1).await.unwrap();
+        assert_eq!(probe.attempts.load(Ordering::Relaxed), 0);
+        cfg.phase2 = Some(p2_cfg(&[VLESS], &[]));
+        cfg.phase2_only = true;
+        let summary = run_local(&c, cfg, 1).await.unwrap();
+        assert_eq!(
+            summary.found, 0,
+            "failed verification must not count as found"
+        );
+        assert_eq!(
+            summary.scanned, 0,
+            "phase2_only runs add no phase-1 probe counts"
+        );
+        assert_eq!(probe.attempts.load(Ordering::Relaxed), 2);
     }
 }

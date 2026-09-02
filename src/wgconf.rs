@@ -6,6 +6,9 @@ use url::Url;
 
 use crate::util::percent_decode;
 
+const MAX_WGCONF_LINE_BYTES: usize = 4096;
+const MAX_KEY_B64_LEN: usize = 64;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WgConfig {
     pub private_key: String,
@@ -54,6 +57,9 @@ pub fn parse_wgconf(text: &str) -> Result<WgConfig> {
     let mut peer_map = BTreeMap::new();
     for raw in text.lines() {
         let line = raw.trim();
+        if line.len() > MAX_WGCONF_LINE_BYTES {
+            bail!("wgconf line exceeds {MAX_WGCONF_LINE_BYTES} bytes");
+        }
         if line.is_empty() || line.starts_with('#') || line.starts_with(';') {
             continue;
         }
@@ -84,6 +90,9 @@ fn parse_awg_uri(entry: &str) -> Result<WgConfig> {
     match url.scheme() {
         "wg" | "wireguard" => {}
         s => bail!("unsupported scheme '{s}'"),
+    }
+    if !url.username().is_empty() || url.password().is_some() {
+        bail!("wg URI must not carry credentials in userinfo");
     }
     let host = url
         .host_str()
@@ -196,6 +205,21 @@ fn build_wg_config(
     let peer_public = required_key(peer_map, "publickey")?;
     decode_key(&private_key).context("invalid private_key")?;
     decode_key(&peer_public).context("invalid public_key")?;
+    let allowed_ips: Vec<String> = peer_map
+        .get("allowedips")
+        .map(|s| s.split(',').map(|p| p.trim().to_owned()).collect())
+        .unwrap_or_default();
+    for entry in &allowed_ips {
+        if entry.is_empty() {
+            continue;
+        }
+        if !entry
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b':' | b'/'))
+        {
+            bail!("AllowedIPs entry has invalid characters: '{entry}'");
+        }
+    }
 
     let mtu = optional_u16(iface, "mtu")?;
     let keepalive = optional_u16(peer_map, "persistentkeepalive")?;
@@ -222,11 +246,10 @@ fn build_wg_config(
             preshared_key: peer_map
                 .get("presharedkey")
                 .cloned()
-                .filter(|v| !v.is_empty()),
-            allowed_ips: peer_map
-                .get("allowedips")
-                .map(|s| s.split(',').map(|p| p.trim().to_owned()).collect())
-                .unwrap_or_default(),
+                .filter(|v| !v.is_empty())
+                .map(|pk| decode_key(&pk).map(|_| pk).context("invalid preshared_key"))
+                .transpose()?,
+            allowed_ips,
             endpoint: peer_map.get("endpoint").cloned().filter(|v| !v.is_empty()),
             persistent_keepalive: keepalive,
         },
@@ -289,6 +312,9 @@ pub fn render_wgconf(wg: &WgConfig) -> String {
 }
 
 pub fn decode_key(b64: &str) -> Result<[u8; 32]> {
+    if b64.len() > MAX_KEY_B64_LEN {
+        bail!("key is too long");
+    }
     let raw = base64::engine::general_purpose::STANDARD
         .decode(b64)
         .map_err(|_| anyhow!("key is not valid base64"))?;
@@ -525,5 +551,52 @@ mod tests {
             wg.private_key,
             "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
         );
+    }
+
+    #[test]
+    fn decode_key_rejects_overlong_input_before_decoding() {
+        let long = format!("{}=", "A".repeat(MAX_KEY_B64_LEN));
+        assert!(decode_key(&long).is_err());
+        let huge = "A".repeat(MAX_KEY_B64_LEN * 8);
+        assert!(decode_key(&huge).is_err());
+    }
+
+    #[test]
+    fn oversized_wgconf_lines_are_rejected() {
+        let long_value = "x".repeat(MAX_WGCONF_LINE_BYTES + 1);
+        let text = format!(
+            "[Interface]\nPrivateKey = AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\nDNS = {long_value}\n[Peer]\nPublicKey = bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=\n"
+        );
+        assert!(parse_wgconf(&text).is_err());
+    }
+
+    #[test]
+    fn wg_uri_rejects_userinfo_credentials() {
+        let uri = "wg://user:secret@8.47.69.246:7103?private_key=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA%3D&public_key=bmXOC%2BF1FxEMF9dyiK2H5%2F1SUtzH0JuVo51h2wPfgyo%3D";
+        assert!(parse_wg_entry(uri).is_err());
+    }
+
+    #[test]
+    fn invalid_preshared_key_is_rejected() {
+        let text = "[Interface]\nPrivateKey = AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\n[Peer]\nPublicKey = bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=\nPresharedKey = not-base64!!\n";
+        assert!(parse_wgconf(text).is_err());
+        let good = "[Interface]\nPrivateKey = AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\n[Peer]\nPublicKey = bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=\nPresharedKey = AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\n";
+        assert!(parse_wgconf(good).is_ok());
+    }
+
+    #[test]
+    fn allowed_ips_with_hostile_characters_are_rejected() {
+        let text = "[Interface]\nPrivateKey = AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\n[Peer]\nPublicKey = bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=\nAllowedIPs = 0.0.0.0/0, bad/cidr here\n";
+        assert!(parse_wgconf(text).is_err());
+        let good = "[Interface]\nPrivateKey = AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\n[Peer]\nPublicKey = bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=\nAllowedIPs = 0.0.0.0/0, ::/0\n";
+        assert!(parse_wgconf(good).is_ok());
+    }
+
+    #[test]
+    fn wg_uri_host_grammar_is_enforced() {
+        let uri = "wg://bad_host:7103?private_key=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA%3D&public_key=bmXOC%2BF1FxEMF9dyiK2H5%2F1SUtzH0JuVo51h2wPfgyo%3D";
+        assert!(parse_wg_entry(uri).is_err());
+        let ok = "wg://my-gateway.example.com:7103?private_key=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA%3D&public_key=bmXOC%2BF1FxEMF9dyiK2H5%2F1SUtzH0JuVo51h2wPfgyo%3D";
+        assert!(parse_wg_entry(ok).is_ok());
     }
 }

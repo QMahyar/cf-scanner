@@ -178,8 +178,11 @@ pub async fn spawn(config_dir: &Path, xray_bin: &Path, config_json: &Value) -> R
         .spawn()
         .context("failed to spawn xray; is the binary present?")?;
 
+    let Some(stderr) = child.stderr.take() else {
+        bail!("xray spawned without a piped stderr handle");
+    };
     let secrets = config_secrets(config_json);
-    let stderr_tail = capture_stderr(child.stderr.take().expect("stderr is piped"), secrets);
+    let stderr_tail = capture_stderr(stderr, secrets);
 
     let socks_port = config_json
         .pointer("/inbounds/0/port")
@@ -329,7 +332,10 @@ struct StderrCapture {
 impl StderrCapture {
     async fn tail(self) -> String {
         let _ = self.done.await;
-        self.tail.lock().unwrap().join("\n")
+        self.tail
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .join("\n")
     }
 }
 
@@ -349,7 +355,7 @@ async fn drain_stderr(
     while let Ok(Some(line)) = lines.next_line().await {
         let masked = sanitize_error_text(&mask_values(&line, &secrets));
         tracing::debug!(stderr_line = %masked, "xray stderr");
-        let mut guard = tail.lock().unwrap();
+        let mut guard = tail.lock().unwrap_or_else(|e| e.into_inner());
         guard.push(masked);
         if guard.len() > STDERR_TAIL_LINES {
             guard.remove(0);
@@ -1073,6 +1079,52 @@ mod tests {
         assert!(
             cached_matches_dgst(&bin).await,
             "re-download must leave a verifiable dgst"
+        );
+    }
+
+    #[tokio::test]
+    async fn memoized_binary_is_restatted_and_redownloaded_when_it_shrinks() {
+        let _guard = crate::paths::test_env::DATA_DIR_LOCK.lock().await;
+        let _isolated = isolated_data_dir().await;
+        let bin = paths::xray_binary_path().unwrap();
+        let good = vec![b'x'; (MIN_BUNDLED_BYTES as usize) + 1];
+        std::fs::write(&bin, &good).unwrap();
+        std::fs::write(
+            dgst_path(&bin),
+            format!("SHA2-256= {}\n", hex_lower(&Sha256::digest(&good))),
+        )
+        .unwrap();
+        reset_binary_state().await;
+
+        struct NeverFetch;
+        impl BinaryFetch for NeverFetch {
+            async fn bytes(&self, _url: &str) -> Result<Vec<u8>> {
+                bail!("an intact memo hit must not download")
+            }
+        }
+        let first = ensure_binary(&NeverFetch).await.unwrap();
+        assert_eq!(first, bin, "intact file must resolve via the memo");
+
+        std::fs::write(&bin, b"tiny").unwrap();
+        let (zip_bytes, zip_dgst) = fake_zip(b"fresh payload");
+        struct ShrunkFetch(Vec<u8>, String);
+        impl BinaryFetch for ShrunkFetch {
+            async fn bytes(&self, url: &str) -> Result<Vec<u8>> {
+                if url.ends_with(".dgst") {
+                    Ok(self.1.clone().into_bytes())
+                } else {
+                    Ok(self.0.clone())
+                }
+            }
+        }
+        let second = ensure_binary(&ShrunkFetch(zip_bytes, zip_dgst))
+            .await
+            .unwrap();
+        assert_eq!(second, bin);
+        assert_eq!(
+            std::fs::read(&bin).unwrap(),
+            b"fresh payload",
+            "shrunken cached file must fail the memo size check and re-download"
         );
     }
 

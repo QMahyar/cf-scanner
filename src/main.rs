@@ -42,19 +42,26 @@ Results print as newline-delimited JSON; pipe to jq for processing.";
 
 #[derive(Subcommand)]
 enum Command {
+    #[command(
+        about = "Scan Cloudflare ranges (CDN probe + optional xray phase 2) or WARP endpoints"
+    )]
     Scan {
         #[command(flatten)]
         args: Box<ScanArgs>,
     },
+    #[command(about = "Interactive guided scan setup")]
     Wizard,
+    #[command(about = "Refresh the bundled Cloudflare IP range lists")]
     Ranges {
         #[command(subcommand)]
         action: RangesAction,
     },
+    #[command(about = "Generate or export a WARP WireGuard identity (wgconf)")]
     WarpConfig {
         #[command(subcommand)]
         action: WarpConfigAction,
     },
+    #[command(about = "Render one config into a shareable URI with a verified IP:port override")]
     ExportConfig {
         #[arg(long)]
         config: String,
@@ -189,14 +196,6 @@ struct ScanArgs {
 
     #[arg(
         long,
-        hide = true,
-        requires = "phase2_configs",
-        conflicts_with = "phase2_probe_urls"
-    )]
-    phase2_probe_url: Option<String>,
-
-    #[arg(
-        long,
         requires = "phase2_configs",
         help_heading = "Phase 2 (xray verification)"
     )]
@@ -294,6 +293,15 @@ impl From<PresetArg> for CdnPreset {
 }
 
 fn build_scan_config(args: &ScanArgs) -> Result<ScanConfig> {
+    if args.target == 0 {
+        bail!("--target must be at least 1");
+    }
+    if let Some(0) = args.count {
+        bail!("--count must be at least 1");
+    }
+    if args.cap.is_some_and(|cap| cap == 0) {
+        bail!("--cap must be at least 1");
+    }
     let mode = Mode::from(args.mode);
     if mode == Mode::Warp && args.preset.is_some() {
         return Err(anyhow!("--preset is CDN-only; WARP uses --count"));
@@ -313,11 +321,25 @@ fn build_scan_config(args: &ScanArgs) -> Result<ScanConfig> {
     if mode == Mode::Warp && args.ipv6 {
         return Err(anyhow!("--ipv6 is CDN-only; WARP pools are IPv4"));
     }
+    if mode == Mode::Warp && !args.custom_cidrs.is_empty() {
+        return Err(anyhow!(
+            "--custom-cidrs is CDN-only; WARP takes --warp-endpoints"
+        ));
+    }
+    if mode == Mode::Warp && !args.phase2_configs.is_empty() {
+        return Err(anyhow!(
+            "--phase2-configs is CDN-only; xray verification does not apply to WARP"
+        ));
+    }
     if args.phase2_only {
         return Err(anyhow!(
             "--phase2-only needs phase-1 results from a running scan; one-shot scans cannot use it"
         ));
     }
+    if let Some(warning) = cap_warning(args) {
+        eprintln!("warning: {warning}");
+    }
+
     let target = match (args.preset, args.count) {
         (Some(preset), None) => ScanTarget::Preset(CdnPreset::from(preset)),
         (None, Some(count)) => ScanTarget::Count(count),
@@ -421,10 +443,7 @@ fn build_phase2(args: &ScanArgs) -> Result<Option<api::types::Phase2Config>> {
             "--phase2-fragment custom requires --phase2-custom \"length,interval\""
         ));
     }
-    let probe_urls = match &args.phase2_probe_url {
-        Some(url) => vec![url.clone()],
-        None => args.phase2_probe_urls.clone(),
-    };
+    let probe_urls = args.phase2_probe_urls.clone();
     Ok(Some(api::types::Phase2Config {
         configs: args.phase2_configs.clone(),
         fragment,
@@ -444,8 +463,7 @@ async fn main() -> ExitCode {
         Err(e) => {
             let json_errors =
                 std::env::args().any(|a| a == "--json-errors" || a.starts_with("--json-errors="));
-            if json_errors {
-                let line = serde_json::json!({ "error": e.to_string() }).to_string();
+            if let Some(line) = parse_error_line(&e, json_errors) {
                 let _ = write_stdout_line(&line);
             }
             e.exit();
@@ -484,6 +502,29 @@ fn env_filter(verbose: bool, rust_log: Option<&str>) -> EnvFilter {
         .parse_lossy(directive)
 }
 
+fn cap_warning(args: &ScanArgs) -> Option<String> {
+    let cap = args.cap?;
+    (cap < args.target).then(|| {
+        format!(
+            "--cap ({cap}) is below --target ({}); the scan stops at the cap and may find fewer than {} working endpoints",
+            args.target, args.target
+        )
+    })
+}
+
+fn parse_error_line(err: &clap::Error, json_errors: bool) -> Option<String> {
+    if !json_errors || !err.use_stderr() {
+        return None;
+    }
+    Some(serde_json::json!({ "error": err.to_string() }).to_string())
+}
+
+fn clear_ticker_line() {
+    if std::io::stderr().is_terminal() {
+        eprint!("\r\x1b[K");
+    }
+}
+
 async fn run(cli: Cli) -> Result<()> {
     match cli.command {
         Command::Scan { args } => run_scan(*args).await,
@@ -507,7 +548,7 @@ async fn run(cli: Cli) -> Result<()> {
                     (n, None)
                 };
                 let family = if ipv6 { "IPv6" } else { "IPv4" };
-                println!(
+                eprintln!(
                     "refreshed {n} {family} ranges -> {}",
                     v6_path.unwrap_or(paths::refreshed_ranges_path()?).display()
                 );
@@ -534,7 +575,7 @@ async fn run(cli: Cli) -> Result<()> {
                 warpgen::generate(out.as_deref(), license.as_deref(), endpoint.as_deref()).await?;
                 match out {
                     Some(path) => {
-                        println!("identity registered; wgconf written to {}", path.display())
+                        eprintln!("identity registered; wgconf written to {}", path.display())
                     }
                     None => eprintln!("identity registered; wgconf printed above"),
                 }
@@ -544,7 +585,7 @@ async fn run(cli: Cli) -> Result<()> {
                 let out = out.as_deref().map(PathBuf::from);
                 warpgen::export(out.as_deref(), endpoint.as_deref()).await?;
                 match out {
-                    Some(path) => println!("wgconf written to {}", path.display()),
+                    Some(path) => eprintln!("wgconf written to {}", path.display()),
                     None => eprintln!("wgconf printed above"),
                 }
                 Ok(())
@@ -606,10 +647,14 @@ async fn run_scan(args: ScanArgs) -> Result<()> {
     }
     .map_err(|e| anyhow!("scan failed: {e:#}"));
     cancel_on_ctrl_c.abort();
-    let summary = result?;
-    if std::io::stderr().is_terminal() {
-        eprint!("\r\x1b[K");
-    }
+    let summary = match result {
+        Ok(summary) => summary,
+        Err(err) => {
+            clear_ticker_line();
+            return Err(err);
+        }
+    };
+    clear_ticker_line();
     eprintln!(
         "scanned {} hosts, found {} working in {} ms",
         summary.scanned, summary.found, summary.duration_ms
@@ -726,7 +771,6 @@ mod tests {
             phase2_custom: None,
             phase2_snis: vec![],
             phase2_probe_urls: vec![],
-            phase2_probe_url: None,
             phase2_concurrency: None,
             warp_probes: None,
             warp_endpoints: vec![],
@@ -796,7 +840,76 @@ mod tests {
         let mut a = args();
         a.cap = Some(0);
         let err = build_scan_config(&a).unwrap_err();
-        assert!(err.to_string().contains("stop.cap out of range"), "{err:#}");
+        assert!(err.to_string().contains("--cap"), "{err:#}");
+    }
+
+    #[test]
+    fn zero_count_and_target_name_the_flag() {
+        let mut a = args();
+        a.count = Some(0);
+        let err = build_scan_config(&a).unwrap_err();
+        assert!(err.to_string().contains("--count"), "{err:#}");
+        let mut a = args();
+        a.target = 0;
+        let err = build_scan_config(&a).unwrap_err();
+        assert!(err.to_string().contains("--target"), "{err:#}");
+    }
+
+    #[test]
+    fn warp_mode_rejects_phase2_configs_with_a_flag_named_error() {
+        let mut a = args();
+        a.mode = ModeArg::Warp;
+        a.phase2_configs = vec!["vless://a@1.2.3.4:443".to_owned()];
+        let err = build_scan_config(&a).unwrap_err();
+        assert!(err.to_string().contains("--phase2-configs"), "{err:#}");
+    }
+
+    #[test]
+    fn warp_mode_rejects_custom_cidrs_with_a_flag_named_error() {
+        let mut a = args();
+        a.mode = ModeArg::Warp;
+        a.custom_cidrs = vec!["203.0.113.0/24".to_owned()];
+        let err = build_scan_config(&a).unwrap_err();
+        assert!(err.to_string().contains("--custom-cidrs"), "{err:#}");
+    }
+
+    #[test]
+    fn cap_below_target_warns_instead_of_erroring() {
+        let mut a = args();
+        a.cap = Some(10);
+        let warning = cap_warning(&a).unwrap();
+        assert!(
+            warning.contains("--cap") && warning.contains("--target"),
+            "{warning}"
+        );
+        let mut a = args();
+        a.cap = Some(25);
+        assert!(cap_warning(&a).is_none());
+        assert!(cap_warning(&args()).is_none());
+        let cfg = {
+            let mut a = args();
+            a.cap = Some(10);
+            build_scan_config(&a).unwrap()
+        };
+        assert_eq!(cfg.stop.cap, Some(10));
+    }
+
+    #[test]
+    fn json_parse_errors_cover_real_errors_but_not_help() {
+        let usage = match Cli::try_parse_from(["cf-scanner", "bogus-command"]) {
+            Err(e) => e,
+            Ok(_) => panic!("bogus-command must fail to parse"),
+        };
+        assert!(usage.use_stderr());
+        let line = parse_error_line(&usage, true).unwrap();
+        assert!(line.contains("\"error\""), "{line}");
+        assert!(parse_error_line(&usage, false).is_none());
+        let help = match Cli::try_parse_from(["cf-scanner", "--help"]) {
+            Err(e) => e,
+            Ok(_) => panic!("--help must short-circuit as a parse error"),
+        };
+        assert!(!help.use_stderr(), "help output is not an error");
+        assert!(parse_error_line(&help, true).is_none());
     }
 
     #[test]
@@ -1096,12 +1209,10 @@ mod tests {
             "--phase2-probe-url",
             "https://example.com/check",
         ];
-        let a = match Cli::try_parse_from(argv).unwrap().command {
-            Command::Scan { args } => *args,
-            _ => unreachable!(),
-        };
-        let p2 = build_scan_config(&a).unwrap().phase2.unwrap();
-        assert_eq!(p2.probe_urls, vec!["https://example.com/check".to_owned()]);
+        assert!(
+            Cli::try_parse_from(argv).is_err(),
+            "the removed singular --phase2-probe-url must fail loudly, not silently no-op"
+        );
         let argv = [
             "cf-scanner",
             "scan",
@@ -1109,10 +1220,21 @@ mod tests {
             "vless://a@1.2.3.4:443",
             "--phase2-probe-urls",
             "https://a.example/",
-            "--phase2-probe-url",
+            "--phase2-probe-urls",
             "https://b.example/",
         ];
-        assert!(Cli::try_parse_from(argv).is_err());
+        let a = match Cli::try_parse_from(argv).unwrap().command {
+            Command::Scan { args } => *args,
+            _ => unreachable!(),
+        };
+        let p2 = build_scan_config(&a).unwrap().phase2.unwrap();
+        assert_eq!(
+            p2.probe_urls,
+            vec![
+                "https://a.example/".to_owned(),
+                "https://b.example/".to_owned()
+            ]
+        );
     }
 
     #[test]

@@ -130,7 +130,7 @@ async fn fetch_tls_inner(url: &str, extra_headers: &str) -> Result<Vec<u8>> {
         }
         request = request.header(name, value);
     }
-    let response = request
+    let mut response = request
         .send()
         .await
         .with_context(|| format!("fetch failed for {}", sanitize_url_for_error(url)))?;
@@ -140,16 +140,19 @@ async fn fetch_tls_inner(url: &str, extra_headers: &str) -> Result<Vec<u8>> {
     {
         bail!("response body exceeds the {MAX_BODY_BYTES} byte cap (Content-Length {len})");
     }
-    let bytes = response.bytes().await.with_context(|| {
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response.chunk().await.with_context(|| {
         format!(
             "failed to read response body of {}",
             sanitize_url_for_error(url)
         )
-    })?;
-    if bytes.len() > MAX_BODY_BYTES {
-        bail!("response body exceeded the {MAX_BODY_BYTES} byte cap");
+    })? {
+        if bytes.len().saturating_add(chunk.len()) > MAX_BODY_BYTES {
+            bail!("response body exceeded the {MAX_BODY_BYTES} byte cap");
+        }
+        bytes.extend_from_slice(&chunk);
     }
-    Ok(bytes.to_vec())
+    Ok(bytes)
 }
 
 pub type HttpFuture<'a> =

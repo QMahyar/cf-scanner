@@ -505,6 +505,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn same_seed_resamples_identical_hosts() {
+        let mut cfg = ok_cfg(8, None);
+        cfg.target = ScanTarget::Count(8);
+        let mut sampled: Vec<Vec<IpAddr>> = Vec::new();
+        for _ in 0..2 {
+            let t = FakeTransport::new();
+            for i in 1..=254u8 {
+                t.insert(
+                    format!("203.0.113.{i}").parse().unwrap(),
+                    443,
+                    Ok(u32::from(i) % 100),
+                );
+            }
+            let (c, _) = controller(Arc::new(t));
+            let pool = ranges::CidrPool::parse("203.0.113.0/24").unwrap();
+            let summary = c.run_seeded_with_pool(cfg.clone(), 42, pool).await.unwrap();
+            assert_eq!(summary.scanned, 8, "found stop must fire after 8 probes");
+            sampled.push(c.results().iter().map(|v| v.ip).collect());
+        }
+        assert_eq!(
+            sampled[0], sampled[1],
+            "the same seed must sample the same host set"
+        );
+    }
+
+    #[tokio::test]
     async fn rejects_invalid_config() {
         let (c, _) = controller(Arc::new(FakeTransport::new()));
         let mut cfg = ok_cfg(1, None);

@@ -1,5 +1,6 @@
 use std::fs;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::{Context, Result, anyhow};
 
@@ -227,9 +228,9 @@ fn decompose(mut base: u128, mut len: u128, bits: u32, out: &mut Vec<Cidr>) {
 
 pub fn base_pool(runtime_refreshed: Option<&str>) -> Result<CidrPool> {
     match runtime_refreshed {
-        Some(text) => match CidrPool::parse(text) {
-            Ok(pool) => Ok(pool),
-            Err(_) => {
+        Some(text) => match CidrPool::parse(text).ok().filter(|p| !p.ranges.is_empty()) {
+            Some(pool) => Ok(pool),
+            _ => {
                 tracing::warn!("refreshed IPv4 ranges failed to parse; using the bundled list");
                 Ok(CidrPool::bundled())
             }
@@ -240,9 +241,9 @@ pub fn base_pool(runtime_refreshed: Option<&str>) -> Result<CidrPool> {
 
 pub fn base_pool_v6(runtime_refreshed: Option<&str>) -> Result<CidrPool> {
     match runtime_refreshed {
-        Some(text) => match CidrPool::parse(text) {
-            Ok(pool) => Ok(pool),
-            Err(_) => {
+        Some(text) => match CidrPool::parse(text).ok().filter(|p| !p.ranges.is_empty()) {
+            Some(pool) => Ok(pool),
+            _ => {
                 tracing::warn!("refreshed IPv6 ranges failed to parse; using the bundled list");
                 Ok(CidrPool::bundled_v6())
             }
@@ -312,11 +313,22 @@ pub fn write_pool_to(path: &std::path::Path, pool: &CidrPool, last_updated: &str
     fs::create_dir_all(&dir).context("create data dir")?;
     let mut text = format!("{LAST_UPDATED_PREFIX}{last_updated}\n");
     text.push_str(&render_lines(pool.ranges()));
-    let tmp = path.with_extension("txt.tmp");
-    fs::write(&tmp, text).context("write refreshed ranges")?;
-    fs::rename(&tmp, path).context("replace refreshed ranges")?;
-    Ok(())
+    let seq = TMP_SEQ.fetch_add(1, Ordering::Relaxed);
+    let tmp = path.with_extension(format!("txt.tmp.{}.{seq}", std::process::id()));
+    let write = || -> Result<()> {
+        fs::write(&tmp, text.as_bytes()).context("write refreshed ranges")?;
+        fs::rename(&tmp, path).context("replace refreshed ranges")
+    };
+    match write() {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            let _ = fs::remove_file(&tmp);
+            Err(e)
+        }
+    }
 }
+
+static TMP_SEQ: AtomicU64 = AtomicU64::new(0);
 
 pub fn last_updated_of(text: &str) -> Option<String> {
     text.lines().find_map(|l| {
@@ -1185,5 +1197,59 @@ mod tests {
         let pool = CidrPool::from_ranges(cidrs);
         assert_eq!(pool.ranges().len(), 1);
         assert_eq!(pool.host_count(), 256);
+    }
+
+    #[test]
+    fn exclusion_edges_are_exact_at_block_boundaries() {
+        let pool = CidrPool {
+            ranges: vec![parse_cidr("10.0.0.0/24").unwrap()],
+        };
+        let first_half = pool.excluding(&[parse_cidr("10.0.0.0/25").unwrap()]);
+        assert_eq!(first_half.host_count(), 128);
+        let out = first_half.excluding(&[parse_cidr("10.0.0.255/32").unwrap()]);
+        assert_eq!(out.host_count(), 127, "last-host exclusion must be exact");
+        let out = out.excluding(&[parse_cidr("10.0.0.128/32").unwrap()]);
+        assert_eq!(
+            out.host_count(),
+            126,
+            "first-host exclusion after a split must be exact"
+        );
+        let again = pool.excluding(&[
+            parse_cidr("10.0.0.0/25").unwrap(),
+            parse_cidr("10.0.0.0/25").unwrap(),
+        ]);
+        assert_eq!(
+            again.host_count(),
+            128,
+            "overlapping exclusions are idempotent"
+        );
+        let v6 = CidrPool {
+            ranges: vec![parse_cidr("2001:db8::/120").unwrap()],
+        };
+        let v6out = v6.excluding(&[parse_cidr("2001:db8::/128").unwrap()]);
+        assert_eq!(
+            v6out.host_count(),
+            255,
+            "v6 first-host exclusion must be exact"
+        );
+    }
+
+    #[test]
+    fn bare_ip_exclude_is_rejected_by_the_shared_grammar() {
+        assert!(parse_cidr("1.2.3.4").is_err(), "no second, looser parser");
+        assert!(
+            effective_pool_from(&[], &["1.2.3.4".to_owned()], false, None, None).is_err(),
+            "bare-IP exclusions must fail loudly instead of being ignored"
+        );
+    }
+
+    #[test]
+    fn base_pool_falls_back_when_refresh_is_parseable_but_empty() {
+        let header_only = format!("{LAST_UPDATED_PREFIX}2025-01-01T00:00:00Z\n");
+        assert_eq!(base_pool(Some(&header_only)).unwrap(), CidrPool::bundled());
+        assert_eq!(
+            base_pool_v6(Some(&header_only)).unwrap(),
+            CidrPool::bundled_v6()
+        );
     }
 }

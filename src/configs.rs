@@ -9,6 +9,7 @@ use percent_encoding::{AsciiSet, CONTROLS, utf8_percent_encode};
 use serde::Deserialize;
 use url::Url;
 
+use crate::api::types::MAX_CONFIG_ENTRY_BYTES;
 use crate::util::percent_decode;
 
 use crate::ranges;
@@ -17,6 +18,10 @@ const SUB_UA: &str = "cf-scanner/0.1.0";
 const WS: &str = "ws";
 const MAX_ERROR_LINE_BYTES: usize = 512;
 const MAX_USER_ID_BYTES: usize = 1024;
+const MAX_SERVER_BYTES: usize = 1024;
+const MAX_FIELD_VALUE_BYTES: usize = 2048;
+const MAX_SUB_BLOB_BYTES: usize = 16 * 1024 * 1024;
+const MAX_EXPORT_CONFIG_BYTES: usize = 64 * 1024;
 
 const USERINFO_ENCODE_SET: &AsciiSet = &CONTROLS
     .add(b' ')
@@ -93,7 +98,24 @@ fn redact_line(line: &str) -> String {
                 out.push_str("***@");
                 out.push_str(&head[at + sep_len..]);
             }
-            None => out.push_str(head),
+            None => {
+                let prefix = &rest[..scheme_end];
+                let scheme_start = prefix
+                    .rfind(|c: char| {
+                        c.is_whitespace() || matches!(c, '"' | '\'' | '(' | '<' | '[' | '=')
+                    })
+                    .map_or(0, |i| i + 1);
+                let scheme = &prefix[scheme_start..];
+                let opaque_blob = !head.is_empty()
+                    && (scheme.eq_ignore_ascii_case("vmess") || scheme.eq_ignore_ascii_case("ss"));
+                if opaque_blob {
+                    let token_end = head.find(char::is_whitespace).unwrap_or(head.len());
+                    out.push_str("***");
+                    out.push_str(&head[token_end..]);
+                } else {
+                    out.push_str(head);
+                }
+            }
         }
         rest = &rest[scheme_end + 3 + seg_end..];
     }
@@ -170,8 +192,19 @@ pub async fn fetch_subscription(fetch: &impl SubFetch, url: &str) -> Result<Subs
     Ok(parse_subscription(&body))
 }
 
+fn check_len(field: &str, value: &str, max: usize) -> Result<()> {
+    let actual = value.len();
+    if actual > max {
+        bail!("{field} exceeds {max} bytes");
+    }
+    Ok(())
+}
+
 pub fn parse_uri(entry: &str) -> Result<OutboundSpec> {
     let entry = entry.trim();
+    if entry.len() > MAX_CONFIG_ENTRY_BYTES {
+        bail!("config entry exceeds {MAX_CONFIG_ENTRY_BYTES} bytes");
+    }
     let scheme = entry
         .split_once("://")
         .map(|(s, _)| s.to_ascii_lowercase())
@@ -181,19 +214,6 @@ pub fn parse_uri(entry: &str) -> Result<OutboundSpec> {
         "vmess" => parse_vmess(entry),
         "ss" => parse_ss(entry),
         other => bail!("unsupported scheme '{other}'"),
-    }
-}
-
-pub fn render_uri(
-    spec: &OutboundSpec,
-    dial_ip: Ipv4Addr,
-    sni_override: Option<&str>,
-    remark: Option<&str>,
-) -> Result<String> {
-    match spec.protocol {
-        Protocol::Vless | Protocol::Trojan => render_sip002(spec, dial_ip, sni_override, remark),
-        Protocol::Vmess => render_vmess(spec, dial_ip, sni_override, remark),
-        Protocol::Shadowsocks => render_ss(spec, dial_ip, remark),
     }
 }
 
@@ -212,6 +232,7 @@ fn render_sip002(
     dial_ip: Ipv4Addr,
     sni_override: Option<&str>,
     remark: Option<&str>,
+    extras: &[(String, String)],
 ) -> Result<String> {
     let mut out = String::with_capacity(160);
     out.push_str(spec.protocol.as_str());
@@ -248,10 +269,60 @@ fn render_sip002(
             add("packetencoding", packet_encoding);
         }
     }
+    for (key, value) in extras {
+        params.push(format!(
+            "{}={}",
+            utf8_percent_encode(key, QUERY_VALUE_ENCODE_SET),
+            utf8_percent_encode(value, QUERY_VALUE_ENCODE_SET)
+        ));
+    }
     out.push('?');
     out.push_str(&params.join("&"));
     out.push_str(&fragment(remark));
     Ok(out)
+}
+
+const MANAGED_SIP002_KEYS: &[&str] = &[
+    "security",
+    "sni",
+    "fp",
+    "type",
+    "path",
+    "host",
+    "packetencoding",
+    "id",
+    "password",
+];
+
+fn sip002_passthrough_params(original_config: &str) -> Vec<(String, String)> {
+    let Ok(url) = Url::parse(original_config) else {
+        return Vec::new();
+    };
+    if !matches!(url.scheme(), "vless" | "trojan") {
+        return Vec::new();
+    }
+    url.query_pairs()
+        .filter(|(k, _)| {
+            let key = k.to_ascii_lowercase();
+            !MANAGED_SIP002_KEYS.contains(&key.as_str())
+        })
+        .map(|(k, v)| (k.into_owned(), v.into_owned()))
+        .collect()
+}
+
+pub fn render_uri(
+    spec: &OutboundSpec,
+    dial_ip: Ipv4Addr,
+    sni_override: Option<&str>,
+    remark: Option<&str>,
+) -> Result<String> {
+    match spec.protocol {
+        Protocol::Vless | Protocol::Trojan => {
+            render_sip002(spec, dial_ip, sni_override, remark, &[])
+        }
+        Protocol::Vmess => render_vmess(spec, dial_ip, sni_override, remark),
+        Protocol::Shadowsocks => render_ss(spec, dial_ip, remark),
+    }
 }
 
 fn render_vmess(
@@ -318,10 +389,20 @@ pub fn export_config_uri(
     sni_override: Option<&str>,
     remark: Option<&str>,
 ) -> Result<String> {
+    if original_config.len() > MAX_EXPORT_CONFIG_BYTES {
+        bail!("config exceeds {MAX_EXPORT_CONFIG_BYTES} bytes");
+    }
     let mut spec = parse_uri(original_config)?;
     spec.server = dial_ip.to_string();
     spec.port = port;
-    render_uri(&spec, dial_ip, sni_override, remark)
+    let extras = sip002_passthrough_params(original_config);
+    match spec.protocol {
+        Protocol::Vless | Protocol::Trojan => {
+            render_sip002(&spec, dial_ip, sni_override, remark, &extras)
+        }
+        Protocol::Vmess => render_vmess(&spec, dial_ip, sni_override, remark),
+        Protocol::Shadowsocks => render_ss(&spec, dial_ip, remark),
+    }
 }
 
 pub fn parse_subscription(body: &str) -> SubscriptionParse {
@@ -330,6 +411,14 @@ pub fn parse_subscription(body: &str) -> SubscriptionParse {
     for (idx, line) in text.lines().enumerate() {
         let line = line.trim();
         if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if line.len() > MAX_CONFIG_ENTRY_BYTES {
+            out.errors.push(format!(
+                "line {}: entry exceeds {MAX_CONFIG_ENTRY_BYTES} bytes",
+                idx + 1
+            ));
+            out.ignored += 1;
             continue;
         }
         match parse_uri(line) {
@@ -347,6 +436,9 @@ pub fn parse_subscription(body: &str) -> SubscriptionParse {
 fn decode_subscription_body(body: &str) -> String {
     let trimmed = body.trim();
     if trimmed.lines().count() != 1 {
+        return body.to_owned();
+    }
+    if trimmed.len() > MAX_SUB_BLOB_BYTES {
         return body.to_owned();
     }
     let line = trimmed;
@@ -461,7 +553,10 @@ fn parse_vmess(entry: &str) -> Result<OutboundSpec> {
     let user_id = get("id")
         .filter(|s| !s.is_empty())
         .ok_or_else(|| anyhow!("vmess missing id"))?;
-    let security = get("tls").unwrap_or("none").to_owned();
+    let security = get("tls")
+        .filter(|s| !s.is_empty())
+        .unwrap_or("none")
+        .to_owned();
     reject_unsupported_security(&security)?;
     let alter_id: u16 = get_flex("aid").and_then(|a| a.parse().ok()).unwrap_or(0);
     let vmess_security = get("scy").filter(|s| !s.is_empty()).map(str::to_owned);
@@ -512,10 +607,16 @@ fn parse_ss(entry: &str) -> Result<OutboundSpec> {
     let (method, password) = userinfo_text
         .split_once(':')
         .ok_or_else(|| anyhow!("ss userinfo is not method:password"))?;
+    if method.is_empty() {
+        bail!("ss method is empty");
+    }
 
     let (host, port) =
         split_host_port(&host_port).ok_or_else(|| anyhow!("ss missing host:port"))?;
     let port: u16 = port.parse().map_err(|_| anyhow!("ss bad port"))?;
+    if host.is_empty() {
+        bail!("ss host is empty");
+    }
 
     finish_spec(OutboundSpec {
         protocol: Protocol::Shadowsocks,
@@ -627,8 +728,46 @@ pub fn parse_xray_json(text: &str) -> Result<OutboundSpec> {
 }
 
 fn finish_spec(spec: OutboundSpec) -> Result<OutboundSpec> {
-    if spec.user_id.len() > MAX_USER_ID_BYTES {
-        bail!("user id exceeds {MAX_USER_ID_BYTES} bytes");
+    if spec.user_id.is_empty() {
+        bail!("user id is empty");
+    }
+    check_len("user id", &spec.user_id, MAX_USER_ID_BYTES)?;
+    if spec.server.is_empty() {
+        bail!("server is empty");
+    }
+    if spec.server.bytes().any(|b| {
+        b.is_ascii_whitespace() || b.is_ascii_control() || matches!(b, b'@' | b'/' | b'?' | b'#')
+    }) {
+        bail!("server has invalid characters");
+    }
+    check_len("server", &spec.server, MAX_SERVER_BYTES)?;
+    if spec.security.trim().is_empty() {
+        bail!("security is empty");
+    }
+    check_len("security", &spec.security, MAX_FIELD_VALUE_BYTES)?;
+    if let Some(sni) = &spec.tls_server_name {
+        check_len("sni", sni, MAX_FIELD_VALUE_BYTES)?;
+    }
+    if let Some(fp) = &spec.fingerprint {
+        check_len("fp", fp, MAX_FIELD_VALUE_BYTES)?;
+    }
+    if let Some(method) = &spec.method {
+        check_len("ss method", method, MAX_FIELD_VALUE_BYTES)?;
+    }
+    if let Some(tag) = &spec.tag {
+        check_len("tag", tag, MAX_FIELD_VALUE_BYTES)?;
+    }
+    if let Some(ws) = &spec.ws {
+        check_len("ws path", &ws.path, MAX_FIELD_VALUE_BYTES)?;
+        if let Some(host) = &ws.host {
+            check_len("ws host", host, MAX_FIELD_VALUE_BYTES)?;
+        }
+        if let Some(pe) = &ws.packet_encoding {
+            check_len("ws packetencoding", pe, MAX_FIELD_VALUE_BYTES)?;
+        }
+    }
+    if let Some(scy) = &spec.vmess_security {
+        check_len("vmess security", scy, MAX_FIELD_VALUE_BYTES)?;
     }
     Ok(spec)
 }
@@ -1352,5 +1491,153 @@ mod tests {
         .unwrap();
         assert!(uri.contains("sni=orig.example.com"), "{uri}");
         assert!(export_config_uri("not a uri", DIAL_IP.parse().unwrap(), 443, None, None).is_err());
+    }
+
+    #[test]
+    fn oversized_entries_are_rejected_up_front() {
+        let base = "vless://u@1.2.3.4:443?pad=";
+        let at_cap = format!("{base}{}", "a".repeat(MAX_CONFIG_ENTRY_BYTES - base.len()));
+        assert!(
+            parse_uri(&at_cap).is_ok(),
+            "8KiB boundary must stay inclusive"
+        );
+        let over = format!("{at_cap}a");
+        let err = parse_uri(&over).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            format!("config entry exceeds {MAX_CONFIG_ENTRY_BYTES} bytes")
+        );
+    }
+
+    #[test]
+    fn subscription_lines_over_the_entry_cap_are_counted_and_not_parsed() {
+        let body = format!("{}\n", "x".repeat(MAX_CONFIG_ENTRY_BYTES + 1));
+        let parsed = parse_subscription(&body);
+        assert_eq!(parsed.specs.len(), 0);
+        assert_eq!(parsed.ignored, 1);
+        assert!(parsed.errors[0].contains("exceeds"), "{:?}", parsed.errors);
+    }
+
+    #[test]
+    fn finish_spec_caps_every_field() {
+        let sni = format!(
+            "vless://u@1.2.3.4:443?sni={}",
+            "a".repeat(MAX_FIELD_VALUE_BYTES + 1)
+        );
+        assert!(parse_uri(&sni).is_err());
+        let at_cap = format!(
+            "vless://u@1.2.3.4:443?sni={}",
+            "a".repeat(MAX_FIELD_VALUE_BYTES)
+        );
+        assert!(parse_uri(&at_cap).is_ok());
+        let path = format!("vless://u@1.2.3.4:443?type=ws&path=/{}", "a".repeat(2048));
+        assert!(parse_uri(&path).is_err());
+        let tag = format!(
+            "vless://u@1.2.3.4:443#{}",
+            "t".repeat(MAX_FIELD_VALUE_BYTES + 1)
+        );
+        assert!(parse_uri(&tag).is_err());
+        let host = format!("vless://u@1.2.3.4:443?type=ws&host={}", "h".repeat(2049));
+        assert!(parse_uri(&host).is_err());
+    }
+
+    #[test]
+    fn finish_spec_rejects_empty_ids_and_empty_or_hostile_servers() {
+        let err = parse_uri("vless://1.2.3.4:443?id=&security=none").unwrap_err();
+        assert_eq!(err.to_string(), "user id is empty");
+        let creds = base64::engine::general_purpose::STANDARD.encode(":pw");
+        let err = parse_uri(&format!("ss://{creds}@1.2.3.4:8388")).unwrap_err();
+        assert_eq!(err.to_string(), "ss method is empty");
+        let json = r#"{"add":"1.2.3.4/hax","port":"443","id":"u"}"#;
+        let err = parse_uri(&format!(
+            "vmess://{}",
+            base64::engine::general_purpose::STANDARD.encode(json)
+        ))
+        .unwrap_err();
+        assert_eq!(err.to_string(), "server has invalid characters");
+    }
+
+    #[test]
+    fn vmess_empty_tls_is_normalized_to_none() {
+        let json = r#"{"add":"1.2.3.4","port":"443","id":"u","tls":""}"#;
+        let spec = parse_uri(&format!(
+            "vmess://{}",
+            base64::engine::general_purpose::STANDARD.encode(json)
+        ))
+        .unwrap();
+        assert_eq!(spec.security, "none");
+    }
+
+    #[test]
+    fn export_config_uri_keeps_unmanaged_query_params() {
+        let uri = export_config_uri(
+            "vless://u@1.2.3.4:443?security=tls&flow=xtls-rprx-vision&headerType=http&sni=orig.example.com",
+            DIAL_IP.parse().unwrap(),
+            2096,
+            Some("b.me"),
+            None,
+        )
+        .unwrap();
+        assert!(uri.contains("flow=xtls-rprx-vision"), "{uri}");
+        assert!(uri.contains("headerType=http"), "{uri}");
+        assert!(uri.contains("sni=b.me"), "{uri}");
+        assert!(!uri.contains("orig.example.com"), "{uri}");
+        assert_eq!(uri.matches("security=").count(), 1, "{uri}");
+        assert_eq!(uri.matches("sni=").count(), 1, "{uri}");
+        let back = parse_uri(&uri).unwrap();
+        assert_eq!(back.server, DIAL_IP);
+        assert_eq!(back.tls_server_name.as_deref(), Some("b.me"));
+    }
+
+    #[test]
+    fn export_config_uri_encodes_hostile_remarks() {
+        let remark = "evil#frag?x\nline";
+        let uri = export_config_uri(
+            "vless://u@1.2.3.4:443?security=none",
+            DIAL_IP.parse().unwrap(),
+            443,
+            None,
+            Some(remark),
+        )
+        .unwrap();
+        assert!(!uri.contains('\n'), "{uri}");
+        assert_eq!(uri.matches('#').count(), 1, "{uri}");
+        let back = parse_uri(&uri).unwrap();
+        assert_eq!(back.tag.as_deref(), Some(remark));
+    }
+
+    #[test]
+    fn sanitize_error_text_masks_vmess_and_ss_payload_blobs() {
+        let vmess = format!(
+            "vmess://{}",
+            base64::engine::general_purpose::STANDARD
+                .encode(r#"{"add":"1.2.3.4","id":"secret-id"}"#)
+        );
+        let out = sanitize_error_text(&format!("config failed: {vmess}"));
+        assert!(!out.contains("secret-id"), "{out}");
+        assert!(out.contains("vmess://***"), "{out}");
+        let ss_env = format!(
+            "ss://{}",
+            base64::engine::general_purpose::STANDARD.encode("aes-128-gcm:secretpw")
+        );
+        let out = sanitize_error_text(&format!("config failed: {ss_env}"));
+        assert!(!out.contains("secretpw"), "{out}");
+        assert!(out.contains("ss://***"), "{out}");
+        let prose = sanitize_error_text("plain https://example.com/docs stays visible");
+        assert!(prose.contains("https://example.com/docs"), "{prose}");
+    }
+
+    #[test]
+    fn parse_ss_rejects_empty_host() {
+        let creds = base64::engine::general_purpose::STANDARD.encode("aes-128-gcm:pw");
+        assert!(parse_uri(&format!("ss://{creds}@:8388")).is_err());
+    }
+
+    #[test]
+    fn oversized_subscription_blob_is_not_decoded() {
+        let blob = "A".repeat(MAX_SUB_BLOB_BYTES + 1);
+        let parsed = parse_subscription(&blob);
+        assert_eq!(parsed.specs.len(), 0);
+        assert_eq!(parsed.ignored, 1);
     }
 }

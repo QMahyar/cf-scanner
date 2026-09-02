@@ -118,13 +118,14 @@ impl WarpClient {
         let mut last: Option<WarpRegisterError> = None;
         let mut next_delay = RETRY_SLEEP;
         let mut tried = 0u32;
+        let http = Self::http_client(self.timeout)?;
         for _ in 0..MAX_ATTEMPTS {
             if tried > 0 {
                 tokio::time::sleep(next_delay).await;
                 next_delay = RETRY_SLEEP;
             }
             tried += 1;
-            let result = build(Self::http_client(self.timeout)?).send().await;
+            let result = build(http.clone()).send().await;
             let resp = match result {
                 Ok(resp) => resp,
                 Err(err) => {
@@ -290,7 +291,9 @@ struct Identity {
 }
 
 fn identity_path() -> Result<PathBuf> {
-    if let Ok(dir) = std::env::var("CF_SCANNER_DATA_DIR") {
+    if let Ok(dir) = std::env::var("CF_SCANNER_DATA_DIR")
+        && !dir.trim().is_empty()
+    {
         return Ok(PathBuf::from(dir).join("identity.json"));
     }
     Ok(paths::data_dir()?.join("identity.json"))
@@ -307,7 +310,6 @@ fn load_identity() -> Result<Identity> {
     let json = fs::read_to_string(identity_path()?)?;
     serde_json::from_str(&json).context("corrupt identity file")
 }
-
 pub fn has_identity() -> bool {
     load_identity().is_ok()
 }
@@ -315,10 +317,10 @@ pub fn has_identity() -> bool {
 pub fn persisted_server_public_key() -> Option<String> {
     let identity = match load_identity() {
         Ok(identity) => identity,
-        Err(err) => {
+        Err(_) => {
             if identity_path().map(|p| p.exists()).unwrap_or(false) {
                 tracing::warn!(
-                    "persisted WARP identity unreadable; falling back to the bundled server key: {err:#}"
+                    "persisted WARP identity unreadable; falling back to the bundled server key"
                 );
             }
             return None;
@@ -373,9 +375,11 @@ fn write_private_replace(dest: &Path, text: &str) -> Result<()> {
         std::process::id(),
         random_u32()
     ));
-    write_private(&tmp, text)?;
-    fs::rename(&tmp, dest)?;
-    Ok(())
+    let result = write_private(&tmp, text).and_then(|()| fs::rename(&tmp, dest));
+    if result.is_err() {
+        let _ = fs::remove_file(&tmp);
+    }
+    result.map_err(anyhow::Error::from)
 }
 
 fn random_u32() -> u32 {
@@ -1108,5 +1112,54 @@ pub(crate) mod tests {
         assert_eq!(loaded.id, "id-b");
         assert_eq!(loaded.private_key, enc(&[2u8; 32]));
         let _ = fs::remove_file(identity_path().unwrap());
+    }
+
+    #[test]
+    fn failed_private_replace_leaves_no_secret_tmp_remnant() {
+        let _guard = IDENTITY_LOCK.lock().unwrap();
+        let dir = isolated_identity_dir();
+        let enc = |b: &[u8]| base64::Engine::encode(&base64::engine::general_purpose::STANDARD, b);
+        let dest = dir.join("identity.json");
+        fs::create_dir_all(&dest).unwrap();
+        let err = save_identity(&Identity {
+            id: "x".into(),
+            token: "t".into(),
+            private_key: enc(&[3u8; 32]),
+            client_id: "c".into(),
+            account_type: "free".into(),
+            license: None,
+            created_at: 1,
+            peer_public_key: None,
+        })
+        .unwrap_err();
+        assert!(err.to_string().contains("writing"), "{err:#}");
+        let leftovers: Vec<_> = fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.contains(".tmp-"))
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "secret tmp files must be cleaned up, found {leftovers:?}"
+        );
+        let _ = fs::remove_dir_all(&dest);
+    }
+
+    #[test]
+    fn empty_cf_scanner_data_dir_env_falls_back_to_the_default_dir() {
+        let _guard = IDENTITY_LOCK.lock().unwrap();
+        let previous = std::env::var("CF_SCANNER_DATA_DIR").ok();
+        unsafe { std::env::set_var("CF_SCANNER_DATA_DIR", "   ") };
+        let resolved = identity_path().unwrap();
+        match previous {
+            Some(v) => unsafe { std::env::set_var("CF_SCANNER_DATA_DIR", v) },
+            None => unsafe { std::env::remove_var("CF_SCANNER_DATA_DIR") },
+        }
+        assert!(
+            resolved.file_name().and_then(|n| n.to_str()) == Some("identity.json")
+                && !resolved.is_relative(),
+            "empty env must fall back to the default data dir, got {resolved:?}"
+        );
     }
 }

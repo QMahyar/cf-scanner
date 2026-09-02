@@ -9,6 +9,9 @@ use crate::paths;
 pub async fn fetch_official(http: &impl HttpGet) -> Result<CidrPool> {
     let body = http.get(OFFICIAL_IPS_URL).await?;
     let cidrs = parse_official(&body)?;
+    if cidrs.is_empty() {
+        bail!("{OFFICIAL_IPS_URL} returned no IPv4 CIDRs; keeping the last-good list");
+    }
     Ok(CidrPool::from_ranges(cidrs))
 }
 
@@ -27,6 +30,9 @@ pub async fn refresh_v6_to_disk(http: &impl HttpGet) -> Result<usize> {
     let cidrs = parse_lines(&body)?;
     if let Some(bad) = cidrs.iter().find(|c| !c.addr.is_ipv6()) {
         bail!("{OFFICIAL_IPS_V6_URL} returned a non-IPv6 CIDR: {bad}");
+    }
+    if cidrs.is_empty() {
+        bail!("{OFFICIAL_IPS_V6_URL} returned no IPv6 CIDRs; keeping the last-good list");
     }
     let pool = CidrPool::from_ranges(cidrs);
     write_pool_to(
@@ -140,5 +146,40 @@ mod tests {
     async fn refresh_v6_rejects_non_v6_entries() {
         let http = FakeHttp("2606:4700::/32\n1.2.3.4/24\n");
         assert!(refresh_v6_to_disk(&http).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn refresh_keeps_last_good_file_when_api_returns_no_cidrs() {
+        let _guard = DATA_DIR_LOCK.lock().await;
+        let _isolated = IsolatedDataDir::new();
+        let good =
+            FakeHttp(r#"{"success":true,"result":{"ipv4_cidrs":["10.0.0.0/8"]},"errors":[]}"#);
+        refresh_to_disk(&good).await.unwrap();
+        let path = paths::refreshed_ranges_path().unwrap();
+        let before = fs::read_to_string(&path).unwrap();
+        let empty = FakeHttp(r#"{"success":true,"result":{"ipv4_cidrs":[]},"errors":[]}"#);
+        assert!(refresh_to_disk(&empty).await.is_err());
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            before,
+            "a degenerate refresh must not clobber the last-good list"
+        );
+    }
+
+    #[tokio::test]
+    async fn refresh_v6_keeps_last_good_file_when_api_returns_no_cidrs() {
+        let _guard = DATA_DIR_LOCK.lock().await;
+        let _isolated = IsolatedDataDir::new();
+        let good = FakeHttp("2606:4700::/32\n");
+        refresh_v6_to_disk(&good).await.unwrap();
+        let path = paths::refreshed_ranges_v6_path().unwrap();
+        let before = fs::read_to_string(&path).unwrap();
+        let empty = FakeHttp("\n");
+        assert!(refresh_v6_to_disk(&empty).await.is_err());
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            before,
+            "a degenerate v6 refresh must not clobber the last-good list"
+        );
     }
 }

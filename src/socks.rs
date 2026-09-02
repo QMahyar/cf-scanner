@@ -1,3 +1,4 @@
+use std::io;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::time::Duration;
 
@@ -13,6 +14,12 @@ pub(crate) fn http_request(host: &str, path: &str, extra_headers: &str) -> Strin
 const MAX_BODY_BYTES: usize = 64 * 1024 * 1024;
 
 const MAX_HEADER_BYTES: usize = 64 * 1024;
+
+const MAX_CHUNK_SIZE_LINE_BYTES: usize = 256;
+
+const MAX_TRAILER_LINE_BYTES: usize = 4096;
+
+const IO_STEP_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub(crate) fn http_request_keepalive(host: &str, path: &str, extra_headers: &str) -> String {
     format!("GET {path} HTTP/1.1\r\nHost: {host}\r\n{extra_headers}\r\n\r\n")
@@ -39,6 +46,14 @@ pub(crate) async fn read_response<S: AsyncRead + Unpin + ?Sized>(
             .await
             .context("reading response headers")?;
         head.push(byte[0]);
+    }
+    let mut skip = 0usize;
+    while head[skip..].starts_with(b"\r\n") {
+        skip += 2;
+    }
+    if skip > 0 {
+        // WHY: RFC 7230 3.5 — ignore stray CRLFs before the status line.
+        head.drain(0..skip);
     }
     let head_str = std::str::from_utf8(&head).context("response headers are not utf-8")?;
     let mut lines = head_str.lines();
@@ -70,13 +85,15 @@ async fn read_body<S: AsyncRead + Unpin + ?Sized>(
     if contains("transfer-encoding: chunked") {
         let mut raw = Vec::new();
         loop {
-            let size_line = read_line(stream, 256).await.context("reading chunk size")?;
+            let size_line = read_line(stream, MAX_CHUNK_SIZE_LINE_BYTES)
+                .await
+                .context("reading chunk size")?;
             let text = std::str::from_utf8(&size_line).context("chunk size not utf-8")?;
             let size = usize::from_str_radix(text.split(';').next().unwrap_or("").trim(), 16)
                 .context("malformed chunk size")?;
             if size == 0 {
                 loop {
-                    let line = read_line(stream, 4096).await?;
+                    let line = read_line(stream, MAX_TRAILER_LINE_BYTES).await?;
                     if line.is_empty() {
                         break;
                     }
@@ -87,7 +104,8 @@ async fn read_body<S: AsyncRead + Unpin + ?Sized>(
             if size > max_body.saturating_sub(raw.len()) {
                 bail!("chunked body exceeds the {max_body} cap");
             }
-            raw.extend_from_slice(format!("{size:x}\r\n").as_bytes());
+            raw.extend_from_slice(&size_line);
+            raw.extend_from_slice(b"\r\n");
             let mut data = vec![0u8; size];
             stream
                 .read_exact(&mut data)
@@ -122,11 +140,26 @@ async fn read_body<S: AsyncRead + Unpin + ?Sized>(
         Ok(body)
     } else {
         let mut body = Vec::new();
-        stream
-            .take(max_body as u64 + 1)
-            .read_to_end(&mut body)
-            .await
-            .context("reading close-delimited body")?;
+        let mut chunk = [0u8; 8192];
+        loop {
+            if body.len() > max_body {
+                bail!("response body exceeded the {max_body} byte cap");
+            }
+            match stream.read(&mut chunk).await {
+                Ok(0) => break,
+                Ok(n) => body.extend_from_slice(&chunk[..n]),
+                Err(err) if err.kind() == io::ErrorKind::Interrupted => continue,
+                Err(err) if err.kind() == io::ErrorKind::UnexpectedEof => {
+                    // WHY: rustls reports a peer close without TLS close_notify as
+                    // UnexpectedEof; for a close-delimited body that is the
+                    // terminator, not a failure (0.5.0 invariant).
+                    break;
+                }
+                Err(err) => {
+                    return Err(anyhow::Error::new(err).context("reading close-delimited body"));
+                }
+            }
+        }
         if body.len() > max_body {
             bail!("response body exceeded the {max_body} byte cap");
         }
@@ -155,7 +188,7 @@ where
     S: AsyncRead + AsyncWrite + Unpin,
 {
     let (mut rd, mut wr) = tokio::io::split(stream);
-    wr.write_all(request.as_bytes()).await?;
+    io_step(wr.write_all(request.as_bytes()), "request write").await?;
     let _ = wr.shutdown().await;
     let resp = read_response(&mut rd, MAX_BODY_BYTES).await?;
     Ok((resp.status, resp.headers, resp.body))
@@ -183,6 +216,9 @@ pub(crate) fn decode_chunked(mut input: &[u8]) -> Result<Vec<u8>> {
         }
         if input.len() < size + 2 {
             bail!("truncated chunk data");
+        }
+        if &input[size..size + 2] != b"\r\n" {
+            bail!("malformed chunk terminator");
         }
         out.extend_from_slice(&input[..size]);
         input = &input[size + 2..];
@@ -231,6 +267,7 @@ async fn get_via_socks_inner(url: &str, socks: SocketAddr) -> Result<Vec<u8>> {
     };
 
     let mut stream = TcpStream::connect(socks).await?;
+    let _ = stream.set_nodelay(true);
     socks5_connect(&mut stream, &host, port).await?;
     let request = http_request(&host, &path, "Accept: */*");
     let (status, _, body) = if use_tls {
@@ -247,10 +284,24 @@ async fn get_via_socks_inner(url: &str, socks: SocketAddr) -> Result<Vec<u8>> {
     Ok(body)
 }
 
+async fn io_step<T, F: Future<Output = std::io::Result<T>>>(
+    fut: F,
+    what: &'static str,
+) -> Result<T> {
+    tokio::time::timeout(IO_STEP_TIMEOUT, fut)
+        .await
+        .map_err(|_| anyhow!("tunnel probe {what} stalled"))?
+        .context(what)
+}
+
 async fn socks5_connect(stream: &mut TcpStream, host: &str, port: u16) -> Result<()> {
-    stream.write_all(&[0x05, 0x01, 0x00]).await?;
+    io_step(
+        stream.write_all(&[0x05, 0x01, 0x00]),
+        "socks greeting write",
+    )
+    .await?;
     let mut method = [0u8; 2];
-    stream.read_exact(&mut method).await?;
+    io_step(stream.read_exact(&mut method), "socks greeting read").await?;
     if method != [0x05, 0x00] {
         bail!("socks server refused no-auth: {method:02x?}");
     }
@@ -271,10 +322,10 @@ async fn socks5_connect(stream: &mut TcpStream, host: &str, port: u16) -> Result
         req.extend_from_slice(host_bytes);
     }
     req.extend_from_slice(&port.to_be_bytes());
-    stream.write_all(&req).await?;
+    io_step(stream.write_all(&req), "socks connect write").await?;
 
     let mut head = [0u8; 4];
-    stream.read_exact(&mut head).await?;
+    io_step(stream.read_exact(&mut head), "socks connect read").await?;
     if head[0] != 0x05 || head[1] != 0x00 {
         bail!("socks CONNECT failed: {head:02x?}");
     }
@@ -282,14 +333,14 @@ async fn socks5_connect(stream: &mut TcpStream, host: &str, port: u16) -> Result
         0x01 => 4 + 2,
         0x03 => {
             let mut len = [0u8; 1];
-            stream.read_exact(&mut len).await?;
+            io_step(stream.read_exact(&mut len), "socks addr len read").await?;
             len[0] as usize + 2
         }
         0x04 => 16 + 2,
         other => bail!("socks reply has unknown addr type {other}"),
     };
     let mut rest = vec![0u8; addr_len];
-    stream.read_exact(&mut rest).await?;
+    io_step(stream.read_exact(&mut rest), "socks addr read").await?;
     Ok(())
 }
 
@@ -297,6 +348,8 @@ async fn socks5_connect(stream: &mut TcpStream, host: &str, port: u16) -> Result
 mod tests {
     use super::*;
     use proptest::prelude::*;
+    use std::pin::Pin;
+    use std::task::Poll;
 
     async fn fake_socks_server() -> SocketAddr {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -420,6 +473,86 @@ mod tests {
         writer.await.unwrap();
     }
 
+    struct EofReader {
+        data: Vec<u8>,
+        pos: usize,
+    }
+
+    impl AsyncRead for EofReader {
+        fn poll_read(
+            mut self: Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+            buf: &mut tokio::io::ReadBuf<'_>,
+        ) -> Poll<io::Result<()>> {
+            if self.pos < self.data.len() {
+                let n = buf.remaining().min(self.data.len() - self.pos);
+                buf.put_slice(&self.data[self.pos..self.pos + n]);
+                self.pos += n;
+                return Poll::Ready(Ok(()));
+            }
+            Poll::Ready(Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "peer closed without close_notify",
+            )))
+        }
+    }
+
+    #[tokio::test]
+    async fn close_delimited_body_treats_abrupt_tls_eof_as_end_of_body() {
+        let resp = b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\nbody-no-close-notify".to_vec();
+        let mut stream = EofReader { data: resp, pos: 0 };
+        let parsed = read_response(&mut stream, MAX_BODY_BYTES).await.unwrap();
+        assert_eq!(parsed.status, 200);
+        assert_eq!(parsed.body, b"body-no-close-notify");
+    }
+
+    #[tokio::test]
+    async fn chunked_body_abrupt_eof_is_still_an_error() {
+        let resp = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n".to_vec();
+        let mut stream = EofReader { data: resp, pos: 0 };
+        let err = read_response(&mut stream, MAX_BODY_BYTES)
+            .await
+            .err()
+            .expect("a truncated chunked stream must fail");
+        assert!(err.to_string().contains("chunk size"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn truncated_content_length_body_fails() {
+        let resp = b"HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\nshort";
+        assert!(read_response(&mut &resp[..], MAX_BODY_BYTES).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn content_length_over_cap_fails_explicitly() {
+        let resp = b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\nshort";
+        let err = read_response(&mut &resp[..], 50)
+            .await
+            .err()
+            .expect("an over-cap Content-Length must fail explicitly");
+        assert!(err.to_string().contains("exceeds"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn chunked_body_over_cap_fails_explicitly() {
+        let mut resp = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n100\r\n".to_vec();
+        resp.extend(std::iter::repeat_n(b'x', 0x100));
+        resp.extend_from_slice(b"\r\n0\r\n\r\n");
+        let err = read_response(&mut &resp[..], 50)
+            .await
+            .err()
+            .expect("an over-cap chunked body must fail explicitly");
+        assert!(err.to_string().contains("exceeds"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn read_response_tolerates_leading_crlf_before_the_status_line() {
+        let resp = b"\r\nHTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok";
+        let parsed = read_response(&mut &resp[..], MAX_BODY_BYTES).await.unwrap();
+        assert_eq!(parsed.status, 200);
+        assert_eq!(parsed.body, b"ok");
+    }
+
     fn encode_chunked(data: &[u8]) -> Vec<u8> {
         if data.is_empty() {
             return b"0\r\n\r\n".to_vec();
@@ -467,6 +600,12 @@ mod tests {
         assert!(decode_chunked(b"ffffffff\r\n").is_err());
         assert!(decode_chunked(b"1\r\na\r\nffffffff\r\n").is_err());
         assert!(decode_chunked(&format!("1\r\na\r\n{MAX_BODY_BYTES:x}\r\n").into_bytes()).is_err());
+    }
+
+    #[test]
+    fn decode_chunked_rejects_bad_chunk_terminators() {
+        assert!(decode_chunked(b"5\r\nhelloXX0\r\n\r\n").is_err());
+        assert!(decode_chunked(b"5\r\nhello\r\r0\r\n\r\n").is_err());
     }
 
     #[test]

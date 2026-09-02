@@ -78,6 +78,23 @@ mod tests {
     }
 
     #[test]
+    fn country_lookup_never_panics_on_any_input() {
+        let geo = Geo::embedded();
+        for ip in [
+            "0.0.0.0",
+            "127.0.0.1",
+            "8.8.8.8",
+            "255.255.255.255",
+            "::",
+            "::1",
+            "2606:4700::1",
+            "2607:f8b0:4001::1",
+        ] {
+            let _ = geo.country(ip.parse().unwrap());
+        }
+    }
+
+    #[test]
     fn fallback_state_returns_none_without_a_db() {
         let geo = Geo { country: None };
         assert_eq!(geo.country("8.8.8.8".parse().unwrap()), None);

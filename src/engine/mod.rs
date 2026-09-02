@@ -43,6 +43,21 @@ type Store = Arc<Mutex<Vec<Verdict>>>;
 #[error("a scan is already running")]
 pub struct AlreadyRunning;
 
+struct ResetGuard<'a> {
+    running: &'a Mutex<bool>,
+    cancel_tx: &'a Mutex<Option<watch::Sender<bool>>>,
+}
+
+impl Drop for ResetGuard<'_> {
+    fn drop(&mut self) {
+        self.cancel_tx
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
+        *self.running.lock().unwrap_or_else(|e| e.into_inner()) = false;
+    }
+}
+
 pub struct ScanController {
     transport: Arc<dyn Transport>,
     warp_transport: Arc<dyn Transport>,
@@ -241,7 +256,10 @@ impl ScanController {
         let rx = self.subscribe();
         let controller = self.clone();
         let seed = OsRng.next_u64();
-        let handle = tokio::spawn(async move { controller.run_reserved(cfg, seed).await });
+        let handle = tokio::spawn(async move {
+            let _guard = controller.reset_guard();
+            controller.run_reserved(cfg, seed).await
+        });
         self.drive_run(handle, rx, on_event).await
     }
 
@@ -312,6 +330,13 @@ impl ScanController {
         Ok(())
     }
 
+    fn reset_guard(&self) -> ResetGuard<'_> {
+        ResetGuard {
+            running: &self.running,
+            cancel_tx: &self.cancel_tx,
+        }
+    }
+
     pub async fn run_seeded(&self, cfg: ScanConfig, seed: u64) -> Result<ScanSummary> {
         self.reserve().map_err(|err| {
             self.emit(ScanEvent::Failed(crate::api::types::FailedPayload {
@@ -319,27 +344,11 @@ impl ScanController {
             }));
             anyhow!("{err}")
         })?;
+        let _guard = self.reset_guard();
         self.run_reserved(cfg, seed).await
     }
 
     async fn run_reserved(&self, cfg: ScanConfig, seed: u64) -> Result<ScanSummary> {
-        struct ResetGuard<'a> {
-            running: &'a Mutex<bool>,
-            cancel_tx: &'a Mutex<Option<watch::Sender<bool>>>,
-        }
-        impl Drop for ResetGuard<'_> {
-            fn drop(&mut self) {
-                self.cancel_tx
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .take();
-                *self.running.lock().unwrap_or_else(|e| e.into_inner()) = false;
-            }
-        }
-        let _guard = ResetGuard {
-            running: &self.running,
-            cancel_tx: &self.cancel_tx,
-        };
         let result = self.run_seeded_unguarded(cfg, seed).await;
         if let Err(err) = &result {
             let msg = crate::configs::sanitize_error_text(&format!("{err:#}"));
@@ -649,6 +658,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn run_streaming_sets_the_busy_flag() {
+        let t = FakeTransport::new().ok_slow("203.0.113.1".parse().unwrap(), 443, 25, 500);
+        let c = Arc::new(ScanController::new(Arc::new(t)));
+        let mut cfg = ok_cfg(1, None);
+        cfg.custom_cidrs = vec!["203.0.113.0/29".to_owned()];
+        let handle = tokio::spawn({
+            let c = c.clone();
+            async move { c.run_streaming(cfg, |_| {}).await.unwrap() }
+        });
+        wait_until(Duration::from_secs(2), || c.is_running()).await;
+        assert!(
+            c.is_running(),
+            "the busy flag must be set during a streaming scan"
+        );
+        handle.await.unwrap();
+        assert!(
+            !c.is_running(),
+            "busy flag must clear after the streaming scan"
+        );
+    }
+
+    #[tokio::test]
     async fn run_streaming_reports_errors_without_finished() {
         let c = Arc::new(ScanController::new(Arc::new(FakeTransport::new())));
         let mut cfg = ok_cfg(1, None);
@@ -727,6 +758,48 @@ mod tests {
         let summary = first.await.unwrap();
         assert_eq!(summary.found, 8);
         assert_eq!(c.results().len(), 8, "reset must not clear an active run");
+    }
+
+    #[tokio::test]
+    async fn reserved_streaming_run_resets_the_busy_flag() {
+        let t = FakeTransport::new().ok("203.0.113.1".parse().unwrap(), 443, 5);
+        let c = Arc::new(ScanController::new(Arc::new(t)));
+        let mut cfg = ok_cfg(1, None);
+        cfg.custom_cidrs = vec!["203.0.113.0/29".to_owned()];
+        c.reserve().unwrap();
+        let summary = c.run_reserved_streaming(cfg, |_| {}).await.unwrap();
+        assert_eq!(summary.found, 1);
+        assert!(!c.is_running(), "guard must reset the busy flag");
+        assert!(
+            c.cancel_tx
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .is_none(),
+            "guard must clear the cancel slot"
+        );
+    }
+
+    #[test]
+    fn poisoned_locks_do_not_wedge_the_controller() {
+        let c = Arc::new(ScanController::new(Arc::new(FakeTransport::new())));
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = c.running.lock().unwrap();
+            panic!("poison running");
+        }));
+        assert!(
+            !c.is_running(),
+            "poisoned busy flag must still read as idle"
+        );
+        assert!(c.reserve().is_ok(), "reserve must tolerate a poisoned lock");
+        drop(c.reset_guard());
+        assert!(!c.is_running());
+
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = c.store.lock().unwrap();
+            panic!("poison store");
+        }));
+        assert!(c.results().is_empty());
+        assert!(!c.has_results());
     }
 
     #[tokio::test]

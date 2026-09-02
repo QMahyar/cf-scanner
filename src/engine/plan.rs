@@ -121,9 +121,9 @@ fn plan_count(pool: &CidrPool, n: u64, rng: &mut SplitMix64) -> Vec<PlanItem> {
     let mut offset = 0u128;
     let mut i = 0usize;
     for &cidr in pool.ranges() {
-        let end = offset + cidr.host_count();
+        let end = offset.saturating_add(cidr.host_count());
         let mut in_range: Vec<u128> = Vec::new();
-        while i < pick.len() && pick[i] < end {
+        while i < pick.len() && pick[i] < end && pick[i] >= offset {
             in_range.push(pick[i] - offset);
             i += 1;
         }
@@ -187,5 +187,101 @@ mod tests {
                 count: 1,
             }]
         );
+    }
+
+    #[test]
+    fn every_preset_covers_all_usable_hosts_of_slash31_and_slash32() {
+        for prefix in [31u8, 32] {
+            let net = format!("203.0.113.0/{prefix}");
+            let pool = CidrPool::parse(&net).unwrap();
+            for preset in [CdnPreset::Quick, CdnPreset::Normal, CdnPreset::Full] {
+                let plan = plan(
+                    &pool,
+                    &ScanTarget::Preset(preset.clone()),
+                    &mut SplitMix64::new(1),
+                );
+                assert_eq!(
+                    plan,
+                    vec![PlanItem::Every {
+                        cidr: parse_cidr(&net).unwrap()
+                    }],
+                    "{prefix} must route to Every, never lose a usable address"
+                );
+            }
+        }
+    }
+    #[test]
+    fn sampled_v6_preserves_first_and_last_addresses() {
+        let pool = CidrPool::parse("2001:db8::/120").unwrap();
+        let quick = plan(
+            &pool,
+            &ScanTarget::Preset(CdnPreset::Quick),
+            &mut SplitMix64::new(9),
+        );
+        let block = parse_cidr("2001:db8::/120").unwrap();
+        let full: std::collections::HashSet<IpAddr> = (0..256u128).map(|i| block.host(i)).collect();
+        let mut rng = SplitMix64::new(9);
+        let mut hosts: std::collections::HashSet<IpAddr> = std::collections::HashSet::new();
+        for item in &quick {
+            hosts.extend(super::super::plan_hosts_iter(item, &mut rng));
+        }
+        assert!(!hosts.is_empty());
+        assert!(
+            hosts.iter().all(|h| full.contains(h)),
+            "v6 sampling must stay inside the block with no broadcast-style trim"
+        );
+        let full_plan = plan(
+            &pool,
+            &ScanTarget::Preset(CdnPreset::Full),
+            &mut SplitMix64::new(9),
+        );
+        assert!(matches!(
+            full_plan.last(),
+            Some(PlanItem::Sample { count: 1, .. })
+        ));
+    }
+    #[test]
+    fn count_plan_is_deterministic_for_a_seed_and_varies_across_seeds() {
+        let pool = CidrPool::parse("203.0.113.0/22").unwrap();
+        let run = |seed: u64| plan(&pool, &ScanTarget::Count(64), &mut SplitMix64::new(seed));
+        let a = run(1234);
+        let b = run(1234);
+        assert_eq!(a, b, "same seed must reproduce the same plan");
+        let c = run(5678);
+        assert_ne!(a, c, "different seeds must diverge");
+        let mut rng = SplitMix64::new(1234);
+        let mut hosts: Vec<IpAddr> = Vec::new();
+        for item in &a {
+            hosts.extend(super::super::plan_hosts_iter(item, &mut rng));
+        }
+        assert_eq!(hosts.len(), 64);
+        assert!(hosts.iter().all(|ip| ip.is_ipv4()));
+    }
+
+    #[test]
+    fn count_plan_partition_survives_two_half_space_v6_ranges() {
+        let pool = CidrPool::parse("8000::/1\n::/1\n").unwrap();
+        assert_eq!(
+            pool.host_count(),
+            u128::MAX,
+            "two half-spaces must saturate, not overflow"
+        );
+        for seed in 0..8u64 {
+            let plan = plan(&pool, &ScanTarget::Count(8), &mut SplitMix64::new(seed));
+            let mut picked = 0usize;
+            for item in &plan {
+                match item {
+                    PlanItem::Hosts { cidr, offsets } => {
+                        for &o in offsets {
+                            assert!(o < cidr.host_count(), "offset escaped its range");
+                            assert!(cidr.host(o).is_ipv6(), "host leaked outside the v6 ranges");
+                            picked += 1;
+                        }
+                    }
+                    _ => panic!("count plan must be concrete hosts"),
+                }
+            }
+            assert_eq!(picked, 8, "seed {seed} must still yield eight hosts");
+        }
     }
 }

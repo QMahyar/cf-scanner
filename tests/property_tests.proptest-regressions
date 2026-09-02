@@ -5,3 +5,4 @@
 # It is recommended to check this file in to source control so that
 # everyone who runs the test benefits from these saved cases.
 cc 0ab9f7ebf03322a78a1a602ba499e3460f672eef53dfe1a90fe7a1a247294d83 # shrinks to addr = 224.0.0.0
+cc 87d03349b8820d54703a842e18e4875655bfb7b6530e7d0ced8eddd319f8c721 # shrinks to user_id = "aa00a00a-0aa0-a0a0-aaaa-a000a0a00aa0", server = "0.aaa000aaa0aaaa00aaaaa0a0.000aa0a000aa00a0.aaaa0aaaaaaaaa0aa00a0aaa0a00a.a0a0a00a00a00a0000a00aa0000.000aa00.a00aaaaaa00aa0aaaa0a.0aa.aa0aa0a000aa0000a00aa000aa0aaaa0.ay0bf9a0j468xhu639ej37s.zfz01w31.11rg2d6hmm19qf.n.ru2k7485jp5hldn244xy3os4tm0.39.u.v2wq46", port = 13681, path = "/1ap-", host = Some("front.example.com"), fp = "chrome", xudp = true

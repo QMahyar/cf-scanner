@@ -377,6 +377,80 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn warp_stop_condition_counts_only_zero_loss_endpoints() {
+        let t = FakeTransport::new()
+            .seq(
+                "203.0.113.1".parse().unwrap(),
+                2408,
+                vec![Ok(5), Err(ProbeError::Timeout { timeout_ms: 3000 })],
+            )
+            .ok("203.0.113.2".parse().unwrap(), 2408, 5);
+        let (c, _) = warp_controller(t);
+        let mut cfg = warp_cfg(2, &["203.0.113.1", "203.0.113.2"]);
+        cfg.stop = StopCondition {
+            found: 1,
+            cap: None,
+        };
+        let summary = run_local(&c, cfg, 1).await.unwrap();
+        assert_eq!(
+            summary.scanned, 2,
+            "a lossy endpoint must not satisfy stop.found"
+        );
+        assert_eq!(summary.found, 1);
+        assert_eq!(c.results()[0].ip, "203.0.113.2".parse::<IpAddr>().unwrap());
+    }
+
+    #[tokio::test]
+    async fn warp_cancel_races_in_flight_probes() {
+        let mut t = FakeTransport::new().ok("203.0.113.1".parse().unwrap(), 2408, 5);
+        t.rendezvous = Some(Arc::new(tokio::sync::Barrier::new(2)));
+        let (c, _) = warp_controller(t);
+        let mut cfg = warp_cfg(2, &["203.0.113.1"]);
+        cfg.stop = StopCondition {
+            found: 100,
+            cap: None,
+        };
+        cfg.concurrency = 1;
+        let handle = tokio::spawn({
+            let c = c.clone();
+            async move { run_local(&c, cfg, 1).await.unwrap() }
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        c.cancel();
+        let summary = handle.await.unwrap();
+        assert!(
+            summary.cancelled,
+            "the run must report the cancel: scanned={} found={}",
+            summary.scanned, summary.found
+        );
+        assert_eq!(summary.scanned, 0, "the parked probe must never complete");
+        assert_eq!(summary.found, 0);
+        assert!(c.results().is_empty(), "no verdict from an aborted probe");
+    }
+
+    #[tokio::test]
+    async fn warp_completed_endpoints_keep_store_in_sync_with_summary() {
+        let mut t = FakeTransport::new();
+        for i in 1..=4u8 {
+            t = t.ok(format!("203.0.113.{i}").parse().unwrap(), 2408, 5);
+        }
+        let (c, _) = warp_controller(t);
+        let cfg = warp_cfg(
+            1,
+            &["203.0.113.1", "203.0.113.2", "203.0.113.3", "203.0.113.4"],
+        );
+        let summary = run_local(&c, cfg, 1).await.unwrap();
+        assert!(!summary.cancelled);
+        assert_eq!(summary.found, 4);
+        assert_eq!(summary.scanned, 4);
+        assert_eq!(
+            c.results().len(),
+            summary.found as usize,
+            "store must match the summary"
+        );
+    }
+
+    #[tokio::test]
     async fn warp_full_pool_scan_visits_every_endpoint() {
         let (c, _) = warp_controller(FakeTransport::new());
         let mut cfg = warp_cfg(1, &[]);

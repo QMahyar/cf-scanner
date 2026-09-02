@@ -113,7 +113,7 @@ async fn run_attempt(
         }
     };
 
-    let mut all_ok = true;
+    let mut all_ok = !targets.is_empty();
     let mut colo = None;
     let mut tunnel: Option<(Target, LiveTunnel)> = None;
     for target in &targets {
@@ -364,26 +364,39 @@ async fn read_response_marker(
     match protocol {
         Protocol::Vless => {
             let mut first = [0u8; 1];
-            stream.read_exact(&mut first).await?;
+            stream
+                .read_exact(&mut first)
+                .await
+                .context("reading vless response header")?;
             if first[0] != 0 {
                 return Ok(Box::new(PrefixedReader::new(first.to_vec(), stream)));
             }
             let mut addons_len = [0u8; 1];
-            stream.read_exact(&mut addons_len).await?;
+            stream
+                .read_exact(&mut addons_len)
+                .await
+                .context("reading vless addons length")?;
             if addons_len[0] > 0 {
                 let mut addons = vec![0u8; addons_len[0] as usize];
-                stream.read_exact(&mut addons).await?;
+                stream
+                    .read_exact(&mut addons)
+                    .await
+                    .context("reading vless addons")?;
             }
             Ok(stream)
         }
         Protocol::Trojan => {
-            let mut peek = [0u8; 3];
+            let mut peek = [0u8; 2];
             stream.read_exact(&mut peek).await?;
-            if peek == *b"\r\n\x00" {
-                Ok(stream)
-            } else {
-                Ok(Box::new(PrefixedReader::new(peek.to_vec(), stream)))
+            if peek == *b"\r\n" {
+                // WHY: legacy trojan servers emit a bare CRLF ack before the response.
+                return Ok(stream);
             }
+            let mut third = [0u8; 1];
+            stream.read_exact(&mut third).await?;
+            let mut prefix = peek.to_vec();
+            prefix.push(third[0]);
+            Ok(Box::new(PrefixedReader::new(prefix, stream)))
         }
         _ => bail!("inline probe cannot read a marker for {protocol:?}"),
     }
@@ -487,6 +500,7 @@ mod tests {
         Reject,
         Stall,
         AcknowledgeThenPass,
+        BareCrlfAckThenPass,
         NoVlessHeader,
     }
 
@@ -574,6 +588,9 @@ mod tests {
         }
         if protocol == Protocol::Trojan && matches!(behavior, ServerBehavior::AcknowledgeThenPass) {
             conn.write_all(b"\r\n\x00").await?;
+        }
+        if protocol == Protocol::Trojan && matches!(behavior, ServerBehavior::BareCrlfAckThenPass) {
+            conn.write_all(b"\r\n").await?;
         }
         let mut served = 0u32;
         loop {
@@ -796,6 +813,21 @@ mod tests {
         assert!(
             result.passed,
             "the legacy `\\r\\n\\x00` ack must be skipped: {result:?}"
+        );
+    }
+
+    #[test]
+    fn trojan_bare_crlf_ack_is_skipped_not_parsed_as_http() {
+        let server = spawn_fake_server(Protocol::Trojan, true, ServerBehavior::BareCrlfAckThenPass);
+        let mut spec = parse_uri(&format!(
+            "trojan://{TROJAN_PASSWORD}@127.0.0.1:443?security=tls"
+        ))
+        .unwrap();
+        spec.port = server.addr.port();
+        let result = probe(spec, &["http://probe.test/x"], 2_000);
+        assert!(
+            result.passed,
+            "a bare CRLF ack must not be re-parsed as a response head: {result:?}"
         );
     }
 
@@ -1143,6 +1175,77 @@ mod tests {
         let (status, got) = read_http_response(&mut &resp[..]).await.unwrap();
         assert_eq!(status, 200);
         assert_eq!(got.len(), MAX_PROBE_BODY_BYTES);
+    }
+
+    struct EofAfterHeaders {
+        head: Vec<u8>,
+        head_pos: usize,
+    }
+
+    impl AsyncRead for EofAfterHeaders {
+        fn poll_read(
+            mut self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            buf: &mut tokio::io::ReadBuf<'_>,
+        ) -> Poll<io::Result<()>> {
+            let data = &self.head;
+            if self.head_pos < data.len() {
+                let n = buf.remaining().min(data.len() - self.head_pos);
+                buf.put_slice(&data[self.head_pos..self.head_pos + n]);
+                self.head_pos += n;
+                return Poll::Ready(Ok(()));
+            }
+            Poll::Ready(Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "peer closed without close_notify",
+            )))
+        }
+    }
+
+    #[tokio::test]
+    async fn abrupt_tls_eof_ends_a_close_delimited_probe_body() {
+        let mut stream = EofAfterHeaders {
+            head: b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\ncolo=AMS".to_vec(),
+            head_pos: 0,
+        };
+        let (status, body) = read_http_response(&mut stream)
+            .await
+            .expect("an abrupt TLS close ends a close-delimited body");
+        assert_eq!(status, 200);
+        assert_eq!(body, b"colo=AMS");
+    }
+
+    #[tokio::test]
+    async fn truncated_content_length_body_fails_explicitly() {
+        let resp = b"HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\nnope";
+        assert!(read_http_response(&mut &resp[..]).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn content_length_over_the_cap_fails_explicitly() {
+        let n = MAX_PROBE_BODY_BYTES + 1;
+        let resp = format!("HTTP/1.1 200 OK\r\nContent-Length: {n}\r\n\r\n").into_bytes();
+        let err = read_http_response(&mut &resp[..])
+            .await
+            .expect_err("an over-cap Content-Length must fail explicitly");
+        assert!(err.to_string().contains("exceeds"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn chunked_body_over_the_cap_fails_explicitly() {
+        let mut resp = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n".to_vec();
+        let chunk_size = 64 * 1024;
+        let mut chunk = format!("{chunk_size:x}\r\n").into_bytes();
+        chunk.extend(std::iter::repeat_n(b'x', chunk_size));
+        chunk.extend_from_slice(b"\r\n");
+        for _ in 0..17 {
+            resp.extend_from_slice(&chunk);
+        }
+        resp.extend_from_slice(b"0\r\n\r\n");
+        let err = read_http_response(&mut &resp[..])
+            .await
+            .expect_err("an over-cap chunked body must fail explicitly");
+        assert!(err.to_string().contains("exceeds"), "{err}");
     }
 
     #[test]

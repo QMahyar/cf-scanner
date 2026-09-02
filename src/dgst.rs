@@ -19,8 +19,12 @@ pub fn dgst_sha256_hex(text: &str) -> Option<String> {
         }
     }
     let remainder = &rest[1..];
-    let hex = remainder.split([' ', '\t']).next()?;
-    (hex.len() == 64 && hex.bytes().all(|b| b.is_ascii_hexdigit()))
+    let hex = remainder.split(' ').next()?;
+    let tail_ok = match &remainder[hex.len()..] {
+        "" => true,
+        t => t.strip_prefix(' ').is_some_and(|t| !t.is_empty()),
+    };
+    (tail_ok && hex.len() == 64 && hex.bytes().all(|b| b.is_ascii_hexdigit()))
         .then(|| hex.to_ascii_lowercase())
 }
 
@@ -117,5 +121,23 @@ mod tests {
     fn filename_with_spaces_still_parses() {
         let dgst = format!("SHA2-256= {} my file with spaces.zip", "d".repeat(64));
         assert_eq!(dgst_sha256_hex(&dgst), Some("d".repeat(64)));
+    }
+
+    #[test]
+    fn tab_before_filename_is_rejected_like_the_npm_parser() {
+        let dgst = format!("SHA2-256= {}\txray.zip", "a".repeat(64));
+        assert_eq!(dgst_sha256_hex(&dgst), None);
+        let dgst = format!("SHA2-256= {}\t", "a".repeat(64));
+        assert_eq!(dgst_sha256_hex(&dgst), None);
+        let dgst = format!("SHA2-256= {} x", "a".repeat(64));
+        assert_eq!(dgst_sha256_hex(&dgst), Some("a".repeat(64)));
+        let empty_name = format!("SHA2-256= {} ", "a".repeat(64));
+        assert_eq!(dgst_sha256_hex(&empty_name), None);
+    }
+
+    #[test]
+    fn uppercase_label_and_mixed_case_hex_are_handled() {
+        let dgst = format!("SHA2-256= {}", "ABCDEF01".repeat(8));
+        assert_eq!(dgst_sha256_hex(&dgst), Some("abcdef01".repeat(8)));
     }
 }

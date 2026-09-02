@@ -425,6 +425,28 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn write_secret_overwrite_keeps_owner_access_and_correct_content() {
+        let dir =
+            std::env::temp_dir().join(format!("cf-scanner-write-secret-ov-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("secret.json");
+
+        write_secret(&file, b"first").expect("first write must succeed");
+        write_secret(&file, b"second-payload").expect("overwrite must succeed");
+        assert_eq!(std::fs::read(&file).unwrap(), b"second-payload");
+
+        std::fs::OpenOptions::new()
+            .write(true)
+            .truncate(true)
+            .open(&file)
+            .expect("owner retains write access after overwrite");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn data_dir_honors_cf_scanner_data_dir_override() {
         let _guard = DATA_DIR_LOCK.blocking_lock();

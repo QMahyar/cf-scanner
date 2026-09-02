@@ -21,24 +21,37 @@ pub const SERVER_PUBLIC_KEY_B64: &str = "bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wP
 const DUMMY_STATIC_PRIVATE: [u8; 32] = [0u8; 32];
 
 pub fn server_public_key() -> anyhow::Result<PublicKey> {
-    let b64 = crate::warpgen::persisted_server_public_key()
-        .unwrap_or_else(|| SERVER_PUBLIC_KEY_B64.to_owned());
-    let bytes = match base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &b64) {
-        Ok(b) => b,
+    fn bundled() -> anyhow::Result<PublicKey> {
+        let bytes = base64::Engine::decode(
+            &base64::engine::general_purpose::STANDARD,
+            SERVER_PUBLIC_KEY_B64,
+        )
+        .map_err(|e| anyhow::anyhow!("bundled WARP server key must decode: {e}"))?;
+        let arr = <[u8; 32]>::try_from(bytes.as_slice())
+            .map_err(|_| anyhow::anyhow!("bundled WARP server key must be 32 bytes"))?;
+        Ok(PublicKey::from(arr))
+    }
+    let Some(b64) = crate::warpgen::persisted_server_public_key() else {
+        return bundled();
+    };
+    let decoded = match base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &b64) {
+        Ok(bytes) => bytes,
         Err(e) => {
             tracing::warn!(
-                "failed to decode WARP server public key: {e}; falling back to bundled key"
+                "failed to decode persisted WARP server public key: {e}; falling back to bundled key"
             );
-            base64::Engine::decode(
-                &base64::engine::general_purpose::STANDARD,
-                SERVER_PUBLIC_KEY_B64,
-            )
-            .map_err(|e| anyhow::anyhow!("bundled WARP server key must decode: {e}"))?
+            return bundled();
         }
     };
-    let arr = <[u8; 32]>::try_from(bytes.as_slice())
-        .map_err(|_| anyhow::anyhow!("WARP server public key is not 32 bytes"))?;
-    Ok(PublicKey::from(arr))
+    match <[u8; 32]>::try_from(decoded.as_slice()) {
+        Ok(arr) => Ok(PublicKey::from(arr)),
+        Err(_) => {
+            tracing::warn!(
+                "persisted WARP server public key is not 32 bytes; falling back to bundled key"
+            );
+            bundled()
+        }
+    }
 }
 
 pub fn bundled_pool() -> CidrPool {
@@ -111,8 +124,9 @@ impl SocketCache {
         if let Some(existing) = map.get(&(ip, port)) {
             return Ok(existing.clone());
         }
-        if map.len() >= MAX_SOCKETS {
-            let victim = map.keys().next().copied().expect("cache is non-empty here");
+        if map.len() >= MAX_SOCKETS
+            && let Some(victim) = map.keys().next().copied()
+        {
             map.remove(&victim);
         }
         map.insert((ip, port), socket.clone());
@@ -208,6 +222,14 @@ enum ProbeDepth {
     FullSession,
 }
 
+async fn send_bounded(socket: &UdpSocket, pkt: &[u8], timeout_ms: u64) -> Result<(), ProbeError> {
+    timeout(Duration::from_millis(timeout_ms), socket.send(pkt))
+        .await
+        .map_err(|_| ProbeError::Timeout { timeout_ms })?
+        .map_err(|_| ProbeError::Refused("udp send failed"))?;
+    Ok(())
+}
+
 async fn probe_once(
     sockets: &SocketCache,
     static_secret: StaticSecret,
@@ -237,10 +259,7 @@ async fn probe_once(
     };
     let socket = sockets.get_or_bind(ip, port).await?;
     let started = std::time::Instant::now();
-    socket
-        .send(&init)
-        .await
-        .map_err(|_| ProbeError::Refused("udp send failed"))?;
+    send_bounded(&socket, &init, timeout_ms).await?;
 
     let mut reply = [0u8; 2048];
     match timeout(Duration::from_millis(timeout_ms), socket.recv(&mut reply)).await {
@@ -281,10 +300,7 @@ async fn finish_full_session(
     match tunn.decapsulate(None, response, &mut out) {
         TunnResult::Done => {}
         TunnResult::WriteToNetwork(keepalive) => {
-            socket
-                .send(keepalive)
-                .await
-                .map_err(|_| ProbeError::Refused("keepalive send failed"))?;
+            send_bounded(socket, keepalive, timeout_ms).await?;
         }
         TunnResult::Err(_) => {
             return Err(ProbeError::Refused("handshake rejected under this keypair"));
@@ -299,10 +315,7 @@ async fn finish_full_session(
         TunnResult::Err(_) => return Err(ProbeError::Refused("session not ready for data")),
         _ => return Err(ProbeError::Refused("unexpected encapsulate result")),
     };
-    socket
-        .send(data)
-        .await
-        .map_err(|_| ProbeError::Refused("data send failed"))?;
+    send_bounded(socket, data, timeout_ms).await?;
 
     let mut reply = [0u8; 2048];
     let elapsed_ms = started.elapsed().as_millis().min(u64::MAX as u128) as u64;
@@ -420,6 +433,31 @@ mod tests {
         );
         std::fs::write(dir.join("identity.json"), identity).unwrap();
         assert_eq!(server_public_key().unwrap().to_bytes(), [7u8; 32]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn corrupt_persisted_server_key_falls_back_to_bundled() {
+        let _guard = crate::warpgen::tests::IDENTITY_LOCK.lock().unwrap();
+        let dir = std::env::temp_dir().join("cf-scanner-warp-key-corrupt-test");
+        unsafe { std::env::set_var("CF_SCANNER_DATA_DIR", &dir) };
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let identity = format!(
+            r#"{{"id":"t","token":"t","private_key":"{}","client_id":"c","account_type":"free","license":null,"created_at":0,"peer_public_key":"not base64 at all"}}"#,
+            base64::Engine::encode(&base64::engine::general_purpose::STANDARD, [1u8; 32])
+        );
+        std::fs::write(dir.join("identity.json"), identity).unwrap();
+        let bundled = base64::Engine::decode(
+            &base64::engine::general_purpose::STANDARD,
+            SERVER_PUBLIC_KEY_B64,
+        )
+        .unwrap();
+        assert_eq!(
+            server_public_key().unwrap().to_bytes(),
+            <[u8; 32]>::try_from(bundled.as_slice()).unwrap(),
+            "a corrupt persisted key must fall back to the bundled constant, not error"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
