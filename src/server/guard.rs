@@ -30,7 +30,7 @@ pub(crate) fn host_allowed(host: &str) -> bool {
 }
 
 /// The served port, threaded into the Origin check so "first-party" means
-/// this process's UI and not any other loopback listener (for IP hosts,
+/// this process's API and not any other loopback listener (for IP hosts,
 /// browsers classify a different port as same-site, so only the port match
 /// can tell them apart).
 #[derive(Clone, Copy)]
@@ -50,9 +50,9 @@ pub(crate) fn origin_allowed(origin: &str, cfg: GuardConfig) -> bool {
     host_allowed(host) && parsed.port_or_known_default() == Some(cfg.port)
 }
 
-/// Rejects requests that are not from the local UI: a foreign Host header,
+/// Rejects requests that are not first-party: a foreign Host header,
 /// a cross-origin browser request (Origin / Sec-Fetch-Site), or no Host at
-/// all. Browsers and curl always send Host; the UI is same-origin.
+/// all. Browsers and curl always send Host; local API clients are same-origin.
 ///
 /// State-changing methods additionally require a custom header
 /// (`X-Requested-With: cf-scanner`). Browsers never attach custom headers to
@@ -136,13 +136,7 @@ where
     }
 }
 
-/// Directives every HTML response must carry. The compiled UI ships real
-/// asset files, so everything stays 'self' — no inline script or style.
-/// Runtime-dynamic Svelte styles cannot be hash-pinned, so `style-src` allows `'unsafe-inline'`; `script-src`/`script-src-attr` stay locked, so style injection adds no script-execution path.
-pub(crate) const SECURITY_CSP: &str = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self' data:; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'; script-src-attr 'none'";
-
-/// Adds the security headers every response should carry, leaving any header
-/// the handler already set untouched (the HTML handlers set their own CSP).
+/// Adds the security headers every response should carry.
 pub(crate) async fn security_headers(request: Request, next: Next) -> Response {
     let mut response = next.run(request).await;
     let headers = response.headers_mut();

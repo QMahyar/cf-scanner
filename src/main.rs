@@ -37,7 +37,7 @@ struct Cli {
 
 const EXAMPLES: &str = "\
 Examples:
-  cf-scanner serve --open                 Start API+UI and open the browser
+  cf-scanner serve                        Start the localhost API (default port 8765)
   cf-scanner scan --preset quick          Fast CDN sweep (1 IP per /24)
   cf-scanner scan --mode warp --count 512 WARP endpoint discovery
   cf-scanner scan --phase2-configs vless://... --phase2-fragment medium
@@ -46,14 +46,11 @@ Results print as newline-delimited JSON; pipe to jq for processing.";
 
 #[derive(Subcommand)]
 enum Command {
-    /// Serve the local API + browser UI on 127.0.0.1
+    /// Serve the local API on 127.0.0.1
     Serve {
         /// Port to bind (default 8765)
         #[arg(long, default_value_t = 8765)]
         port: u16,
-        /// Open the browser at the served URL once the listener is up
-        #[arg(long)]
-        open: bool,
         /// Keep serving from the Windows system tray; its menu drives the API
         #[arg(long)]
         tray: bool,
@@ -68,7 +65,7 @@ enum Command {
         #[command(flatten)]
         args: Box<ScanArgs>,
     },
-    /// Interactive wizard over the same engine the UI uses
+    /// Interactive wizard over the same engine the API uses
     Wizard,
     /// Manage bundled Cloudflare IP ranges
     Ranges {
@@ -551,10 +548,9 @@ async fn run(cli: Cli) -> Result<()> {
     match cli.command {
         Command::Serve {
             port,
-            open,
             tray,
             autostart,
-        } => serve(port, open, tray, autostart).await,
+        } => serve(port, tray, autostart).await,
         Command::Scan { args } => run_scan(*args).await,
         Command::Wizard => {
             let controller = Arc::new(engine::ScanController::new(Arc::new(
@@ -744,12 +740,7 @@ fn run_export_config(
     Ok(uri)
 }
 
-async fn serve(
-    port: u16,
-    open_ui: bool,
-    tray_enabled: bool,
-    autostart: Option<AutostartArg>,
-) -> Result<()> {
+async fn serve(port: u16, tray_enabled: bool, autostart: Option<AutostartArg>) -> Result<()> {
     // Removal runs before bind: unregistering must not depend on the server
     // coming up (a busy port must not trap the entry in the registry).
     if autostart == Some(AutostartArg::Remove) {
@@ -786,17 +777,13 @@ async fn serve(
         }
     }
     if tray_enabled {
-        // --tray never auto-opens the browser: the tray menu's "Open UI" is
-        // the way in, so spawning can fail silently without hurting serve.
-        if let Err(err) = tray::spawn(url.clone(), false) {
+        if let Err(err) = tray::spawn(url.clone()) {
             tracing::warn!("could not start system tray: {err:#}");
         }
-    } else if open_ui {
-        open_browser(&url);
     }
     // Graceful shutdown waits for in-flight responses, but an idle SSE
-    // stream is open forever by design — bound the wait so a connected UI
-    // can never hang process exit (the stream itself ends on terminal or
+    // stream is open forever by design — bound the wait so a connected SSE
+    // client can never hang process exit (the stream itself ends on terminal or
     // Lagged; this only cuts idle ones at shutdown).
     const SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
     let (shutdown_fired_tx, mut shutdown_fired) = tokio::sync::watch::channel(false);
@@ -834,26 +821,6 @@ fn ensure_autostart_valid(tray_enabled: bool, autostart: Option<AutostartArg>) -
         return Err(anyhow!("--autostart requires --tray"));
     }
     Ok(())
-}
-
-/// Open `url` in the default browser (`serve --open`). Best-effort: a
-/// missing opener must never take the server down.
-fn open_browser(url: &str) {
-    #[cfg(target_os = "windows")]
-    let spawned = {
-        use std::os::windows::process::CommandExt as _;
-        std::process::Command::new("cmd")
-            .args(["/c", "start", "", url])
-            .creation_flags(0x0800_0000) // CREATE_NO_WINDOW: no console flash
-            .spawn()
-    };
-    #[cfg(target_os = "macos")]
-    let spawned = std::process::Command::new("open").arg(url).spawn();
-    #[cfg(all(unix, not(target_os = "macos")))]
-    let spawned = std::process::Command::new("xdg-open").arg(url).spawn();
-    if let Err(err) = spawned {
-        tracing::warn!("could not open browser at {url}: {err}");
-    }
 }
 
 /// Bind failure message: a busy port gets a hint, anything else stays
@@ -1423,12 +1390,10 @@ mod tests {
         match cli.command {
             Command::Serve {
                 port,
-                open,
                 tray,
                 autostart,
             } => {
                 assert_eq!(port, 8765);
-                assert!(!open);
                 assert!(tray);
                 assert_eq!(autostart, None);
             }
@@ -1470,7 +1435,7 @@ mod tests {
     fn autostart_enable_requires_tray_but_remove_does_not() {
         // The old clap `requires = "tray"` moved here so `remove` can run
         // standalone; enabling without a tray would register an entry that
-        // cannot bring the UI up.
+        // cannot bring the API-driven tray up.
         assert!(ensure_autostart_valid(false, Some(AutostartArg::Enable)).is_err());
         let err = ensure_autostart_valid(false, Some(AutostartArg::Enable)).unwrap_err();
         assert!(err.to_string().contains("--tray"), "{err:#}");

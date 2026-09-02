@@ -195,7 +195,7 @@ async fn post_scan(addr: SocketAddr, body: &str) -> u16 {
 }
 
 /// Marker the guard requires on every state-changing request (mirrors the
-/// UI's api.ts and the tray client).
+/// tray client).
 pub(crate) const CSRF_MARKER: &str = "X-Requested-With: cf-scanner\r\n";
 
 /// POST /api/scan returning the status AND the raw response text, so
@@ -226,62 +226,9 @@ fn script_all_hosts(t: &FakeTransport, latency: u32) {
 }
 
 #[tokio::test]
-async fn serves_index_html() {
-    let addr = serve(FakeTransport::new()).await;
-    let (status, body) = request(
-        addr,
-        "GET / HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n",
-        None,
-    )
-    .await;
-    assert_eq!(status, 200);
-    assert!(body.contains("CF-Scanner"));
-}
-
-#[tokio::test]
-async fn index_carries_hardened_security_headers() {
-    let addr = serve(FakeTransport::new()).await;
-    let (status, text) = request(
-        addr,
-        "GET / HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n",
-        None,
-    )
-    .await;
-    assert_eq!(status, 200);
-    let headers = text.split_once("\r\n\r\n").map(|(h, _)| h).unwrap_or("");
-    let lower = headers.to_ascii_lowercase();
-    assert!(
-        lower.contains("referrer-policy: no-referrer"),
-        "missing Referrer-Policy: {headers}"
-    );
-    assert!(
-        lower.contains("x-content-type-options: nosniff"),
-        "missing nosniff: {headers}"
-    );
-    let csp = headers
-        .lines()
-        .find(|l| {
-            l.to_ascii_lowercase()
-                .starts_with("content-security-policy")
-        })
-        .expect("CSP header present");
-    for directive in [
-        "form-action 'self'",
-        "script-src-attr 'none'",
-        "base-uri 'self'",
-        "object-src 'none'",
-        "script-src 'self'",
-        "style-src 'self' 'unsafe-inline'",
-        "font-src 'self' data:",
-    ] {
-        assert!(csp.contains(directive), "CSP missing {directive}: {csp}");
-    }
-}
-
-#[tokio::test]
 async fn api_responses_carry_security_headers() {
-    // "ideally all responses": the middleware adds the safe defaults to
-    // API payloads and SSE too, not just the HTML page.
+    // The middleware adds the safe defaults to every API payload and SSE
+    // stream.
     let addr = serve(FakeTransport::new()).await;
     let (status, text) = request(
         addr,
@@ -841,7 +788,7 @@ async fn origin_must_carry_the_served_port() {
             "GET /api/status HTTP/1.1\r\nHost: 127.0.0.1\r\nOrigin: {origin}\r\nConnection: close\r\n\r\n"
         )
     };
-    // Same origin as the served UI: allowed.
+    // Same origin as the served API: allowed.
     let own = format!("http://127.0.0.1:{}", addr.port());
     let (status, text) = request(addr, &req_for(&own), None).await;
     assert_eq!(status, 200, "{text}");

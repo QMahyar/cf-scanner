@@ -1,7 +1,7 @@
-//! Localhost HTTP API + embedded browser UI, both thin clients of the one
-//! ScanController. Routes map engine state into the `api::types` contract
-//! directly (those types ARE the wire contract); no engine type is
-//! serialized.
+//! Localhost HTTP API, a thin client of the one ScanController. Routes map
+//! engine state into the `api::types` contract directly (those types ARE the
+//! wire contract); no engine type is serialized. There is no frontend: the
+//! server answers API routes and uniform JSON errors only.
 
 use std::net::Ipv4Addr;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -32,23 +32,11 @@ mod sse;
 mod state;
 
 use self::error::{ApiError, map_register_error};
-use self::guard::{JsonBody, SECURITY_CSP, localhost_only, security_headers};
+use self::guard::{JsonBody, localhost_only, security_headers};
 use self::sse::events;
 use self::state::{
     AppState, REGISTER_COOLDOWN, RangesState, WarpRegistrar, XRAY_DOWNLOAD_COOLDOWN, XrayFetcher,
 };
-
-const EMBEDDED_INDEX: &str = "index.html";
-
-/// The compiled Svelte UI (`ui/dist`, committed so a plain `cargo build`
-/// works without Node). Release builds serve the embedded assets; debug
-/// builds prefer live `ui/dist` files on disk (via `cfg(debug_assertions)`
-/// fallback) so `npm run build` output shows up on browser refresh without
-/// a cargo rebuild, falling back to the embedded copy when the file is
-/// absent (e.g. in tests or a pure `cargo run` without a prior UI build).
-#[derive(rust_embed::RustEmbed)]
-#[folder = "ui/dist"]
-struct UiAssets;
 
 pub fn router(controller: Arc<ScanController>, bound_port: u16) -> Router {
     let ranges = RangesState::load();
@@ -85,7 +73,6 @@ fn router_with_dir(
         xray_fetch,
     });
     Router::new()
-        .route("/", get(index))
         .route("/api/status", get(status_handler))
         .route("/api/xray/status", get(xray_status))
         .route("/api/xray/download", post(xray_download))
@@ -100,7 +87,7 @@ fn router_with_dir(
         .route("/api/bundle", get(export::bundle))
         .route("/api/results/export", get(export::result_export))
         .with_state(state)
-        .fallback(fallback)
+        .fallback(not_found)
         .method_not_allowed_fallback(method_not_allowed)
         .layer(DefaultBodyLimit::max(2 * 1024 * 1024))
         .layer(middleware::from_fn_with_state(
@@ -110,75 +97,15 @@ fn router_with_dir(
         .layer(middleware::from_fn(security_headers))
 }
 
-/// Unmatched paths serve the embedded Svelte UI: `/` and `/index.html` the
-/// page shell, hashed asset files by exact path; everything else (including
-/// any `/api/*` miss) keeps the uniform JSON error envelope. The UI is a
-/// single page with no client-side routing, so unknown paths stay 404 —
-/// no SPA fallback widening the surface.
-async fn fallback(uri: Uri) -> Response {
+/// No static frontend is served: every unmatched non-API path (and any
+/// `/api/*` miss) keeps the uniform JSON error envelope.
+async fn not_found(uri: Uri) -> Response {
     let path = uri.path();
     if path.starts_with("/api/") {
-        return ApiError::not_found(format!("no such endpoint: {path}")).into_response();
+        ApiError::not_found(format!("no such endpoint: {path}")).into_response()
+    } else {
+        ApiError::not_found("not found").into_response()
     }
-    let file = match path {
-        "/" | "/index.html" => EMBEDDED_INDEX,
-        p => p.trim_start_matches('/'),
-    };
-    ui_response(file)
-        .await
-        .unwrap_or_else(|| ApiError::not_found("not found").into_response())
-}
-
-fn ui_mime(file: &str) -> &'static str {
-    match file.rsplit('.').next().unwrap_or("") {
-        "html" => "text/html; charset=utf-8",
-        "js" | "mjs" => "text/javascript",
-        "css" => "text/css",
-        "woff2" => "font/woff2",
-        "woff" => "font/woff",
-        "svg" => "image/svg+xml",
-        "json" => "application/json",
-        _ => "application/octet-stream",
-    }
-}
-
-fn ui_headers(file: &str) -> axum::http::HeaderMap {
-    let mut headers = axum::http::HeaderMap::new();
-    headers.insert(
-        axum::http::header::CONTENT_TYPE,
-        ui_mime(file).parse().unwrap(),
-    );
-    headers.insert("content-security-policy", SECURITY_CSP.parse().unwrap());
-    headers.insert("x-content-type-options", "nosniff".parse().unwrap());
-    headers.insert("referrer-policy", "no-referrer".parse().unwrap());
-    headers
-}
-
-async fn ui_response(file: &str) -> Option<Response> {
-    #[cfg(debug_assertions)]
-    {
-        // Debug prefers live disk files so `cd ui && npm run build` is visible
-        // without a cargo rebuild; falls back to embedded when absent. The
-        // disk read is restricted to plain relative paths: besides `..`, any
-        // absolute/rooted/drive-prefixed component is rejected — on Windows,
-        // `Path::join` with e.g. `C:/x` or `\x` replaces the base and would
-        // escape ui/dist entirely.
-        let escapes = file.contains("..")
-            || std::path::Path::new(file).components().any(|c| {
-                matches!(
-                    c,
-                    std::path::Component::Prefix(_) | std::path::Component::RootDir
-                )
-            });
-        if !escapes {
-            let disk_path = std::path::Path::new("ui/dist").join(file);
-            if let Ok(bytes) = tokio::fs::read(&disk_path).await {
-                return Some((ui_headers(file), bytes).into_response());
-            }
-        }
-    }
-    let data = UiAssets::get(file)?;
-    Some((ui_headers(file), data.data).into_response())
 }
 
 /// Wrong method on a known path: 405 with the same JSON envelope as every
@@ -430,12 +357,6 @@ async fn ranges(State(state): State<Arc<AppState>>) -> Json<RangesPayload> {
         host_count: pool.host_count().min(u64::MAX as u128) as u64,
         last_updated,
     })
-}
-
-async fn index() -> Response {
-    ui_response(EMBEDDED_INDEX)
-        .await
-        .expect("ui/dist/index.html is embedded at compile time")
 }
 
 #[cfg(test)]

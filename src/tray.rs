@@ -1,10 +1,10 @@
 //! Windows system-tray integration for `serve --tray`.
 //!
-//! The tray is a thin client of the localhost HTTP API, exactly like the
-//! browser UI: the tray thread shares no state with the server and only
-//! POSTs to `http://127.0.0.1:<port>/api/...`, so the engine stays decoupled
-//! and testable. On non-Windows targets the tray is stubbed out with a
-//! warning; `serve` keeps running either way.
+//! The tray is a thin client of the localhost HTTP API: the tray thread
+//! shares no state with the server and only POSTs to
+//! `http://127.0.0.1:<port>/api/...`, so the engine stays decoupled and
+//! testable. On non-Windows targets the tray is stubbed out with a warning;
+//! `serve` keeps running either way.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
