@@ -1,38 +1,13 @@
 [workspace]
 members = ["cargo:."]
 
-# Config for 'dist'
 [dist]
-# The preferred dist version to use in CI (Cargo.toml SemVer syntax)
 cargo-dist-version = "0.32.0"
-# CI backends to support
 ci = "github"
-# The installers to generate for each app
 installers = ["msi", "powershell", "shell"]
-# wix/main.wxs carries a hand-added xray.exe component (self-contained MSI);
-# stop dist from regenerating/syncing it.
-# The GitHub workflow carries hand-added hardening (release tag-gate, artifact
-# attestations, concurrency guard, gate parity); dist would regenerate it
-# plain, so allow the CI file to stay dirty too.
 allow-dirty = ["msi", "ci"]
-# Target platforms to build apps for (Rust target-triple syntax)
-# macOS targets dropped: unsigned binaries + bundled xray trip Gatekeeper
-# quarantine; see docs/decisions/ADR-009.md. Restore once signing exists.
 targets = ["aarch64-unknown-linux-gnu", "x86_64-unknown-linux-gnu", "x86_64-pc-windows-msvc"]
 
-# Archives carry the per-platform xray binary next to cf-scanner itself:
-# build.rs overwrites the committed 0-byte placeholder with the checksum-
-# verified download whenever the `dist-bundle-xray` feature is on (dist builds
-# only) and deletes the other platform's placeholder, so the directory include
-# ships exactly one xray binary per target. The directory lands as
-# `bundled/<exe>` inside the archive; find_bundled() covers that layout.
-# Tracked placeholders stay 0 bytes; never commit the real binary (see ADR-001
-# and the placeholder-guard job in checks.yml). Treat `cargo-dist-version` as
-# the release toolchain pin: bump only with CI/tooling updates.
-# NOTE: dist-workspace.toml is parsed as the flat v0 schema - no nested
-# [dist.artifacts.archives] / [dist.builds.cargo] tables (they're ignored).
 include = ["data/bundled"]
 
-# Enable the release-bundling feature only for dist builds; dev builds stay
-# untouched (runtime fallback download covers them, per spec).
 features = ["dist-bundle-xray"]

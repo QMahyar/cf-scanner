@@ -11,9 +11,6 @@ rust-version = "1.88"
 [package.metadata.wix]
 upgrade-guid = "B4B16BC8-2905-4E0E-A024-47552733A782"
 path-guid = "77D27897-3FD7-4F5E-8E8D-752186082D10"
-# Renders the license sidecar component into wix/main.wxs (cargo-wix writes
-# wix/LICENSE.rtf from the MIT template); required for MSI to be self-contained
-# per review Domain 5. `eula` stays false so no EULA dialog is shown.
 license = true
 eula = false
 
@@ -44,9 +41,6 @@ url = "2.5.8"
 webpki-roots = "0.26"
 zip = { version = "7.2.0", default-features = false, features = ["deflate"] }
 
-# Windows system tray + HKCU autostart; absent from non-Windows builds so the
-# tray stub never drags GTK/appindicator into Linux/macOS builds. default-features
-# off: tray-icon's defaults (libxdo/gtk) are Linux-only extras we never need.
 [target.'cfg(windows)'.dependencies]
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "blocking"] }
 tray-icon = { version = "0.24", default-features = false }
@@ -58,12 +52,7 @@ proptest = "1"
 rcgen = "0.13"
 
 [features]
-# dist-only: build.rs bundles the checksum-verified xray binary into release
-# archives (see dist-workspace.toml). Dev builds never enable this.
 dist-bundle-xray = []
-# test-only helpers: exposes `FakeTransport` / `FakeTunnelProbe` for
-# integration tests (e.g. `tests/cli_scan_agent.rs`) without needing `#[cfg(test)]`.
-# No runtime code depends on this; it is never enabled in release builds.
 test-helpers = []
 
 [build-dependencies]
@@ -71,13 +60,10 @@ flate2 = "1"
 sha2 = "0.11.0"
 zip = { version = "7.2.0", default-features = false, features = ["deflate"] }
 
-# The profile that 'dist' will build with
 [profile.dist]
 inherits = "release"
 lto = "thin"
 
-# Review Domain 4: keep dev `cargo build --release` on par with dist builds
-# (release artifacts are produced with LTO + single codegen unit).
 [profile.release]
 lto = "thin"
 codegen-units = 1
