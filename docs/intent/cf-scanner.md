@@ -1,5 +1,11 @@
 # CF-Scanner — Confirmed Intent
 
+> **Architecture note (2026-09-02):** ADR-013 removed the HTTP server, browser
+> frontend, and tray — the product is a pure CLI. The engine/scan-model
+> sections below are still accurate. The browser-frontend intent (UI) is
+> expected to return per the user's statement; the CLI-first architecture
+> becomes the foundation for whatever UI replaces the Svelte SPA.
+
 Date: 2026-08-12
 Status: Confirmed by user (interview-me skill)
 
