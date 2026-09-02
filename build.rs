@@ -1,16 +1,3 @@
-//! Build-time data embedding (Task 15, Task 17):
-//! - db-ip Lite country mmdb (embedded): the official host only ships gzipped
-//!   builds, so download + decompress + cache. The version and its SHA-256
-//!   are pinned in `data/geoip-version.txt`; a failed download or checksum
-//!   mismatch fails the build (never embed an empty db). Setting
-//!   `CFSCANNER_OFFLINE_BUILD=1` skips the network and embeds a small
-//!   placeholder instead — runtime country lookups then return None (see
-//!   src/geo.rs), never a hard failure.
-//! - dist builds only (`dist-bundle-xray` feature): the pinned, checksum
-//!   verified xray binary, written over the committed placeholder in
-//!   `data/bundled/` so release archives carry it next to the app binary.
-//!   Dev builds are untouched; the runtime fallback download covers them.
-
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -19,8 +6,6 @@ use flate2::read::GzDecoder;
 use sha2::{Digest, Sha256};
 use zip::ZipArchive;
 
-// Same grammar file src/xray.rs parses at runtime; included so the two
-// cannot silently diverge (src/dgst.rs is std-only on purpose).
 #[path = "src/dgst.rs"]
 mod dgst;
 
@@ -34,13 +19,10 @@ fn version() -> &'static str {
     VERSION_FILE.lines().next().unwrap_or("").trim_end()
 }
 
-/// SHA-256 of the pinned `.mmdb.gz` download (review Domain 1 rec 6).
 fn geoip_pin() -> &'static str {
     VERSION_FILE.lines().nth(1).unwrap_or("").trim_end()
 }
 
-/// `CFSCANNER_OFFLINE_BUILD` set to any non-empty value (e.g. `1`): skip the
-/// geoip download + checksum and embed a placeholder instead.
 fn offline_build() -> bool {
     std::env::var_os("CFSCANNER_OFFLINE_BUILD")
         .map(|v| !v.is_empty())
@@ -63,26 +45,17 @@ fn main() {
 fn embed_geoip() {
     let out_dir = PathBuf::from(std::env::var("OUT_DIR").unwrap());
     let dest = out_dir.join("geoip.mmdb");
-    // The offline escape hatch: compile without network access. The flags
-    // must not affect normal builds — it is checked before any download or
-    // cache validation, and the placeholder is never mistaken for the db.
     if offline_build() {
-        // cargo:warning= (not eprintln!) is what cargo shows on a successful
-        // build script run; plain stderr is swallowed unless the script fails.
         println!(
             "cargo:warning=CFSCANNER_OFFLINE_BUILD set: embedding placeholder geoip db; \
              country lookups will return None"
         );
-        // A few readable bytes, clearly not a valid mmdb (min 100 KB):
-        // geo.rs's Reader::from_source fails and degrades to None lookups.
         if std::fs::write(&dest, b"cf-scanner offline build: no geoip db\n").is_err() {
             eprintln!("error: could not write placeholder {}", dest.display());
             std::process::exit(1);
         }
         return;
     }
-    // OUT_DIR survives between builds (unlike the OS temp dir, which is
-    // shared and unpredictable); the git-tracked data/ dir stays untouched.
     let cache = out_dir.join(format!("dbip-country-lite-{}.mmdb", version()));
 
     if !cache_intact(&cache) {
@@ -98,9 +71,6 @@ fn embed_geoip() {
     }
 }
 
-/// Re-download, verify against the pinned `.mmdb.gz` sha256, decompress, then
-/// atomically place both the cache and its `<cache>.sha256` sidecar (digest
-/// of the decompressed mmdb) so verify-before-use can trust later builds.
 fn refresh_cache(cache: &Path) {
     let Some(bytes) = download(&URL.replace("{version}", version())) else {
         eprintln!(
@@ -140,11 +110,6 @@ fn refresh_cache(cache: &Path) {
     }
 }
 
-/// Verify-before-use: the cache counts as good only when a fresh SHA-256 of
-/// its bytes matches the sidecar written at download time. A truncated or
-/// otherwise corrupted cache (or missing/garbled sidecar) forces re-download
-/// instead of persisting forever the way the old size-only check allowed.
-/// The size floor doubles as a cheap early-out before hashing megabytes.
 fn cache_intact(cache: &Path) -> bool {
     let Ok(meta) = std::fs::metadata(cache) else {
         return false;
@@ -165,7 +130,6 @@ fn cache_intact(cache: &Path) -> bool {
     dgst::hex_lower(&Sha256::digest(&bytes)) == expected
 }
 
-/// Sidecar holds just the lowercase hex digest; trailing newline tolerated.
 fn parse_sidecar_digest(text: &str) -> Option<String> {
     let digest = text.trim();
     (digest.len() == 64 && digest.bytes().all(|b| b.is_ascii_hexdigit()))
@@ -178,8 +142,6 @@ fn sidecar_path(cache: &Path) -> PathBuf {
     cache.with_file_name(name)
 }
 
-/// tmp+rename so a killed build never leaves a half-written file that a
-/// later run would accept (the rename replaces any existing file).
 fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     let file_name = path
         .file_name()
@@ -190,9 +152,6 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     std::fs::rename(tmp, path)
 }
 
-/// dist-only: place the verified xray binary at `data/bundled/<exe>` so the
-/// release archive (dist `include`) carries it. Refuses to run when the
-/// placeholder is missing, keeping accidental repo mutations out of dev.
 fn bundle_xray_if_requested() {
     if std::env::var_os("CARGO_FEATURE_DIST_BUNDLE_XRAY").is_none() {
         return;
@@ -211,11 +170,6 @@ fn bundle_xray_if_requested() {
     };
     let dest = PathBuf::from("data/bundled").join(exe);
     ensure_placeholder(&dest);
-    // A leftover real binary from an earlier dist build only counts when it
-    // was bundled for the pinned version: the stamp lives in OUT_DIR, so it
-    // survives between builds but resets on `cargo clean` — re-bundling
-    // after a data/xray-version.txt bump or a placeholder restore, never
-    // silently shipping a stale binary.
     let out_dir = PathBuf::from(std::env::var("OUT_DIR").unwrap());
     let stamp = out_dir.join("bundled-xray-version.txt");
     let stamped = std::fs::read_to_string(&stamp)
@@ -225,7 +179,7 @@ fn bundle_xray_if_requested() {
         .map(|m| m.len() > 0)
         .unwrap_or(false);
     if stamped && dest_real {
-        return; // already bundled for this pinned version
+        return;
     }
 
     let url = format!("{XRAY_BASE}/{}/{}", xray_version(), asset);
@@ -274,9 +228,6 @@ fn bundle_xray_if_requested() {
         eprintln!("error: writing stamp {}: {err}", stamp.display());
         std::process::exit(1)
     });
-    // Archives must carry only this target's binary: drop the foreign
-    // 0-byte placeholder so dist's include glob picks up a single xray. A
-    // later build of the other target recreates it via ensure_placeholder.
     let foreign = if exe == "xray.exe" {
         "xray"
     } else {
@@ -286,9 +237,6 @@ fn bundle_xray_if_requested() {
     println!("bundled {asset} -> {}", dest.display());
 }
 
-/// dist builds overwrite the git-tracked 0-byte placeholders with real
-/// binaries; a prior build of the other target may have deleted this
-/// placeholder (foreign-target sweep), so recreate it instead of failing.
 fn ensure_placeholder(path: &std::path::Path) {
     if path.exists() {
         return;
@@ -306,8 +254,6 @@ fn read_all<R: Read>(entry: &mut R) -> Vec<u8> {
 }
 
 fn xray_asset(target: &str) -> Option<String> {
-    // XTLS asset naming (v26.x): macos uses "macos" (not darwin), and arm64
-    // carries a "-v8a" suffix across all platforms.
     let (os, arch) = if target.contains("windows") {
         (
             "windows",

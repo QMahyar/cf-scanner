@@ -1,7 +1,3 @@
-//! Minimal SOCKS5 (no-auth) HTTP GET client: CONNECT through a socks
-//! inbound, then the same TLS+HTTP GET leg as a direct fetch. Used for the
-//! phase-2 tunnel probes (verify.rs); not a general-purpose client.
-
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::time::Duration;
 
@@ -14,35 +10,20 @@ pub(crate) fn http_request(host: &str, path: &str, extra_headers: &str) -> Strin
     format!("GET {path} HTTP/1.1\r\nHost: {host}\r\n{extra_headers}\r\nConnection: close\r\n\r\n")
 }
 
-/// Sends `request` over the stream and parses the reply: status line,
-/// headers, and body (chunked transfer decoding applied). The body is capped
-/// at [`MAX_BODY_BYTES`] so untrusted responses can't exhaust memory.
 const MAX_BODY_BYTES: usize = 64 * 1024 * 1024;
 
-/// Maximum HTTP head (status + headers) size. Anything larger is a protocol
-/// failure, not a real response.
 const MAX_HEADER_BYTES: usize = 64 * 1024;
 
-/// Same shape as [`http_request`] but without `Connection: close`, so one
-/// tunneled connection can serve several probe URLs (the inline verifier's
-/// keep-alive multi-URL loop). `http_request` itself stays close-delimited
-/// for the socks path, whose reader drains to EOF.
 pub(crate) fn http_request_keepalive(host: &str, path: &str, extra_headers: &str) -> String {
     format!("GET {path} HTTP/1.1\r\nHost: {host}\r\n{extra_headers}\r\n\r\n")
 }
 
-/// Parsed HTTP/1.1 response.
 pub(crate) struct ParsedResponse {
     pub status: u16,
     pub headers: Vec<String>,
     pub body: Vec<u8>,
 }
 
-/// Generic HTTP/1.1 response reader over any `AsyncRead` stream. Reads the
-/// status line and headers (CRLF-terminated, capped at `MAX_HEADER_BYTES`),
-/// then the body sized by Content-Length / chunked / close-delimited. The
-/// body is capped at `max_body` bytes so untrusted responses can't exhaust
-/// memory.
 pub(crate) async fn read_response<S: AsyncRead + Unpin + ?Sized>(
     stream: &mut S,
     max_body: usize,
@@ -153,8 +134,6 @@ async fn read_body<S: AsyncRead + Unpin + ?Sized>(
     }
 }
 
-/// Reads one CRLF-terminated line (the CRLF stripped), capped so a hostile
-/// server cannot feed an unbounded line.
 async fn read_line<S: AsyncRead + Unpin + ?Sized>(stream: &mut S, cap: usize) -> Result<Vec<u8>> {
     let mut line = Vec::new();
     let mut byte = [0u8; 1];
@@ -182,7 +161,6 @@ where
     Ok((resp.status, resp.headers, resp.body))
 }
 
-/// Minimal HTTP/1.1 chunked decoder: `size\r\n data \r\n ... 0\r\n\r\n`.
 pub(crate) fn decode_chunked(mut input: &[u8]) -> Result<Vec<u8>> {
     let mut out = Vec::new();
     loop {
@@ -224,9 +202,6 @@ pub(crate) fn tls_connector() -> tokio_rustls::TlsConnector {
     CONNECTOR.clone()
 }
 
-/// Phase-2 tunnel probe: SOCKS5 (no-auth) CONNECT to `url`'s host through the
-/// socks inbound, then the same TLS+HTTP GET leg as a direct fetch. `Err`
-/// means the tunnel did not deliver a 200.
 pub async fn get_via_socks(url: &str, socks: SocketAddr, timeout_ms: u64) -> Result<Vec<u8>> {
     tokio::time::timeout(
         Duration::from_millis(timeout_ms),
@@ -244,8 +219,6 @@ async fn get_via_socks_inner(url: &str, socks: SocketAddr) -> Result<Vec<u8>> {
         .ok_or_else(|| anyhow!("probe URL has no host"))?
         .to_owned();
     let port = parsed.port_or_known_default().unwrap_or(80);
-    // The request line must exercise the resource as given: dropping the
-    // query would verify a different endpoint than the user asked for.
     let mut path = parsed.path().to_owned();
     if let Some(q) = parsed.query() {
         path.push('?');
@@ -274,7 +247,6 @@ async fn get_via_socks_inner(url: &str, socks: SocketAddr) -> Result<Vec<u8>> {
     Ok(body)
 }
 
-/// RFC 1928 no-auth handshake with a domain-based CONNECT.
 async fn socks5_connect(stream: &mut TcpStream, host: &str, port: u16) -> Result<()> {
     stream.write_all(&[0x05, 0x01, 0x00]).await?;
     let mut method = [0u8; 2];
@@ -326,8 +298,6 @@ mod tests {
     use super::*;
     use proptest::prelude::*;
 
-    /// Plays a minimal no-auth socks server that answers CONNECT and serves
-    /// one `200 OK` body — enough to prove the client's wire format.
     async fn fake_socks_server() -> SocketAddr {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -345,7 +315,6 @@ mod tests {
                     break;
                 }
             }
-            // VER REP RSV ATYP BND.ADDR BND.PORT (127.0.0.1:0)
             sock.write_all(&[0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0])
                 .await
                 .unwrap();
@@ -371,8 +340,6 @@ mod tests {
         assert_eq!(body, b"ok");
     }
 
-    /// The probe URL's query must reach the wire: the request line the fake
-    /// socks server receives carries the path AND its query string.
     #[tokio::test]
     async fn tunnel_probe_request_line_keeps_the_query_string() {
         use tokio::io::AsyncWriteExt as _;
@@ -418,7 +385,6 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let socks = listener.local_addr().unwrap();
         tokio::spawn(async move {
-            // Accept the greeting and then stay silent: the client must give up.
             if let Ok((mut sock, _)) = listener.accept().await {
                 let mut buf = [0u8; 3];
                 let _ = sock.read_exact(&mut buf).await;
@@ -441,8 +407,6 @@ mod tests {
                 return;
             }
             let chunk = vec![7u8; 64 * 1024];
-            // Far past the cap; once the reader errors out and drops its half,
-            // the writes start failing and this task exits.
             for _ in 0..2200 {
                 if server.write_all(&chunk).await.is_err() {
                     break;
@@ -456,10 +420,6 @@ mod tests {
         writer.await.unwrap();
     }
 
-    // --- decode_chunked bounds (review r6) -----------------------------------
-
-    /// Chunk-encodes `data` (one or two chunks) the way real chunked
-    /// responses do: `size\r\n data \r\n ... 0\r\n\r\n`.
     fn encode_chunked(data: &[u8]) -> Vec<u8> {
         if data.is_empty() {
             return b"0\r\n\r\n".to_vec();
@@ -479,10 +439,7 @@ mod tests {
 
     #[test]
     fn decode_chunked_empty_input_and_terminal_chunk() {
-        // Empty input has no CRLF-terminated size line: the decoder must
-        // reject it, not loop or panic (matches its actual semantics).
         assert!(decode_chunked(b"").is_err());
-        // A lone terminal chunk decodes to nothing.
         assert_eq!(decode_chunked(b"0\r\n").unwrap(), b"");
         assert_eq!(decode_chunked(b"0\r\n\r\n").unwrap(), b"");
     }
@@ -495,7 +452,6 @@ mod tests {
         );
         let body = b"5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n";
         assert_eq!(decode_chunked(body).unwrap(), b"hello world");
-        // Chunk-size extensions (`;ext`) and uneven chunk lengths are legal.
         assert_eq!(
             decode_chunked(b"5;ext=1\r\nhello\r\n0\r\n").unwrap(),
             b"hello"
@@ -508,31 +464,24 @@ mod tests {
 
     #[test]
     fn decode_chunked_rejects_huge_sizes_without_allocating() {
-        // 0xffffffff overflows the 64 MiB cap on the FIRST chunk: the size
-        // check runs before any buffer growth.
         assert!(decode_chunked(b"ffffffff\r\n").is_err());
-        // A huge size mid-stream is rejected after the earlier chunks decode.
         assert!(decode_chunked(b"1\r\na\r\nffffffff\r\n").is_err());
-        // A size that would cross the cap only when accumulated is rejected
-        // by the same check (the first chunk decodes, then the cap binds).
         assert!(decode_chunked(&format!("1\r\na\r\n{MAX_BODY_BYTES:x}\r\n").into_bytes()).is_err());
     }
 
     #[test]
     fn decode_chunked_rejects_truncated_and_malformed_streams() {
-        assert!(decode_chunked(b"5\r\nhel").is_err()); // body shorter than size
-        assert!(decode_chunked(b"5\r\nhello\r").is_err()); // missing trailing CRLF
-        assert!(decode_chunked(b"5\r\nhello\r\n0\r").is_err()); // truncated terminal
-        assert!(decode_chunked(b"zz\r\n").is_err()); // non-hex chunk size
-        assert!(decode_chunked(b"5z\r\n").is_err()); // hex digit followed by garbage
-        assert!(decode_chunked(b"10\r\n0123456789").is_err()); // declared 16, got 10
-        assert!(decode_chunked(&[0xff, 0xff, b'\r', b'\n']).is_err()); // non-UTF-8 size
+        assert!(decode_chunked(b"5\r\nhel").is_err());
+        assert!(decode_chunked(b"5\r\nhello\r").is_err());
+        assert!(decode_chunked(b"5\r\nhello\r\n0\r").is_err());
+        assert!(decode_chunked(b"zz\r\n").is_err());
+        assert!(decode_chunked(b"5z\r\n").is_err());
+        assert!(decode_chunked(b"10\r\n0123456789").is_err());
+        assert!(decode_chunked(&[0xff, 0xff, b'\r', b'\n']).is_err());
     }
 
     #[test]
     fn decode_chunked_ignores_bytes_after_the_terminal_chunk() {
-        // The decoder returns as soon as the 0-size line parses: HTTP
-        // trailer lines (`X-foo: bar`) and the final CRLF are never read.
         assert_eq!(
             decode_chunked(b"5\r\nhello\r\n0\r\nX-Trail: yes\r\n\r\n").unwrap(),
             b"hello"
@@ -556,9 +505,9 @@ mod tests {
             status in 200u16..599u16,
             body in proptest::collection::vec(proptest::prelude::any::<u8>(), 0..2048),
             framing in prop_oneof![
-                Just(0usize),  // Content-Length
-                Just(1usize),  // chunked
-                Just(2usize),  // close-delimited
+                Just(0usize),
+                Just(1usize),
+                Just(2usize),
             ]
         ) {
             let rt = tokio::runtime::Runtime::new().unwrap();

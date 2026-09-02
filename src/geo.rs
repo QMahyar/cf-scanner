@@ -1,16 +1,7 @@
-//! Offline GeoIP (Task 15): country from the embedded db-ip Lite country
-//! mmdb (CC BY 4.0 — the UI footer links the license), colo from
-//! /cdn-cgi/trace bodies parsed defensively (phase 2 only). An absent or
-//! unreadable embedded db degrades to `None` everywhere.
-
 use std::net::IpAddr;
 
 use maxminddb::geoip2::Country;
 
-/// Build-time embedded db; build.rs guarantees the file exists. Normal
-/// builds embed the real db-ip Lite mmdb; `CFSCANNER_OFFLINE_BUILD` embeds a
-/// small placeholder instead, so `Reader::from_source` below fails and every
-/// lookup degrades to `None`.
 static EMBEDDED_MMDB: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/geoip.mmdb"));
 
 pub struct Geo {
@@ -29,8 +20,6 @@ impl Geo {
         Self { country }
     }
 
-    /// ISO-3166 alpha-2 country code for an IP (v4 or v6), when the embedded
-    /// db has it.
     pub fn country(&self, ip: IpAddr) -> Option<String> {
         let reader = self.country.as_ref()?;
         let record = reader.lookup(ip).ok()?;
@@ -39,14 +28,8 @@ impl Geo {
     }
 }
 
-/// Defensive parse of a /cdn-cgi/trace body: `colo=XXX` on its own line.
-/// The endpoint is community-documented, so unknown keys are ignored and any
-/// malformed body yields `None`. The value must look like an airport code —
-/// at most 4 ASCII alphanumerics — so trace junk cannot flow into results.
 pub fn parse_colo(body: &[u8]) -> Option<String> {
     let text = std::str::from_utf8(body).ok()?;
-    // First matching `colo=` line wins; the community endpoint returns at
-    // most one per body, but a defensive first-match is the documented pick.
     text.lines().find_map(|line| {
         let (key, value) = line.split_once('=')?;
         let value = value.trim();
@@ -80,28 +63,22 @@ mod tests {
     #[test]
     fn colo_parse_accepts_only_iata_style_codes() {
         assert_eq!(parse_colo(b"colo=SJO").as_deref(), Some("SJO"));
-        // 4 characters is the accepted ceiling.
         assert_eq!(parse_colo(b"colo=LHRA").as_deref(), Some("LHRA"));
-        // Punctuation, symbols, and over-length junk are rejected.
         assert_eq!(parse_colo(b"colo=sjoo!"), None);
         assert_eq!(parse_colo(b"colo=SJ OO"), None);
         let long_junk = format!("colo={}", "x".repeat(100));
         assert_eq!(parse_colo(long_junk.as_bytes()), None);
-        // Non-alphanumeric bytes are rejected even when short.
         assert_eq!(parse_colo(b"colo=a-b"), None);
     }
 
     #[test]
     fn embedded_geo_constructs_without_the_db() {
-        // Must not panic on machines where the build-time download failed.
         let geo = Geo::embedded();
         let _ = geo.country("127.0.0.1".parse().unwrap());
     }
 
     #[test]
     fn fallback_state_returns_none_without_a_db() {
-        // Deterministic: constructs the degraded state directly, so this runs
-        // unconditionally (no build-time download, no network, no skipping).
         let geo = Geo { country: None };
         assert_eq!(geo.country("8.8.8.8".parse().unwrap()), None);
         assert_eq!(geo.country("2607:f8b0:4001::1".parse().unwrap()), None);
@@ -110,8 +87,6 @@ mod tests {
 
     #[test]
     fn embedded_db_resolves_a_known_public_ip_when_present() {
-        // db-ip Lite is a real database; assert against a stable allocation.
-        // Skipped implicitly when the build-time download was unavailable.
         let geo = Geo::embedded();
         if geo.country.is_none() {
             return;
@@ -126,7 +101,6 @@ mod tests {
         if geo.country.is_none() {
             return;
         }
-        // Google GGC v6 allocation the db-ip Lite build resolves to US.
         let google: IpAddr = "2607:f8b0:4001::1".parse().unwrap();
         assert_eq!(geo.country(google).as_deref(), Some("US"));
     }

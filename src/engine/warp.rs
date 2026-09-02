@@ -1,7 +1,3 @@
-//! WARP-mode UDP endpoint discovery: handshake probes per (endpoint, port)
-//! group, optional wgconf-verified keypair transport, Count-capped custom
-//! endpoint sampling.
-
 use std::collections::HashSet;
 use std::net::IpAddr;
 use std::sync::Arc;
@@ -22,7 +18,6 @@ use crate::engine::plan::{SplitMix64, plan};
 use crate::probe::Transport;
 use crate::ranges;
 
-/// One WARP probe unit: a concrete (endpoint, port) group.
 #[derive(Clone)]
 struct WarpTask {
     ip: IpAddr,
@@ -30,16 +25,9 @@ struct WarpTask {
 }
 
 impl ScanController {
-    /// WARP run: every (endpoint, port) group gets `probes_per_endpoint`
-    /// handshake probes; zero-loss (Response/Cookie) groups emit a verdict
-    /// with min latency and loss %. `scanned` counts completed groups, so
-    /// totals stay readable in the UI.
     pub(super) async fn run_warp(&self, cfg: ScanConfig, seed: u64) -> Result<ScanSummary> {
         let warp = cfg.warp.clone().unwrap_or_default();
         let probes_per_endpoint = warp.probes_per_endpoint.max(1) as u64;
-        // Verification (Task 13): probe under the user's keypair from their
-        // wgconf instead of the dummy key. Parsing fails fast here, before
-        // any probe is sent.
         let transport: Arc<dyn Transport> = if warp.verify_with_wgconf {
             let text = warp
                 .wgconf
@@ -61,9 +49,6 @@ impl ScanController {
         let started = Instant::now();
         self.clear_store();
         let groups = self.warp_groups(&cfg, &warp, seed)?;
-        // `scanned` counts completed (endpoint, port) tasks, so the
-        // progress total must count the same unit: a multi-port endpoint
-        // contributes one task per port, not one.
         let total = groups
             .iter()
             .map(|(_, ports)| ports.len() as u64)
@@ -105,7 +90,6 @@ impl ScanController {
             worker_rxs.push(rx);
         }
 
-        // Producer: feeds (endpoint, port) groups via per-worker channels.
         let producer = {
             let ctx = Arc::clone(&ctx);
             let groups = groups.clone();
@@ -133,7 +117,6 @@ impl ScanController {
             })
         };
 
-        // Workers: one fixed task per concurrency slot; each owns its receiver.
         let mut workers = JoinSet::new();
         for mut rx in worker_rxs {
             let ctx = Arc::clone(&ctx);
@@ -222,8 +205,6 @@ impl ScanController {
         ))
     }
 
-    /// (endpoint, ports) groups: custom endpoints (with optional per-endpoint
-    /// ports) when given, else the bundled pools sampled per `cfg.target`.
     fn warp_groups(
         &self,
         cfg: &ScanConfig,
@@ -233,8 +214,6 @@ impl ScanController {
         let ports = Arc::new(cfg.ports.iter().map(|p| p.get()).collect::<Vec<u16>>());
         let mut groups = Vec::new();
         if warp.custom_endpoints.is_empty() {
-            // Same collect-and-bail contract as the CDN pool: an unparsable
-            // exclusion must fail the run, never silently scan excluded space.
             let excluded = cfg
                 .exclude
                 .iter()
@@ -244,8 +223,6 @@ impl ScanController {
                 .collect::<Result<Vec<_>>>()?;
             let pool = crate::warp::bundled_pool().excluding(&excluded);
             let plan = plan(&pool, &cfg.target, &mut SplitMix64::new(seed));
-            // One RNG across items: reseeding per item made every block
-            // sample the same offsets (cdn.rs hoists for the same reason).
             let mut rng = SplitMix64::new(seed);
             for item in &plan {
                 for host in plan_hosts_iter(item, &mut rng) {
@@ -256,12 +233,6 @@ impl ScanController {
                 }
             }
         } else {
-            // Dedupe at (ip, port) granularity: overlapping entries (a bare
-            // endpoint plus a port-suffixed twin, or two endpoints whose port
-            // lists intersect) must not create groups probing the same
-            // (ip, port) — they would share one connected socket and
-            // cross-receive each other's handshake replies (a false negative
-            // in FullSession). The first entry in input order claims a port.
             let mut seen: HashSet<(std::net::Ipv4Addr, u16)> = HashSet::new();
             for ep in &warp.custom_endpoints {
                 let (ip, port) = parse_endpoint(ep)?;
@@ -278,8 +249,6 @@ impl ScanController {
                 }
             }
             if let ScanTarget::Count(n) = cfg.target {
-                // 0x5EED ("SEED"): fixed offset so the cap draw never mirrors
-                // the pool-plan host draw for the same seed.
                 let mut rng = SplitMix64::new(seed ^ 0x5EED);
                 while groups.len() > n as usize {
                     let idx = rng.below(groups.len() as u64) as usize;
@@ -291,8 +260,6 @@ impl ScanController {
     }
 }
 
-/// `ip` or `ip:port`; delegates to the canonical parser in the API contract
-/// (the API validator already ran, so errors mean impossible input).
 fn parse_endpoint(s: &str) -> Result<(std::net::Ipv4Addr, Option<u16>)> {
     let (ip, port) = crate::api::types::parse_endpoint(s).map_err(|e| anyhow!("{e}"))?;
     let IpAddr::V4(ip) = ip else {
@@ -330,7 +297,6 @@ mod tests {
         }
     }
 
-    /// WARP tests script the fake into the warp transport slot.
     fn warp_controller(
         t: FakeTransport,
     ) -> (
@@ -364,7 +330,6 @@ mod tests {
         let summary = run_local(&c, warp_cfg(3, &["203.0.113.1", "203.0.113.2"]), 1)
             .await
             .unwrap();
-        // Zero-loss endpoint emits a verdict; lossy endpoint is excluded.
         assert_eq!(summary.found, 1);
         assert_eq!(summary.scanned, 2);
         let results = c.results();
@@ -438,8 +403,6 @@ mod tests {
         cfg.target = ScanTarget::Preset(CdnPreset::Quick);
         let groups = c.warp_groups(&cfg, cfg.warp.as_ref().unwrap(), 42).unwrap();
         assert_eq!(groups.len(), blocks.len(), "one sampled host per block");
-        // Per-item reseeding made every block draw the same relative offset;
-        // one shared stream must not.
         let offsets: HashSet<u8> = groups
             .iter()
             .map(|(ip, _)| (u32::from(*ip) & 0xff) as u8)
@@ -455,8 +418,6 @@ mod tests {
         let (c, _) = warp_controller(FakeTransport::new());
         let mut cfg = warp_cfg(1, &[]);
         cfg.exclude = vec!["203.0.113.0/33".to_owned()];
-        // Direct planning call: a full run rejects the same entry earlier in
-        // cfg.validate, so this isolates the exclusion handling itself.
         let err = c
             .warp_groups(&cfg, cfg.warp.as_ref().unwrap(), 1)
             .expect_err("an unparsable --exclude CIDR must fail the plan");
@@ -478,8 +439,6 @@ mod tests {
     async fn warp_duplicate_custom_endpoints_probe_once() {
         let t = FakeTransport::new().ok("203.0.113.1".parse().unwrap(), 2408, 5);
         let (c, _) = warp_controller(t);
-        // Identical endpoints (bare, repeated, and port-suffixed) must dedupe
-        // into a single group.
         let cfg = warp_cfg(1, &["203.0.113.1", "203.0.113.1", "203.0.113.1:2408"]);
         let summary = run_local(&c, cfg, 1).await.unwrap();
         assert_eq!(summary.scanned, 1, "duplicate endpoints must probe once");
@@ -492,10 +451,6 @@ mod tests {
             .ok("203.0.113.1".parse().unwrap(), 2408, 5)
             .ok("203.0.113.1".parse().unwrap(), 2409, 5);
         let (c, _) = warp_controller(t);
-        // A bare endpoint plus its port-suffixed twin over a multi-port scan
-        // list: (ip, 2408) must be probed exactly once — two groups hitting
-        // it would share one connected UDP socket and cross-receive
-        // handshake replies.
         let mut cfg = warp_cfg(1, &["203.0.113.1", "203.0.113.1:2408"]);
         cfg.ports = vec![Port::new(2408), Port::new(2409)];
         let summary = run_local(&c, cfg, 1).await.unwrap();

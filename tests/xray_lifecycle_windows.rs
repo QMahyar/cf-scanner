@@ -1,7 +1,3 @@
-//! Windows port of the xray subprocess lifecycle coverage: the same
-//! spawn/stop/cleanup contract as `xray_lifecycle.rs`, with a fake "xray"
-//! binary COMPILED AT TEST TIME by `rustc` (no shell interpreter involved,
-//! so the killed child really is the process holding the socks port).
 #![cfg(windows)]
 
 use std::net::SocketAddr;
@@ -50,10 +46,6 @@ fn main() {
 }
 "##;
 
-/// Compiles the fake xray source with `rustc` and writes a matching
-/// `<bin>.dgst` sidecar (same grammar as the real cached install) so
-/// `ensure_binary`'s use-time checksum accepts the fake instead of evicting
-/// it and downloading a real binary.
 fn write_fake_xray(bin_path: &Path, marker_env_key: &str) -> std::io::Result<()> {
     let src = tmp_sibling(bin_path, "fake_xray_src.rs");
     std::fs::write(&src, FAKE_SRC)?;
@@ -71,8 +63,6 @@ fn write_fake_xray(bin_path: &Path, marker_env_key: &str) -> std::io::Result<()>
     let bytes = std::fs::read(bin_path)?;
     let digest = cf_scanner::dgst::hex_lower(&sha2::Sha256::digest(&bytes));
     std::fs::write(dgst_path(bin_path), format!("SHA2-256= {digest}\n"))?;
-    // The fake reads its marker path from the environment it inherits.
-    // SAFETY-free process env mutation happens in the parent test below.
     unsafe {
         std::env::set_var(marker_env_key, marker_for(bin_path));
     }
@@ -113,8 +103,6 @@ fn pick_ephemeral_port() -> u16 {
 #[tokio::test]
 #[allow(clippy::await_holding_lock)]
 async fn spawn_launches_fake_xray_and_stop_kills_it() {
-    // The fake reads its marker path from inherited env; hold the same lock
-    // as the probe test so parallel env mutation cannot redirect the child.
     let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let tmp = unique_dir("cf-scanner-xray-spawn-win");
     let marker = tmp.join("spawned.marker");
@@ -143,8 +131,6 @@ async fn spawn_launches_fake_xray_and_stop_kills_it() {
         .expect("socks inbound must accept connections while the fake is up");
 
     proc.stop().await;
-    // A freshly killed Windows socket can linger in TIME_WAIT-ish states for
-    // a tick; poll briefly so the assertion tests refusal, not timing.
     let mut refused = false;
     for _ in 0..50 {
         if tokio::net::TcpStream::connect(proc.socks_addr)
@@ -160,8 +146,6 @@ async fn spawn_launches_fake_xray_and_stop_kills_it() {
     std::fs::remove_dir_all(&tmp).ok();
 }
 
-// Same rationale as the unix suite: the guard spans the probe because the
-// child re-reads CF_SCANNER_DATA_DIR / FAKE_MARKER from inherited env.
 #[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn tunnel_probe_lifecycle_spawns_and_cleans_trial_dirs() {
@@ -208,8 +192,6 @@ async fn tunnel_probe_lifecycle_spawns_and_cleans_trial_dirs() {
         std::env::remove_var("FAKE_MARKER");
     }
 
-    // The fake binds the socks port but is not a SOCKS server: the tunnel
-    // handshake fails and the probe completes locally with passed=false.
     let result = result.expect("probe must complete without a local failure");
     assert!(!result.passed);
     assert!(marker.exists(), "the fake xray must have been spawned");

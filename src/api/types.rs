@@ -1,7 +1,3 @@
-//! Shared API contract for every CF-Scanner client (CLI, wizard, browser,
-//! agents). The engine returns domain types; the server maps them into these
-//! wire types. Never serialize engine types directly.
-
 pub use super::error::*;
 pub use super::limits::*;
 pub use super::validate::*;
@@ -9,8 +5,6 @@ pub use super::validate::*;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::net::IpAddr;
 
-/// A validated TCP/UDP port number (1..=65535). Rejects 0 at deserialization
-/// time so invalid ports never reach the engine.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Port(pub u16);
 
@@ -51,25 +45,19 @@ pub enum Mode {
     Warp,
 }
 
-/// CDN-mode candidate selection. WARP mode always uses a count.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CdnPreset {
-    /// 1 random IP per /24 across all ranges (~4K probes)
     Quick,
-    /// 3 IPs per /24 (~12K probes)
     Normal,
-    /// Every IP in all bundled ranges (~1.5M probes)
     Full,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ScanTarget {
     Preset(CdnPreset),
-    /// Exact number of candidate IPs, sampled randomly across ranges
     Count(u32),
 }
 
-/// What terminates a scan. `cap: None` = "don't stop" until `found` is met.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct StopCondition {
@@ -112,44 +100,29 @@ pub enum Verifier {
     Xray,
 }
 
-/// Free-form Xray fragment values (Int32Range strings).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CustomFragment {
-    /// `"tlshello"` or `"1-3"`
     pub packets: String,
-    /// e.g. `"100-200"` (bytes)
     pub length: String,
-    /// e.g. `"10-20"` (ms)
     pub interval: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Phase2Config {
-    /// vless:// trojan:// vmess:// ss:// links, subscription URLs, or local
-    /// Xray JSON file paths. At least one required.
     pub configs: Vec<String>,
     pub fragment: FragmentPreset,
     pub custom_fragment: Option<CustomFragment>,
-    /// SNI fronting variants; empty = use each config's own SNI.
     pub snis: Vec<String>,
-    /// Legacy single-probe field; new clients send `probe_urls` instead.
     #[serde(default = "default_probe_url")]
     pub probe_url: String,
-    /// Tiny HTTP targets fetched through the tunnel to prove connectivity;
-    /// every one must return 200 for a pass (max 8, each http(s)). Empty =
-    /// fall back to the legacy `probe_url`.
     #[serde(default)]
     pub probe_urls: Vec<String>,
-    /// Parallel xray instances (1..=8).
     pub concurrency: u8,
 }
 
 impl Phase2Config {
-    /// The URLs the run actually targets: `probe_urls` when non-empty (new
-    /// clients), else the legacy single `probe_url`. Post-validation the
-    /// fallbacks are unreachable; kept so callers never dial an empty list.
     pub fn effective_probe_urls(&self) -> Vec<String> {
         if !self.probe_urls.is_empty() {
             self.probe_urls.clone()
@@ -178,14 +151,9 @@ impl Default for Phase2Config {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WarpConfig {
-    /// `ip`, `ip:port`, or CIDR lines; empty = bundled pools.
     pub custom_endpoints: Vec<String>,
-    /// Handshake attempts per endpoint (1..=10); an endpoint counts as
-    /// working only when every probe responds (any dropped probe excludes it).
     pub probes_per_endpoint: u8,
-    /// Pasted WireGuard / AmneziaWG config text (verification only, opt-in).
     pub wgconf: Option<String>,
-    /// Run the real handshake with the user's keypair after discovery.
     pub verify_with_wgconf: bool,
 }
 
@@ -207,21 +175,12 @@ pub struct ScanConfig {
     pub target: ScanTarget,
     pub ports: Vec<Port>,
     pub stop: StopCondition,
-    /// Dirty ranges to skip (CIDRs). Validated as CIDRs by `validate_phase2()`.
     pub exclude: Vec<String>,
-    /// CIDRs to scan INSTEAD of the bundled ranges; empty = bundled ranges.
-    /// Validated as CIDRs by `validate_phase2()`.
     pub custom_cidrs: Vec<String>,
-    /// Include the bundled Cloudflare IPv6 ranges in the CDN phase-1 pool.
-    /// Off by default so existing scans stay IPv4-only unless requested.
     #[serde(default)]
     pub include_v6: bool,
-    /// Parallel probes (1..=1000).
     pub concurrency: u16,
-    /// Per-probe timeout in ms (100..=30_000).
     pub timeout_ms: u64,
-    /// Verify the LAST scan's candidates only, skipping phase-1 probing
-    /// entirely (requires `phase2` configs and a store with candidates).
     #[serde(default)]
     pub phase2_only: bool,
     #[serde(default)]
@@ -255,7 +214,6 @@ pub struct Verdict {
     pub port: u16,
     pub latency_ms: Option<u32>,
     pub country: Option<String>,
-    /// Phase-2 only: colo code from /cdn-cgi/trace.
     pub colo: Option<String>,
     pub phase2: Option<Phase2Verdict>,
 }
@@ -263,26 +221,17 @@ pub struct Verdict {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Phase2Verdict {
     pub passed: bool,
-    /// Fragment preset that was used for this verdict.
     pub fragment: FragmentPreset,
     pub sni: String,
     pub latency_ms: Option<u32>,
-    /// Redacted failure detail from the last failed attempt, when `passed`
-    /// is false (why the candidate did not verify). Absent = no detail.
     #[serde(default)]
     pub error: Option<String>,
-    /// Index into the submitted `phase2.configs` list that produced this
-    /// verdict; None when unknown/legacy.
     #[serde(default)]
     pub config_index: Option<u32>,
-    /// Which verifier produced the verdict: inline (in-process vless/trojan)
-    /// or xray (subprocess). Absent for legacy payloads.
     #[serde(default)]
     pub verifier: Option<Verifier>,
 }
 
-/// Phase-2 progress: how many of the total (candidate × config × SNI)
-/// attempts have completed. Sent while the verification phase runs.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Phase2Progress {
     pub done: u64,
@@ -293,7 +242,6 @@ pub struct Phase2Progress {
 pub struct ScanProgress {
     pub scanned: u64,
     pub found: u64,
-    /// None when the total candidate count is unknown.
     pub total: Option<u64>,
 }
 
@@ -302,8 +250,6 @@ pub struct ScanSummary {
     pub scanned: u64,
     pub found: u64,
     pub duration_ms: u64,
-    /// True when the run was stopped by a cancel request instead of finishing
-    /// its plan. `serde(default)` keeps old clients decoding additive fields.
     #[serde(default)]
     pub cancelled: bool,
 }
@@ -319,16 +265,9 @@ pub enum ScanEvent {
     Progress(ScanProgress),
     Result(Box<Verdict>),
     Finished(ScanSummary),
-    /// Phase-2 verification progress (additive event; old clients ignore it).
     Phase2Progress(Phase2Progress),
-    /// The run aborted before finishing (e.g. phase-2 setup failed); the
-    /// message is redacted and safe for the UI/stderr. No `Finished` follows.
     Failed(FailedPayload),
 }
-
-// ── Wire payloads (server ↔ clients); kept here so the contract is one
-// place. All are deny_unknown_fields so newkeys are rejected (422) per the
-// v0.8.0 invariant.
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -408,9 +347,6 @@ impl ScanConfig {
                 if n == 0 {
                     return Err(ConfigError::InvalidCount(0));
                 }
-                // The engine spawns one probe task per sampled host and the plan
-                // pre-allocates a set of 2n entries: cap the count so an
-                // unauthenticated API call cannot abort the process (OOM).
                 if n > MAX_SCAN_COUNT {
                     return Err(ConfigError::InvalidCount(n));
                 }
@@ -418,15 +354,10 @@ impl ScanConfig {
             if self.stop.found == 0 {
                 return Err(ConfigError::InvalidFound(0));
             }
-            // The frontend caps both stop fields at MAX_STOP_VALUE; the server
-            // enforces the same bound so an agent cannot request a stop condition
-            // the UI never offers (contract parity).
             if self.stop.found > MAX_STOP_VALUE {
                 return Err(ConfigError::InvalidFoundUpper(self.stop.found));
             }
             if let Some(cap) = self.stop.cap {
-                // cap 0 would stop before the first probe: the engine compares
-                // scanned >= cap, which holds trivially.
                 if cap == 0 || cap > MAX_STOP_VALUE {
                     return Err(ConfigError::InvalidCap(cap));
                 }

@@ -1,11 +1,3 @@
-//! Property-style tests: a seeded `SplitMix64` RNG drives (a) the CIDR
-//! exclusion split against a brute-force containment reference, and (b)
-//! wgconf render -> parse round-trips over random-but-valid key material.
-//! `proptest` drives (c) the config/wgconf/CIDR parsers: arbitrary input
-//! must never panic and known-good generated input must round-trip. The
-//! split logic lives in `ranges.rs`; it is tested here black-box through
-//! the public `CidrPool` API.
-
 use std::collections::HashSet;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
@@ -18,8 +10,6 @@ use cf_scanner::wgconf::{
     AmneziaParams, WgConfig, WgPeer, parse_wg_entry, parse_wgconf, render_wgconf,
 };
 use proptest::prelude::*;
-
-// --- (a) CIDR exclusion split ----------------------------------------------
 
 fn v4_base(c: &Cidr) -> u32 {
     match c.addr {
@@ -42,8 +32,6 @@ fn v4_contains(c: &Cidr, ip: u32) -> bool {
 
 fn v4_hosts(c: &Cidr) -> impl Iterator<Item = u32> {
     let base = v4_base(c);
-    // host_count is u128 (a /0 counts 2^32); cast per element with wrapping
-    // adds so every address family stays a total enumeration.
     (0..c.host_count()).map(move |i| base.wrapping_add(i as u32))
 }
 
@@ -53,8 +41,6 @@ fn brute_force_union(outer: &Cidr, excluded: &[Cidr]) -> HashSet<u32> {
         .collect()
 }
 
-/// A random aligned sub-block of `outer` (v4); `prefix` must be within
-/// `outer.prefix..=32`. Equal to the whole outer when prefix == outer.prefix.
 fn aligned_v4_sub(outer: &Cidr, prefix: u8, rng: &mut SplitMix64) -> Cidr {
     let block = 1u32 << (32 - prefix as u32);
     let slots = (outer.host_count() / u128::from(block)) as u64;
@@ -82,8 +68,6 @@ fn v4_exclusion_split_matches_brute_force_reference() {
             .unwrap()
             .excluding(&excluded);
 
-        // Union of the split ranges == outer minus the exclusions (set
-        // equality also catches any split range intersecting an exclusion).
         let got: HashSet<u32> = split.ranges().iter().flat_map(v4_hosts).collect();
         assert_eq!(
             got,
@@ -91,9 +75,6 @@ fn v4_exclusion_split_matches_brute_force_reference() {
             "round {round} with exclusions {excluded:?}"
         );
 
-        // Split ranges are valid aligned CIDRs inside the outer block, and
-        // the host counts sum exactly to the covered set (no overlaps, no
-        // gaps, no duplicates).
         let mut total = 0u64;
         for c in split.ranges() {
             assert!(c.addr.is_ipv4(), "round {round}: v6 leaked into a v4 split");
@@ -131,7 +112,7 @@ fn v6_exclusion_split_matches_brute_force_reference() {
         };
         let excluded: Vec<Cidr> = (0..1 + rng.below(3) as usize)
             .map(|_| {
-                let prefix = 120 + rng.below(9) as u8; // 120..=128
+                let prefix = 120 + rng.below(9) as u8;
                 let block = 1u128 << (128 - prefix as u32);
                 let offset = rng.below_u128(256 / block) * block;
                 Cidr {
@@ -216,8 +197,6 @@ fn cross_family_exclusions_never_touch_the_other_family() {
     assert!(v4_excluded.ranges().iter().all(|c| c.addr.is_ipv4()));
 }
 
-// --- (b) wgconf render -> parse round-trip fuzz -----------------------------
-
 fn random_key(rng: &mut SplitMix64) -> String {
     let mut bytes = [0u8; 32];
     for chunk in bytes.chunks_mut(8) {
@@ -230,9 +209,6 @@ fn octet(rng: &mut SplitMix64) -> u64 {
     rng.below(256)
 }
 
-/// Builds a random-but-valid config: keys are real 32-byte base64, optional
-/// strings are None or non-empty (render omits the None case, so empty
-/// strings would not survive the round trip).
 fn random_wgconf(rng: &mut SplitMix64) -> WgConfig {
     let amnezia = AmneziaParams {
         jc: Some(rng.below(u16::MAX as u64) as u16),
@@ -303,8 +279,6 @@ fn wgconf_render_parse_round_trips_random_valid_configs() {
     }
 }
 
-// --- (c) parser fuzz + round-trips (proptest) -------------------------------
-
 #[test]
 fn parse_uri_known_good_samples_across_protocols() {
     let vless = parse_uri(
@@ -365,8 +339,6 @@ fn parse_uri_known_good_samples_across_protocols() {
     assert_eq!(vmess.tag.as_deref(), Some("My tag"));
 }
 
-/// Test-local vless renderer (no production renderer exists in configs.rs):
-/// the generated URI must parse back to exactly these fields.
 fn render_vless(
     user_id: &str,
     server: &str,
@@ -502,7 +474,6 @@ proptest! {
         );
     }
 
-    // --- (d) URI producer round-trip: render_uri -> parse_uri ----------------
 
     #[test]
     fn render_uri_roundtrips_userinfo(
@@ -535,28 +506,23 @@ proptest! {
         assert_eq!(back.protocol, Protocol::Vless, "protocol must survive: {uri}");
     }
 
-    // --- (e) dgst grammar: valid hex accepted, junk rejected -----------------
 
     #[test]
     fn dgst_sha256_hex_accepts_valid_and_rejects_invalid(
         hex64 in "[0-9a-fA-F]{64}",
         junk in ".*",
     ) {
-        // A properly formed dgst line must be accepted.
         let valid = format!("SHA2-256= {hex64}");
         let got = dgst_sha256_hex(&valid);
         assert_eq!(got, Some(hex64.to_ascii_lowercase()), "valid dgst must parse: {valid}");
 
-        // Junk with no valid line must return None.
         let result = dgst_sha256_hex(&junk);
         if let Some(hash) = result {
-            // If it returned Something, it must be exactly 64 hex chars.
             assert_eq!(hash.len(), 64, "returned hash must be 64 chars: {hash}");
             assert!(hash.bytes().all(|b| b.is_ascii_hexdigit()), "returned hash must be hex: {hash}");
         }
     }
 
-    // --- (f) validate_fetch_url: loopback/link-local refused, public ok ------
 
     #[test]
     fn validate_fetch_url_refuses_loopback_and_allows_public(

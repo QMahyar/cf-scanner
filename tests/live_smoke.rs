@@ -1,12 +1,6 @@
-//! Live smoke tests, opt-in only: `cargo test --test live_smoke -- --ignored`.
-//! They hit real endpoints; credentials come from the environment (never
-//! committed).
-
 use cf_scanner::configs::Protocol;
 use cf_scanner::configs::{RealSubFetch, fetch_subscription, parse_uri};
 
-/// Mirrors the provider install `main()` performs; the test binary has no
-/// main of its own.
 fn install_crypto() {
     let _ = rustls::crypto::ring::default_provider().install_default();
 }
@@ -34,9 +28,6 @@ async fn subscription_endpoint_returns_parseable_configs() {
     }
 }
 
-/// Genuinely dials the fixture's live Cloudflare worker endpoint. The dial is
-/// a short TCP connect; once the gate is enabled, a refused/timeout dial is a
-/// test FAILURE (an ISP-blocked network must never read as a pass).
 #[tokio::test]
 #[ignore = "network; dials the live Cloudflare IP from the fixture"]
 async fn vless_fixture_dials_its_own_server() {

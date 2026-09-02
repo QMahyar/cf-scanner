@@ -6,15 +6,12 @@ use super::pool::{CidrPool, parse_cidr, parse_lines, rfc3339_utc, unix_now, writ
 
 use crate::paths;
 
-/// Fetches the official list, validates it, and returns the parsed pool.
 pub async fn fetch_official(http: &impl HttpGet) -> Result<CidrPool> {
     let body = http.get(OFFICIAL_IPS_URL).await?;
     let cidrs = parse_official(&body)?;
     Ok(CidrPool::from_ranges(cidrs))
 }
 
-/// Fetches the official list over HTTPS and writes it to the data dir with a
-/// fresh last-updated header. Returns the number of ranges.
 pub async fn refresh_to_disk(http: &impl HttpGet) -> Result<usize> {
     let pool = fetch_official(http).await?;
     write_pool_to(
@@ -25,9 +22,6 @@ pub async fn refresh_to_disk(http: &impl HttpGet) -> Result<usize> {
     Ok(pool.ranges().len())
 }
 
-/// Fetches the official IPv6 list (`ranges refresh --ipv6`) and writes it to
-/// the data dir. The endpoint serves plain one-CIDR-per-line text, so every
-/// parsed entry must come back v6.
 pub async fn refresh_v6_to_disk(http: &impl HttpGet) -> Result<usize> {
     let body = http.get(OFFICIAL_IPS_V6_URL).await?;
     let cidrs = parse_lines(&body)?;
@@ -56,8 +50,6 @@ struct OfficialResult {
     ipv4_cidrs: Vec<String>,
 }
 
-/// IPv6 entries are skipped: this JSON endpoint feeds the v4 refresh only;
-/// the v6 list has its own source (`cf-ranges-v6.txt`, `ips-v6` endpoint).
 pub fn parse_official(body: &str) -> Result<Vec<super::pool::Cidr>> {
     let resp: OfficialResponse =
         serde_json::from_str(body).context("parse cloudflare API response")?;

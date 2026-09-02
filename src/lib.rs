@@ -1,11 +1,3 @@
-//! CF-Scanner: find working Cloudflare IPs/endpoints on ISP-restricted
-//! networks. Library target so integration tests and the binary can import
-//! engine modules; the real entry point is the binary (`src/main.rs`).
-//!
-//! Public surface = the modules the binary and the integration tests
-//! consume. `geo`, `socks`, and `inline_verify` are internal plumbing and
-//! stay crate-private; reach them through their owners (engine/verify).
-
 #![allow(clippy::collapsible_if)]
 
 pub mod api;

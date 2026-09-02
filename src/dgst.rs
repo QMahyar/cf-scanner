@@ -1,8 +1,3 @@
-//! XTLS `.dgst` digest grammar, shared by the build script (`#[path]` include
-//! in build.rs) and the runtime downloader (src/xray.rs). One canonical copy
-//! so the two parsers cannot silently diverge. Std-only: build-deps are fixed.
-
-/// Lowercase hex encoding of `bytes`, matching `Sha256` hex output.
 pub fn hex_lower(bytes: &[u8]) -> String {
     let mut s = String::with_capacity(bytes.len() * 2);
     for b in bytes {
@@ -11,10 +6,6 @@ pub fn hex_lower(bytes: &[u8]) -> String {
     s
 }
 
-/// Digest from `.dgst` text: strict `SHA2-256= <64 hex>[ <filename>]` line
-/// grammar. A loose "first 64-char hex run" scan could grab a substring of a
-/// longer digest on a comment line, so the value must be a clean 64-hex token.
-/// Lowercased to match `Sha256` hex output.
 pub fn dgst_sha256_hex(text: &str) -> Option<String> {
     let line = text.lines().find(|l| l.starts_with("SHA2-256="))?;
     let rest = &line["SHA2-256=".len()..];

@@ -1,7 +1,3 @@
-//! CDN/proxy-mode phase-1 scan: TCP/TLS probes over the plan (port fan-out,
-//! per-port host sampling) with stop-condition and cancel checks, then
-//! optional phase-2 verification of the found candidates.
-
 use std::net::IpAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -19,7 +15,6 @@ use crate::api::types::{ScanConfig, ScanEvent, ScanProgress, ScanSummary, Verdic
 use crate::engine::plan::{SplitMix64, plan};
 use crate::ranges;
 
-/// One phase-1 probe unit: a concrete (host, port) pair from the plan.
 #[derive(Clone)]
 struct ProbeTask {
     ip: IpAddr,
@@ -27,8 +22,6 @@ struct ProbeTask {
 }
 
 impl ScanController {
-    /// CDN-mode run: pool planning, phase-1 probe fan-out, then phase-2
-    /// verification of the candidates when configured.
     pub(super) async fn run_cdn(
         &self,
         mut cfg: ScanConfig,
@@ -39,8 +32,6 @@ impl ScanController {
         let phase2_configured = phase2.is_some();
 
         let started = Instant::now();
-        // Verify-last-results mode: skip phase-1 probing entirely and run
-        // phase-2 verification against the candidates already in the store.
         if cfg.phase2_only {
             let Some(p2) = phase2 else {
                 return Err(anyhow!("phase2_only requires phase2 configs"));
@@ -72,10 +63,6 @@ impl ScanController {
             return Ok(self.finish(started, 0, 0));
         }
 
-        // One cancel signal per run, shared by every phase: `cancel_signal`
-        // (re)creates the channel on first use and later phases subscribe to
-        // the same one, so a cancel fired during phase 1 is still visible to
-        // phase-2 workers and to `finish` — never lost to a fresh install.
         let cancel_rx = self.cancel_signal();
 
         let ctx = Arc::new(ProbeContext {
@@ -102,9 +89,6 @@ impl ScanController {
             worker_rxs.push(rx);
         }
 
-        // Producer: streams plan hosts lazily into per-worker queues, checking the
-        // stop conditions before every send. Hoisted RNG per port outside the outer
-        // loop so SplitMix64 is not recreated per item.
         let producer = {
             let ctx = Arc::clone(&ctx);
             let cfg = cfg.clone();
@@ -143,10 +127,6 @@ impl ScanController {
             })
         };
 
-        // Workers: a fixed `concurrency` set (no spawn-per-probe), each
-        // holding at most one in-flight probe past the stop check, so
-        // overshoot is bounded by the worker count. Verdicts are batched
-        // and merged into the store under one lock per batch.
         let mut workers = JoinSet::new();
         for mut rx in worker_rxs {
             let ctx = Arc::clone(&ctx);
@@ -189,7 +169,6 @@ impl ScanController {
                             merge_sorted(&ctx.store, &ctx.dirty, std::mem::take(&mut batch));
                         }
                     }
-                    // Timeouts and refusals are counted in `scanned` only.
                     let scanned = ctx.scanned.load(Ordering::Relaxed);
                     if ctx.milestone_due(scanned) {
                         ctx.progress(scanned, ctx.found.load(Ordering::Relaxed));
@@ -214,9 +193,6 @@ impl ScanController {
             self.verify_phase(&cfg, &p2).await?;
         }
 
-        // With phase 2 configured, the summary reflects verified working
-        // endpoints (candidates phase 2 failed are excluded; v6 finds phase 2
-        // never touched keep counting), mirroring the phase2_only path.
         let found = if phase2_configured {
             self.working_found()
         } else {
@@ -246,7 +222,6 @@ mod tests {
         let (c, mut rx) = controller(Arc::new(t));
         let summary = run_local(&c, ok_cfg(2, None), 1).await.unwrap();
         assert_eq!(summary.found, 2);
-        // 3 probes: 203.0.113.0 (refused) + two hits; the 4th task sees found == 2.
         assert_eq!(summary.scanned, 3);
         let results = c.results();
         assert_eq!(results.len(), 2);
@@ -262,9 +237,6 @@ mod tests {
 
     #[tokio::test]
     async fn progress_milestones_are_monotonic_and_unique() {
-        // Concurrent workers racing the shared counter: every Progress event
-        // must carry a strictly increasing scanned value (no duplicates, no
-        // regressions), which the modulo emission could not guarantee.
         let t = FakeTransport::new();
         for i in 0..1024u32 {
             t.insert(
@@ -301,7 +273,6 @@ mod tests {
 
     #[tokio::test]
     async fn cap_limits_probes() {
-        // found is unreachable; the hard cap must stop the scan.
         let t = FakeTransport::new()
             .ok("203.0.113.1".parse().unwrap(), 443, 1)
             .ok("203.0.113.2".parse().unwrap(), 443, 1);
@@ -322,9 +293,6 @@ mod tests {
 
     #[tokio::test]
     async fn scans_v6_hosts_from_an_explicit_pool() {
-        // Count(8) >= the /126 pool's 3 usable hosts, so the plan enumerates
-        // every host; script the v6 addresses deterministically. (::0 is the
-        // network address and comes back unanswered.)
         let t = FakeTransport::new()
             .ok("2606:4700::1".parse().unwrap(), 443, 20)
             .ok("2606:4700::2".parse().unwrap(), 443, 30)
@@ -368,10 +336,6 @@ mod tests {
 
     #[tokio::test]
     async fn cancel_stops_mid_scan() {
-        // Delayed probes keep the first outcome in flight long enough for the
-        // test to observe a result and cancel before the remaining hosts start.
-        // Results are observed via the event stream: workers batch verdicts
-        // into the store, so `results()` only catches up at flush/scan end.
         let t = Arc::new(
             FakeTransport::new()
                 .ok_slow("203.0.113.1".parse().unwrap(), 443, 60, 200)
@@ -397,7 +361,6 @@ mod tests {
         }
         c.cancel();
         let summary = handle.await.unwrap();
-        // Cancel halts the scan before all 8 hosts are probed.
         assert!(summary.scanned < 8, "scanned={}", summary.scanned);
         assert!(summary.found >= 1);
         assert!(summary.cancelled);
@@ -405,9 +368,6 @@ mod tests {
 
     #[tokio::test]
     async fn cap_overshoot_is_bounded_by_worker_count() {
-        // All hosts refuse; only the hard cap can end the run. Four workers
-        // may each hold one in-flight probe past the cap check, so scanned
-        // lands in [cap, cap + concurrency] = [3, 7] — bounded, no runaway.
         let (c, _) = controller(Arc::new(FakeTransport::new()));
         let mut cfg = ok_cfg(100, Some(3));
         cfg.concurrency = 4;
@@ -422,12 +382,7 @@ mod tests {
 
     #[tokio::test]
     async fn cancel_racing_in_flight_probes_ends_consistently() {
-        // 60ms probes leave a 60ms window between the 7th result and the
-        // last probe finishing; cancel lands inside it. The summary must
-        // agree with the store and end with Finished, not Failed.
         let mut t = FakeTransport::new();
-        // The run_local /29 pool is hosts 203.0.113.0..=203.0.113.7: script every
-        // one so the last probe is still in flight when the test cancels.
         for i in 0..=7u8 {
             t = t.ok_slow(format!("203.0.113.{i}").parse().unwrap(), 443, 60, 60);
         }
@@ -460,8 +415,6 @@ mod tests {
             c.results().len(),
             seen
         );
-        // Near-instant cancel abandons the in-flight probe without counting it,
-        // so scanned may be 7 (abandoned) or 8 (finished before cancel was observed).
         assert!(
             (7..=8).contains(&summary.scanned),
             "scanned={}",
@@ -517,8 +470,6 @@ mod tests {
     #[tokio::test]
     async fn progress_events_report_total() {
         let t = FakeTransport::new();
-        // Count(60) samples 60 random hosts from the /24 pool; scripting every
-        // host makes the sample fully deterministic.
         for i in 1..=254u8 {
             t.insert(
                 format!("203.0.113.{i}").parse().unwrap(),

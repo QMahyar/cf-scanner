@@ -40,7 +40,6 @@ fn cfg(count: u32, found: u32) -> ScanConfig {
         mode: Mode::Cdn,
         target: ScanTarget::Count(count),
         stop: StopCondition { found, cap: None },
-        // Explicit pool input keeps tests off the filesystem ranges.
         custom_cidrs: vec!["203.0.113.0/29".to_owned()],
         ports: vec![Port::new(443)],
         concurrency: 1,
@@ -48,8 +47,6 @@ fn cfg(count: u32, found: u32) -> ScanConfig {
     }
 }
 
-/// Spawns the router on an ephemeral port with a scripted transport and
-/// returns its address. Ranges are the bundled list with no timestamp.
 async fn serve(t: FakeTransport) -> SocketAddr {
     serve_with_ranges(t, RangesState::load_text(BUNDLED_RANGES, None)).await
 }
@@ -80,14 +77,7 @@ async fn serve_with_dir(
     tokio::spawn(async move {
         axum::serve(
             listener,
-            router_with_dir(
-                controller,
-                ranges,
-                registrar,
-                // Ephemeral test port; guard tests derive origins from it.
-                addr.port(),
-                xray_fetch,
-            ),
+            router_with_dir(controller, ranges, registrar, addr.port(), xray_fetch),
         )
         .await
         .unwrap();
@@ -95,12 +85,10 @@ async fn serve_with_dir(
     addr
 }
 
-/// Registration fakes never touch the network.
 fn canned_registrar() -> WarpRegistrar {
     Arc::new(|_| Ok("fake-wgconf".to_owned()))
 }
 
-/// Test xray fetcher: returns a dummy path immediately (no network).
 fn canned_xray_fetch() -> XrayFetcher {
     Arc::new(|| Ok(std::path::PathBuf::from("/fake/xray")))
 }
@@ -109,11 +97,6 @@ fn failing_registrar() -> WarpRegistrar {
     Arc::new(|_| Err(anyhow::anyhow!("upstream unreachable")))
 }
 
-/// Points `CF_SCANNER_DATA_DIR` at a throwaway dir and returns a guard
-/// that removes any identity file when dropped. Serialized against
-/// warpgen's identity tests (which flip the same process-global
-/// variable), so no register test ever reads another test's identity —
-/// or a real user's.
 fn isolate_identity_dir() -> impl Drop {
     let guard = crate::warpgen::tests::IDENTITY_LOCK.lock().unwrap();
     let dir = std::env::temp_dir().join("cf-scanner-server-register-tests");
@@ -132,8 +115,6 @@ fn isolate_identity_dir() -> impl Drop {
     Cleanup { _guard: guard }
 }
 
-/// Registrar that persists a minimal identity file on success, as the
-/// real warpgen register flow does, so the overwrite guard sees it.
 fn identity_persisting_registrar() -> WarpRegistrar {
     let dir = std::env::temp_dir().join("cf-scanner-server-register-tests");
     Arc::new(move |_| {
@@ -146,7 +127,6 @@ fn identity_persisting_registrar() -> WarpRegistrar {
     })
 }
 
-/// Records the license each call received; returns the canned wgconf.
 fn recording_registrar(wgconf: &'static str) -> (WarpRegistrar, Arc<Mutex<Option<String>>>) {
     let seen = Arc::new(Mutex::new(None));
     let capture = Arc::clone(&seen);
@@ -157,11 +137,6 @@ fn recording_registrar(wgconf: &'static str) -> (WarpRegistrar, Arc<Mutex<Option
     (registrar, seen)
 }
 
-/// Raw HTTP/1.1 over a throwaway TCP connection. Reads until EOF or
-/// `until` (for endless streams like SSE) or a 2 s deadline, and returns
-/// the status code plus what was read. The write half is NOT shutdown:
-/// hyper closes the connection without responding when the client FINs
-/// immediately after the request.
 async fn request(addr: SocketAddr, req: &str, until: Option<&str>) -> (u16, String) {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
@@ -177,7 +152,7 @@ async fn request(addr: SocketAddr, req: &str, until: Option<&str>) -> (u16, Stri
         tokio::select! {
             _ = &mut deadline => break,
             read = stream.read(&mut chunk) => match read {
-                Ok(0) => break, // EOF
+                Ok(0) => break,
                 Ok(n) => buf.extend_from_slice(&chunk[..n]),
                 Err(_) => break,
             },
@@ -194,12 +169,8 @@ async fn post_scan(addr: SocketAddr, body: &str) -> u16 {
     post_scan_full(addr, body).await.0
 }
 
-/// Marker the guard requires on every state-changing request (mirrors the
-/// tray client).
 pub(crate) const CSRF_MARKER: &str = "X-Requested-With: cf-scanner\r\n";
 
-/// POST /api/scan returning the status AND the raw response text, so
-/// tests can assert on the error envelope's message.
 async fn post_scan_full(addr: SocketAddr, body: &str) -> (u16, String) {
     let req = format!(
         "POST /api/scan HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\n{CSRF_MARKER}Content-Length: {}\r\nConnection: close\r\n\r\n{}",
@@ -217,8 +188,6 @@ async fn post_register(addr: SocketAddr, body: &str) -> (u16, String) {
     request(addr, &req, None).await
 }
 
-/// Scripts every host of the /29 so count-sampled runs are deterministic
-/// regardless of which hosts the seeded RNG draws.
 fn script_all_hosts(t: &FakeTransport, latency: u32) {
     for i in 0..8u8 {
         t.insert(format!("203.0.113.{i}").parse().unwrap(), 443, Ok(latency));
@@ -227,8 +196,6 @@ fn script_all_hosts(t: &FakeTransport, latency: u32) {
 
 #[tokio::test]
 async fn api_responses_carry_security_headers() {
-    // The middleware adds the safe defaults to every API payload and SSE
-    // stream.
     let addr = serve(FakeTransport::new()).await;
     let (status, text) = request(
         addr,
@@ -272,7 +239,6 @@ async fn accepts_include_v6_scan_config() {
 
 #[tokio::test]
 async fn scan_config_without_include_v6_field_still_posts() {
-    // The field is serde-defaulted so older clients keep working.
     let addr = serve(FakeTransport::new()).await;
     let c = cfg(1, 1);
     let mut json = serde_json::to_string(&c).unwrap();
@@ -290,7 +256,6 @@ async fn scan_results_and_summary_roundtrip() {
     let body = serde_json::to_string(&cfg(1, 1)).unwrap();
     assert_eq!(post_scan(addr, &body).await, 202);
 
-    // The scan runs in a background task; poll until it finishes.
     let results_body = async {
         for _ in 0..50 {
             let (status, text) = request(
@@ -313,10 +278,6 @@ async fn scan_results_and_summary_roundtrip() {
 
 #[tokio::test]
 async fn events_stream_ends_after_the_terminal_event() {
-    // Every host probes slowly so the run outlives the SSE subscription
-    // attach window (no fixed sleeps: fast machines would flake). The
-    // stream must END after `finished`: an ever-pending body would hold
-    // hyper's graceful shutdown open forever.
     let mut t = FakeTransport::new();
     for i in 0..8u8 {
         t = t.ok_slow(format!("203.0.113.{i}").parse().unwrap(), 443, 25, 500);
@@ -329,8 +290,6 @@ async fn events_stream_ends_after_the_terminal_event() {
         .write_all(b"GET /api/events HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
         .await
         .unwrap();
-    // Wait until the SSE connection is readable (server accepted it)
-    // instead of a fixed sleep.
     let deadline = tokio::time::sleep(Duration::from_secs(2));
     tokio::pin!(deadline);
     tokio::select! {
@@ -361,9 +320,6 @@ async fn events_stream_ends_after_the_terminal_event() {
         }
     };
     assert!(eof, "no terminal event within 2 s");
-    // The connection must close right after the terminal event, not hang:
-    // read to EOF and require it to land well before the request helper's
-    // own 2 s deadline (the old contract pended forever here).
     loop {
         let deadline = tokio::time::sleep(Duration::from_secs(2));
         tokio::pin!(deadline);
@@ -385,16 +341,11 @@ async fn events_stream_ends_after_the_terminal_event() {
 
 #[tokio::test]
 async fn concurrent_scan_starts_emit_no_phantom_failed() {
-    // Racing POSTs must resolve via 409 conflicts alone: the old
-    // check-then-spawn gap let a second run through, whose engine-level
-    // rejection surfaced as a spurious `Failed` event mid-scan.
     let mut t = FakeTransport::new();
     for i in 0..8u8 {
         t = t.ok_slow(format!("203.0.113.{i}").parse().unwrap(), 443, 25, 500);
     }
     let addr = serve(t).await;
-    // Ensure the server is ready to accept connections before spawning
-    // the events stream. Poll until a TCP connection is accepted.
     let ready_deadline = tokio::time::sleep(Duration::from_secs(2));
     tokio::pin!(ready_deadline);
     loop {
@@ -441,9 +392,6 @@ async fn concurrent_scan_starts_emit_no_phantom_failed() {
 
 #[tokio::test]
 async fn terminal_bounded_stream_stops_after_finished() {
-    // Unit-level contract of the live SSE adapter: items flow until the
-    // terminal event, then the stream ends (None) even though the
-    // broadcast sender stays alive.
     let (tx, rx) = tokio::sync::broadcast::channel(8);
     let mut stream = TerminalBounded {
         rx: BroadcastStream::new(rx),
@@ -472,9 +420,6 @@ async fn terminal_bounded_stream_stops_after_finished() {
         cancelled: false,
     }))
     .unwrap();
-    // axum's Event exposes no getters; item-count + termination is the
-    // adapter's contract (event names are asserted over the wire in
-    // events_stream_ends_after_the_terminal_event).
     let first = tokio::time::timeout(Duration::from_secs(1), stream.next())
         .await
         .unwrap()
@@ -494,9 +439,6 @@ async fn terminal_bounded_stream_stops_after_finished() {
 
 #[tokio::test]
 async fn replayed_terminal_does_not_close_the_stream() {
-    // A stale terminal delivered as context must not terminate the
-    // connection (idle browser EventSources would reconnect-storm);
-    // only a fresh LIVE terminal from a later run ends it.
     let (tx, rx) = tokio::sync::broadcast::channel(8);
     let mut stream = TerminalBounded {
         rx: BroadcastStream::new(rx),
@@ -549,8 +491,6 @@ async fn replayed_terminal_does_not_close_the_stream() {
     );
 }
 
-/// Polls /api/status until the spawned run task has reached the running
-/// guard (replaces fixed sleeps that flake on slow machines).
 async fn wait_until_running(addr: SocketAddr) {
     for _ in 0..200 {
         let (status, text) = request(
@@ -567,10 +507,6 @@ async fn wait_until_running(addr: SocketAddr) {
     panic!("scan did not reach the running guard in time");
 }
 
-/// Polls /api/status until the spawned run task has fully finished
-/// (running flag cleared), then one more beat so the terminal-event
-/// store — which lands microseconds after the flag clears — is visible
-/// to a replaying connection.
 async fn wait_until_idle(addr: SocketAddr) {
     for _ in 0..200 {
         let (status, text) = request(
@@ -590,8 +526,6 @@ async fn wait_until_idle(addr: SocketAddr) {
 
 #[tokio::test]
 async fn events_replay_the_terminal_of_the_latest_finished_run() {
-    // Fast hosts: the run ends quickly and the terminal store lands
-    // right after the running flag clears.
     let t = FakeTransport::new();
     for i in 0..8u8 {
         t.insert(format!("203.0.113.{i}").parse().unwrap(), 443, Ok(10));
@@ -603,8 +537,6 @@ async fn events_replay_the_terminal_of_the_latest_finished_run() {
         202
     );
     wait_until_idle(addr).await;
-    // A connection after the run ended replays exactly one terminal
-    // event (not the whole finished-run tail).
     let (status, text) = request(
         addr,
         "GET /api/events HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n",
@@ -617,8 +549,6 @@ async fn events_replay_the_terminal_of_the_latest_finished_run() {
 
 #[tokio::test]
 async fn second_scan_while_running_is_conflict() {
-    // All /29 hosts probe slowly so the count-sampled plan keeps the run
-    // alive while the second POST arrives.
     let mut t = FakeTransport::new();
     for i in 0..8u8 {
         t = t.ok_slow(format!("203.0.113.{i}").parse().unwrap(), 443, 25, 500);
@@ -653,7 +583,6 @@ async fn get_ranges(addr: SocketAddr) -> (u16, String) {
     .await
 }
 
-/// The JSON body after the HTTP header block.
 fn json_body(text: &str) -> &str {
     text.split_once("\r\n\r\n").map(|(_, b)| b).unwrap_or(text)
 }
@@ -687,7 +616,6 @@ async fn background_refresh_populates_last_updated() {
         Arc::new(FakeHttp(OFFICIAL_FIXTURE)),
     );
     let addr = serve_with_ranges(FakeTransport::new(), ranges).await;
-    // Poll across several refresh cycles until the timestamp flips non-null.
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
     while std::time::Instant::now() < deadline {
         let (status, text) = get_ranges(addr).await;
@@ -697,7 +625,6 @@ async fn background_refresh_populates_last_updated() {
                 serde_json::from_str(json_body(&text)).expect("ranges payload JSON");
             if let Some(ts) = payload["last_updated"].as_str() {
                 assert!(ts.ends_with('Z'), "{ts}");
-                // host_count should be > 0 after refresh
                 assert!(payload["host_count"].as_u64().unwrap_or(0) > 0);
                 return;
             }
@@ -712,7 +639,6 @@ async fn background_refresh_failure_keeps_last_good_data() {
     let ranges = RangesState::load_text("203.0.113.0/24", Some("2026-01-01T00:00:00Z"));
     ranges.spawn_refresh(Some(Duration::from_millis(20)), Arc::new(FailingHttp));
     let addr = serve_with_ranges(FakeTransport::new(), ranges).await;
-    // Poll across several failed refresh cycles; the state must not move.
     let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
     loop {
         let (status, text) = get_ranges(addr).await;
@@ -745,8 +671,6 @@ async fn rejects_foreign_host_header() {
 
 #[tokio::test]
 async fn accepts_localhost_case_insensitively_and_rejects_ipv6_host() {
-    // The server binds IPv4 loopback only, so [::1] is not an answerable
-    // Host and must be rejected like any foreign host.
     let addr = serve(FakeTransport::new()).await;
     for host in ["localhost:8765", "LOCALHOST:8765", "127.0.0.1:1"] {
         let (status, _) = request(
@@ -788,16 +712,13 @@ async fn origin_must_carry_the_served_port() {
             "GET /api/status HTTP/1.1\r\nHost: 127.0.0.1\r\nOrigin: {origin}\r\nConnection: close\r\n\r\n"
         )
     };
-    // Same origin as the served API: allowed.
     let own = format!("http://127.0.0.1:{}", addr.port());
     let (status, text) = request(addr, &req_for(&own), None).await;
     assert_eq!(status, 200, "{text}");
-    // Another local process's port is same-site but NOT first-party.
     let (status, text) = request(addr, &req_for("http://127.0.0.1:9999"), None).await;
     assert_eq!(status, 403, "{text}");
     let (status, text) = request(addr, &req_for("http://localhost:9999"), None).await;
     assert_eq!(status, 403, "{text}");
-    // No Origin header (curl, same-origin GETs): accepted exactly as before.
     let (status, text) = request(
         addr,
         "GET /api/status HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n",
@@ -869,8 +790,6 @@ async fn phase2_file_paths_are_rejected_over_http() {
 
 #[tokio::test]
 async fn concurrent_scan_starts_do_not_double_spawn() {
-    // Two POSTs racing each other must yield exactly one running scan
-    // (one 202, one 409), never two accepted runs.
     let mut t = FakeTransport::new();
     for i in 0..8u8 {
         t = t.ok_slow(format!("203.0.113.{i}").parse().unwrap(), 443, 25, 500);
@@ -902,13 +821,8 @@ async fn concurrent_scan_starts_do_not_double_spawn() {
 
 #[tokio::test]
 async fn sse_connection_cap_rejects_fifth_stream() {
-    // The four connections must be held open concurrently: each request
-    // reads until its own deadline, so a sequential loop would let slots
-    // free up before the fifth attempt.
     let addr = serve(FakeTransport::new()).await;
     let req = "GET /api/events HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n";
-    // Open 4 raw TCP connections and send the SSE request so the server
-    // occupies slots. We don't read responses — just hold the connections open.
     use tokio::io::AsyncWriteExt;
     let mut streams = Vec::new();
     for _ in 0..MAX_SSE_CONNECTIONS {
@@ -916,7 +830,6 @@ async fn sse_connection_cap_rejects_fifth_stream() {
         s.write_all(req.as_bytes()).await.unwrap();
         streams.push(s);
     }
-    // Poll until the fifth connection is rejected (slots occupied).
     let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
     let status = loop {
         let (status, _) = request(addr, req, None).await;
@@ -974,8 +887,6 @@ async fn warp_register_absent_or_blank_license_is_none() {
         r#"{"license":""}"#,
         r#"{"license":"   "}"#,
     ] {
-        // A fresh app state per attempt: the 60 s registration cooldown
-        // would 429 a second POST on the same server.
         let addr = serve_with_registrar(
             FakeTransport::new(),
             RangesState::load_text(BUNDLED_RANGES, None),
@@ -1046,7 +957,6 @@ async fn register_is_rate_limited() {
 #[tokio::test]
 async fn register_refuses_overwrite_without_consent() {
     let _isolated = isolate_identity_dir();
-    // First registration on a fresh app state: no identity yet → 200.
     let addr = serve_with_registrar(
         FakeTransport::new(),
         RangesState::load_text(BUNDLED_RANGES, None),
@@ -1055,11 +965,8 @@ async fn register_refuses_overwrite_without_consent() {
     .await;
     let (status, text) = post_register(addr, r#"{"license":null}"#).await;
     assert_eq!(status, 200, "{text}");
-    // The persisted identity now exists: a plain re-register must 409...
     let (status, text) = post_register(addr, r#"{"license":null}"#).await;
     assert_eq!(status, 409, "{text}");
-    // ...and explicit consent replaces it (fresh app state: the 60 s
-    // cooldown is per app state, not per identity).
     let addr = serve_with_registrar(
         FakeTransport::new(),
         RangesState::load_text(BUNDLED_RANGES, None),
@@ -1070,9 +977,6 @@ async fn register_refuses_overwrite_without_consent() {
     assert_eq!(status, 200, "{text}");
 }
 
-/// Registrar that signals when called via `Notify` (replaces the blocking
-/// `std::thread::sleep` with an async-aware wait). Returns the receiver so
-/// the test can wait until the registrar is invoked.
 fn slow_identity_registrar() -> (WarpRegistrar, Arc<Notify>) {
     let dir = std::env::temp_dir().join("cf-scanner-server-register-tests");
     let notify = Arc::new(Notify::new());
@@ -1099,14 +1003,11 @@ async fn concurrent_registers_serialize_overwrite_consent() {
         registrar,
     )
     .await;
-    // Arm the notified future BEFORE the requests so the notification is
-    // not missed even if both registrar calls complete before we await.
     let notified = notify.notified();
     let (a, b) = tokio::join!(
         post_register(addr, r#"{"license":null}"#),
         post_register(addr, r#"{"license":null}"#),
     );
-    // Wait for the registrar signal (must have fired during the join).
     tokio::time::timeout(Duration::from_secs(2), notified)
         .await
         .expect("registrar was not called within 2 s");
@@ -1139,7 +1040,6 @@ async fn register_rejects_oversized_license() {
         )),
         "{text}"
     );
-    // At the cap the license goes through to the registrar untouched.
     let at_cap = "a".repeat(crate::api::types::MAX_LICENSE_BYTES);
     let (status, text) = post_register(addr, &format!(r#"{{"license":"{at_cap}"}}"#)).await;
     assert_eq!(status, 200, "{text}");
@@ -1169,38 +1069,34 @@ async fn export_rejects_oversized_config() {
 async fn scan_rejects_non_routable_custom_cidrs() {
     let addr = serve(FakeTransport::new()).await;
     for cidr in [
-        "127.0.0.1/32",   // loopback
-        "169.254.0.0/16", // link-local
-        "0.0.0.0/8",      // unspecified block
-        "10.0.0.0/8",     // RFC1918
-        "172.16.0.0/12",  // RFC1918
-        "192.168.1.0/24", // RFC1918
-        "::1/128",        // loopback v6
-        "::/128",         // unspecified v6
-        "fc00::/7",       // ULA
-        "fe80::/10",      // link-local v6
-        // IPv4-mapped IPv6 spellings of the same specials must fail
-        // exactly like their v4 forms.
-        "::ffff:127.0.0.1/128",   // loopback, mapped
-        "::ffff:169.254.0.1/128", // link-local, mapped
-        "::ffff:10.0.0.0/104",    // RFC1918 10/8, mapped
-        "::ffff:192.168.1.0/120", // RFC1918 /24, mapped
+        "127.0.0.1/32",
+        "169.254.0.0/16",
+        "0.0.0.0/8",
+        "10.0.0.0/8",
+        "172.16.0.0/12",
+        "192.168.1.0/24",
+        "::1/128",
+        "::/128",
+        "fc00::/7",
+        "fe80::/10",
+        "::ffff:127.0.0.1/128",
+        "::ffff:169.254.0.1/128",
+        "::ffff:10.0.0.0/104",
+        "::ffff:192.168.1.0/120",
     ] {
         let mut c = cfg(1, 1);
         c.custom_cidrs = vec![cidr.to_owned()];
         let status = post_scan(addr, &serde_json::to_string(&c).unwrap()).await;
         assert_eq!(status, 422, "custom_cidrs {cidr} must be rejected");
     }
-    // TEST-NET ranges stay routable over the API.
     assert_eq!(
         post_scan(addr, &serde_json::to_string(&cfg(1, 1)).unwrap()).await,
         202
     );
-    // WARP endpoints: loopback rejected, TEST-NET accepted.
     let mut c = cfg(1, 1);
     c.mode = Mode::Warp;
     c.custom_cidrs = vec![];
-    c.ports = vec![Port::new(2408)]; // WARP needs explicit ports (no defaulting)
+    c.ports = vec![Port::new(2408)];
     c.warp = Some(WarpConfig {
         custom_endpoints: vec!["127.0.0.1".to_owned()],
         ..WarpConfig::default()
@@ -1251,8 +1147,6 @@ async fn scan_rejects_stop_values_above_the_frontend_cap() {
 
 #[tokio::test]
 async fn warp_scan_with_cdn_default_port_is_rejected_not_substituted() {
-    // The review found the server silently rewrote ports [443] into
-    // DEFAULT_WARP_PORTS; the contract now rejects it with a clear error.
     let addr = serve(FakeTransport::new()).await;
     let mut c = cfg(1, 1);
     c.mode = Mode::Warp;
@@ -1263,15 +1157,11 @@ async fn warp_scan_with_cdn_default_port_is_rejected_not_substituted() {
     });
     let (status, text) = post_scan_full(addr, &serde_json::to_string(&c).unwrap()).await;
     assert_eq!(status, 422, "{text}");
-    // A real WARP port list passes (the scan itself runs in the
-    // background against real UDP timeouts; only the accept matters).
     c.ports = DEFAULT_WARP_PORTS.to_vec();
     assert_eq!(
         post_scan(addr, &serde_json::to_string(&c).unwrap()).await,
         202
     );
-    // CDN keeps accepting the default port (fresh server: the WARP run
-    // above is still probing real endpoints).
     let cdn = serve(FakeTransport::new()).await;
     assert_eq!(
         post_scan(cdn, &serde_json::to_string(&cfg(1, 1)).unwrap()).await,
@@ -1282,7 +1172,7 @@ async fn warp_scan_with_cdn_default_port_is_rejected_not_substituted() {
 fn warp_cfg_with_wgconf() -> ScanConfig {
     let mut c = cfg(1, 1);
     c.mode = Mode::Warp;
-    c.custom_cidrs = vec![]; // CDN-only; WARP takes custom_endpoints
+    c.custom_cidrs = vec![];
     c.ports = vec![Port::new(2408)];
     c.warp = Some(WarpConfig {
         custom_endpoints: vec!["203.0.113.1".to_owned()],
@@ -1298,8 +1188,6 @@ fn warp_cfg_with_wgconf() -> ScanConfig {
 
 #[tokio::test]
 async fn scan_path_still_accepts_wgconf_configs() {
-    // The engine's scan path keeps accepting verification configs
-    // (review Domain 7: the real config stays in the engine's scan path).
     let addr = serve(FakeTransport::new()).await;
     let mut c = warp_cfg_with_wgconf();
     c.warp.as_mut().unwrap().verify_with_wgconf = false;
@@ -1341,7 +1229,6 @@ async fn export_renders_a_ready_uri_for_a_verified_candidate() {
         uri.contains("sni=b.me") && uri.contains("fp=chrome"),
         "{uri}"
     );
-    // The exported URI parses and targets the candidate.
     let spec = crate::configs::parse_uri(uri).unwrap();
     assert_eq!(spec.server, "203.0.113.7");
     assert_eq!(spec.port, 2096);
@@ -1422,7 +1309,6 @@ async fn export_rejects_malformed_sni() {
         assert_eq!(status, 400, "{bad}: {text}");
         assert!(text.contains("invalid SNI"), "{bad}: {text}");
     }
-    // Raw IPs and valid hostnames stay accepted.
     for good in ["1.2.3.4", "2606:4700::1111", "front.example.com"] {
         let body = serde_json::json!({
             "config": EXPORT_VLESS,
@@ -1438,8 +1324,6 @@ async fn export_rejects_malformed_sni() {
 #[tokio::test]
 async fn export_rejects_unsupported_configs_with_a_redacted_envelope() {
     let addr = serve(FakeTransport::new()).await;
-    // Schemes xray cannot verify (hysteria) are rejected at parse time; the
-    // id inside the URI must never leak into the error envelope.
     let body = serde_json::json!({
         "config": "hysteria2://secret-hy2-id@1.2.3.4:443",
         "ip": "203.0.113.7",
@@ -1449,7 +1333,6 @@ async fn export_rejects_unsupported_configs_with_a_redacted_envelope() {
     assert_eq!(status, 400, "{text}");
     assert!(text.contains("unsupported scheme"), "{text}");
     assert!(!text.contains("secret-hy2-id"), "{text}");
-    // Garbage configs error through the same envelope with no echo.
     let body = serde_json::json!({"config": "http://evil.example/x?id=sec", "ip": "203.0.113.7", "port": 443});
     let (status, text) = post_export(addr, &body.to_string()).await;
     assert_eq!(status, 400, "{text}");
@@ -1460,7 +1343,6 @@ async fn export_rejects_unsupported_configs_with_a_redacted_envelope() {
 async fn bundle_endpoints_serve_subscription_and_metadata_formats() {
     let addr = serve(FakeTransport::new()).await;
     let client = reqwest::Client::new();
-    // No scan yet: every format is an empty-but-valid payload.
     for (path, expect) in [
         ("/api/bundle?format=base64", ""),
         ("/api/bundle?format=raw", ""),
@@ -1505,9 +1387,6 @@ async fn bundle_endpoints_reject_unknown_formats_with_400() {
 
 #[tokio::test]
 async fn bundle_and_export_serve_seeded_results_with_unique_tags() {
-    // A phase-2 scan whose probe passes for every candidate: the verdict
-    // store and last_phase2_configs fill, so the export endpoints exercise
-    // their full rewrite pipeline instead of the empty state.
     let t = FakeTransport::new();
     for i in 0..8u8 {
         t.insert(format!("203.0.113.{i}").parse().unwrap(), 443, Ok(10));
@@ -1550,7 +1429,6 @@ async fn bundle_and_export_serve_seeded_results_with_unique_tags() {
     wait_until_idle(addr).await;
 
     let client = reqwest::Client::new();
-    // Raw bundle: every passing candidate is rewritten against its config.
     let res = client
         .get(format!("http://{addr}/api/bundle?format=raw"))
         .send()
@@ -1564,7 +1442,6 @@ async fn bundle_and_export_serve_seeded_results_with_unique_tags() {
         assert!(uri.starts_with("vless://"), "{uri}");
         assert!(uri.contains("203.0.113."), "{uri}");
     }
-    // Clash: proxy names must be unique even when colo/latency repeat.
     let res = client
         .get(format!("http://{addr}/api/bundle?format=clash"))
         .send()
@@ -1584,7 +1461,6 @@ async fn bundle_and_export_serve_seeded_results_with_unique_tags() {
         unique.len(),
         "proxy names must be unique: {names:?}"
     );
-    // Mismatched protocol fields stay absent (no empty uuid on trojan etc.).
     for p in parsed["proxies"].as_array().unwrap() {
         let has_uuid = p.get("uuid").is_some();
         let has_password = p.get("password").is_some();
@@ -1593,7 +1469,6 @@ async fn bundle_and_export_serve_seeded_results_with_unique_tags() {
             "exactly one credential field per proxy: {p}"
         );
     }
-    // Sing-box: tags unique too.
     let res = client
         .get(format!("http://{addr}/api/bundle?format=singbox"))
         .send()
@@ -1611,7 +1486,6 @@ async fn bundle_and_export_serve_seeded_results_with_unique_tags() {
         tags.iter().collect::<std::collections::HashSet<_>>().len()
     );
 
-    // Results export carries the rows with their metadata.
     let res = client
         .get(format!("http://{addr}/api/results/export?format=csv"))
         .send()
@@ -1642,8 +1516,6 @@ fn csv_export_quotes_fields_containing_separators() {
 async fn export_endpoints_keep_their_documented_no_param_defaults() {
     let addr = serve(FakeTransport::new()).await;
     let client = reqwest::Client::new();
-    // No ?format: bundle defaults to base64 (sub filename), results export
-    // to csv (header row) — regression guard for the resolve_format default.
     let res = client
         .get(format!("http://{addr}/api/bundle"))
         .send()
@@ -1671,7 +1543,6 @@ async fn export_endpoints_keep_their_documented_no_param_defaults() {
 #[tokio::test]
 async fn mutating_requests_require_the_csrf_marker() {
     let addr = serve(FakeTransport::new()).await;
-    // POST without the marker is rejected even with a valid Host.
     let (status, text) = request(
         addr,
         "POST /api/cancel HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
@@ -1681,7 +1552,6 @@ async fn mutating_requests_require_the_csrf_marker() {
     assert_eq!(status, 403, "{text}");
     let parsed: serde_json::Value = serde_json::from_str(json_body(&text)).unwrap();
     assert_eq!(parsed["code"], "forbidden");
-    // With the marker it passes the guard (204 noop cancel).
     let (status, _) = request(
         addr,
         &format!(
@@ -1691,7 +1561,6 @@ async fn mutating_requests_require_the_csrf_marker() {
     )
     .await;
     assert_eq!(status, 204);
-    // GET stays open without the marker.
     let (status, _) = request(
         addr,
         "GET /api/status HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n",
@@ -1700,8 +1569,6 @@ async fn mutating_requests_require_the_csrf_marker() {
     .await;
     assert_eq!(status, 200);
 }
-
-// --- A9 / A13 / A17 new coverage ---
 
 #[tokio::test]
 async fn rejects_null_origin() {
@@ -1715,7 +1582,6 @@ async fn rejects_null_origin() {
     assert_eq!(status, 403, "{text}");
     let parsed: serde_json::Value = serde_json::from_str(json_body(&text)).unwrap();
     assert_eq!(parsed["code"], "forbidden");
-    // absent Origin stays allowed
     let (status, _) = request(
         addr,
         "GET /api/status HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n",
@@ -1723,7 +1589,6 @@ async fn rejects_null_origin() {
     )
     .await;
     assert_eq!(status, 200);
-    // normal same-origin still allowed
     let own_origin = format!("http://127.0.0.1:{}", addr.port());
     let req = format!(
         "GET /api/status HTTP/1.1\r\nHost: 127.0.0.1\r\nOrigin: {own_origin}\r\nConnection: close\r\n\r\n"
@@ -1735,8 +1600,6 @@ async fn rejects_null_origin() {
 #[tokio::test]
 async fn json_rejection_is_sanitized_and_truncated() {
     let addr = serve(FakeTransport::new()).await;
-    // Oversized multiline body with control chars; rejection body_text flows
-    // through sanitize_error_text and 512-char truncation.
     let big = "x".repeat(2000);
     let body = format!(
         "{{\"mode\":\"Cdn\",\"target\":{{\"Preset\":\"Quick\"}},\"ports\":[443],\"bad\":\"{big}\"\nsecond line with control \x07 and https://user:pass@example.com/secret?token=abc#frag"
@@ -1747,8 +1610,6 @@ async fn json_rejection_is_sanitized_and_truncated() {
         body
     );
     let (status, text) = request(addr, &req, None).await;
-    // The unknown "bad" field trips deny_unknown_fields (a serde DATA
-    // error) before the trailing syntax garbage matters -> 422.
     assert_eq!(status, 422, "{text}");
     let parsed: serde_json::Value = serde_json::from_str(json_body(&text)).unwrap();
     let msg = parsed["message"].as_str().unwrap();
@@ -1768,7 +1629,6 @@ async fn json_rejection_is_sanitized_and_truncated() {
 #[tokio::test]
 async fn error_responses_carry_machine_readable_codes() {
     let addr = serve(FakeTransport::new()).await;
-    // 404 code
     let (status, text) = request(
         addr,
         "GET /api/nope HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n",
@@ -1779,7 +1639,6 @@ async fn error_responses_carry_machine_readable_codes() {
     let parsed: serde_json::Value = serde_json::from_str(json_body(&text)).unwrap();
     assert_eq!(parsed["code"], "not_found");
 
-    // 403 forbidden
     let (status, text) = request(
         addr,
         "GET /api/status HTTP/1.1\r\nHost: evil.example\r\nConnection: close\r\n\r\n",
@@ -1790,7 +1649,6 @@ async fn error_responses_carry_machine_readable_codes() {
     let parsed: serde_json::Value = serde_json::from_str(json_body(&text)).unwrap();
     assert_eq!(parsed["code"], "forbidden");
 
-    // 409 conflict (scan already running)
     let mut t = FakeTransport::new();
     for i in 0..8u8 {
         t = t.ok_slow(format!("203.0.113.{i}").parse().unwrap(), 443, 25, 500);
@@ -1804,7 +1662,6 @@ async fn error_responses_carry_machine_readable_codes() {
     let parsed: serde_json::Value = serde_json::from_str(json_body(&text)).unwrap();
     assert_eq!(parsed["code"], "conflict");
 
-    // invalid_config vs bad_request: cfg.validate failure is invalid_config
     let addr3 = serve(FakeTransport::new()).await;
     let mut bad = cfg(1, 1);
     bad.concurrency = 0;
@@ -1813,7 +1670,6 @@ async fn error_responses_carry_machine_readable_codes() {
     let parsed: serde_json::Value = serde_json::from_str(json_body(&text)).unwrap();
     assert_eq!(parsed["code"], "invalid_config");
 
-    // generic bad_request stays bad_request (export oversized)
     let big = format!(
         "vless://x@1.2.3.4:443?{}",
         "a".repeat(crate::api::types::MAX_EXPORT_CONFIG_BYTES)
@@ -1828,26 +1684,22 @@ async fn error_responses_carry_machine_readable_codes() {
 #[test]
 fn map_register_error_maps_variants() {
     use crate::warpgen::WarpRegisterError;
-    // Timeout -> gateway_timeout 504
     let err = anyhow::Error::from(WarpRegisterError::Timeout);
     let api = map_register_error(err);
     assert_eq!(api.status, StatusCode::GATEWAY_TIMEOUT);
     assert_eq!(api.code, "gateway_timeout");
 
-    // RateLimited -> rate_limited 429
     let err = anyhow::Error::from(WarpRegisterError::RateLimited);
     let api = map_register_error(err);
     assert_eq!(api.status, StatusCode::TOO_MANY_REQUESTS);
     assert_eq!(api.code, "rate_limited");
 
-    // Unauthorized -> upstream_error 502 with status in message
     let err = anyhow::Error::from(WarpRegisterError::Unauthorized { status: 401 });
     let api = map_register_error(err);
     assert_eq!(api.status, StatusCode::BAD_GATEWAY);
     assert_eq!(api.code, "upstream_error");
     assert!(api.message.contains("401"), "{}", api.message);
 
-    // Server -> upstream_error with sanitized detail, truncated
     let long_detail =
         "https://user:secret@example.com/x?token=abc ".to_string() + &"y".repeat(1000);
     let err = anyhow::Error::from(WarpRegisterError::Server {
@@ -1863,12 +1715,10 @@ fn map_register_error_maps_variants() {
         "sanitized detail truncated"
     );
 
-    // Wrapped via context -> still maps (chain)
     let err = anyhow::Error::from(WarpRegisterError::Timeout).context("outer wrap");
     let api = map_register_error(err);
     assert_eq!(api.code, "gateway_timeout");
 
-    // Unknown -> fallback upstream_error
     let err = anyhow::anyhow!("some other network failure https://user:pass@example.com/q?x=1");
     let api = map_register_error(err);
     assert_eq!(api.code, "upstream_error");
@@ -1878,7 +1728,6 @@ fn map_register_error_maps_variants() {
 #[tokio::test]
 async fn warp_register_maps_typed_errors_over_http() {
     let _isolated = isolate_identity_dir();
-    // Timeout variant via injected registrar
     let timeout_reg: WarpRegistrar = Arc::new(|_| {
         Err(anyhow::Error::from(
             crate::warpgen::WarpRegisterError::Timeout,
@@ -1895,7 +1744,6 @@ async fn warp_register_maps_typed_errors_over_http() {
     let parsed: serde_json::Value = serde_json::from_str(json_body(&text)).unwrap();
     assert_eq!(parsed["code"], "gateway_timeout");
 
-    // RateLimited -> 429
     let rl_reg: WarpRegistrar = Arc::new(|_| {
         Err(anyhow::Error::from(
             crate::warpgen::WarpRegisterError::RateLimited,
@@ -1915,8 +1763,6 @@ async fn warp_register_maps_typed_errors_over_http() {
 
 #[tokio::test]
 async fn lagged_stream_stays_alive_with_terminal_snapshot() {
-    // Lagged must not close the stream; instead it re-emits the terminal
-    // snapshot and continues listening.
     let (tx, rx) = tokio::sync::broadcast::channel(2);
     let last = Arc::new(Mutex::new(Some((
         1u64,
@@ -1941,7 +1787,6 @@ async fn lagged_stream_stays_alive_with_terminal_snapshot() {
         pending: std::collections::VecDeque::new(),
         last_resync: None,
     };
-    // Fill and overflow the 2-slot channel so the receiver lags.
     tx.send(ScanEvent::Progress(crate::api::types::ScanProgress {
         scanned: 1,
         found: 0,
@@ -1960,16 +1805,12 @@ async fn lagged_stream_stays_alive_with_terminal_snapshot() {
         total: Some(8),
     }))
     .unwrap();
-    // Receiver has missed events -> Lagged. It must yield the terminal snapshot and stay open.
     let item = tokio::time::timeout(Duration::from_secs(1), stream.next())
         .await
         .unwrap()
         .unwrap()
         .unwrap();
     drop(item);
-    // After the Lagged replay the broadcast may still deliver retained
-    // events (e.g. the newest progress) — the invariant is that the
-    // stream NEVER ends: drain until the window goes quiet.
     let mut stayed_open = true;
     for _ in 0..8 {
         match tokio::time::timeout(Duration::from_millis(100), stream.next()).await {
@@ -1999,16 +1840,11 @@ async fn xray_download_is_rate_limited() {
         canned_registrar(),
     )
     .await;
-    // First request passes the cooldown gate (the download itself may
-    // fail since there's no real xray binary, but the gate is set).
     let (status, _) = post_xray_download(addr).await;
-    // The download may fail (502) or succeed (200) depending on the
-    // environment; either way the cooldown gate was passed.
     assert!(
         status == 200 || status == 502,
         "first download must pass the gate, got {status}"
     );
-    // Second request within 60 s must be rejected with 429.
     let (status, text) = post_xray_download(addr).await;
     assert_eq!(
         status, 429,

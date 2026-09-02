@@ -1,6 +1,3 @@
-//! SSE event streaming: slot accounting, the lag-surviving terminal-bounded
-//! stream, and the engine-event to wire-event mapping.
-
 use std::collections::{HashSet, VecDeque};
 use std::convert::Infallible;
 use std::net::IpAddr;
@@ -16,32 +13,16 @@ use crate::api::types::ScanEvent;
 use super::error::ApiError;
 use super::state::AppState;
 
-/// Cap on concurrent SSE event streams so hung tabs cannot hoard broadcast
-/// receivers; the UI needs one, extras are an abuse signal.
 pub(crate) const MAX_SSE_CONNECTIONS: usize = 4;
 
-/// Minimum spacing between Lagged re-syncs on one stream. Each re-sync costs
-/// an O(store) snapshot clone, and a slow consumer that lags because of it
-/// would otherwise invite the next lag — a feedback loop. Anything still
-/// missed inside the window is healed by the next lag past it, or at the
-/// terminal (the UI refetches /api/results on finished).
 const RESYNC_MIN_INTERVAL: Duration = Duration::from_millis(250);
 
-/// One concurrent SSE stream per app slot; the slot is held by the returned
-/// stream for the connection's lifetime, so a dropped connection frees it.
 pub(crate) async fn events(
     axum::extract::State(state): axum::extract::State<Arc<AppState>>,
 ) -> Result<Sse<impl Stream<Item = Result<axum::response::sse::Event, Infallible>>>, ApiError> {
     let Some(slot) = try_acquire_sse_slot(&state.sse_connections) else {
         return Err(ApiError::too_many("too many open event streams"));
     };
-    // Subscribe BEFORE reading the terminal state: a finish landing between
-    // the old is_running() check and the subscribe lost the terminal for that
-    // client. With the receiver already attached, a terminal emitted after it
-    // arrives on the live stream, and one emitted before it is replayed from
-    // last_terminal — exactly-once either way. The (epoch, terminal) state is
-    // authoritative because start_scan records the terminal at emit time,
-    // before the running flag clears.
     let rx = state.controller.subscribe();
     let current_epoch = state.run_epoch.load(Ordering::SeqCst);
     let replay = state
@@ -56,12 +37,6 @@ pub(crate) async fn events(
             rx: BroadcastStream::new(rx),
             _slot: slot,
             done: false,
-            // A terminal from an ALREADY-FINISHED run is context, not an
-            // end-of-stream signal for THIS connection: closing here would
-            // make every idle browser EventSource reconnect-storm (connect ->
-            // replay -> close -> reconnect) and miss the next run's events.
-            // Deliver it once, then keep waiting for a future run's live
-            // tail — only a fresh live terminal ends the stream.
             replay: replay.map(|ev| (ev, false)),
             last_terminal: Arc::clone(&state.last_terminal),
             epoch: current_epoch,
@@ -75,25 +50,16 @@ pub(crate) async fn events(
 
 use std::pin::Pin;
 
-/// Live SSE items off the engine's broadcast tail, optionally preceded by one
-/// replayed terminal from the previous run. Ends after a LIVE run's terminal
-/// event (Finished/Failed) so an in-flight response body cannot hold hyper's
-/// graceful shutdown open forever. On Lagged the stream stays alive and
-/// re-emits the latest terminal snapshot (if any) instead of closing, to avoid
-/// EventSource reconnect storms.
 pub(crate) struct TerminalBounded {
     pub(super) rx: BroadcastStream<ScanEvent>,
     pub(super) _slot: SseSlot,
     pub(super) done: bool,
-    /// `Some((event, delivered))`: the previous run's terminal until it has
-    /// been yielded.
     pub(super) replay: Option<(ScanEvent, bool)>,
     pub(super) last_terminal: Arc<Mutex<Option<(u64, ScanEvent)>>>,
     pub(super) epoch: u64,
     pub(super) controller: Arc<crate::engine::ScanController>,
     pub(super) seen: HashSet<(IpAddr, u16)>,
     pub(super) pending: VecDeque<ScanEvent>,
-    /// Last Lagged re-sync instant, for the [`RESYNC_MIN_INTERVAL`] throttle.
     pub(super) last_resync: Option<Instant>,
 }
 
@@ -108,8 +74,6 @@ impl Stream for TerminalBounded {
         if self.done {
             return std::task::Poll::Ready(None);
         }
-        // The replayed terminal goes out first, exactly once; it does not
-        // end the stream (see the field docs).
         if let Some((ev, delivered)) = &mut self.replay
             && !*delivered
         {
@@ -131,10 +95,6 @@ impl Stream for TerminalBounded {
                         self.seen.insert((v.ip, v.port));
                     }
                     let terminal = matches!(ev, ScanEvent::Finished(_) | ScanEvent::Failed(_));
-                    // A terminal broadcast while this stream was subscribing
-                    // is both replayed from last_terminal and delivered live.
-                    // The replay went out first; drop the equal live copy but
-                    // still end the stream, so the terminal lands exactly once.
                     if terminal && matches!(&self.replay, Some((replayed, true)) if *replayed == ev)
                     {
                         self.done = true;
@@ -146,8 +106,6 @@ impl Stream for TerminalBounded {
                             return std::task::Poll::Ready(Some(Ok(event)));
                         }
                         None => {
-                            // Unserializable payload (never expected): drop
-                            // silently; a terminal still ends the stream.
                             if terminal {
                                 self.done = true;
                                 return std::task::Poll::Ready(None);
@@ -155,10 +113,6 @@ impl Stream for TerminalBounded {
                         }
                     }
                 }
-                // Lagged: avoid closing the stream (reconnect storm). Re-sync
-                // missed verdicts from the store (deduped by ip/port) and emit
-                // a fresh terminal snapshot if one exists for this epoch, then
-                // keep listening for live events.
                 std::task::Poll::Ready(Some(Err(_lagged))) => {
                     if self
                         .last_resync
@@ -191,7 +145,6 @@ impl Stream for TerminalBounded {
                     {
                         return std::task::Poll::Ready(Some(Ok(event)));
                     }
-                    // No terminal to replay; stay alive and wait for next live event.
                     continue;
                 }
                 std::task::Poll::Ready(None) => return std::task::Poll::Ready(None),
@@ -201,8 +154,6 @@ impl Stream for TerminalBounded {
     }
 }
 
-/// Maps an engine-domain event onto the SSE wire shape; None when the
-/// payload cannot serialize (never expected; the live path drops silently).
 pub(crate) fn map_event(ev: ScanEvent) -> Option<axum::response::sse::Event> {
     let retry = Duration::from_secs(3);
     match ev {
@@ -234,9 +185,6 @@ pub(crate) fn map_event(ev: ScanEvent) -> Option<axum::response::sse::Event> {
     }
 }
 
-/// RAII SSE slot: acquire bumps the counter, drop releases it. The caller
-/// moves the guard into the event stream so release happens when the
-/// connection dies, not when the handler returns.
 pub(crate) fn try_acquire_sse_slot(total: &Arc<AtomicUsize>) -> Option<SseSlot> {
     if total.fetch_add(1, Ordering::SeqCst) >= MAX_SSE_CONNECTIONS {
         total.fetch_sub(1, Ordering::SeqCst);

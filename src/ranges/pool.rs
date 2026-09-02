@@ -35,8 +35,6 @@ impl Cidr {
         }
     }
 
-    /// Number of addresses in the block. The v6 space can exceed u128
-    /// (`/0`); those blocks saturate at [`u128::MAX`].
     pub fn host_count(self) -> u128 {
         let shift = self.bits() - self.prefix as u32;
         if shift >= 128 {
@@ -46,9 +44,6 @@ impl Cidr {
         }
     }
 
-    /// /24 sub-blocks this v4 range covers; prefix >= 24 clamps to 1.
-    /// v6 ranges are never decomposed this way (see `plan_preset` in
-    /// `crate::engine::plan`).
     pub(crate) fn sub24_count(self) -> u64 {
         debug_assert!(self.addr.is_ipv4());
         if self.prefix >= 24 {
@@ -58,7 +53,6 @@ impl Cidr {
         }
     }
 
-    /// Absolute address for a host index within this range (index wraps).
     pub fn host(self, index: u128) -> IpAddr {
         let offset = index % self.host_count();
         match self.addr {
@@ -67,7 +61,6 @@ impl Cidr {
         }
     }
 
-    /// True when `other` is a same-family sub-block of `self`.
     fn contains(self, other: Cidr) -> bool {
         if self.addr.is_ipv4() != other.addr.is_ipv4() {
             return false;
@@ -80,9 +73,6 @@ impl Cidr {
     }
 }
 
-/// Parses and normalizes `ip/prefix`; host bits are masked off. Delegates
-/// grammar validation to the canonical `api::validate::parse_cidr` and adds
-/// pool-specific host-bit masking.
 pub fn parse_cidr(s: &str) -> Result<Cidr> {
     let (addr, prefix) = crate::api::types::parse_cidr(s).map_err(|e| anyhow!("{e}"))?;
     let masked = match addr {
@@ -135,7 +125,6 @@ impl CidrPool {
         Self::parse(BUNDLED_RANGES).expect("bundled ranges must parse: data/cf-ranges.txt")
     }
 
-    /// The official Cloudflare IPv6 ranges; opt-in via `ScanConfig::include_v6`.
     pub fn bundled_v6() -> Self {
         Self::parse(BUNDLED_RANGES_V6).expect("bundled v6 ranges must parse: data/cf-ranges-v6.txt")
     }
@@ -167,7 +156,6 @@ impl CidrPool {
         self.ranges.extend(more);
     }
 
-    /// Removes every excluded range (punctured) from this pool.
     pub fn excluding(&self, excluded: &[Cidr]) -> CidrPool {
         let mut ranges = self.ranges.clone();
         for e in excluded {
@@ -191,8 +179,6 @@ enum Subtract {
     Split(Vec<Cidr>),
 }
 
-/// Splits `outer` around `inner` when inner is a proper sub-block of the
-/// same family; different families never intersect, so they always Keep.
 fn subtract(outer: Cidr, inner: Cidr) -> Subtract {
     if outer.addr.is_ipv4() != inner.addr.is_ipv4() {
         return Subtract::Keep;
@@ -215,7 +201,6 @@ fn subtract(outer: Cidr, inner: Cidr) -> Subtract {
     Subtract::Split(parts)
 }
 
-/// Splits [base, base+len) into aligned same-family CIDR blocks.
 fn decompose(mut base: u128, mut len: u128, bits: u32, out: &mut Vec<Cidr>) {
     while len > 0 {
         let max_k = 127 - len.leading_zeros();
@@ -240,11 +225,6 @@ fn decompose(mut base: u128, mut len: u128, bits: u32, out: &mut Vec<Cidr>) {
     }
 }
 
-/// Bundled ranges, overridden by a refreshed copy in the data dir when
-/// present. What the engine scans (IPv4 half of the pool). A refreshed copy
-/// that fails to parse falls back to the bundled list, matching
-/// `RangesState::load`: a corrupted or hand-edited file must degrade the
-/// scan, never brick it.
 pub fn base_pool(runtime_refreshed: Option<&str>) -> Result<CidrPool> {
     match runtime_refreshed {
         Some(text) => match CidrPool::parse(text) {
@@ -258,9 +238,6 @@ pub fn base_pool(runtime_refreshed: Option<&str>) -> Result<CidrPool> {
     }
 }
 
-/// The IPv6 half, added to the pool only when the scan opts in via
-/// `include_v6`. Refreshed copy from the data dir wins when present; a copy
-/// that fails to parse falls back to the bundled list like the v4 half.
 pub fn base_pool_v6(runtime_refreshed: Option<&str>) -> Result<CidrPool> {
     match runtime_refreshed {
         Some(text) => match CidrPool::parse(text) {
@@ -329,9 +306,6 @@ pub async fn effective_pool(
 
 pub const LAST_UPDATED_PREFIX: &str = "# last-updated: ";
 
-/// Atomically replaces `path` with `pool` (temp file + rename), tagged with
-/// the `last_updated` header that CLI refreshes and the server's background
-/// refresh share as one timestamp source.
 pub fn write_pool_to(path: &std::path::Path, pool: &CidrPool, last_updated: &str) -> Result<()> {
     let _gate = paths::data_write_guard();
     let dir = paths::data_dir()?;
@@ -344,7 +318,6 @@ pub fn write_pool_to(path: &std::path::Path, pool: &CidrPool, last_updated: &str
     Ok(())
 }
 
-/// The header's value if `text` is a refreshed ranges file we wrote.
 pub fn last_updated_of(text: &str) -> Option<String> {
     text.lines().find_map(|l| {
         l.trim()
@@ -360,9 +333,6 @@ pub fn unix_now() -> u64 {
         .unwrap_or(0)
 }
 
-/// RFC3339 UTC timestamp for `unix_secs` (second precision). Civil date via
-/// Howard Hinnant's epoch-days algorithm; no chrono dependency (same
-/// approach as the WARP registration `tos` timestamp in warpgen).
 pub fn rfc3339_utc(unix_secs: u64) -> String {
     let days = unix_secs / 86_400;
     let z = days as i64 + 719_468;
@@ -389,9 +359,6 @@ mod tests {
     use crate::engine::{PlanItem, SplitMix64, plan};
     use std::net::Ipv4Addr;
 
-    /// Shared grammar fixture: the same cases the UI's TS mirror
-    /// (ui/src/lib/validators.ts) is written against, so a server-side
-    /// grammar change that strands the frontend shows up here.
     #[test]
     fn grammar_fixture_cidr_cases_match_parse_cidr() {
         let raw = include_str!("../../tests/fixtures/grammar-cases.json");
@@ -848,8 +815,6 @@ mod tests {
         assert_eq!(plan.len(), 1);
         assert!(matches!(plan[0], PlanItem::Every { .. }));
     }
-
-    // --- Property tests (seeded, no external RNG) -----------------------------
 
     fn random_v4_base(rng: &mut SplitMix64, prefix: u8) -> Ipv4Addr {
         let raw = rng.next_u64() as u32;

@@ -1,9 +1,3 @@
-//! WARP registration (Task 14): opt-in v0a884 client, Curve25519 keygen,
-//! wgconf builder, WARP+ license binding, export text/.conf, identity
-//! persistence (wgcf-style). The identity (id/token/client key) lives in the
-//! data dir; it is never logged and never transmitted anywhere except
-//! api.cloudflareclient.com ("no proxy fallback for registration" per intent).
-
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -19,7 +13,6 @@ use crate::ranges::unix_now;
 use crate::wgconf::{WgConfig, WgPeer, render_wgconf};
 
 const DEFAULT_API_BASE: &str = "https://api.cloudflareclient.com";
-/// Server endpoint baked into exported configs when no override is given.
 pub const DEFAULT_ENDPOINT: &str = "engage.cloudflareclient.com:2408";
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(15);
 
@@ -34,30 +27,19 @@ pub enum WarpRegisterError {
     #[error("registration server error ({status})")]
     Server { status: u16, detail: String },
 }
-/// Idempotent registration calls (GET/PATCH/PUT) are rare;
-/// api.cloudflareclient.com resolves to several IPs and ISPs commonly
-/// blackhole some of them, so a single attempt can stall. Retrying with a
-/// fresh client (fresh DNS + connection) makes those flows succeed unless
-/// every path is broken. POST /reg never retries: it is not idempotent and a
-/// transport-level failure leaves its server-side outcome unknown.
 const MAX_ATTEMPTS: u32 = 3;
 const RETRY_SLEEP: Duration = Duration::from_millis(300);
 const DNS: &str = "1.1.1.1, 1.0.0.1";
 
-/// Generated keypair; the public half is sent to the registration API.
 pub fn keygen() -> (StaticSecret, PublicKey) {
     let secret = StaticSecret::random_from_rng(OsRng);
     let public = PublicKey::from(&secret);
     (secret, public)
 }
 
-// --- v0a884 API shapes (subset of the wgcf OpenAPI spec) --------------------
-
 #[derive(Clone, Debug, Deserialize)]
 struct Device {
     id: String,
-    /// Present on the register response; the persisted identity supplies it
-    /// for later fetches (GET /reg/{id} has no token).
     token: Option<String>,
     account: Account,
     config: DeviceConfig,
@@ -91,7 +73,6 @@ struct NetworkAddress {
 struct DevicePeer {
     public_key: String,
     endpoint: PeerEndpoint,
-    /// Not in the spec but present in real responses; fall back to full-tunnel.
     #[serde(default)]
     allowed_ips: Vec<String>,
 }
@@ -101,12 +82,6 @@ struct PeerEndpoint {
     host: String,
 }
 
-/// Small v0a884 client. The base URL is injectable so tests run against a
-/// loopback mock; production uses the Cloudflare client API directly and
-/// never the system proxy (registration must work even when routing is
-/// broken). Every call is bounded by a builder-level timeout covering
-/// connect through end-of-body; idempotent endpoints retry with a fresh
-/// client per attempt, POST /reg does not retry at all (see MAX_ATTEMPTS).
 struct WarpClient {
     base: String,
     timeout: Duration,
@@ -117,11 +92,6 @@ impl WarpClient {
         Self { base, timeout }
     }
 
-    /// Per-attempt HTTP client: fresh DNS resolution per attempt, the whole
-    /// request lifecycle (connect + send + body read) inside one timeout, and
-    /// per-hop redirect validation matching ranges::HTTP_CLIENT (AGENTS.md:
-    /// every direct HTTPS fetch validates each hop; registration also needs
-    /// `.no_proxy()`).
     fn http_client(timeout: Duration) -> Result<reqwest::Client> {
         Ok(reqwest::Client::builder()
             .use_rustls_tls()
@@ -139,16 +109,6 @@ impl WarpClient {
             .build()?)
     }
 
-    /// One request. A fresh reqwest::Client per attempt means each retry
-    /// re-resolves DNS, so a blackholed IP from a previous resolution cannot
-    /// poison subsequent attempts.
-    ///
-    /// Retry policy: 429/5xx are retried for every endpoint — the server
-    /// answered, so nothing was processed. Transport-level failures (send
-    /// error, timeout anywhere in the request lifecycle, broken body read)
-    /// leave the server-side outcome unknown, so they are retried only when
-    /// `retryable_transport` is set; POST /reg passes false and fails after
-    /// one attempt. Other 4xx is deterministic and reported as-is.
     async fn attempt(
         &self,
         label: &str,
@@ -229,8 +189,6 @@ impl WarpClient {
 
     async fn post_json(&self, path: &str, body: impl Serialize) -> Result<String> {
         let body = serde_json::to_value(body)?;
-        // Only /reg flows through here: non-idempotent, so transport-level
-        // uncertainty fails immediately instead of re-registering.
         self.attempt(path, false, |http| {
             http.post(format!("{}/{}", self.base, path))
                 .header("User-Agent", "okhttp/3.12.1")
@@ -247,7 +205,6 @@ impl WarpClient {
         body: Option<serde_json::Value>,
     ) -> Result<String> {
         let url = format!("{}/{}", self.base, path);
-        // GET/PATCH/PUT on an existing device are idempotent and may retry.
         self.attempt(&path, true, |http| {
             let mut req = http
                 .request(method.clone(), url.clone())
@@ -261,8 +218,6 @@ impl WarpClient {
         .await
     }
 
-    /// POST /v0a884/reg with the client's public key. Body and `tos` format
-    /// match wgcf's working clients (full timestamp, `type` required).
     async fn register(&self, public_b64: &str) -> Result<Device> {
         let body = serde_json::json!({
             "install_id": "",
@@ -277,7 +232,6 @@ impl WarpClient {
         serde_json::from_str(&text).context("malformed registration response")
     }
 
-    /// PATCH warp_enabled=true so the peer/addresses appear in the config.
     async fn enable_warp(&self, id: &str, token: &str) -> Result<()> {
         self.authed(
             token,
@@ -289,7 +243,6 @@ impl WarpClient {
         .map(|_| ())
     }
 
-    /// PUT a WARP+ license key onto the identity (opt-in).
     async fn bind_license(&self, id: &str, token: &str, license: &str) -> Result<()> {
         self.authed(
             token,
@@ -301,7 +254,6 @@ impl WarpClient {
         .map(|_| ())
     }
 
-    /// GET the current (post-enable) config.
     async fn fetch(&self, id: &str, token: &str) -> Result<Device> {
         let text = self
             .authed(
@@ -315,44 +267,29 @@ impl WarpClient {
     }
 }
 
-/// Delay before the next attempt: honor the server's Retry-After when
-/// present, otherwise the fixed fallback; capped so a hostile value cannot
-/// stretch the overall request bound.
 fn retry_delay(retry_after: Option<Duration>, fallback: Duration, cap: Duration) -> Duration {
     retry_after.unwrap_or(fallback).min(cap)
 }
 
-/// Retry-After in seconds form only; absent, unparsable, or date-form values
-/// yield None and callers fall back to their fixed delay.
 fn parse_retry_after(headers: &reqwest::header::HeaderMap) -> Option<Duration> {
     let raw = headers.get(reqwest::header::RETRY_AFTER)?.to_str().ok()?;
     Some(Duration::from_secs(raw.trim().parse().ok()?))
 }
 
-// --- identity persistence ----------------------------------------------------
-
-// This type is written raw (private key included) — never Debug-printed,
-// never put in logs.
 #[derive(Serialize, Deserialize)]
 struct Identity {
     id: String,
     token: String,
-    /// Base64 client private key (the wire-format used in wgconf files).
     private_key: String,
     client_id: String,
     account_type: String,
     license: Option<String>,
     created_at: u64,
-    /// WARP server public key from the registration response; the probe
-    /// prefers this over the bundled constant (ADR-002 "refresh when
-    /// available"). Absent in identities written before this field existed.
     #[serde(default)]
     peer_public_key: Option<String>,
 }
 
 fn identity_path() -> Result<PathBuf> {
-    // Test-only override so the identity tests never touch a real user
-    // identity in the real data dir.
     if let Ok(dir) = std::env::var("CF_SCANNER_DATA_DIR") {
         return Ok(PathBuf::from(dir).join("identity.json"));
     }
@@ -371,23 +308,14 @@ fn load_identity() -> Result<Identity> {
     serde_json::from_str(&json).context("corrupt identity file")
 }
 
-/// True when a registration identity is already persisted.
 pub fn has_identity() -> bool {
     load_identity().is_ok()
 }
 
-/// Public: the WARP server public key persisted at registration, if any. The
-/// probe prefers this over the bundled constant (a registration refresh).
-/// Key material is validated (base64, exactly 32 bytes) so a corrupt or
-/// hand-edited identity degrades to `None` and callers fall back to the
-/// bundled constant instead of panicking on decode.
 pub fn persisted_server_public_key() -> Option<String> {
     let identity = match load_identity() {
         Ok(identity) => identity,
         Err(err) => {
-            // A missing file is the normal no-registration case and stays
-            // silent; an existing but unreadable/corrupt one must warn —
-            // the bundled-key fallback may never be silent.
             if identity_path().map(|p| p.exists()).unwrap_or(false) {
                 tracing::warn!(
                     "persisted WARP identity unreadable; falling back to the bundled server key: {err:#}"
@@ -410,10 +338,6 @@ pub fn persisted_server_public_key() -> Option<String> {
     }
 }
 
-/// Writes `text` to `path` locked down to the owning user. The 0o600 mode is
-/// applied at open (not via a later chmod) so a private key on disk is never
-/// world-readable, not even for a microsecond; a pre-existing file with wider
-/// perms is re-locked afterwards. Windows has no POSIX modes — best-effort.
 fn write_private(path: &Path, text: &str) -> std::io::Result<()> {
     #[cfg(unix)]
     {
@@ -436,11 +360,6 @@ fn write_private(path: &Path, text: &str) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Atomic private write: unique temp file in the same dir, then rename into
-/// place, so a crash mid-write never leaves a truncated private-key file and
-/// concurrent registrations cannot interleave bytes. The temp name carries the
-/// process id + randomness so two processes sharing the data dir cannot
-/// collide.
 fn write_private_replace(dest: &Path, text: &str) -> Result<()> {
     if let Some(parent) = dest.parent() {
         fs::create_dir_all(parent)?;
@@ -463,12 +382,6 @@ fn random_u32() -> u32 {
     RngCore::next_u32(&mut OsRng)
 }
 
-// --- wgconf builder ----------------------------------------------------------
-
-/// Renders the exported config: our generated key from `secret`, the client
-/// address/DNS/peer from the registration response, and `endpoint_override`
-/// (a working `host:port` from the scan) when given — defaulting to the
-/// engage endpoint.
 fn build_wgconf(
     secret: &StaticSecret,
     dev: &Device,
@@ -516,7 +429,6 @@ fn peer_endpoint(endpoint: &PeerEndpoint) -> String {
     if host.is_empty() {
         return DEFAULT_ENDPOINT.to_owned();
     }
-    // The API's `host` sometimes already carries the port.
     if host.contains(':') {
         host.to_owned()
     } else {
@@ -524,12 +436,6 @@ fn peer_endpoint(endpoint: &PeerEndpoint) -> String {
     }
 }
 
-// --- public flows ------------------------------------------------------------
-
-/// The v0a884 flow: keygen -> register -> enable -> (license) -> fetch ->
-/// persist identity, returning the rendered wgconf text. Never prints or
-/// writes anything; `base` is injectable so tests run against a loopback
-/// mock. Every network call carries a timeout and retries (WarpClient).
 async fn register_flow(
     base: &str,
     license: Option<&str>,
@@ -550,10 +456,6 @@ async fn register_flow(
     let reg = client.fetch(&reg.id, &token).await?;
     let wgconf = build_wgconf(&secret, &reg, endpoint_override)?;
     let text = render_wgconf(&wgconf);
-    // The identity (keys included) is persisted so `export` works offline of
-    // the keygen step; it is never printed or logged. The registration peer
-    // public key is stored too, so the WARP probe can prefer the live key
-    // over the bundled constant (ADR-002 "refresh when available").
     let identity = Identity {
         id: reg.id.clone(),
         token,
@@ -568,9 +470,6 @@ async fn register_flow(
     Ok(text)
 }
 
-/// `warpconfig generate`: register, then write the wgconf to `out` (or
-/// stdout). Returns the rendered wgconf for callers that need it (wizard
-/// auto-import).
 pub async fn generate(
     out: Option<&Path>,
     license: Option<&str>,
@@ -581,24 +480,15 @@ pub async fn generate(
     Ok(text)
 }
 
-/// Server path (`POST /api/warp/register`): register a fresh identity and
-/// return the wgconf text without printing it (the CLI prints via
-/// `generate`). The Cloudflare flow carries its own per-attempt timeout and
-/// retries; errors are anyhow at this boundary.
 pub async fn register(license: Option<&str>) -> Result<String> {
     register_flow(DEFAULT_API_BASE, license, None).await
 }
 
-/// Test-only entry: same flow as `register` against an explicit API base
-/// (loopback mock), so the server-facing path never touches the network in
-/// tests.
 #[cfg(test)]
 async fn register_with_base(base: String, license: Option<&str>) -> Result<String> {
     register_flow(&base, license, None).await
 }
 
-/// `warpconfig export`: reuse the persisted identity, refresh the config, and
-/// write it to `out` (or stdout).
 pub async fn export(out: Option<&Path>, endpoint_override: Option<&str>) -> Result<String> {
     let identity = load_identity().context("no saved identity; run `warpconfig generate` first")?;
     let client = WarpClient::new(DEFAULT_API_BASE.into(), DEFAULT_TIMEOUT);
@@ -619,8 +509,6 @@ fn write_out(out: Option<&Path>, text: &str) -> Result<()> {
     Ok(())
 }
 
-/// A closed downstream pipe (e.g. `warpgen | head`) must not panic the
-/// process; the write is best-effort.
 fn write_stdout(text: &str) {
     use std::io::Write as _;
     let mut out = std::io::stdout().lock();
@@ -628,14 +516,8 @@ fn write_stdout(text: &str) {
     let _ = out.flush();
 }
 
-/// The `tos` field of the register request: a full RFC3339-style timestamp
-/// with milliseconds and UTC offset (wgcf's working clients send this; a
-/// bare date is rejected with "Invalid registration request"). Reuses the
-/// canonical `ranges::rfc3339_utc` civil-date logic instead of duplicating
-/// Howard Hinnant's algorithm.
 fn tos_timestamp() -> String {
     let base = crate::ranges::rfc3339_utc(crate::ranges::unix_now());
-    // base is "YYYY-MM-DDTHH:MM:SSZ" -> "YYYY-MM-DDTHH:MM:SS.00+00:00"
     let without_z = base.strip_suffix('Z').unwrap_or(&base);
     format!("{without_z}.00+00:00")
 }
@@ -654,9 +536,6 @@ pub(crate) mod tests {
         routing::{get, patch, post, put},
     };
 
-    /// Loopback mock state: every request the client sends, recorded as
-    /// (method, path, body). Module level because nested fn items do not
-    /// implement axum's `Handler` (item resolution quirk).
     type MockSeen = std::sync::Arc<Mutex<Vec<(String, String, String)>>>;
 
     fn mock_registration() -> serde_json::Value {
@@ -751,8 +630,6 @@ pub(crate) mod tests {
         Ok(Json(mock_registration()))
     }
 
-    /// The full registration API surface, scripted; asserts auth + records
-    /// every request into `seen`.
     fn mock_app(seen: MockSeen) -> Router {
         Router::new()
             .route("/v0a884/reg", post(mock_register))
@@ -833,15 +710,10 @@ pub(crate) mod tests {
         assert!(text.contains("AllowedIPs"));
     }
 
-    /// Both identity tests share one file on disk and one temp dir; serialize
-    /// them so the remove/create dance never races (tests run in parallel by
-    /// default). warp.rs's persisted-key test serializes on the same lock.
     pub(crate) static IDENTITY_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     fn isolated_identity_dir() -> std::path::PathBuf {
         let dir = std::env::temp_dir().join("cf-scanner-warpgen-tests");
-        // Process-global env mutation is sound here: both callers serialize on
-        // IDENTITY_LOCK and no other test reads this variable.
         unsafe { std::env::set_var("CF_SCANNER_DATA_DIR", &dir) };
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
@@ -900,9 +772,6 @@ pub(crate) mod tests {
         }
     }
 
-    /// Drives the whole register -> enable -> license -> fetch flow against a
-    /// loopback mock and asserts the requests the client emits (paths, auth
-    /// headers, bodies). No real Cloudflare traffic in tests.
     #[tokio::test]
     async fn client_flow_against_a_loopback_mock() {
         let seen: MockSeen = Default::default();
@@ -954,9 +823,6 @@ pub(crate) mod tests {
         assert_eq!(path, "/v0a884/reg/reg-1");
     }
 
-    /// The server-facing `register` path (no output writing, identity
-    /// persisted) against the same loopback mock. Sync test + explicit
-    /// runtime so the identity-dir guard is not held across awaits.
     #[test]
     fn register_returns_a_rendered_wgconf_and_persists_identity() {
         let _guard = IDENTITY_LOCK.lock().unwrap();
@@ -1175,12 +1041,6 @@ pub(crate) mod tests {
         );
     }
 
-    /// Transport-level failure on POST /reg must surface after exactly one
-    /// attempt: the server may have processed the registration, and a retry
-    /// would orphan a second Cloudflare device on the same key material.
-    /// A TCP peer that accepts and immediately resets (SO_LINGER 0) yields a
-    /// deterministic send-level failure — the request died mid-flight, no
-    /// response ever existed.
     #[tokio::test]
     async fn reg_is_never_retried_on_transport_errors() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1227,9 +1087,6 @@ pub(crate) mod tests {
         );
     }
 
-    /// Regression for the removed Windows delete-then-rename fallback: the
-    /// second save must replace the first through the plain rename path,
-    /// leaving exactly the new content behind.
     #[test]
     fn save_replaces_existing_identity() {
         let _guard = IDENTITY_LOCK.lock().unwrap();

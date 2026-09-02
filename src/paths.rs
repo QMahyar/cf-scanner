@@ -1,28 +1,14 @@
-//! Runtime file locations (refreshed ranges, xray binary). Tests and
-//! embedding flows redirect the whole data dir via `CF_SCANNER_DATA_DIR`.
-
 use std::path::PathBuf;
 use std::sync::{Mutex, MutexGuard};
 
 use anyhow::{Result, anyhow};
 
-/// Single-writer gate for every managed data-dir file (identity.json,
-/// refreshed ranges, identity.json, xray binary + sidecar). These writes are
-/// rare and small; one process-wide lock is cheaper and easier to reason
-/// about than per-file locks, and it closes the interleaved/torn-write race
-/// between concurrent scans, refreshes, and profile saves. Holders must keep
-/// their write atomic (tmp + rename) so a crash mid-write cannot corrupt.
 pub fn data_write_guard() -> MutexGuard<'static, ()> {
     static WRITE_GATE: Mutex<()> = Mutex::new(());
     WRITE_GATE.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 pub fn data_dir() -> Result<PathBuf> {
-    // Redirects the whole data directory (tests, embedding flows); the
-    // refresh-ranges path, the xray binary path and the trial dirs all
-    // resolve through this one function. warpgen's identity path honors the
-    // same variable (its own entry point), so a test or embedder setting it
-    // redirects the entire product data footprint.
     if let Ok(dir) = std::env::var("CF_SCANNER_DATA_DIR")
         && !dir.trim().is_empty()
     {
@@ -37,21 +23,12 @@ pub fn refreshed_ranges_path() -> Result<PathBuf> {
     Ok(data_dir()?.join("cf-ranges.txt"))
 }
 
-/// Data-dir copy of the refreshed IPv6 list (`ranges refresh --ipv6`).
 pub fn refreshed_ranges_v6_path() -> Result<PathBuf> {
     Ok(data_dir()?.join("cf-ranges-v6.txt"))
 }
 
-/// Data-dir location of the xray binary (dev/downloaded fallback; release
-/// archives bundle the binary next to the executable instead).
 pub fn xray_binary_path() -> Result<PathBuf> {
     let name = if cfg!(windows) { "xray.exe" } else { "xray" };
-    // Test-only seam, scoped to THIS path: lets the xray test module isolate
-    // its binary/cache without mutating the process-wide env var. It must
-    // not live in `data_dir()` — ranges' refresh tests resolve the shared
-    // data dir at arbitrary moments, and a seam there would redirect (and
-    // drop) their files mid-test. `xray_binary_path` is read only by xray's
-    // own resolution/download code, so the seam is visible nowhere else.
     #[cfg(test)]
     if let Some(dir) = test_env::SEAM_DATA_DIR.lock().unwrap().clone() {
         return Ok(dir.join(name));
@@ -59,12 +36,6 @@ pub fn xray_binary_path() -> Result<PathBuf> {
     Ok(data_dir()?.join(name))
 }
 
-/// Restricts a secret-bearing file (identity keys, trial configs) to the
-/// current user: a protected DACL with one grant replaces whatever inherited
-/// ACEs the parent directory contributed. Used by [`write_secret`] when it
-/// must degrade from `CreateFile2`: the file is created empty, locked down,
-/// and only then written, so the secret bytes never exist under inherited
-/// ACEs.
 #[cfg(windows)]
 pub fn lock_down_to_owner(path: &std::path::Path) -> std::io::Result<()> {
     use std::os::windows::ffi::OsStrExt as _;
@@ -125,9 +96,6 @@ mod windows_security {
         io::Error::from_raw_os_error(err.code().0)
     }
 
-    /// RAII guard for a DACL allocated by `SetEntriesInAclW` (via
-    /// `LocalAlloc`). Calls `LocalFree` on drop so the pointer is valid
-    /// for the duration of the guard.
     pub(super) struct OwnedAcl {
         pub ptr: *mut ACL,
     }
@@ -164,11 +132,6 @@ mod windows_security {
         }
     }
 
-    /// Queries the current process token for the owner SID, builds a
-    /// DACL that grants `GENERIC_ALL` to that SID only, and returns it
-    /// wrapped in a self-relative `SECURITY_DESCRIPTOR` suitable for
-    /// `CreateFile2`. The returned guard keeps both the descriptor and
-    /// the DACL alive; drop it after the create call.
     pub(super) fn build_owner_dacl() -> io::Result<OwnerDacl> {
         let mut token = HANDLE::default();
         unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) }
@@ -250,13 +213,6 @@ mod windows_security {
     }
 }
 
-/// Writes `data` to `path` with the file locked down to the owning user
-/// at creation time. On Windows, `CreateFile2` creates the file with an
-/// owner-only DACL so secrets never exist on disk under inherited ACEs.
-/// On any `CreateFile2` failure, falls back to `fs::write` +
-/// `lock_down_to_owner` (the previous behavior) so a Win32 misuse
-/// degrades to today's pattern, never to a failure to save. Unix callers
-/// don't need this — `write_private` already applies 0o600 at open.
 #[cfg(windows)]
 pub fn write_secret(path: &std::path::Path, data: &[u8]) -> std::io::Result<()> {
     use std::io::Write as _;
@@ -274,11 +230,6 @@ pub fn write_secret(path: &std::path::Path, data: &[u8]) -> std::io::Result<()> 
 
     let guard = match windows_security::build_owner_dacl() {
         Ok(v) => v,
-        // WHY: if we cannot build the DACL, degrade to a two-step path —
-        // create the file EMPTY, lock it down, and only then write the
-        // secret bytes — so the data never exists under inherited ACEs.
-        // The final write can still fail (disk full, AV lock); failing the
-        // save beats writing plaintext-readable secrets.
         Err(_) => {
             std::fs::File::create(path)?;
             lock_down_to_owner(path)?;
@@ -307,8 +258,6 @@ pub fn write_secret(path: &std::path::Path, data: &[u8]) -> std::io::Result<()> 
 
     match handle {
         Ok(h) => {
-            // HANDLE is Copy (no Drop), so no double-close risk; the
-            // std::fs::File now owns the raw pointer.
             let file = unsafe { std::fs::File::from_raw_handle(h.0 as *mut _) };
             let _ = h;
             let mut file = file;
@@ -317,10 +266,6 @@ pub fn write_secret(path: &std::path::Path, data: &[u8]) -> std::io::Result<()> 
             Ok(())
         }
         Err(_) => {
-            // WHY: CreateFile2 failed (path issue, permissions, etc.).
-            // Same degrade path as the DACL-build failure above: create
-            // empty, lock down, then write, so the secret never exists
-            // under inherited ACEs.
             std::fs::File::create(path)?;
             lock_down_to_owner(path)?;
             let mut file = std::fs::OpenOptions::new().write(true).open(path)?;
@@ -362,35 +307,15 @@ pub fn write_secret(path: &std::path::Path, data: &[u8]) -> std::io::Result<()> 
 
 #[cfg(test)]
 pub(crate) mod test_env {
-    //! Isolated-data-dir harness for the paths and xray test modules.
-    //!
-    //! The xray tests redirect via [`SEAM_DATA_DIR`] (a test-only override
-    //! consulted by `xray_binary_path` alone) so they never race the ranges
-    //! refresh tests, which resolve the shared data dir mid-body. The paths
-    //! tests exercise the real cross-module contract — the
-    //! `CF_SCANNER_DATA_DIR` env var — using warpgen's exact pattern
-    //! (warpgen.rs `isolated_identity_dir`): set the var to a fixed temp
-    //! dir, never restore it. The variable only ever holds one of a handful
-    //! of stable absolute paths, so any other test resolving the data dir
-    //! sees a consistent value between two calls.
 
     use std::path::{Path, PathBuf};
 
-    /// Serializes every test that mutates `CF_SCANNER_DATA_DIR` or the
-    /// seam. A tokio mutex so async tests may hold the guard across awaits
-    /// without deadlocking the runtime.
     pub(crate) static DATA_DIR_LOCK: std::sync::LazyLock<tokio::sync::Mutex<()>> =
         std::sync::LazyLock::new(|| tokio::sync::Mutex::new(()));
 
-    /// Test-only data dir consulted by `xray_binary_path()`; set instead of
-    /// the env var so the xray tests never race the ranges refresh tests'
-    /// env reads (or warpgen's own flips of the variable).
     pub(crate) static SEAM_DATA_DIR: std::sync::Mutex<Option<PathBuf>> =
         std::sync::Mutex::new(None);
 
-    /// Points `CF_SCANNER_DATA_DIR` at a fresh temp dir; the variable stays
-    /// set for the rest of the process (warpgen's pattern), so path fns
-    /// resolve consistently from any test's point of view.
     pub(crate) struct IsolatedDataDir {
         dir: PathBuf,
     }
@@ -405,9 +330,6 @@ pub(crate) mod test_env {
                 use std::os::unix::fs::PermissionsExt as _;
                 let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
             }
-            // Unsafe: process-global env mutation, sound because callers
-            // serialize on DATA_DIR_LOCK and the value is a stable absolute
-            // path any reader can safely use.
             unsafe { std::env::set_var("CF_SCANNER_DATA_DIR", &dir) };
             Self { dir }
         }
@@ -437,7 +359,6 @@ mod tests {
         let file = dir.join("secret.json");
         std::fs::write(&file, b"{}").unwrap();
         lock_down_to_owner(&file).expect("DACL lockdown must succeed for the owner");
-        // The owner must still be able to rewrite the file afterwards.
         std::fs::OpenOptions::new()
             .write(true)
             .truncate(true)
@@ -447,11 +368,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// write_secret must produce a file whose DACL is owner-only at creation
-    /// time (before any data is written). The query reuses the same
-    /// GetNamedSecurityInfoW path that lock_down_to_owner applies; a
-    /// DACL with exactly one ACE (the owner's GENERIC_ALL grant) and the
-    /// PROTECTED flag is the expected shape.
     #[cfg(windows)]
     #[test]
     fn write_secret_sets_dacl_at_creation() {
@@ -476,7 +392,6 @@ mod tests {
         write_secret(&file, b"{\"key\":\"secret\"}").expect("write_secret must succeed");
         assert_eq!(std::fs::read(&file).unwrap(), b"{\"key\":\"secret\"}");
 
-        // Query the DACL via GetNamedSecurityInfoW.
         let wide: Vec<u16> = file.as_os_str().encode_wide().chain(Some(0)).collect();
         let sd = std::ptr::null_mut();
         let mut dacl = std::ptr::null_mut();
@@ -494,16 +409,12 @@ mod tests {
         };
         assert_eq!(err, NO_ERROR, "GetNamedSecurityInfoW must succeed");
 
-        // The DACL must exist (not NULL — an empty/NULL DACL means
-        // everyone has full access, which would be a regression).
         assert!(!dacl.is_null(), "DACL must not be NULL after write_secret");
 
-        // Free the security descriptor.
         unsafe {
             let _ = windows::Win32::Foundation::LocalFree(Some(HLOCAL(sd as *mut _)));
         }
 
-        // Also verify the file is writable by the owner (functional test).
         std::fs::OpenOptions::new()
             .write(true)
             .truncate(true)
@@ -546,10 +457,6 @@ mod tests {
 
     #[test]
     fn default_data_dir_is_absolute() {
-        // Without the override, the directories fallback must still resolve
-        // to something usable (exact path is platform/user dependent). The
-        // env var is deliberately NOT touched: any test-set value is an
-        // absolute temp dir, so the assertion holds regardless.
         let _guard = DATA_DIR_LOCK.blocking_lock();
         assert!(data_dir().unwrap().is_absolute());
     }

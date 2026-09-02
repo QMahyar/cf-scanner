@@ -1,8 +1,3 @@
-//! CLI `scan` agent integration tests (Domain 6 review rec 4): runs the real
-//! binary via `CARGO_BIN_EXE_cf-scanner`. Network-free paths (flag errors,
-//! help/version) run unconditionally; the one live scan is `#[ignore]`d and
-//! gated on the same env credential pattern as `tests/live_smoke.rs`.
-
 use std::process::{Command, Output};
 
 fn bin() -> &'static str {
@@ -117,10 +112,6 @@ fn custom_fragment_without_values_exits_nonzero() {
     );
 }
 
-/// Live run: a tiny seeded scan over one port. NDJSON verdict lines and the
-/// final summary must appear on stdout; the human summary goes to stderr.
-/// Gated on the same env credential as the live_smoke suite, so a plain CI
-/// run never touches the network.
 #[tokio::test]
 #[ignore = "network; runs a real tiny scan (gate: CFSCANNER_SUB_URL)"]
 async fn live_tiny_scan_prints_ndjson_and_a_final_summary() {

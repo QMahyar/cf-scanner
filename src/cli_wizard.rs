@@ -1,7 +1,3 @@
-//! Interactive wizard: friendly prompts that drive the same engine and API
-//! contract the browser UI and CLI use. Non-json output lives on stderr so
-//! stdout stays machine-readable.
-
 use std::sync::Arc;
 
 use crate::api::types::{
@@ -14,9 +10,6 @@ use crate::warpgen;
 use anyhow::{Context as _, Result, anyhow};
 use dialoguer::{Confirm, Input, Select};
 
-/// WARP prompts: candidate count / full pools, ports, probes per endpoint,
-/// custom endpoints, optional wgconf verification. Registration lands with
-/// Task 14.
 fn prompt_warp() -> Result<ScanConfig> {
     let all_pools = warp::bundled_pool().host_count();
     let count: u32 = Input::new()
@@ -122,8 +115,6 @@ fn prompt_warp() -> Result<ScanConfig> {
     Ok(cfg)
 }
 
-/// Ctrl+C during a prompt: a typed marker callers can downcast (main.rs)
-/// instead of comparing error text. Display stays "interrupted".
 #[derive(Debug, thiserror::Error)]
 #[error("interrupted")]
 pub struct WizardInterrupted;
@@ -137,8 +128,6 @@ pub async fn run(controller: Arc<ScanController>) -> Result<()> {
 
 async fn run_wizard(controller: Arc<ScanController>) -> Result<()> {
     eprintln!("CF-Scanner wizard — CDN/proxy scan with optional xray phase-2 verification");
-    // dialoguer prompts are blocking stdin reads: keep them off the tokio
-    // workers or a background runtime task could starve while we wait.
     let cfg = tokio::task::spawn_blocking(prompt_config)
         .await
         .map_err(|e| anyhow!("wizard task failed: {e}"))??;
@@ -225,9 +214,6 @@ async fn run_wizard(controller: Arc<ScanController>) -> Result<()> {
     Ok(())
 }
 
-/// Task 14 opt-in: after a WARP scan, offer to register an identity with
-/// Cloudflare's client API and export a ready-to-use wgconf. The exported
-/// endpoint bakes in the best endpoint the scan just found.
 async fn prompt_registration(controller: &ScanController) -> Result<()> {
     if !Confirm::new()
         .with_prompt(
@@ -276,9 +262,6 @@ async fn prompt_registration(controller: &ScanController) -> Result<()> {
     Ok(())
 }
 
-/// A Ctrl+C during a prompt surfaces as `dialoguer::Error::IO(Interrupted)`
-/// in the error chain; report it as a plain "interrupted" instead of a raw
-/// IO error.
 fn is_interrupt(err: &anyhow::Error) -> bool {
     err.chain().any(|cause| {
         cause.downcast_ref::<dialoguer::Error>().is_some_and(|e| {
@@ -428,7 +411,6 @@ fn prompt_config() -> Result<ScanConfig> {
     Ok(cfg)
 }
 
-/// Phase-2 prompts: configs, fragment preset, SNIs, probe target.
 fn prompt_phase2() -> Result<Phase2Config> {
     let configs = parse_list(
         "Configs (vless/trojan/vmess/ss URIs, subscription URLs, or xray JSON paths; comma-separated)",
@@ -520,8 +502,6 @@ fn prompt_phase2() -> Result<Phase2Config> {
     })
 }
 
-/// Parse `"length,interval"` into a custom fragment; the prompt validator
-/// already guarantees the comma, but user input must never unwrap.
 fn parse_custom_fragment(values: &str) -> Result<crate::api::types::CustomFragment> {
     let Some((length, interval)) = values.split_once(',') else {
         return Err(anyhow!(
@@ -621,8 +601,6 @@ mod tests {
         let err: anyhow::Error = WizardInterrupted.into();
         assert_eq!(err.to_string(), "interrupted");
         assert!(err.is::<WizardInterrupted>());
-        // A raw dialoguer interrupt (what run() sees before mapping) must not
-        // itself satisfy the downcast, or unrelated IO errors would pass.
         let raw = anyhow::Error::new(dialoguer::Error::IO(std::io::Error::new(
             std::io::ErrorKind::Interrupted,
             "ctrl+c",

@@ -1,15 +1,8 @@
-//! Scan-planning: turns an effective pool and target into the walk plan the
-//! engine probes (every host, per-/24 random samples, or pre-rolled concrete
-//! host offsets for v6 host spaces). Pure logic over `ranges::CidrPool`; the
-//! seeded splitmix64 sampling keeps plan shapes deterministic across runs.
-
 use std::net::{IpAddr, Ipv4Addr};
 
 use crate::api::types::{CdnPreset, ScanTarget};
 use crate::ranges::{Cidr, CidrPool};
 
-/// How the engine walks a pool: every host, a random subset per CIDR block,
-/// or pre-rolled concrete host offsets (v6 host spaces need u128 offsets).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PlanItem {
     Every { cidr: Cidr },
@@ -17,7 +10,6 @@ pub enum PlanItem {
     Hosts { cidr: Cidr, offsets: Vec<u128> },
 }
 
-/// Deterministic (seeded) splitmix64; good enough for sampling.
 pub struct SplitMix64(u64);
 
 impl SplitMix64 {
@@ -33,13 +25,10 @@ impl SplitMix64 {
         z ^ (z >> 31)
     }
 
-    /// Uniform in [0, bound). Modulo bias (< 2^-32 for our bounds) is fine.
     pub fn below(&mut self, bound: u64) -> u64 {
         self.next_u64() % bound
     }
 
-    /// Uniform in [0, bound) for u128 bounds (v6 host spaces). Two 64-bit
-    /// draws; modulo bias (< 2^-64) is negligible.
     pub fn below_u128(&mut self, bound: u128) -> u128 {
         let lo = self.next_u64() as u128;
         let hi = self.next_u64() as u128;
@@ -47,7 +36,6 @@ impl SplitMix64 {
     }
 }
 
-/// Builds the walk plan for a target. Apply exclusions before planning.
 pub fn plan(pool: &CidrPool, target: &ScanTarget, rng: &mut SplitMix64) -> Vec<PlanItem> {
     match target {
         ScanTarget::Count(n) => plan_count(pool, *n as u64, rng),
@@ -59,8 +47,6 @@ pub fn plan(pool: &CidrPool, target: &ScanTarget, rng: &mut SplitMix64) -> Vec<P
                 .iter()
                 .map(|c| {
                     if c.addr.is_ipv6() {
-                        // Enumerating the v6 space is infeasible (2^96+ hosts
-                        // per bundled range); Full samples one per range.
                         PlanItem::Sample { cidr: *c, count: 1 }
                     } else {
                         PlanItem::Every { cidr: *c }
@@ -71,9 +57,6 @@ pub fn plan(pool: &CidrPool, target: &ScanTarget, rng: &mut SplitMix64) -> Vec<P
     }
 }
 
-/// 1 (Quick) or 3 (Normal) random hosts per /24, network/broadcast excluded.
-/// v6 ranges have no /24 notion; they yield `per` random hosts from the
-/// whole block.
 fn plan_preset(pool: &CidrPool, per: u64) -> Vec<PlanItem> {
     let mut items = Vec::new();
     for &cidr in pool.ranges() {
@@ -84,8 +67,6 @@ fn plan_preset(pool: &CidrPool, per: u64) -> Vec<PlanItem> {
             });
             continue;
         }
-        // Dense sampling skips network+broadcast, so /31-/32 would draw from
-        // an empty space and silently probe nothing; walk them host by host.
         if cidr.host_count() <= 2 {
             items.push(PlanItem::Every { cidr });
             continue;
@@ -97,10 +78,6 @@ fn plan_preset(pool: &CidrPool, per: u64) -> Vec<PlanItem> {
             });
             continue;
         }
-        // A coarse custom CIDR (e.g. /0) would decompose into 2^24 plan
-        // items: the same OOM the count path guards against. Beyond the cap
-        // the whole block is sampled directly instead — one item, same
-        // per-block semantics.
         if cidr.sub24_count() > MAX_PRESET_BLOCKS {
             items.push(PlanItem::Sample {
                 cidr,
@@ -123,11 +100,8 @@ fn plan_preset(pool: &CidrPool, per: u64) -> Vec<PlanItem> {
     items
 }
 
-/// Plan items a preset run may materialize (one per /24 block); beyond this
-/// the block is sampled whole instead of being decomposed.
 const MAX_PRESET_BLOCKS: u64 = 1 << 16;
 
-/// `n` distinct random offsets spread across the whole pool.
 fn plan_count(pool: &CidrPool, n: u64, rng: &mut SplitMix64) -> Vec<PlanItem> {
     let total = pool.host_count();
     if n as u128 >= total {
@@ -164,7 +138,6 @@ fn plan_count(pool: &CidrPool, n: u64, rng: &mut SplitMix64) -> Vec<PlanItem> {
     items
 }
 
-/// Unwraps the v4 address of a range the caller has already checked is v4.
 fn ipv4(addr: IpAddr) -> Ipv4Addr {
     match addr {
         IpAddr::V4(a) => a,

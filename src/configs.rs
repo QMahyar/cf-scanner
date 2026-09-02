@@ -1,8 +1,3 @@
-//! Phase-2 config parsers: vless/trojan/vmess/ss URIs, subscription text, and
-//! Xray JSON -> one normalized `OutboundSpec`. Input here is UNTRUSTED
-//! (subscriptions + user paste), so parsing never panics and never touches
-//! the network unless explicitly fetching a sub URL.
-
 use std::collections::BTreeMap;
 use std::future::Future;
 use std::net::Ipv4Addr;
@@ -20,16 +15,9 @@ use crate::ranges;
 
 const SUB_UA: &str = "cf-scanner/0.1.0";
 const WS: &str = "ws";
-/// Error lines longer than this are truncated (e.g. xray stderr tails).
 const MAX_ERROR_LINE_BYTES: usize = 512;
-/// Decoded UUID/password cap; ids are embedded verbatim into xray configs.
 const MAX_USER_ID_BYTES: usize = 1024;
 
-/// Chars percent-encoded in a rendered URI's userinfo segment. RFC 3986
-/// allows raw unreserved + sub-delims + ':' there, but our parser (like most
-/// clients') reads a single username up to the first '@': ':' must be
-/// encoded or a "user:pass" password would split, and '@' would corrupt the
-/// host.
 const USERINFO_ENCODE_SET: &AsciiSet = &CONTROLS
     .add(b' ')
     .add(b'"')
@@ -50,10 +38,6 @@ const USERINFO_ENCODE_SET: &AsciiSet = &CONTROLS
     .add(b'}')
     .add(b'@');
 
-/// Chars percent-encoded in a rendered URI's query values: '&'/'=' would
-/// split a parameter, '+' reads as a space to form-style clients, and '%'
-/// must never double-encode. '/' and '?' stay raw (the query grammar allows
-/// them); everything else reserved is encoded.
 const QUERY_VALUE_ENCODE_SET: &AsciiSet = &CONTROLS
     .add(b' ')
     .add(b'"')
@@ -71,13 +55,6 @@ const QUERY_VALUE_ENCODE_SET: &AsciiSet = &CONTROLS
     .add(b'|')
     .add(b'}');
 
-/// Best-effort redaction of error text before it reaches logs, the wire, or
-/// the UI: URL-bearing lines lose their query/fragment (the usual carrier of
-/// ids/passwords) and their userinfo (raw `user:pass@` or percent-encoded
-/// `%40`), over-long lines are truncated, and control characters are
-/// stripped. Not a security boundary on its own — parsers must still avoid
-/// echoing raw entries (see `parse_uri`) — but it stops the common leak
-/// shapes from imported configs and API bodies.
 pub fn sanitize_error_text(text: &str) -> String {
     text.lines()
         .map(|line| {
@@ -95,12 +72,6 @@ pub fn sanitize_error_text(text: &str) -> String {
         .join("\n")
 }
 
-/// One line of error text: every `scheme://` occurrence starts a segment
-/// that gets the single-URL treatment — the query/fragment is cut first (a
-/// stray '@' inside the query must not defeat the userinfo mask), then the
-/// userinfo up to the first '@' — raw or percent-encoded `%40` — is
-/// replaced. An '@' that sits after a space is prose, not userinfo, and is
-/// left alone.
 fn redact_line(line: &str) -> String {
     let mut out = String::with_capacity(line.len());
     let mut rest = line;
@@ -109,8 +80,6 @@ fn redact_line(line: &str) -> String {
             out.push_str(rest);
             break;
         };
-        // Literal text plus the scheme itself stay verbatim; the URL's
-        // segment runs to the next scheme marker (or end of line).
         out.push_str(&rest[..scheme_end + 3]);
         let seg = &rest[scheme_end + 3..];
         let seg_end = seg.find("://").unwrap_or(seg.len());
@@ -131,39 +100,26 @@ fn redact_line(line: &str) -> String {
     out
 }
 
-/// One normalized outbound after IP swap the engine can rebuild as Xray JSON.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct OutboundSpec {
     pub protocol: Protocol,
-    /// Hostname or IP the client dials (phase 2 swaps this per candidate).
     pub server: String,
     pub port: u16,
-    /// vless/vmess UUID or trojan password.
     pub user_id: String,
-    /// Shadowsocks cipher (e.g. `aes-128-gcm`).
     pub method: Option<String>,
-    /// `none` or `tls` (`reality` is rejected at parse time: the builder
-    /// cannot emit a working reality outbound, and xray would silently fail
-    /// phase 2).
     pub security: String,
     pub tls_server_name: Option<String>,
-    /// Client fingerprint, e.g. `chrome`.
     pub fingerprint: Option<String>,
     pub ws: Option<WsSettings>,
     pub tag: Option<String>,
-    /// VMess legacy `alterId` (0 = AEAD-only); ignored by other protocols.
     pub alter_id: u16,
-    /// VMess AEAD security (`scy` in v2ray JSON); xray's default applies
-    /// when absent. Ignored by other protocols.
     pub vmess_security: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WsSettings {
     pub path: String,
-    /// `Host` header override (often a fronting domain).
     pub host: Option<String>,
-    /// e.g. `xudp` (empty when absent).
     pub packet_encoding: Option<String>,
 }
 
@@ -186,19 +142,13 @@ impl Protocol {
     }
 }
 
-/// Result of parsing subscription text: good specs plus how many lines were
-/// skipped (ads, comments, corrupt entries) with a per-line reason (the
-/// 1-based line number, for actionable feedback).
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct SubscriptionParse {
     pub specs: Vec<OutboundSpec>,
     pub ignored: usize,
-    /// "line 3: <reason>" entries for every skipped line; empty when clean.
     pub errors: Vec<String>,
 }
 
-/// Full HTTPS GET with a subscription-friendly User-Agent. BoxFuture style
-/// so it is dyn-compatible for `Arc<dyn SubFetch>` in the engine.
 pub trait SubFetch: Send + Sync {
     fn fetch(&self, url: &str) -> Pin<Box<dyn Future<Output = Result<String>> + Send + '_>>;
 }
@@ -215,33 +165,11 @@ impl SubFetch for RealSubFetch {
     }
 }
 
-/// Fetches a subscription URL and parses every line.
 pub async fn fetch_subscription(fetch: &impl SubFetch, url: &str) -> Result<SubscriptionParse> {
     let body = fetch.fetch(url).await?;
     Ok(parse_subscription(&body))
 }
 
-/// Parses one imported config entry: a vless/trojan/vmess/ss URI.
-///
-/// # Examples
-///
-/// ```
-/// use cf_scanner::configs::parse_uri;
-///
-/// let spec = parse_uri(
-///     "vless://00000000-0000-0000-0000-000000000000@104.17.160.217:2096\
-///      ?security=tls&type=ws&path=/&host=front.example.com&fp=chrome#tag",
-/// )
-/// .unwrap();
-/// assert_eq!(spec.protocol.as_str(), "vless");
-/// assert_eq!(spec.server, "104.17.160.217");
-/// assert_eq!(spec.port, 2096);
-/// assert_eq!(spec.security, "tls");
-/// assert_eq!(spec.ws.as_ref().unwrap().host.as_deref(), Some("front.example.com"));
-///
-/// // Garbage never panics; it errors.
-/// assert!(parse_uri("not a uri").is_err());
-/// ```
 pub fn parse_uri(entry: &str) -> Result<OutboundSpec> {
     let entry = entry.trim();
     let scheme = entry
@@ -256,11 +184,6 @@ pub fn parse_uri(entry: &str) -> Result<OutboundSpec> {
     }
 }
 
-/// Renders a ready-to-use URI for a verified candidate: the config's id,
-/// security, SNI, fingerprint and (vless/vmess) ws settings, dialing
-/// `dial_ip`:`port`. The inverse of `parse_uri`. `remark`, when given, is
-/// appended as the fragment (the proxy client's display tag) — typically
-/// `CF-<COLO>-<latency>ms`.
 pub fn render_uri(
     spec: &OutboundSpec,
     dial_ip: Ipv4Addr,
@@ -284,8 +207,6 @@ fn fragment(remark: Option<&str>) -> String {
     }
 }
 
-/// vless:// and trojan:// (including trojan-over-ws) share the SIP002 query
-/// shape; vmess builds a base64 JSON payload instead.
 fn render_sip002(
     spec: &OutboundSpec,
     dial_ip: Ipv4Addr,
@@ -300,8 +221,6 @@ fn render_sip002(
     out.push_str(&dial_ip.to_string());
     out.push(':');
     out.push_str(&spec.port.to_string());
-    // Build the query components, then join with '&' so no closure holds a
-    // borrow of `out` while `out.push_str` runs elsewhere.
     let mut params: Vec<String> = Vec::new();
     let mut add = |key: &str, value: &str| {
         params.push(format!(
@@ -392,10 +311,6 @@ fn render_ss(spec: &OutboundSpec, dial_ip: Ipv4Addr, remark: Option<&str>) -> Re
     Ok(out)
 }
 
-/// One export path shared by the CLI and the API: parse the user's original
-/// config URI, point it at the verified candidate, render the ready URI.
-/// `sni_override` (when given) wins over the config's own SNI. `remark`,
-/// when given, becomes the proxy client's display tag fragment.
 pub fn export_config_uri(
     original_config: &str,
     dial_ip: Ipv4Addr,
@@ -409,11 +324,6 @@ pub fn export_config_uri(
     render_uri(&spec, dial_ip, sni_override, remark)
 }
 
-/// Parses subscription text: one URI per line; blank lines and `#` comments
-/// are skipped, unparseable lines are counted (never errors the batch) and
-/// reported with their line number. When the whole body is a single base64
-/// blob (the common `base64(vless://...\n...)` subscription shape) it is
-/// decoded first and the lines re-parsed.
 pub fn parse_subscription(body: &str) -> SubscriptionParse {
     let text = decode_subscription_body(body);
     let mut out = SubscriptionParse::default();
@@ -434,19 +344,12 @@ pub fn parse_subscription(body: &str) -> SubscriptionParse {
     out
 }
 
-/// Detect a whole-body base64 subscription blob and decode it. A blob is a
-/// single non-whitespace line that base64-decodes into text containing URI
-/// lines (never a raw config line itself). Plain multi-line subscriptions are
-/// returned unchanged.
 fn decode_subscription_body(body: &str) -> String {
     let trimmed = body.trim();
-    // Multi-line bodies are treated as line-based text directly.
     if trimmed.lines().count() != 1 {
         return body.to_owned();
     }
     let line = trimmed;
-    // A config line always starts with a scheme prefix (or, for vmess/ss, a
-    // scheme we recognise) — if it looks like one, don't try to base64 it.
     let looks_like_uri = line
         .split_once("://")
         .map(|(s, _)| {
@@ -465,8 +368,6 @@ fn decode_subscription_body(body: &str) -> String {
     let Ok(text) = String::from_utf8(decoded) else {
         return body.to_owned();
     };
-    // Only accept the decode when it actually produces parseable URIs; a
-    // random base64 string that decodes to prose must not be silently used.
     if text.lines().any(|l| {
         let l = l.trim();
         l.starts_with("vless://")
@@ -480,9 +381,6 @@ fn decode_subscription_body(body: &str) -> String {
     }
 }
 
-/// vless:// and trojan:// follow the SIP002 shape:
-/// `scheme://userinfo@host:port?params#tag`. Id/password may also arrive in
-/// the query (`id=`, `password=`) when the generator omits userinfo.
 fn parse_sip002(entry: &str) -> Result<OutboundSpec> {
     let url = Url::parse(entry).map_err(|e| anyhow!("bad URL: {e}"))?;
     let protocol = match url.scheme() {
@@ -496,8 +394,6 @@ fn parse_sip002(entry: &str) -> Result<OutboundSpec> {
         .trim_start_matches('[')
         .trim_end_matches(']')
         .to_owned();
-    // Share links commonly omit the default port; 443 is universal for
-    // vless/trojan.
     let port = url.port().unwrap_or(443);
     let q = query_map(&url);
 
@@ -541,9 +437,6 @@ fn parse_sip002(entry: &str) -> Result<OutboundSpec> {
     })
 }
 
-/// vmess://BASE64(JSON) where the JSON carries everything, e.g.
-/// `{"v":"2","ps":"tag","add":"host","port":"443","id":"uuid","net":"ws",
-///  "host":"h","path":"/","tls":"tls","sni":"s","fp":"chrome"}`.
 fn parse_vmess(entry: &str) -> Result<OutboundSpec> {
     let (b64, tag) = match entry.split_once('#') {
         Some((b, t)) => (b, Some(t.to_owned())),
@@ -557,7 +450,6 @@ fn parse_vmess(entry: &str) -> Result<OutboundSpec> {
         .as_object()
         .ok_or_else(|| anyhow!("vmess payload is not an object"))?;
     let get = |k: &str| o.get(k).and_then(|v| v.as_str());
-    // Generators emit port/aid either quoted or as JSON numbers.
     let get_flex = |k: &str| o.get(k).and_then(value_to_string);
 
     let server = get("add")
@@ -597,9 +489,6 @@ fn parse_vmess(entry: &str) -> Result<OutboundSpec> {
     })
 }
 
-/// Shadowsocks URIs come in two forms:
-/// `ss://BASE64(method:password)@host:port#tag` (SIP002 userinfo) or
-/// `ss://BASE64(method:password@host:port)#tag` (full envelope).
 fn parse_ss(entry: &str) -> Result<OutboundSpec> {
     let (b64, tag) = match entry.split_once('#') {
         Some((b, t)) => (b, Some(t.to_owned())),
@@ -608,11 +497,9 @@ fn parse_ss(entry: &str) -> Result<OutboundSpec> {
     let b64 = strip_scheme(b64, "ss").ok_or_else(|| anyhow!("bad ss prefix"))?;
 
     let (userinfo, host_port) = if let Some((u, hp)) = b64.split_once('@') {
-        // SIP002 userinfo form; userinfo may be base64 or plain `m:p`.
         let decoded = base64_any(u).unwrap_or_else(|_| u.as_bytes().to_vec());
         (decoded, hp.to_owned())
     } else {
-        // Full envelope: base64 of `method:password@host:port`.
         let decoded = base64_any(b64).map_err(|_| anyhow!("bad ss base64"))?;
         let text = String::from_utf8_lossy(&decoded);
         let (u, hp) = text
@@ -646,8 +533,6 @@ fn parse_ss(entry: &str) -> Result<OutboundSpec> {
     })
 }
 
-/// Extracts one usable outbound from xray-style JSON:
-/// `{"outbounds":[{...}]}`. The first outbound with a known protocol wins.
 pub fn parse_xray_json(text: &str) -> Result<OutboundSpec> {
     let cfg: XrayConfig = serde_json::from_str(text).map_err(|e| anyhow!("bad xray JSON: {e}"))?;
     for out in &cfg.outbounds {
@@ -741,12 +626,6 @@ pub fn parse_xray_json(text: &str) -> Result<OutboundSpec> {
     bail!("no usable outbound found")
 }
 
-// --- helpers ---------------------------------------------------------------
-
-/// Single exit point every parser passes through before returning a spec:
-/// the id lands verbatim in generated xray configs, so a percent-encoded or
-/// base64 megabyte in one field would slip past whole-entry length checks
-/// counted elsewhere — bound the decoded value itself here, once.
 fn finish_spec(spec: OutboundSpec) -> Result<OutboundSpec> {
     if spec.user_id.len() > MAX_USER_ID_BYTES {
         bail!("user id exceeds {MAX_USER_ID_BYTES} bytes");
@@ -754,9 +633,6 @@ fn finish_spec(spec: OutboundSpec) -> Result<OutboundSpec> {
     Ok(spec)
 }
 
-/// Case-insensitive `scheme://` prefix strip, mirroring the lowercase scheme
-/// dispatch in `parse_uri` (vmess/ss payloads are case-sensitive base64, so
-/// the raw entry cannot be lowercased wholesale).
 fn strip_scheme<'a>(s: &'a str, scheme: &str) -> Option<&'a str> {
     let prefix = format!("{scheme}://");
     (s.len() >= prefix.len() && s[..prefix.len()].eq_ignore_ascii_case(&prefix))
@@ -769,9 +645,6 @@ fn query_map(url: &Url) -> BTreeMap<String, String> {
         .collect()
 }
 
-/// Security modes the outbound builder cannot emit correctly. `reality`
-/// needs realitySettings/serverName, which `build_outbound` does not produce;
-/// accepting it would make xray reject the config and phase 2 silently fail.
 fn reject_unsupported_security(security: &str) -> Result<()> {
     if security.eq_ignore_ascii_case("reality") {
         bail!("security 'reality' is not supported; use tls or none")
@@ -1031,7 +904,6 @@ mod tests {
         assert_eq!(parsed.specs.len(), 2);
         assert_eq!(parsed.ignored, 1);
         assert_eq!(parsed.specs[0].tag.as_deref(), Some("CF官方优选5"));
-        // Per-line error reports the skip reason, not just a count.
         assert_eq!(parsed.errors.len(), 1);
         assert!(
             parsed.errors[0].starts_with("line 4:") && parsed.errors[0].contains("no scheme"),
@@ -1047,7 +919,6 @@ mod tests {
         let parsed = parse_subscription(&blob);
         assert_eq!(parsed.specs.len(), 1);
         assert_eq!(parsed.ignored, 1);
-        // A raw base64 blob that decodes to prose is NOT treated as a sub.
         let prose = base64::engine::general_purpose::STANDARD.encode("just some random text");
         assert_eq!(parse_subscription(&prose).specs.len(), 0);
     }
@@ -1123,8 +994,6 @@ mod tests {
             "",
             "garbage",
             "ftp://x",
-            // A missing port no longer rejects (defaults to 443); a missing
-            // host still must.
             "vless://aaaaaaaa-bbbb-cccc-dddd-eeeeffff0000@",
             "vless://@1.2.3.4:443",
             "vmess://!!!not-base64!!!",
@@ -1163,9 +1032,6 @@ mod tests {
     #[test]
     fn ss_envelope_accepts_url_safe_base64() {
         use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-        // 0xFF produces a base64 group of 63, which is '_' in the URL-safe
-        // alphabet and '/' in STANDARD: STANDARD decoding must fail and the
-        // URL-safe fallback must kick in.
         let mut payload = b"chacha20-ietf-poly1305:p".to_vec();
         payload.extend_from_slice(&[0xFF, 0x73, 0x73]);
         payload.extend_from_slice(b"@1.2.3.4:443");
@@ -1191,8 +1057,6 @@ mod tests {
         use base64::engine::general_purpose::{
             STANDARD, STANDARD_NO_PAD, URL_SAFE, URL_SAFE_NO_PAD,
         };
-        // The ÿ pair forces a '/' sextet and the length a '=' pad, so all
-        // four engine outputs are distinct inputs.
         let json =
             r#"{"v":"2","z":"ÿÿ","add":"5.6.7.8","port":"443","id":"u","net":"tcp","tls":"none"}"#;
         let variants = [
@@ -1252,9 +1116,7 @@ mod tests {
 
     #[test]
     fn rejects_ports_out_of_range() {
-        // url crate rejects >u16 ports at parse time.
         assert!(parse_uri("vless://aaaaaaaa-bbbb-cccc-dddd-eeeeffff0000@1.2.3.4:70000").is_err());
-        // vmess carries the port inside base64 JSON: string parse must fail.
         let json = r#"{"add":"1.2.3.4","port":"abc","id":"u"}"#;
         let b64 = base64::engine::general_purpose::STANDARD.encode(json);
         assert!(parse_uri(&format!("vmess://{b64}")).is_err());
@@ -1265,24 +1127,19 @@ mod tests {
         let oversized = "x".repeat(MAX_USER_ID_BYTES + 1);
         let want = format!("user id exceeds {MAX_USER_ID_BYTES} bytes");
         let std = base64::engine::general_purpose::STANDARD;
-        // SIP002 userinfo.
         let err = parse_uri(&format!("vless://{oversized}@1.2.3.4:443")).unwrap_err();
         assert_eq!(err.to_string(), want);
-        // vmess decoded JSON id.
         let json = format!(r#"{{"add":"h","port":"443","id":"{oversized}","net":"tcp"}}"#);
         let err = parse_uri(&format!("vmess://{}", std.encode(json))).unwrap_err();
         assert_eq!(err.to_string(), want);
-        // ss decoded password (SIP002 userinfo form).
         let creds = std.encode(format!("aes-128-gcm:{oversized}"));
         let err = parse_uri(&format!("ss://{creds}@1.2.3.4:8388")).unwrap_err();
         assert_eq!(err.to_string(), want);
-        // xray JSON user id.
         let json = format!(
             r#"{{"outbounds":[{{"protocol":"vless","settings":{{"vnext":[{{"address":"1.2.3.4","port":443,"users":[{{"id":"{oversized}"}}]}}]}}}}]}}"#
         );
         let err = parse_xray_json(&json).unwrap_err();
         assert_eq!(err.to_string(), want);
-        // At exactly the cap the credential passes on every path.
         let at_cap = "x".repeat(MAX_USER_ID_BYTES);
         assert!(
             parse_uri(&format!("vless://{at_cap}@1.2.3.4:443"))
@@ -1295,34 +1152,25 @@ mod tests {
         assert!(parse_uri(&format!("ss://{creds}@1.2.3.4:8388")).is_ok());
     }
 
-    // --- sanitize_error_text / redact_line table (review r6) -----------------
-
     #[test]
     fn sanitize_error_text_redacts_secret_shapes() {
         let cases: &[(&str, &str)] = &[
-            // Raw userinfo is masked, path kept.
             (
                 "fetch failed: https://user:pass@example.com/x",
                 "fetch failed: https://***@example.com/x",
             ),
-            // Percent-encoded userinfo (`%40` = '@') is masked too.
             (
                 "fetch failed: https://user%40pass@example.com/x",
                 "fetch failed: https://***@example.com/x",
             ),
-            // Query/fragment (the usual id/password carrier) is cut first,
-            // so a stray '@' in the query cannot defeat the userinfo mask.
             (
                 "https://user:pass@example.com/x?id=secret&token=abc#frag",
                 "https://***@example.com/x",
             ),
-            // An '@' after a space is prose, not userinfo: left alone.
             (
                 "email me at admin@example.com or use https://example.com",
                 "email me at admin@example.com or use https://example.com",
             ),
-            // Lines without a scheme are untouched by design (the redactor
-            // only masks URL-shaped text; prose stays readable).
             ("user:pass@example.com/x", "user:pass@example.com/x"),
         ];
         for (input, want) in cases {
@@ -1343,11 +1191,9 @@ mod tests {
             out,
             "dial failed: vless://***@host1/x retry vless://***@host2/y"
         );
-        // Query/fragment cutting applies per segment too.
         let input = "https://u:p@a.com/x?q=1 and https://u:p@b.com/y#frag";
         let out = sanitize_error_text(input);
         assert!(!out.contains("u:p"), "credentials leaked: {out}");
-        // Prose between URLs survives when no query/fragment intervenes.
         let input = "see https://a.com/p then mail admin@x.com or vless://u2:p2@b.com/q";
         let out = sanitize_error_text(input);
         assert!(out.contains("then mail admin@x.com or "), "{out}");
@@ -1364,13 +1210,10 @@ mod tests {
 
     #[test]
     fn sanitize_error_text_truncates_over_long_lines() {
-        // The length must live in the path: query/fragment is stripped by the
-        // redactor before truncation ever runs.
         let long = format!("https://example.com/{}", "a".repeat(600));
         let out = sanitize_error_text(&long);
         assert!(out.ends_with('…'), "truncation marker missing: {out}");
         assert_eq!(out.chars().count(), MAX_ERROR_LINE_BYTES + 1);
-        // Multi-line input truncates per line, not as one blob.
         let two = format!(
             "https://example.com/{}\nhttps://example.com/{}",
             "a".repeat(600),
@@ -1382,12 +1225,8 @@ mod tests {
         assert!(lines.iter().all(|l| l.ends_with('…')));
     }
 
-    // --- render_uri / export_config_uri (review round) ----------------------
-
     const DIAL_IP: &str = "203.0.113.7";
 
-    /// Parses, renders with a fake dial IP, re-parses, and checks every
-    /// identity-critical field survived.
     fn assert_round_trips(original: &str, sni_override: Option<&str>) {
         let spec = parse_uri(original).unwrap();
         let uri = render_uri(&spec, DIAL_IP.parse().unwrap(), sni_override, None).unwrap();
@@ -1409,13 +1248,9 @@ mod tests {
     #[test]
     fn render_uri_round_trips_vless() {
         for uri in [
-            // Plain tls with explicit SNI + fingerprint.
             "vless://aaaaaaaa-bbbb-cccc-dddd-eeeeffff0000@104.17.160.217:2096?security=tls&sni=edgetunnel.workers.dev&fp=chrome",
-            // Default security=none, no extras.
             "vless://00000000-0000-0000-0000-000000000000@1.2.3.4:443",
-            // WS + Host fronting + packetencoding, as Cloudflare workers use.
             "vless://aaaaaaaa-bbbb-cccc-dddd-eeeeffff0000@104.17.160.217:2096?security=tls&type=ws&path=/&host=front.example.com&fp=chrome&sni=front.example.com&packetencoding=xudp",
-            // An override swaps the config's own SNI.
             "vless://aaaaaaaa-bbbb-cccc-dddd-eeeeffff0000@104.17.160.217:2096?security=tls&sni=orig.example.com",
         ] {
             let override_sni = uri.contains("override").then_some("b.me");
@@ -1435,9 +1270,6 @@ mod tests {
 
     #[test]
     fn render_uri_percent_encodes_hostile_passwords() {
-        // ':' and '@' inside the userinfo must survive the round trip; a
-        // raw ':' would split a user:pass pair in every parser, so the
-        // input side is fed percent-encoded (as real configs are).
         for password in ["p@ss:word", "p a s s#1", "päss/word?x"] {
             let encoded = utf8_percent_encode(password, USERINFO_ENCODE_SET);
             let spec = parse_uri(&format!("trojan://{encoded}@1.2.3.4:443")).unwrap();
@@ -1452,7 +1284,6 @@ mod tests {
 
     #[test]
     fn render_uri_round_trips_vmess_ss_trojan_ws() {
-        // vmess renders a base64 JSON payload with remark in "ps"; re-parse.
         let vmess = parse_uri(&format!(
             "vmess://{}",
             base64::engine::general_purpose::STANDARD.encode(
@@ -1466,7 +1297,6 @@ mod tests {
         assert_eq!(back.server, DIAL_IP);
         assert_eq!(back.user_id, "u");
 
-        // Shadowsocks round-trips method:password.
         let ss = parse_uri(&format!(
             "ss://{}@1.2.3.4:8388",
             base64::engine::general_purpose::STANDARD.encode("aes-128-gcm:secret")
@@ -1479,7 +1309,6 @@ mod tests {
         assert_eq!(back.user_id, "secret");
         assert_eq!(back.method.as_deref(), Some("aes-128-gcm"));
 
-        // trojan-over-ws now exports (was rejected).
         let trojan_ws = parse_uri("trojan://secret@1.2.3.4:443?type=ws&path=/api").unwrap();
         let uri = render_uri(&trojan_ws, DIAL_IP.parse().unwrap(), None, None).unwrap();
         let back = parse_uri(&uri).unwrap();
@@ -1487,7 +1316,6 @@ mod tests {
         assert_eq!(back.server, DIAL_IP);
         assert_eq!(back.ws.as_ref().unwrap().path, "/api");
 
-        // A remark lands as the fragment and round-trips as the tag.
         let uri = render_uri(&ss, DIAL_IP.parse().unwrap(), None, Some("CF-LAX-42ms")).unwrap();
         assert!(uri.ends_with("#CF-LAX-42ms"), "{uri}");
         let back = parse_uri(&uri).unwrap();
@@ -1514,8 +1342,6 @@ mod tests {
         assert_eq!(back.port, 2096);
         assert_eq!(back.tls_server_name.as_deref(), Some("b.me"));
         assert_eq!(back.fingerprint.as_deref(), Some("chrome"));
-        // The override is what the scan verified; without one the config's
-        // own SNI is preserved.
         let uri = export_config_uri(
             "vless://aaaaaaaa-bbbb-cccc-dddd-eeeeffff0000@1.2.3.4:443?security=tls&sni=orig.example.com",
             DIAL_IP.parse().unwrap(),
@@ -1525,7 +1351,6 @@ mod tests {
         )
         .unwrap();
         assert!(uri.contains("sni=orig.example.com"), "{uri}");
-        // Garbage input errors instead of rendering something unusable.
         assert!(export_config_uri("not a uri", DIAL_IP.parse().unwrap(), 443, None, None).is_err());
     }
 }

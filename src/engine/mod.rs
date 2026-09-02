@@ -1,7 +1,3 @@
-//! The one in-process scan engine every client drives: pool planning, probe
-//! fan-out, stop conditions, event stream and the last-scan results store.
-//! Used by the HTTP server, wizard, and CLI.
-
 mod cdn;
 mod phase2;
 mod plan;
@@ -29,8 +25,6 @@ use crate::probe::Transport;
 use crate::ranges;
 use crate::verify::{HybridTunnelProbe, TunnelProbe, XrayTunnelProbe};
 
-/// Progress events: every 50 probes up to 10k totals, then every 500, so a
-/// Full scan's event stream stays bounded.
 const PROGRESS_EVERY: u64 = 50;
 const PROGRESS_EVERY_COARSE: u64 = 500;
 const PROGRESS_COARSE_TOTAL: u64 = 10_000;
@@ -45,7 +39,6 @@ fn progress_cadence(total: u64) -> u64 {
 
 type Store = Arc<Mutex<Vec<Verdict>>>;
 
-/// Reservation failure: the single run slot is already taken.
 #[derive(Debug, thiserror::Error)]
 #[error("a scan is already running")]
 pub struct AlreadyRunning;
@@ -63,9 +56,6 @@ pub struct ScanController {
     summary: Mutex<Option<ScanSummary>>,
     cancel_tx: Mutex<Option<watch::Sender<bool>>>,
     running: Mutex<bool>,
-    /// Phase-2 configs of the last run, retained so export endpoints can
-    /// rewrite each verified candidate's original config into an importable
-    /// URI/subscription without the client re-sending it.
     last_phase2_configs: Mutex<Vec<String>>,
 }
 
@@ -81,8 +71,6 @@ impl ScanController {
         ctrl
     }
 
-    /// One controller serving both modes (the server's case): CDN probes go
-    /// through `transport`, WARP through `warp_transport`.
     pub fn with_transports(
         transport: Arc<dyn Transport>,
         warp_transport: Arc<dyn Transport>,
@@ -105,8 +93,6 @@ impl ScanController {
         }
     }
 
-    /// Test seam: injects the subscription fetcher and tunnel probe so
-    /// phase-2 runs never touch the network or spawn xray.
     pub fn with_probes(
         transport: Arc<dyn Transport>,
         sub_fetch: Arc<dyn SubFetch>,
@@ -122,7 +108,6 @@ impl ScanController {
         self.events.subscribe()
     }
 
-    /// Summary of the last finished scan, if one has run yet.
     pub fn summary(&self) -> Option<ScanSummary> {
         self.summary
             .lock()
@@ -130,15 +115,10 @@ impl ScanController {
             .clone()
     }
 
-    /// Snapshot of the last scan's working endpoints, sorted by latency.
-    /// The only legitimate full-snapshot read: prefer [`Self::has_results`]
-    /// for emptiness checks, [`Self::for_each_result`] for iteration.
     pub fn results(&self) -> Vec<Verdict> {
         self.snapshot_sorted()
     }
 
-    /// True once the last scan produced at least one working endpoint.
-    /// Emptiness needs neither the sort nor the clone of [`Self::results`].
     pub fn has_results(&self) -> bool {
         !self
             .store
@@ -147,9 +127,6 @@ impl ScanController {
             .is_empty()
     }
 
-    /// Iterate sorted results after taking a snapshot under the lock, so the
-    /// callback runs without holding the mutex. The snapshot is dropped once
-    /// iteration finishes.
     pub fn for_each_result(&self, mut f: impl FnMut(&Verdict)) {
         let snapshot = self.snapshot_sorted();
         for v in &snapshot {
@@ -170,7 +147,6 @@ impl ScanController {
         guard.clone()
     }
 
-    /// Rows that passed phase-2 verification (phase2_only summary semantics).
     fn phase2_passed(&self) -> u64 {
         self.store
             .lock()
@@ -180,9 +156,6 @@ impl ScanController {
             .count() as u64
     }
 
-    /// Rows still considered working after a phase-2 pass: candidates that
-    /// passed verification plus candidates phase 2 never touched (v6 finds
-    /// stay phase-1-only, so they keep counting as working).
     fn working_found(&self) -> u64 {
         self.store
             .lock()
@@ -192,15 +165,10 @@ impl ScanController {
             .count() as u64
     }
 
-    /// True while a run is active; the server rejects new scans then.
     pub fn is_running(&self) -> bool {
         *self.running.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    /// Clears the last scan's results. No-op while a run is active so an
-    /// in-flight run can never repopulate a store the user just cleared.
-    /// The running lock is held across the check AND the clear so a run
-    /// starting between them cannot lose its results to a stale reset.
     pub fn reset(&self) {
         let running = self.running.lock().unwrap_or_else(|e| e.into_inner());
         if *running {
@@ -210,8 +178,6 @@ impl ScanController {
         drop(running);
     }
 
-    /// Internal reset for run start; bypasses the running guard (the run
-    /// itself is the one clearing, not a concurrent caller).
     fn clear_store(&self) {
         self.store.lock().unwrap_or_else(|e| e.into_inner()).clear();
         self.store_dirty.store(false, Ordering::Relaxed);
@@ -232,10 +198,6 @@ impl ScanController {
         }
     }
 
-    /// The run's cancel signal: one watch channel per run, reused by every
-    /// phase, so a cancel fired during phase 1 (or in the gap before phase
-    /// 2) is still visible to phase-2 workers and to `finish` — never lost
-    /// to a fresh channel install.
     fn cancel_signal(&self) -> watch::Receiver<bool> {
         let mut slot = self.cancel_tx.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(tx) = slot.as_ref() {
@@ -250,10 +212,6 @@ impl ScanController {
         self.run_seeded(cfg, OsRng.next_u64()).await
     }
 
-    /// Runs `cfg` while invoking `on_event` as each event is emitted (the
-    /// subscriber attaches before the run starts, so no event is missed).
-    /// Errors abort before `Finished` is sent (a `Failed` event is emitted
-    /// instead); callers still get them here.
     pub async fn run_streaming(
         self: &Arc<Self>,
         cfg: ScanConfig,
@@ -263,7 +221,6 @@ impl ScanController {
             .await
     }
 
-    /// `run_streaming` with an explicit sampling seed (repro runs).
     pub async fn run_streaming_seeded(
         self: &Arc<Self>,
         cfg: ScanConfig,
@@ -276,10 +233,6 @@ impl ScanController {
         self.drive_run(handle, rx, on_event).await
     }
 
-    /// Streaming variant of [`run_reserved`] for callers that reserved the
-    /// slot via [`reserve`](Self::reserve) (the server's start path reserves
-    /// synchronously, then spawns this). Running it without a reservation
-    /// breaks the one-run-at-a-time invariant.
     pub async fn run_reserved_streaming(
         self: &Arc<Self>,
         cfg: ScanConfig,
@@ -292,27 +245,17 @@ impl ScanController {
         self.drive_run(handle, rx, on_event).await
     }
 
-    /// Drives a spawned run to completion, invoking `on_event` for every
-    /// broadcast event. Shared by the streaming entry points.
     async fn drive_run(
         self: &Arc<Self>,
         mut handle: tokio::task::JoinHandle<Result<ScanSummary>>,
         mut rx: broadcast::Receiver<ScanEvent>,
         mut on_event: impl FnMut(ScanEvent),
     ) -> Result<ScanSummary> {
-        // Rows this consumer already saw; every branch records into it so the
-        // end-of-run store re-sync only emits rows the consumer truly missed
-        // (fast consumers get exactly-once, lagging ones get a deduped tail).
         let mut seen: HashSet<(IpAddr, u16, bool)> = HashSet::new();
         loop {
             tokio::select! {
                 done = &mut handle => {
                     let result = done?;
-                    // The run may have finished with events still buffered;
-                    // deliver them so callers never miss the tail. A receiver
-                    // that fell behind (Lagged) has dropped events: keep
-                    // draining past the gap, then re-emit store rows the
-                    // drain never delivered.
                     loop {
                         match rx.try_recv() {
                             Ok(event) => {
@@ -325,10 +268,6 @@ impl ScanController {
                             Err(TryRecvError::Lagged(_)) => continue,
                         }
                     }
-                    // Verdicts still in worker-local batches when the
-                    // broadcast window overflowed are in the store, not the
-                    // stream: re-emit any row the consumer never saw (deduped
-                    // by (ip, port, phase2)) so a lagging consumer never loses one.
                     self.for_each_result(|v| {
                         if seen.insert((v.ip, v.port, v.phase2.is_some())) {
                             on_event(ScanEvent::Result(Box::new(v.clone())));
@@ -339,10 +278,6 @@ impl ScanController {
                 recv = rx.recv() => match recv {
                     Ok(event @ ScanEvent::Finished(_)) => {
                         on_event(event);
-                        // The same tail reconciliation as the handle-done
-                        // branch: rows dropped from the broadcast window (and
-                        // not covered by an earlier re-sync) must still reach
-                        // the consumer exactly once.
                         self.for_each_result(|v| {
                             if seen.insert((v.ip, v.port, v.phase2.is_some())) {
                                 on_event(ScanEvent::Result(Box::new(v.clone())));
@@ -357,13 +292,6 @@ impl ScanController {
                         on_event(event);
                     }
                     Err(_) => {
-                        // Lagged: the channel dropped missed events. Re-sync
-                        // the authoritative store so a slow consumer never
-                        // ends up with a silently incomplete stream (the
-                        // store is flushed before Finished, so this can only
-                        // under-report mid-run verdicts, never over-report).
-                        // Duplicate rows are possible after a re-sync;
-                        // consumers keyed on (ip, port, phase2) dedupe naturally.
                         self.for_each_result(|v| {
                             if seen.insert((v.ip, v.port, v.phase2.is_some())) {
                                 on_event(ScanEvent::Result(Box::new(v.clone())));
@@ -375,10 +303,6 @@ impl ScanController {
         }
     }
 
-    /// Reserves the single run slot synchronously: the caller can flip the
-    /// running state and THEN spawn the run task, so a racing second caller
-    /// sees the reservation instead of a false "idle" (the server's start
-    /// path depends on this — a check-then-spawn gap let two POSTs through).
     pub fn reserve(&self) -> Result<(), AlreadyRunning> {
         let mut running = self.running.lock().unwrap_or_else(|e| e.into_inner());
         if *running {
@@ -388,9 +312,6 @@ impl ScanController {
         Ok(())
     }
 
-    /// At most one run per controller: a second concurrent run is rejected
-    /// (surfacing as a `Failed` event) so two runs can never race the shared
-    /// store or the cancel slot.
     pub async fn run_seeded(&self, cfg: ScanConfig, seed: u64) -> Result<ScanSummary> {
         self.reserve().map_err(|err| {
             self.emit(ScanEvent::Failed(crate::api::types::FailedPayload {
@@ -401,14 +322,7 @@ impl ScanController {
         self.run_reserved(cfg, seed).await
     }
 
-    /// Runs without re-checking the slot; the caller must have reserved it
-    /// via [`reserve`](Self::reserve) (or be inside [`run_seeded`], which
-    /// reserves first).
     async fn run_reserved(&self, cfg: ScanConfig, seed: u64) -> Result<ScanSummary> {
-        // RAII: clears the busy flag (and the cancel slot) even if the run
-        // panics, so one bad run can never brick the controller for the rest
-        // of the process's life. Created BEFORE the body so a panic mid-run
-        // still unwinds through it.
         struct ResetGuard<'a> {
             running: &'a Mutex<bool>,
             cancel_tx: &'a Mutex<Option<watch::Sender<bool>>>,
@@ -428,8 +342,6 @@ impl ScanController {
         };
         let result = self.run_seeded_unguarded(cfg, seed).await;
         if let Err(err) = &result {
-            // The chain can carry imported config material (URLs, paths);
-            // sanitize before it reaches logs or the wire.
             let msg = crate::configs::sanitize_error_text(&format!("{err:#}"));
             self.emit(ScanEvent::Failed(crate::api::types::FailedPayload {
                 reason: msg,
@@ -443,8 +355,6 @@ impl ScanController {
         self.run_seeded_with_pool(cfg, seed, pool).await
     }
 
-    /// Scan over an explicit pool; tests use this to stay off the filesystem
-    /// and the real Cloudflare ranges.
     async fn run_seeded_with_pool(
         &self,
         cfg: ScanConfig,
@@ -459,9 +369,6 @@ impl ScanController {
         self.run_cdn(cfg, seed, pool).await
     }
 
-    /// Snapshot the run's phase-2 configs so export endpoints can rewrite the
-    /// original config per verified candidate (the sub never requires the
-    /// client to resend the configs).
     fn retain_phase2_configs(&self, cfg: &ScanConfig) {
         let configs = cfg
             .phase2
@@ -474,7 +381,6 @@ impl ScanController {
             .unwrap_or_else(|e| e.into_inner()) = configs;
     }
 
-    /// The last run's phase-2 configs (empty for WARP-only or no phase 2).
     pub fn phase2_configs(&self) -> Vec<String> {
         self.last_phase2_configs
             .lock()
@@ -483,8 +389,6 @@ impl ScanController {
     }
 
     fn finish(&self, started: Instant, scanned: u64, found: u64) -> ScanSummary {
-        // Borrow, don't take: ResetGuard owns the clear. Taking here raced
-        // with the guard and hid cancels that fired after `finish` read.
         let cancelled = self
             .cancel_tx
             .lock()
@@ -516,8 +420,6 @@ fn plan_hosts_iter<'a>(
         PlanItem::Every { cidr } => Box::new((0..cidr.host_count()).map(move |i| cidr.host(i))),
         PlanItem::Sample { cidr, count } => {
             let count = (*count as u128).min(cidr.host_count());
-            // Dense v4 blocks (/24 and tighter) skip network and broadcast
-            // addresses; every other block samples its whole host space.
             let (draw_max, skip_net_bcast) = if cidr.addr.is_ipv4() && cidr.prefix >= 24 {
                 (cidr.host_count().saturating_sub(2), true)
             } else {
@@ -526,8 +428,6 @@ fn plan_hosts_iter<'a>(
             let mut seen = std::collections::HashSet::new();
             let mut emitted = 0u128;
             Box::new(std::iter::from_fn(move || {
-                // Draws are deduped per block: sampling with replacement
-                // produced duplicate verdicts and inflated `found` counts.
                 if emitted >= count || seen.len() as u128 >= draw_max {
                     return None;
                 }
@@ -561,14 +461,8 @@ fn plan_probe_count(plan: &[PlanItem], ports: &[super::api::types::Port]) -> u64
     probes.min(u64::MAX as u128) as u64
 }
 
-/// Verdicts a worker accumulates before flushing to the shared store, so the
-/// store lock is taken once per batch instead of once per verdict.
 const BATCH_FLUSH: usize = 256;
 
-/// Claims the cadence threshold crossed by `observed` for exactly one of the
-/// concurrent workers that saw it: the CAS on the highest claimed threshold
-/// makes every milestone single-winner and strictly increasing, so progress
-/// never duplicates or regresses no matter how workers interleave.
 fn claim_milestone(last: &AtomicU64, observed: u64, cadence: u64) -> bool {
     let threshold = observed / cadence;
     let claimed = last.load(Ordering::Relaxed);
@@ -578,8 +472,6 @@ fn claim_milestone(last: &AtomicU64, observed: u64, cadence: u64) -> bool {
             .is_ok()
 }
 
-/// Resolves once the run's cancel flag flips; parks forever if the sender
-/// dropped without a flip (the reset guard only clears it after `finish`).
 async fn cancelled_signal(mut rx: watch::Receiver<bool>) {
     while !*rx.borrow() {
         if rx.changed().await.is_err() {
@@ -588,9 +480,6 @@ async fn cancelled_signal(mut rx: watch::Receiver<bool>) {
     }
 }
 
-/// Shared state for one probe phase: stop conditions, counters, and the
-/// event/store handles every worker needs. `Arc`-shared between the producer
-/// and all workers of a phase.
 struct ProbeContext {
     cancel: watch::Receiver<bool>,
     stop: StopCondition,
@@ -606,9 +495,6 @@ struct ProbeContext {
 }
 
 impl ProbeContext {
-    /// Pre-probe stop check: cancel, found reached, or hard cap reached.
-    /// Overshoot beyond the stop condition is bounded by `concurrency`
-    /// (each worker holds at most one in-flight probe past the check).
     fn should_stop(&self) -> bool {
         *self.cancel.borrow()
             || self.found.load(Ordering::Acquire) >= u64::from(self.stop.found)
@@ -622,9 +508,6 @@ impl ProbeContext {
         cancelled_signal(self.cancel.clone()).await;
     }
 
-    /// Single-winner progress gate: true only for the worker that claims the
-    /// next cadence threshold, so exactly one Progress event fires per
-    /// milestone regardless of how many workers raced past it.
     fn milestone_due(&self, observed: u64) -> bool {
         claim_milestone(&self.last_milestone, observed, self.cadence)
     }
@@ -699,9 +582,6 @@ mod tests {
             }
         });
         let claimed = winners.lock().unwrap_or_else(|e| e.into_inner()).clone();
-        // Push order reflects thread scheduling, not claim order, so the
-        // assertions must be set-shaped: the CAS guarantees one winner per
-        // threshold and increasing claims, not ordered Vec appends.
         let mut seen = claimed.clone();
         seen.sort_unstable();
         seen.dedup();
@@ -717,7 +597,6 @@ mod tests {
     }
 
     pub(crate) fn ok_cfg(found: u32, cap: Option<u32>) -> ScanConfig {
-        // Serial probing keeps stop/cap semantics exact in tests.
         ScanConfig {
             mode: Mode::Cdn,
             target: ScanTarget::Count(8),
@@ -728,8 +607,6 @@ mod tests {
         }
     }
 
-    /// Runs a scan over a scripted /29 pool: deterministic hosts
-    /// 203.0.113.0-203.0.113.7, independent of the filesystem and bundled ranges.
     pub(crate) async fn run_local(
         c: &Arc<ScanController>,
         cfg: ScanConfig,
@@ -756,7 +633,6 @@ mod tests {
             .ok("203.0.113.1".parse().unwrap(), 443, 50)
             .ok("203.0.113.2".parse().unwrap(), 443, 10);
         let c = Arc::new(ScanController::new(Arc::new(t)));
-        // custom_cidrs keeps the scan on the scripted /29, off the filesystem.
         let mut cfg = ok_cfg(2, None);
         cfg.custom_cidrs = vec!["203.0.113.0/29".to_owned()];
         let mut events = vec![];
@@ -776,11 +652,10 @@ mod tests {
     async fn run_streaming_reports_errors_without_finished() {
         let c = Arc::new(ScanController::new(Arc::new(FakeTransport::new())));
         let mut cfg = ok_cfg(1, None);
-        cfg.ports = vec![Port::new(0)]; // validation rejects the run before any event
+        cfg.ports = vec![Port::new(0)];
         let mut events = vec![];
         let err = c.run_streaming(cfg, |e| events.push(e)).await.unwrap_err();
         assert!(err.to_string().contains("out of range"));
-        // The run surfaced as a Failed event instead of Finished.
         assert!(!events.is_empty(), "the failure must reach clients");
         assert!(!events.iter().any(|e| matches!(e, ScanEvent::Finished(_))));
         assert!(events.iter().any(|e| matches!(e, ScanEvent::Failed(_))));
@@ -788,8 +663,6 @@ mod tests {
 
     #[tokio::test]
     async fn concurrent_runs_are_rejected_and_failed_event_is_emitted() {
-        // Every /29 host probes slowly so the run is provably alive when the
-        // second run is attempted (the count-sampled plan may draw any host).
         let mut t = FakeTransport::new();
         for i in 0..8u8 {
             t = t.ok_slow(format!("203.0.113.{i}").parse().unwrap(), 443, 25, 150);
@@ -809,8 +682,6 @@ mod tests {
         let err = c.run(cfg.clone()).await.unwrap_err();
         assert!(err.to_string().contains("already running"), "{err}");
 
-        // The rejected run still surfaces to UI/CLI clients as a Failed event
-        // (drain past the first run's Progress events).
         let event = loop {
             let event = tokio::time::timeout(Duration::from_secs(1), events.recv())
                 .await
@@ -833,7 +704,6 @@ mod tests {
         assert_eq!(summary.found, 8);
         assert!(!c.is_running());
 
-        // After the first run finishes, a new run is accepted again.
         let again = c.run(cfg).await.unwrap();
         assert_eq!(again.found, 8);
     }
@@ -861,8 +731,6 @@ mod tests {
 
     #[tokio::test]
     async fn empty_pool_finishes_with_zero_summary() {
-        // A pool emptied by exclusions yields zero probes: the run must end
-        // cleanly with a 0/0 summary and no probes (no fake scripting needed).
         let (c, _) = controller(Arc::new(FakeTransport::new()));
         let pool = ranges::CidrPool::parse("203.0.113.0/29")
             .unwrap()
@@ -878,9 +746,6 @@ mod tests {
 
     #[tokio::test]
     async fn late_subscribers_see_complete_results() {
-        // The store is the authoritative snapshot: whoever subscribes whenever
-        // must end up with the same found set as the summary, even if they
-        // missed every live event (the store is flushed before Finished).
         let t = FakeTransport::new()
             .ok("203.0.113.1".parse().unwrap(), 443, 50)
             .ok("203.0.113.2".parse().unwrap(), 443, 10)
@@ -894,7 +759,6 @@ mod tests {
             events.push(e);
         }
         assert!(matches!(events.last(), Some(ScanEvent::Finished(_))));
-        // Results must be latency-sorted in the store.
         let lats: Vec<u32> = results.iter().filter_map(|v| v.latency_ms).collect();
         assert!(lats.windows(2).all(|w| w[0] <= w[1]), "{lats:?}");
     }
@@ -902,8 +766,6 @@ mod tests {
     #[test]
     fn sampling_skips_network_and_broadcast_for_dense_v4_blocks() {
         let mut rng = SplitMix64::new(1);
-        // /25: network 203.0.113.0, broadcast 203.0.113.127; a count beyond the
-        // usable space must draw every usable host and neither edge.
         let item = PlanItem::Sample {
             cidr: ranges::parse_cidr("203.0.113.0/25").unwrap(),
             count: 200,
@@ -913,7 +775,6 @@ mod tests {
         assert!(!hosts.contains(&"203.0.113.0".parse::<IpAddr>().unwrap()));
         assert!(!hosts.contains(&"203.0.113.127".parse::<IpAddr>().unwrap()));
 
-        // /24 keeps its existing 254-usable-host behavior.
         let item = PlanItem::Sample {
             cidr: ranges::parse_cidr("203.0.113.0/24").unwrap(),
             count: 300,
@@ -921,7 +782,6 @@ mod tests {
         let hosts: Vec<IpAddr> = plan_hosts_iter(&item, &mut rng).collect();
         assert_eq!(hosts.len(), 254);
 
-        // /31 and /32 have no usable host left once both edges are skipped.
         for dense in ["203.0.113.0/31", "203.0.113.0/32"] {
             let item = PlanItem::Sample {
                 cidr: ranges::parse_cidr(dense).unwrap(),
@@ -936,11 +796,6 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn run_streaming_recovers_verdicts_an_overflowing_consumer_dropped() {
-        // A /22 (1024 hosts) emits more events than the 1024-slot broadcast
-        // window. The consumer parks on its first event until the scan
-        // itself has finished, so the receiver provably falls behind and
-        // the window drops messages before the end-of-run drain: every
-        // verdict must still arrive (store re-sync), each at least once.
         let t = FakeTransport::new();
         for i in 0..1024u32 {
             t.insert(
@@ -983,8 +838,6 @@ mod tests {
             }
         });
         wait_until(Duration::from_secs(2), || !c.is_running()).await;
-        // The scan finished (store fully flushed, Finished emitted); release
-        // the parked consumer and let the end-of-run drain + store re-sync run.
         let _ = park_tx.send(());
         let (summary, events) = handle.await.unwrap();
         assert_eq!(summary.found, 1024);
@@ -1040,13 +893,11 @@ mod tests {
         );
         let results = c.results();
         assert_eq!(results.len(), 3);
-        // Sorted by latency, then ip, then port: 10@203.0.113.1:443, 10@203.0.113.2:80, 50@203.0.113.3:443
         assert_eq!(results[0].ip, "203.0.113.1".parse::<IpAddr>().unwrap());
         assert_eq!(results[0].port, 443);
         assert_eq!(results[1].ip, "203.0.113.2".parse::<IpAddr>().unwrap());
         assert_eq!(results[1].port, 80);
         assert_eq!(results[2].ip, "203.0.113.3".parse::<IpAddr>().unwrap());
-        // push after read dirties again
         let v4 = Verdict {
             ip: "203.0.113.4".parse().unwrap(),
             port: 443,
@@ -1065,7 +916,6 @@ mod tests {
     #[test]
     fn results_accessors_avoid_full_clone() {
         let c = Arc::new(ScanController::new(Arc::new(FakeTransport::new())));
-        // Empty store: has_results is false.
         assert!(!c.has_results());
 
         let v1 = Verdict {
@@ -1098,10 +948,8 @@ mod tests {
             vec![v1.clone(), v2.clone(), v3.clone()],
         );
 
-        // Non-empty store: has_results is true.
         assert!(c.has_results());
 
-        // for_each_result iterates in sorted order matching results().
         let snapshot = c.results();
         let mut collected = Vec::new();
         c.for_each_result(|v| collected.push((v.ip, v.port)));

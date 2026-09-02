@@ -1,6 +1,3 @@
-//! Request screening: Host allowlist, Origin/Sec-Fetch-Site rejection, and
-//! the security-header layer every response passes through.
-
 use axum::Json;
 use axum::extract::rejection::JsonRejection;
 use axum::extract::{FromRequest, Request, State};
@@ -10,9 +7,6 @@ use axum::response::Response;
 use super::error::ApiError;
 use super::error::status_to_code;
 
-/// Host header values the API answers to. Anything else is rejected before
-/// routing (DNS-rebinding / drive-by protection); the server only ever binds
-/// IPv4 loopback, so v6 loopback hosts are not answerable and stay rejected.
 const ALLOWED_HOSTS: [&str; 2] = ["127.0.0.1", "localhost"];
 
 pub(crate) fn host_allowed(host: &str) -> bool {
@@ -29,10 +23,6 @@ pub(crate) fn host_allowed(host: &str) -> bool {
         .any(|allowed| allowed.eq_ignore_ascii_case(host))
 }
 
-/// The served port, threaded into the Origin check so "first-party" means
-/// this process's API and not any other loopback listener (for IP hosts,
-/// browsers classify a different port as same-site, so only the port match
-/// can tell them apart).
 #[derive(Clone, Copy)]
 pub(crate) struct GuardConfig {
     pub(crate) port: u16,
@@ -45,20 +35,9 @@ pub(crate) fn origin_allowed(origin: &str, cfg: GuardConfig) -> bool {
     let Some(host) = parsed.host_str() else {
         return false;
     };
-    // Browsers omit the scheme-default port (http 80 / https 443); normalize
-    // so a server pinned to such a port still matches its own UI's origin.
     host_allowed(host) && parsed.port_or_known_default() == Some(cfg.port)
 }
 
-/// Rejects requests that are not first-party: a foreign Host header,
-/// a cross-origin browser request (Origin / Sec-Fetch-Site), or no Host at
-/// all. Browsers and curl always send Host; local API clients are same-origin.
-///
-/// State-changing methods additionally require a custom header
-/// (`X-Requested-With: cf-scanner`). Browsers never attach custom headers to
-/// cross-site form submissions or navigation requests, so this closes the
-/// CSRF gap on legacy browsers that send neither Origin nor Sec-Fetch-Site —
-/// the layers above already cover every modern browser.
 pub(crate) async fn localhost_only(
     State(cfg): State<GuardConfig>,
     request: Request,
@@ -68,9 +47,6 @@ pub(crate) async fn localhost_only(
     let Some(host) = headers.get("host").and_then(|h| h.to_str().ok()) else {
         return Err(ApiError::forbidden("missing Host header"));
     };
-    // The Host header keeps its bare-host comparison: it legitimately omits
-    // or varies the port (curl, proxies), so over-tightening it would break
-    // callers the Origin pin below does not affect.
     if !host_allowed(host) {
         return Err(ApiError::forbidden("Host header not allowed"));
     }
@@ -105,9 +81,6 @@ pub(crate) async fn localhost_only(
     Ok(next.run(request).await)
 }
 
-/// Json extractor with the uniform ApiError envelope on rejection, so
-/// malformed bodies answer `{"error","message"}` JSON instead of axum's
-/// plain-text default.
 pub(crate) struct JsonBody<T>(pub(super) T);
 
 impl<S, T> FromRequest<S> for JsonBody<T>
@@ -136,7 +109,6 @@ where
     }
 }
 
-/// Adds the security headers every response should carry.
 pub(crate) async fn security_headers(request: Request, next: Next) -> Response {
     let mut response = next.run(request).await;
     let headers = response.headers_mut();

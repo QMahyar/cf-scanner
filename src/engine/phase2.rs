@@ -1,7 +1,3 @@
-//! Phase-2 real-config verification: parses user configs (URIs, subscriptions,
-//! local xray JSON) and verifies phase-1 candidates through tunnel probes with
-//! fragment presets and SNI combos, updating verdicts in place.
-
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -20,34 +16,15 @@ use crate::api::types::{
 use crate::configs::{OutboundSpec, parse_subscription, parse_uri, parse_xray_json};
 use crate::verify::ProbeRequest;
 
-/// Phase-2 progress events: every 32 completed attempts (plus the final
-/// one), so a long verification run stays observable without flooding.
 const PROGRESS_EVERY_P2: u64 = 32;
 
-/// Shared (ip, port) -> store-position index for phase-2 verdict updates.
-/// The inner `Arc` is swapped atomically when a fallback lookup rebuilds the
-/// mapping after a concurrent in-place store sort permuted positions.
 type PosIndex = Arc<Mutex<Arc<HashMap<(Ipv4Addr, u16), usize>>>>;
 
 impl ScanController {
-    /// Verifies every phase-1 candidate through the user's configs, trying
-    /// (config, SNI) combos until one passes per candidate. Updates verdicts
-    /// in place and re-emits them so clients see the fragment/SNI detail.
-    ///
-    /// Combos are never materialized: a fixed set of `concurrency` workers
-    /// pull combo indices off a shared counter, so memory stays bounded
-    /// regardless of candidates × configs × SNIs, and stop conditions
-    /// (cancel, hard cap) are honored before every attempt.
     pub(super) async fn verify_phase(&self, cfg: &ScanConfig, p2: &Phase2Config) -> Result<()> {
-        // One cancel signal per run, shared by parsing and the workers below:
-        // when phase 2 follows a phase 1 this is the same channel phase 1
-        // used, so a cancel fired during phase 1 (or mid-parse) stops
-        // verification immediately.
         let cancel_rx = self.cancel_signal();
         let (specs, parse_cancelled) = self.parse_phase2_configs(p2, &cancel_rx).await?;
         if parse_cancelled {
-            // The normal cancelled-summary path: `finish` reports the cancel,
-            // so a mid-parse abort must not surface as a config error.
             return Ok(());
         }
         if specs.is_empty() {
@@ -58,13 +35,8 @@ impl ScanController {
         } else {
             p2.snis.iter().map(|s| Some(s.clone())).collect()
         };
-        // Probe-target list is fixed for the whole run: every combo dials
-        // the same URLs, so resolve the effective list exactly once.
         let probe_urls = p2.effective_probe_urls();
         let candidates = self.store.lock().unwrap_or_else(|e| e.into_inner()).clone();
-        // Phase 2 dials the candidate through xray, which takes a raw IPv4
-        // address; v6 phase-1 finds stay phase-1-only for now. Rows are
-        // keyed by (ip, port) so multi-port scans update the right row.
         let v4_candidates: Vec<(Ipv4Addr, u16)> = candidates
             .iter()
             .filter_map(|v| match v.ip {
@@ -75,18 +47,6 @@ impl ScanController {
         if v4_candidates.is_empty() {
             return Ok(());
         }
-        // Store positions of every v4 candidate so update_verdict_phase2 can
-        // index the store directly instead of a linear scan per completed
-        // combo. The row set cannot change during phase 2 (reset() no-ops
-        // while a run is active and phase 2 updates in place), but a
-        // concurrent results()/for_each_result() CAN sort the store in place
-        // (snapshot_sorted during the async config-parse window), permuting
-        // positions after this index is built. The update re-validates the
-        // indexed row and, on mismatch, falls back to the authoritative scan
-        // and rebuilds the shared index from the store under the lock — so
-        // the optimization self-heals instead of silently degrading.
-        // First match wins to mirror the linear scan's semantics on
-        // duplicate keys.
         let pos_index: PosIndex = Arc::new(Mutex::new(Arc::new({
             let mut map: HashMap<(Ipv4Addr, u16), usize> = HashMap::new();
             for (i, v) in candidates.iter().enumerate() {
@@ -200,11 +160,6 @@ impl ScanController {
                             {
                                 break;
                             }
-                            // An overshoot pass (concurrent passes pushed the
-                            // found count past the stop quota while this probe
-                            // was already in flight) must still be recorded:
-                            // the probe ran, the row counts as working, and
-                            // clients need the verdict. Record, then stop.
                             let overshoot =
                                 passed.lock().unwrap_or_else(|e| e.into_inner()).len() > stop_found;
                             if let Some(updated) =
@@ -221,9 +176,6 @@ impl ScanController {
                             {
                                 break;
                             }
-                            // Local failures (spawn, config build) are kept
-                            // redacted and surfaced on the row so clients see
-                            // why the candidate did not verify.
                             let msg = crate::configs::sanitize_error_text(&err.to_string());
                             let mut slot = first_error.lock().unwrap_or_else(|e| e.into_inner());
                             if slot.is_none() {
@@ -251,10 +203,6 @@ impl ScanController {
                     }
                     let done = completed.load(Ordering::Relaxed);
                     let terminal = done == total;
-                    // The terminal event is claimed once (a worker that saw
-                    // `done == total` beats the post-loop emit); intermediate
-                    // milestones go through the shared single-winner gate so
-                    // concurrent completions cannot duplicate or regress.
                     if (terminal && !terminal_sent.swap(true, Ordering::Relaxed))
                         || (!terminal && claim_milestone(&milestones, done, PROGRESS_EVERY_P2))
                     {
@@ -268,10 +216,6 @@ impl ScanController {
         while let Some(res) = tasks.join_next().await {
             res.map_err(|e| anyhow!("phase-2 task panicked: {e}"))??;
         }
-        // Terminal progress: workers short-circuit combos of already-passed
-        // candidates, so `done` can land below `total`; emit the final
-        // numbers regardless so clients always resolve to a final event.
-        // Suppressed when a worker already claimed the terminal event.
         let done = completed.load(Ordering::Relaxed);
         if (done > 0 || attempts.load(Ordering::Relaxed) > 0)
             && !terminal_sent.swap(true, Ordering::Relaxed)
@@ -305,15 +249,6 @@ impl ScanController {
         Ok(())
     }
 
-    /// Configs entries are vless/trojan/vmess/ss URIs, http(s) subscription
-    /// URLs, or local xray JSON file paths. One bad entry is skipped (and
-    /// counted) so a typo'd line never sinks a good batch; only a batch
-    /// with zero usable entries aborts the phase. Each spec carries the
-    /// index of the config entry it came from, so verdicts can name the
-    /// submitted config that produced them (a subscription expands to many
-    /// specs sharing one entry index). A cancel stops the loop between
-    /// entries and aborts an in-flight subscription fetch; the returned
-    /// flag marks the batch partial and unusable.
     async fn parse_phase2_configs(
         &self,
         p2: &Phase2Config,
@@ -350,7 +285,6 @@ impl ScanController {
                     .with_context(|| format!("config {} failed to parse", redact_entry(entry)))
                     .map(|spec| vec![spec])
             } else {
-                // File reads are blocking; keep them off the tokio workers.
                 let path = entry.to_owned();
                 let text = tokio::task::spawn_blocking(move || std::fs::read_to_string(&path))
                     .await
@@ -398,16 +332,6 @@ impl ScanController {
     }
 }
 
-/// Attaches a phase-2 verdict (and the colo observed during verification) to
-/// the stored row and returns the updated verdict for re-emission. `None`
-/// when the row vanished (reset mid-phase) or a passing verdict is already
-/// recorded: concurrent combos race, and a pass must never be downgraded.
-/// `pos_index` maps (ip, port) to snapshot positions, making the lookup O(1)
-/// instead of a full scan under the store mutex. A concurrent in-place sort
-/// (snapshot_sorted) can permute positions after the index was built, so the
-/// mapped row is re-validated; on mismatch the lookup falls back to the
-/// authoritative linear scan and rebuilds the shared index from the store
-/// under the lock, keeping later lookups O(1).
 fn update_verdict_phase2(
     store: &Store,
     ip: Ipv4Addr,
@@ -451,7 +375,6 @@ fn update_verdict_phase2(
     Some(results[pos].clone())
 }
 
-/// Maps the internal `&'static str` verifier tag to the API enum.
 fn parse_verifier(tag: &str) -> Option<Verifier> {
     match tag {
         "inline" => Some(Verifier::Inline),
@@ -460,19 +383,12 @@ fn parse_verifier(tag: &str) -> Option<Verifier> {
     }
 }
 
-/// Renders a config entry safe for logs/errors: userinfo and query/fragment
-/// are stripped, and hosts that look like opaque payloads (ss:// base64,
-/// VMess UUIDs) are masked. Local file paths keep only the file name.
 fn redact_entry(entry: &str) -> String {
-    // Windows drive-letter paths ("C:\...") must not be mistaken for URLs.
     let looks_like_path = entry.len() > 2
         && entry.as_bytes()[0].is_ascii_alphabetic()
         && entry.as_bytes()[1] == b':'
         && matches!(entry.as_bytes().get(2), Some(b'\\') | Some(b'/'));
     let Ok(mut url) = url::Url::parse(entry) else {
-        // Not a URL: keep only the trailing segment and strip anything
-        // before the last '@' (plus query/fragment), so a malformed URI can
-        // never surface its userinfo (uuid/password) in an error or log.
         let tail = entry.rsplit(['/', '\\']).next().unwrap_or(entry);
         return tail
             .rsplit_once('@')
@@ -538,12 +454,7 @@ mod tests {
         attempts: std::sync::Arc<AtomicU64>,
         sni_pass: Option<&'static str>,
         always_err: std::sync::Arc<AtomicBool>,
-        /// Optional barrier both in-flight probes wait on, so tests can hold
-        /// concurrent passes open until both workers are inside the
-        /// found-stop race window.
         rendezvous: Option<Arc<tokio::sync::Barrier>>,
-        /// Every URL list each probe call received (assert spells the
-        /// multi-URL plumbing through the engine).
         url_lists: std::sync::Arc<std::sync::Mutex<Vec<Vec<String>>>>,
     }
 
@@ -626,8 +537,6 @@ mod tests {
         ))
     }
 
-    /// Subscription fetch that never resolves: stands in for a
-    /// never-responding subscription endpoint.
     struct HangingSub;
 
     impl SubFetch for HangingSub {
@@ -640,7 +549,6 @@ mod tests {
 
     #[tokio::test]
     async fn phase2_skips_v6_candidates() {
-        // v6 phase-1 finds stay phase-1-only: xray dials a raw v4 address.
         let t = FakeTransport::new()
             .ok("2606:4700::1".parse().unwrap(), 443, 20)
             .ok("2606:4700::2".parse().unwrap(), 443, 30)
@@ -651,7 +559,6 @@ mod tests {
         cfg.phase2 = Some(p2_cfg(&[VLESS], &[]));
         let pool = ranges::CidrPool::parse("2606:4700::/126\n203.0.113.0/30").unwrap();
         c.run_seeded_with_pool(cfg, 1, pool).await.unwrap();
-        // Only the v4 candidate went through the tunnel probe.
         assert_eq!(probe.attempts.load(Ordering::Relaxed), 1);
         let results = c.results();
         let v4 = results.iter().find(|v| !v.ip.is_ipv6()).unwrap();
@@ -704,7 +611,7 @@ mod tests {
     #[tokio::test]
     async fn phase2_marks_failed_attempts_without_aborting() {
         let t = FakeTransport::new().ok("203.0.113.1".parse().unwrap(), 443, 50);
-        let probe = FakeTunnelProbe::new(); // nothing passes
+        let probe = FakeTunnelProbe::new();
         let c = p2_controller(t, FakeSub(""), probe.clone());
         let mut cfg = ok_cfg(1, None);
         cfg.phase2 = Some(p2_cfg(&[VLESS], &[]));
@@ -729,7 +636,6 @@ mod tests {
         let p2 = results[0].phase2.as_ref().unwrap();
         assert!(p2.passed);
         assert_eq!(p2.sni, "b.me");
-        // One failed combo + one pass per candidate.
         assert_eq!(probe.attempts.load(Ordering::Relaxed), 2);
     }
 
@@ -745,15 +651,11 @@ mod tests {
         let results = c.results();
         let p2 = results[0].phase2.as_ref().unwrap();
         assert!(p2.passed);
-        // A subscription-expanded spec still names its config entry.
         assert_eq!(p2.config_index, Some(0));
     }
 
     #[tokio::test]
     async fn phase2_probes_every_url_with_one_spawn_per_combo() {
-        // Multiple probe URLs ride ONE tunnel spawn per (candidate, config,
-        // preset, sni) combo: attempts stay at candidate count and every
-        // probe call carries the full URL list.
         let t = FakeTransport::new()
             .ok("203.0.113.1".parse().unwrap(), 443, 50)
             .ok("203.0.113.2".parse().unwrap(), 443, 10);
@@ -783,7 +685,6 @@ mod tests {
         let lists = probe.url_lists.lock().unwrap_or_else(|e| e.into_inner());
         assert_eq!(lists.len(), 2);
         assert!(lists.iter().all(|l| l == &want), "{lists:?}");
-        // The verdict names the submitted config entry that passed.
         for v in c.results() {
             assert_eq!(v.phase2.as_ref().unwrap().config_index, Some(0));
         }
@@ -839,14 +740,11 @@ mod tests {
             redact_entry("ss://YWVzLTI1Ni1nY206cGFzc3dvcmQxMjM0NTY3ODkw@1.2.3.4:8388"),
             "ss://***:***@1.2.3.4:8388"
         );
-        // Opaque hosts (no userinfo, no dots) get masked outright.
         assert_eq!(
             redact_entry("vmess://Zm9vYmFyYmF6cXV4MTIzNDU2Nzg5MDEyMzQ1Njc4OTAxMjM0NTY3OA"),
             "vmess://redacted"
         );
-        // Non-URLs (local file paths) degrade to the file name only.
         assert_eq!(redact_entry("C:\\users\\me\\config.json"), "config.json");
-        // Parseable URIs keep their (masked) scheme so diagnostics stay readable.
         assert_eq!(
             redact_entry("vless://deadbeef-0000-0000-0000-000000000000@1.2.3.4:443?type=tcp"),
             "vless://***:***@1.2.3.4:443"
@@ -894,7 +792,6 @@ mod tests {
                 verifier: Some(Verifier::Xray),
             }),
         }]));
-        // A racing failed combo must not clobber the passing verdict.
         let failed = Phase2Verdict {
             passed: false,
             fragment: FragmentPreset::Off,
@@ -923,9 +820,6 @@ mod tests {
             assert_eq!(row.colo.as_deref(), Some("FRA"));
         }
 
-        // A permuted index (stale position) falls back to the authoritative
-        // linear scan: the row is still found, the pass guard holds, and the
-        // shared index is rebuilt so later lookups map back to the true row.
         let stale_index = PosIndex::new(Mutex::new(Arc::new(HashMap::from([(
             ("203.0.113.1".parse().unwrap(), 443),
             7_usize,
@@ -952,9 +846,6 @@ mod tests {
 
     #[tokio::test]
     async fn cancel_during_phase1_stops_phase2_work() {
-        // A cancel fired while phase-1 probes are still in flight must be
-        // visible to phase-2 workers: verification runs zero tunnel probes
-        // and the summary reports the cancel.
         let t = FakeTransport::new()
             .ok_slow("203.0.113.1".parse().unwrap(), 443, 50, 200)
             .ok_slow("203.0.113.2".parse().unwrap(), 443, 50, 200);
@@ -991,14 +882,6 @@ mod tests {
 
     #[tokio::test]
     async fn phase2_records_the_overshoot_pass_past_the_found_stop() {
-        // stop.found = 1 with two passes held in flight across the record
-        // point: the transport rendezvous keeps BOTH phase-1 probes open so
-        // both hosts become candidates, and the tunnel-probe rendezvous
-        // keeps both phase-2 probes in flight. The second pass crosses the
-        // quota while in flight and must still be recorded
-        // (record-then-stop), not dropped while the row counts as working.
-        // Hosts .0/.1: the Every-plan walk starts at the network address,
-        // and round-robin dispatch pairs them across the two workers.
         let mut t = FakeTransport::new()
             .ok("203.0.113.0".parse().unwrap(), 443, 50)
             .ok("203.0.113.1".parse().unwrap(), 443, 50);
@@ -1024,9 +907,6 @@ mod tests {
 
     #[tokio::test]
     async fn phase2_terminal_progress_emitted_once() {
-        // Nothing passes, so every combo completes and `done` reaches
-        // `total`: the winning worker and the post-loop emit must yield
-        // exactly one terminal Phase2Progress, not two.
         let t = FakeTransport::new().ok("203.0.113.1".parse().unwrap(), 443, 50);
         let probe = FakeTunnelProbe::new();
         let c = p2_controller(t, FakeSub(""), probe);
@@ -1047,9 +927,6 @@ mod tests {
 
     #[tokio::test]
     async fn cancel_during_config_parse_aborts_promptly() {
-        // The first entry hangs forever on its subscription fetch; a cancel
-        // fired mid-parse must abort the fetch and finish as a cancelled run
-        // without touching the remaining entries or any tunnel probe.
         let t = FakeTransport::new();
         let probe = FakeTunnelProbe::new();
         let c = p2_controller(t, HangingSub, probe.clone());
@@ -1100,9 +977,6 @@ mod tests {
             }
         }
         assert_eq!(total, 4, "2 candidates x 2 SNIs — events: {events:?}");
-        // Pass-short-circuit: once a candidate passes, its remaining SNI
-        // combos are skipped, so the final event reports the probes that
-        // actually ran (one per candidate).
         assert_eq!(
             progress, 2,
             "the terminal progress event must report done == executed combos"

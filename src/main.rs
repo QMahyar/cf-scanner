@@ -23,11 +23,9 @@ use tracing_subscriber::filter::LevelFilter;
     after_help = EXAMPLES
 )]
 struct Cli {
-    /// Info-level logs (RUST_LOG, when set, still wins)
     #[arg(long, global = true)]
     verbose: bool,
 
-    /// Print machine-readable {"error": ...} JSON to stdout on failure
     #[arg(long, global = true)]
     json_errors: bool,
 
@@ -46,49 +44,34 @@ Results print as newline-delimited JSON; pipe to jq for processing.";
 
 #[derive(Subcommand)]
 enum Command {
-    /// Serve the local API on 127.0.0.1
     Serve {
-        /// Port to bind (default 8765)
         #[arg(long, default_value_t = 8765)]
         port: u16,
-        /// Keep serving from the Windows system tray; its menu drives the API
         #[arg(long)]
         tray: bool,
-        /// Manage start-with-Windows registration: bare flag or `enable`
-        /// registers `serve --tray` once this server is up (needs --tray);
-        /// `remove` unregisters and works without --tray
         #[arg(long, num_args = 0..=1, default_missing_value = "enable")]
         autostart: Option<AutostartArg>,
     },
-    /// One-shot scan; prints newline-delimited JSON to stdout
     Scan {
         #[command(flatten)]
         args: Box<ScanArgs>,
     },
-    /// Interactive wizard over the same engine the API uses
     Wizard,
-    /// Manage bundled Cloudflare IP ranges
     Ranges {
         #[command(subcommand)]
         action: RangesAction,
     },
-    /// WARP identity: register with Cloudflare, generate/export a wgconf
     WarpConfig {
         #[command(subcommand)]
         action: WarpConfigAction,
     },
-    /// Render a verified candidate as a ready-to-use vless/trojan URI
     ExportConfig {
-        /// Original vless:// or trojan:// config URI from the scan
         #[arg(long)]
         config: String,
-        /// Verified candidate IPv4 dial address
         #[arg(long)]
         ip: std::net::Ipv4Addr,
-        /// Verified candidate port (1-65535)
         #[arg(long)]
         port: u16,
-        /// SNI fronting override (defaults to the config's own SNI)
         #[arg(long)]
         sni: Option<String>,
     },
@@ -96,9 +79,7 @@ enum Command {
 
 #[derive(Subcommand)]
 enum RangesAction {
-    /// Re-fetch official Cloudflare IPv4 ranges from cloudflare.com
     Refresh {
-        /// Also fetch the official IPv6 list into data/cf-ranges-v6.txt
         #[arg(long)]
         ipv6: bool,
     },
@@ -106,25 +87,17 @@ enum RangesAction {
 
 #[derive(Subcommand)]
 enum WarpConfigAction {
-    /// Keygen + v0a884 registration; persist identity; write wgconf
     Generate {
-        /// Output .conf path (default: print to stdout)
         #[arg(long)]
         out: Option<String>,
-        /// Optional WARP+ license key to bind
         #[arg(long)]
         license: Option<String>,
-        /// WireGuard endpoint `host:port` baked into the config (default:
-        /// engage.cloudflareclient.com:2408)
         #[arg(long)]
         endpoint: Option<String>,
     },
-    /// Reuse the persisted identity: refresh the config and write it out
     Export {
-        /// Output .conf path (default: print to stdout)
         #[arg(long)]
         out: Option<String>,
-        /// WireGuard endpoint `host:port` baked into the config
         #[arg(long)]
         endpoint: Option<String>,
     },
@@ -132,11 +105,9 @@ enum WarpConfigAction {
 
 #[derive(clap::Args, Clone)]
 struct ScanArgs {
-    /// Scan mode (phase-2 via xray in CDN mode; UDP discovery in WARP)
     #[arg(long, value_enum, default_value_t = ModeArg::Cdn, help_heading = "Candidate selection")]
     mode: ModeArg,
 
-    /// Candidate preset; conflicts with --count
     #[arg(
         long,
         value_enum,
@@ -145,11 +116,9 @@ struct ScanArgs {
     )]
     preset: Option<PresetArg>,
 
-    /// Exact number of random candidate IPs; conflicts with --preset
     #[arg(long, conflicts_with = "preset", help_heading = "Candidate selection")]
     count: Option<u32>,
 
-    /// Stop after this many working endpoints
     #[arg(
         long,
         alias = "stop-after",
@@ -158,15 +127,12 @@ struct ScanArgs {
     )]
     target: u32,
 
-    /// Hard cap on probes performed (optional)
     #[arg(long, alias = "max-probes", help_heading = "Stopping")]
     cap: Option<u32>,
 
-    /// Comma-separated ports (default 443; WARP mode: 2408,500,...)
     #[arg(long, value_delimiter = ',', help_heading = "Candidate selection")]
     ports: Option<Vec<u16>>,
 
-    /// Parallel probes (1-1000)
     #[arg(
         long,
         default_value_t = DEFAULT_CONCURRENCY,
@@ -174,24 +140,18 @@ struct ScanArgs {
     )]
     concurrency: u16,
 
-    /// Per-probe timeout in ms (100-30000)
     #[arg(long, default_value_t = 3000, help_heading = "Tuning")]
     timeout_ms: u64,
 
-    /// Dirtied CIDRs to skip, comma-separated
     #[arg(long, value_delimiter = ',', help_heading = "Candidate selection")]
     exclude: Vec<String>,
 
-    /// Scan these CIDRs INSTEAD of the bundled ranges, comma-separated
     #[arg(long, value_delimiter = ',', help_heading = "Candidate selection")]
     custom_cidrs: Vec<String>,
 
-    /// Include the bundled Cloudflare IPv6 ranges in the CDN candidate pool
     #[arg(long, help_heading = "Candidate selection")]
     ipv6: bool,
 
-    /// Enable phase-2 verification: vless/trojan/vmess/ss URIs, subscription
-    /// URLs, or local xray JSON paths, comma-separated
     #[arg(
         long,
         value_delimiter = ',',
@@ -199,7 +159,6 @@ struct ScanArgs {
     )]
     phase2_configs: Vec<String>,
 
-    /// Skip phase-1 probing and verify the last scan's candidates (CDN only)
     #[arg(
         long,
         requires = "phase2_configs",
@@ -207,7 +166,6 @@ struct ScanArgs {
     )]
     phase2_only: bool,
 
-    /// Fragment preset for phase 2 (custom needs --phase2-custom)
     #[arg(
         long,
         value_enum,
@@ -216,7 +174,6 @@ struct ScanArgs {
     )]
     phase2_fragment: Option<FragmentArg>,
 
-    /// Custom fragment "length,interval" (phase2_fragment=custom only)
     #[arg(
         long,
         requires = "phase2_configs",
@@ -224,7 +181,6 @@ struct ScanArgs {
     )]
     phase2_custom: Option<String>,
 
-    /// SNI fronting variants, comma-separated (empty = each config's SNI)
     #[arg(
         long,
         value_delimiter = ',',
@@ -233,8 +189,6 @@ struct ScanArgs {
     )]
     phase2_snis: Vec<String>,
 
-    /// Probe URLs fetched through the tunnel to prove connectivity,
-    /// comma-separated (up to 8; every one must return 200 for a pass)
     #[arg(
         long,
         value_delimiter = ',',
@@ -243,7 +197,6 @@ struct ScanArgs {
     )]
     phase2_probe_urls: Vec<String>,
 
-    /// Single probe URL (legacy alias for --phase2-probe-urls)
     #[arg(
         long,
         hide = true,
@@ -252,7 +205,6 @@ struct ScanArgs {
     )]
     phase2_probe_url: Option<String>,
 
-    /// Parallel xray instances for phase 2 (1-8)
     #[arg(
         long,
         requires = "phase2_configs",
@@ -260,24 +212,18 @@ struct ScanArgs {
     )]
     phase2_concurrency: Option<u8>,
 
-    /// WARP: handshake probes per endpoint (1-10, default 3); drives loss %
     #[arg(long, help_heading = "WARP")]
     warp_probes: Option<u8>,
 
-    /// WARP: explicit endpoints `ip` or `ip:port`, comma-separated (empty =
-    /// bundled pools)
     #[arg(long, value_delimiter = ',', help_heading = "WARP")]
     warp_endpoints: Vec<String>,
 
-    /// WARP: verify discovered endpoints with the user's wgconf keypair
     #[arg(long, requires = "warp_wgconf_file", help_heading = "WARP")]
     warp_verify: bool,
 
-    /// WARP: path to a wg-quick / AmneziaWG config used for verification
     #[arg(long, alias = "warp-wgconf", help_heading = "WARP")]
     warp_wgconf_file: Option<String>,
 
-    /// Deterministic sampling seed (tests, repro)
     #[arg(long, help_heading = "Tuning")]
     seed: Option<u64>,
 }
@@ -288,7 +234,6 @@ enum ModeArg {
     Warp,
 }
 
-/// `--autostart` value: register or unregister the HKCU Run entry.
 #[derive(Copy, Clone, PartialEq, Eq, Debug, ValueEnum)]
 enum AutostartArg {
     Enable,
@@ -376,12 +321,7 @@ fn build_scan_config(args: &ScanArgs) -> Result<ScanConfig> {
         (None, None) => ScanTarget::Preset(CdnPreset::Quick),
         _ => unreachable!("clap enforces preset/count exclusivity"),
     };
-    // Empty --custom-cidrs means "use bundled ranges"; clap's value_delimiter
-    // yields Vec::new() for an absent flag, which is exactly what we want.
     let phase2 = build_phase2(args)?;
-    // Capped read: the size limit is normally enforced by
-    // `WarpConfig::validate`, but the file lands in memory first, so an
-    // accidental `--warp-wgconf-file /dev/zero` must not OOM before that.
     let wgconf = match args.warp_wgconf_file.as_deref() {
         Some(path) => {
             let path = path.to_owned();
@@ -442,7 +382,6 @@ fn build_scan_config(args: &ScanArgs) -> Result<ScanConfig> {
     Ok(cfg)
 }
 
-/// Phase-2 config from CLI flags; `None` unless `--phase2-configs` is given.
 fn build_phase2(args: &ScanArgs) -> Result<Option<api::types::Phase2Config>> {
     if args.phase2_configs.is_empty() {
         return Ok(None);
@@ -519,8 +458,6 @@ async fn main() -> ExitCode {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
             if json_errors {
-                // Machine-readable failure for agents; the chain (`{err:#}`)
-                // stays on stderr for humans.
                 let line = serde_json::json!({ "error": err.to_string() }).to_string();
                 let _ = write_stdout_line(&line);
             }
@@ -530,9 +467,6 @@ async fn main() -> ExitCode {
     }
 }
 
-/// Tracing filter: `RUST_LOG` wins when set (lossy, same as the old
-/// `from_default_env`); otherwise `--verbose` lifts the error-only default to
-/// `info`.
 fn env_filter(verbose: bool, rust_log: Option<&str>) -> EnvFilter {
     let directive = match rust_log.map(str::trim).filter(|s| !s.is_empty()) {
         Some(dirs) => dirs.to_owned(),
@@ -558,8 +492,6 @@ async fn run(cli: Cli) -> Result<()> {
             )));
             match cli_wizard::run(controller).await {
                 Ok(()) => Ok(()),
-                // Ctrl+C during the wizard is a user choice, not a failure;
-                // downcast the typed marker instead of matching on text.
                 Err(err) if err.is::<cli_wizard::WizardInterrupted>() => Ok(()),
                 Err(err) => Err(err),
             }
@@ -620,9 +552,6 @@ async fn run(cli: Cli) -> Result<()> {
     }
 }
 
-/// One-shot scan: results and the final summary as newline-delimited JSON on
-/// stdout (the `ScanEvent` contract), human summary on stderr. Ctrl+C cancels
-/// the running scan so it drains and exits cleanly instead of dying mid-probe.
 async fn run_scan(args: ScanArgs) -> Result<()> {
     let cfg = build_scan_config(&args)?;
     let controller = Arc::new(engine::ScanController::new(Arc::new(
@@ -633,8 +562,6 @@ async fn run_scan(args: ScanArgs) -> Result<()> {
         tokio::spawn(async move {
             match tokio::signal::ctrl_c().await {
                 Ok(()) => controller.cancel(),
-                // A broken signal hook must not leave the scan running
-                // silently forever (mirrors the serve-path behavior).
                 Err(err) => tracing::error!("could not listen for Ctrl+C: {err}"),
             }
         })
@@ -659,8 +586,6 @@ async fn run_scan(args: ScanArgs) -> Result<()> {
             }
         }
         ScanEvent::Progress(p) => {
-            // TTY-only ticker: NDJSON consumers get clean stdout, humans see
-            // live progress instead of silence between results.
             if stderr_is_tty {
                 match p.total {
                     Some(total) => eprint!(
@@ -697,9 +622,6 @@ async fn run_scan(args: ScanArgs) -> Result<()> {
     Ok(())
 }
 
-/// Serialize a scan event to an NDJSON line without panicking: a serialization
-/// failure (unreachable for the fixed API types, but possible) is logged to
-/// stderr and the line is skipped.
 fn serialize_event<T: serde::Serialize>(value: &T) -> Option<String> {
     match serde_json::to_string(value) {
         Ok(line) => Some(line),
@@ -710,8 +632,6 @@ fn serialize_event<T: serde::Serialize>(value: &T) -> Option<String> {
     }
 }
 
-/// NDJSON line to stdout. A downstream pipe that closed (e.g. `head`, jq)
-/// reports the write failure so the caller can cancel the pointless scan.
 fn write_stdout_line(line: &str) -> std::io::Result<()> {
     use std::io::Write as _;
     let mut out = std::io::stdout().lock();
@@ -719,9 +639,6 @@ fn write_stdout_line(line: &str) -> std::io::Result<()> {
     out.flush()
 }
 
-/// Shared export-config logic (the CLI prints the URI, the server's
-/// /api/config/export returns it in JSON): parse the user's original config
-/// URI, point it at the verified candidate, render the ready URI.
 fn run_export_config(
     config: &str,
     ip: std::net::Ipv4Addr,
@@ -741,8 +658,6 @@ fn run_export_config(
 }
 
 async fn serve(port: u16, tray_enabled: bool, autostart: Option<AutostartArg>) -> Result<()> {
-    // Removal runs before bind: unregistering must not depend on the server
-    // coming up (a busy port must not trap the entry in the registry).
     if autostart == Some(AutostartArg::Remove) {
         tray::set_autostart(false)?;
         if cfg!(target_os = "windows") {
@@ -762,11 +677,7 @@ async fn serve(port: u16, tray_enabled: bool, autostart: Option<AutostartArg>) -
     };
     let bind_addr = listener.local_addr()?;
     let url = serve_url(bind_addr);
-    // Unconditional stderr print: the user must see where the server is even
-    // without --verbose (info-level logs are hidden by default).
     eprintln!("CF-Scanner running at {url}");
-    // Registered only after a successful bind: an autostart entry that keeps
-    // relaunching a serve which cannot bind would fail at every logon.
     if autostart == Some(AutostartArg::Enable) {
         tray::set_autostart(true)?;
         if cfg!(target_os = "windows") {
@@ -781,10 +692,6 @@ async fn serve(port: u16, tray_enabled: bool, autostart: Option<AutostartArg>) -
             tracing::warn!("could not start system tray: {err:#}");
         }
     }
-    // Graceful shutdown waits for in-flight responses, but an idle SSE
-    // stream is open forever by design — bound the wait so a connected SSE
-    // client can never hang process exit (the stream itself ends on terminal or
-    // Lagged; this only cuts idle ones at shutdown).
     const SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
     let (shutdown_fired_tx, mut shutdown_fired) = tokio::sync::watch::channel(false);
     let mut server = tokio::spawn(async move {
@@ -813,9 +720,6 @@ async fn serve(port: u16, tray_enabled: bool, autostart: Option<AutostartArg>) -
     Ok(())
 }
 
-/// `--autostart enable` registers a `serve --tray` entry, so it needs
-/// --tray; `remove` stands alone. Clap cannot express per-value requires,
-/// hence this check instead of `requires = "tray"`.
 fn ensure_autostart_valid(tray_enabled: bool, autostart: Option<AutostartArg>) -> Result<()> {
     if autostart == Some(AutostartArg::Enable) && !tray_enabled {
         return Err(anyhow!("--autostart requires --tray"));
@@ -823,8 +727,6 @@ fn ensure_autostart_valid(tray_enabled: bool, autostart: Option<AutostartArg>) -
     Ok(())
 }
 
-/// Bind failure message: a busy port gets a hint, anything else stays
-/// human-readable with the attempted address.
 fn bind_error(port: u16, err: &std::io::Error) -> String {
     if err.kind() == std::io::ErrorKind::AddrInUse {
         format!("port {port} in use — try: cf-scanner serve --port <other>")
@@ -833,23 +735,15 @@ fn bind_error(port: u16, err: &std::io::Error) -> String {
     }
 }
 
-/// The URL of the bound listener; `--port 0` picks an ephemeral port, so the
-/// printed URL must come from `local_addr`, not the requested port.
 fn serve_url(addr: std::net::SocketAddr) -> String {
     format!("http://{addr}")
 }
 
-/// Ctrl+C (and the tray's Exit item, with --tray): cancel any in-flight scan
-/// (probes drain on the next stop check), then let axum finish in-flight
-/// requests. The runtime drop after `serve` returns reaps xray children via
-/// their Drop::start_kill.
 async fn shutdown_signal(controller: Arc<engine::ScanController>, tray_enabled: bool) {
     if tray_enabled {
         tokio::select! {
             ctrl_c = tokio::signal::ctrl_c() => {
                 if let Err(err) = ctrl_c {
-                    // A broken Ctrl+C hook must not hang shutdown; serve's
-                    // graceful shutdown proceeds immediately.
                     tracing::error!("could not listen for Ctrl+C: {err}");
                 }
             }
@@ -858,8 +752,6 @@ async fn shutdown_signal(controller: Arc<engine::ScanController>, tray_enabled: 
             }
         }
     } else if let Err(err) = tokio::signal::ctrl_c().await {
-        // A broken Ctrl+C hook must not hang shutdown; serve's graceful
-        // shutdown proceeds immediately.
         tracing::error!("could not listen for Ctrl+C: {err}");
     }
     tracing::info!("shutting down; cancelling any active scan");
@@ -869,9 +761,6 @@ async fn shutdown_signal(controller: Arc<engine::ScanController>, tray_enabled: 
     }
 }
 
-/// Completes once the tray thread requests shutdown via its Exit menu item.
-/// The tray never shares state with the server, so this only reads the shared
-/// flag; when no tray is running the flag stays false forever.
 async fn tray_exit_requested() {
     let mut ticker = tokio::time::interval(std::time::Duration::from_millis(100));
     loop {
@@ -960,10 +849,8 @@ mod tests {
 
     #[test]
     fn phase2_custom_requires_configs_and_custom_fragment() {
-        // clap: --phase2-custom without --phase2-configs never parses.
         let argv = ["cf-scanner", "scan", "--phase2-custom", "100-200,10-20"];
         assert!(Cli::try_parse_from(argv).is_err());
-        // build: a custom fragment value with a non-custom preset is rejected.
         let mut a = args();
         a.phase2_configs = vec!["vless://a@1.2.3.4:443".to_owned()];
         a.phase2_custom = Some("100-200,10-20".to_owned());
@@ -976,8 +863,6 @@ mod tests {
         let mut a = args();
         a.cap = Some(0);
         let err = build_scan_config(&a).unwrap_err();
-        // Rejection moved to the single source (ScanConfig::validate); the
-        // CLI no longer duplicates the check with its own message.
         assert!(err.to_string().contains("stop.cap out of range"), "{err:#}");
     }
 
@@ -1107,7 +992,6 @@ mod tests {
         assert!(scan_args.ipv6);
         let cfg = build_scan_config(&scan_args).unwrap();
         assert!(cfg.include_v6);
-        // Default stays off.
         assert!(!build_scan_config(&args()).unwrap().include_v6);
     }
 
@@ -1271,8 +1155,6 @@ mod tests {
                 "https://www.cloudflare.com/".to_owned()
             ]
         );
-        // The legacy single-URL alias stays parseable (hidden flag, same
-        // name) and maps to a one-entry list so old scripts keep working.
         let argv = [
             "cf-scanner",
             "scan",
@@ -1287,7 +1169,6 @@ mod tests {
         };
         let p2 = build_scan_config(&a).unwrap().phase2.unwrap();
         assert_eq!(p2.probe_urls, vec!["https://example.com/check".to_owned()]);
-        // Passing both is ambiguous and must not parse.
         let argv = [
             "cf-scanner",
             "scan",
@@ -1399,7 +1280,6 @@ mod tests {
             }
             _ => panic!("expected serve"),
         }
-        // Bare flag means enable (back-compat with the old bool --autostart).
         let cli = Cli::try_parse_from(["cf-scanner", "serve", "--tray", "--autostart"]).unwrap();
         match cli.command {
             Command::Serve {
@@ -1416,7 +1296,6 @@ mod tests {
                 ..
             }
         ));
-        // Removal needs no --tray; the tray requirement is serve()-level.
         let cli = Cli::try_parse_from(["cf-scanner", "serve", "--autostart", "remove"]).unwrap();
         assert!(matches!(
             cli.command,
@@ -1433,9 +1312,6 @@ mod tests {
 
     #[test]
     fn autostart_enable_requires_tray_but_remove_does_not() {
-        // The old clap `requires = "tray"` moved here so `remove` can run
-        // standalone; enabling without a tray would register an entry that
-        // cannot bring the API-driven tray up.
         assert!(ensure_autostart_valid(false, Some(AutostartArg::Enable)).is_err());
         let err = ensure_autostart_valid(false, Some(AutostartArg::Enable)).unwrap_err();
         assert!(err.to_string().contains("--tray"), "{err:#}");

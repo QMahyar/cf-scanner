@@ -24,13 +24,6 @@ pub(crate) static HTTP_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
         .expect("HTTP client must build")
 });
 
-/// SSRF guard for every outbound fetch: https scheme only, and literal
-/// loopback/link-local/unspecified IP hosts are refused. DNS names stay
-/// allowed (GitHub, CDNs, subscription hosts); the API binds 127.0.0.1, so
-/// only local code could have crafted a hostile URL in the first place, and
-/// private LAN ranges (RFC 1918: 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16)
-/// are intentionally permitted to support self-hosted subscription feeds that
-/// run on local networks.
 pub fn validate_fetch_url(url: &str) -> Result<()> {
     let parsed = url::Url::parse(url).context("bad URL")?;
     if parsed.scheme() != "https" {
@@ -82,7 +75,6 @@ pub fn validate_fetch_url(url: &str) -> Result<()> {
     Ok(())
 }
 
-/// URL text safe for errors/logs: userinfo (and query/fragment) stripped.
 fn sanitize_url_for_error(url: &str) -> String {
     match url::Url::parse(url) {
         Ok(mut parsed) => {
@@ -98,14 +90,11 @@ fn sanitize_url_for_error(url: &str) -> String {
     }
 }
 
-/// HTTPS GET with extra request headers (e.g. `User-Agent`), used by the
-/// phase-2 subscription fetcher which must not send the bare default UA.
 pub async fn fetch_tls_with_headers(url: &str, extra_headers: &str) -> Result<String> {
     let body = fetch_tls_inner(url, extra_headers).await?;
     Ok(String::from_utf8_lossy(&body).into_owned())
 }
 
-/// HTTPS GET returning raw bytes (binary downloads like the xray zip).
 pub async fn fetch_bytes(url: &str) -> Result<Vec<u8>> {
     fetch_tls_inner(url, "Accept: */*").await
 }
@@ -163,8 +152,6 @@ async fn fetch_tls_inner(url: &str, extra_headers: &str) -> Result<Vec<u8>> {
     Ok(bytes.to_vec())
 }
 
-/// One HTTPS GET, boxed so the seam is dyn-compatible and Send (the server
-/// spawns refreshes as a background task).
 pub type HttpFuture<'a> =
     std::pin::Pin<Box<dyn std::future::Future<Output = Result<String>> + Send + 'a>>;
 
@@ -172,7 +159,6 @@ pub trait HttpGet {
     fn get<'a>(&'a self, url: &'a str) -> HttpFuture<'a>;
 }
 
-/// Minimal HTTPS GET (HTTP/1.1, rustls roots); enough for one JSON endpoint.
 pub struct RealHttp;
 
 impl HttpGet for RealHttp {

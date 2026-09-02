@@ -1,15 +1,3 @@
-//! Phase-1 probe transport: TCP connect + TLS handshake against a raw IP,
-//! measuring full-connection latency. Injectable so the engine and tests
-//! never depend on a live network.
-//! Handshake success alone marks an endpoint "open": phase-1 does not verify
-//! certificates (anycast SNI fronting rarely matches the IP SAN), so the
-//! verifier is bypassed on purpose; real configuration validation is what
-//! phase-2 (Task 11) exists for.
-//! `FakeTransport` (and its `Scripted` scripting type) exist only for tests
-//! and are `#[cfg(any(test, feature = "test-helpers"))]`-gated, so the public transport
-//! items stay the lib's API surface but integration tests (e.g.
-//! `tests/cli_scan_agent.rs`) can enable them via `--features test-helpers`.
-
 use std::future::Future;
 use std::net::IpAddr;
 use std::pin::Pin;
@@ -26,8 +14,6 @@ use tokio::net::TcpStream;
 use tokio::time::timeout;
 use tokio_rustls::TlsConnector;
 
-/// SNI sent on every phase-1 probe; Cloudflare serves a cert for it from any
-/// of its CDN IPs.
 pub const PROBE_SNI: &str = "cloudflare.com";
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
@@ -40,10 +26,6 @@ pub enum ProbeError {
     Tls(&'static str),
 }
 
-/// `Ok(latency_ms)` when the endpoint completed TCP+TLS within the budget.
-/// Core type is an explicit future so `Arc<dyn Transport>` stays object-safe
-/// for the server. `ip` may be v4 or v6; the connect goes to `[ip]:port`
-/// either way.
 pub trait Transport: Send + Sync {
     fn probe(
         &self,
@@ -53,11 +35,6 @@ pub trait Transport: Send + Sync {
     ) -> Pin<Box<dyn Future<Output = Result<u32, ProbeError>> + Send + '_>>;
 }
 
-/// Real transport: tokio TcpStream + rustls, no cert verification (see the
-/// module note). The SNI `ServerName` is built once here and cloned per
-/// probe: `ServerName` holds an `Arc`-backed name, so a clone is a refcount
-/// bump instead of the parse + allocation a per-probe build would cost on
-/// every one of millions of probes.
 pub struct TlsTransport {
     connector: TlsConnector,
     server_name: ServerName<'static>,
@@ -73,17 +50,6 @@ impl TlsTransport {
     }
 }
 
-/// Client TLS config with certificate verification disabled. Shared by the
-/// phase-1 transport and the inline phase-2 verifier: both dial anycast
-/// fronting IPs whose certificate SANs never match the probed name.
-/// Explicit ring provider: no process-level install needed in tests or when
-/// other rustls consumers install a different provider.
-///
-/// # WARNING: disables all certificate verification
-/// This verifier DISABLES all certificate checks and is ONLY acceptable for
-/// phase-1 SNI probing and phase-2 tunnel dials to user-supplied endpoints
-/// (inline_verify uses it in production); it MUST NEVER be used for direct
-/// config/range downloads.
 pub(crate) fn no_verify_client_config() -> ClientConfig {
     ClientConfig::builder_with_provider(ring::default_provider().into())
         .with_safe_default_protocol_versions()
@@ -123,7 +89,6 @@ impl Transport for TlsTransport {
                         tracing::debug!(error = %e, "probe tls handshake failed");
                         ProbeError::Tls("handshake failed")
                     })?;
-                // Half-close to signal we want no response data back.
                 let _ = tls.shutdown().await;
                 Ok(())
             };
@@ -176,25 +141,17 @@ impl ServerCertVerifier for NoVerify {
     }
 }
 
-/// A scripted outcome plus an optional artificial delay so tests can
-/// exercise cancellation while a probe is in flight.
 #[cfg(any(test, feature = "test-helpers"))]
 #[derive(Clone)]
 struct Scripted {
-    /// Falls back to the last sequence entry once the queue is drained.
     outcome: Result<u32, ProbeError>,
     delay_ms: u64,
     sequence: std::collections::VecDeque<Result<u32, ProbeError>>,
 }
 
-/// Scripted transport for engine tests: each (ip, port) maps to a scripted
-/// outcome. Latencies are returned verbatim so stop-condition math is
-/// observable.
 #[cfg(any(test, feature = "test-helpers"))]
 pub struct FakeTransport {
     script: std::sync::Mutex<std::collections::HashMap<(IpAddr, u16), Scripted>>,
-    /// Optional gate every in-flight probe waits on before resolving, so
-    /// tests can hold concurrent probes open across a stop-condition check.
     pub rendezvous: Option<std::sync::Arc<tokio::sync::Barrier>>,
 }
 
@@ -214,14 +171,11 @@ impl FakeTransport {
         }
     }
 
-    /// Chainable builder entry.
     pub fn ok(self, ip: IpAddr, port: u16, latency_ms: u32) -> Self {
         self.insert(ip, port, Ok(latency_ms));
         self
     }
 
-    /// Chainable builder entry for an Ok outcome that only resolves after
-    /// `delay_ms` of real time.
     pub fn ok_slow(self, ip: IpAddr, port: u16, latency_ms: u32, delay_ms: u64) -> Self {
         self.insert(ip, port, Ok(latency_ms));
         self.script
@@ -233,7 +187,6 @@ impl FakeTransport {
         self
     }
 
-    /// Mutable insert for tests that script transports incrementally.
     pub fn insert(&self, ip: IpAddr, port: u16, outcome: Result<u32, ProbeError>) {
         self.script.lock().unwrap().insert(
             (ip, port),
@@ -245,8 +198,6 @@ impl FakeTransport {
         );
     }
 
-    /// Chainable builder for per-call outcomes (WARP loss tests): each call
-    /// pops the next entry; the entry inserted first is used first.
     pub fn seq(self, ip: IpAddr, port: u16, outcomes: Vec<Result<u32, ProbeError>>) -> Self {
         self.script.lock().unwrap().insert(
             (ip, port),
@@ -322,9 +273,6 @@ mod tests {
 
     #[test]
     fn transport_builds_its_server_name_once_at_construction() {
-        // The ServerName lives on the transport, so per-probe work is a
-        // refcount bump on an Arc, never a parse + allocation (millions of
-        // probes on a Full scan).
         let transport = TlsTransport::new();
         let expected = ServerName::try_from(PROBE_SNI.to_owned()).unwrap();
         match (&transport.server_name, &expected) {
@@ -336,8 +284,6 @@ mod tests {
                 transport.server_name
             ),
         }
-        // Clones are cheap and equal: the per-probe path clones the stored
-        // name, and the clone must round-trip identically.
         assert_eq!(transport.server_name.clone(), transport.server_name);
     }
 

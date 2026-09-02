@@ -1,19 +1,7 @@
-//! Windows system-tray integration for `serve --tray`.
-//!
-//! The tray is a thin client of the localhost HTTP API: the tray thread
-//! shares no state with the server and only POSTs to
-//! `http://127.0.0.1:<port>/api/...`, so the engine stays decoupled and
-//! testable. On non-Windows targets the tray is stubbed out with a warning;
-//! `serve` keeps running either way.
-
 use std::sync::atomic::{AtomicBool, Ordering};
 
-/// Set by the tray's Exit menu item; `serve` polls it to trigger graceful
-/// shutdown. Never set on non-Windows (no tray there), so the poll is a cheap
-/// always-false no-op on those platforms.
 static EXIT_REQUESTED: AtomicBool = AtomicBool::new(false);
 
-/// Name of the `HKCU\...\CurrentVersion\Run` value backing `serve --autostart`.
 pub const RUN_VALUE_NAME: &str = "CF-Scanner";
 
 pub fn exit_requested() -> bool {
@@ -24,17 +12,11 @@ pub fn request_exit() {
     EXIT_REQUESTED.store(true, Ordering::Relaxed);
 }
 
-/// `HKCU\...\Run` value payload: the quoted exe path plus the `serve` flags
-/// the autostart entry must launch. Pure so the quoting/arg shape is unit
-/// testable without touching the registry.
 #[cfg(any(target_os = "windows", test))]
 fn autostart_command(exe: &std::path::Path) -> String {
     format!("\"{}\" serve --tray", exe.display())
 }
 
-/// "Start CDN scan" menu payload: CLI defaults (quick preset, port 443).
-/// `Cdn`/`Preset`/`Quick` are the externally-tagged serde shapes
-/// `ScanConfig` actually deserializes from (lowercase variants would 400).
 #[cfg(any(target_os = "windows", test))]
 fn cdn_payload() -> serde_json::Value {
     serde_json::json!({
@@ -51,7 +33,6 @@ fn cdn_payload() -> serde_json::Value {
     })
 }
 
-/// "Start WARP scan" menu payload: 40 endpoints on the WARP ports.
 #[cfg(any(target_os = "windows", test))]
 fn warp_payload() -> serde_json::Value {
     serde_json::json!({
@@ -83,26 +64,21 @@ mod imp {
 
     use super::{RUN_VALUE_NAME, autostart_command, cdn_payload, warp_payload};
 
-    /// Spawns the tray thread. The icon is created on a dedicated std thread
-    /// (not tokio) that also pumps the tray window's Win32 messages; menu
-    /// actions are blocking HTTP calls against the localhost API.
-    pub fn spawn(api_base: String, open_ui: bool) -> Result<()> {
+    pub fn spawn(api_base: String) -> Result<()> {
         std::thread::Builder::new()
             .name("cf-scanner-tray".to_owned())
-            .spawn(move || tray_thread(api_base, open_ui))
+            .spawn(move || tray_thread(api_base))
             .context("could not spawn tray thread")?;
         Ok(())
     }
 
-    fn tray_thread(api_base: String, open_ui: bool) {
-        // A tray that fails to come up (headless session, explorer not ready)
-        // must never take down serve: log and return, the server keeps running.
-        if let Err(err) = run_tray(&api_base, open_ui) {
+    fn tray_thread(api_base: String) {
+        if let Err(err) = run_tray(&api_base) {
             tracing::warn!("system tray unavailable, serving without it: {err:#}");
         }
     }
 
-    fn run_tray(api_base: &str, open_ui: bool) -> Result<()> {
+    fn run_tray(api_base: &str) -> Result<()> {
         let open_ui_item = MenuItem::new("Open UI", true, None);
         let cdn_item = MenuItem::new("Start CDN scan", true, None);
         let warp_item = MenuItem::new("Start WARP scan", true, None);
@@ -118,16 +94,12 @@ mod imp {
             &separator,
             &exit_item,
         ])?;
-        // The icon stays alive as long as `_tray` lives on this thread.
         let _tray = TrayIconBuilder::new()
             .with_menu(Box::new(menu))
             .with_tooltip("CF-Scanner")
             .with_icon(Icon::from_rgba(tray_icon_rgba(), 32, 32)?)
             .build()
             .context("could not create tray icon")?;
-        if open_ui {
-            open_browser(api_base);
-        }
         let client = reqwest::blocking::Client::builder()
             .timeout(Duration::from_secs(10))
             .build()
@@ -184,8 +156,6 @@ mod imp {
         super::request_exit();
     }
 
-    /// Registers/removes the `HKCU\...\CurrentVersion\Run` entry that starts
-    /// `serve --tray` at logon; deleting a missing value is Ok.
     pub fn set_autostart(enabled: bool) -> Result<()> {
         use winreg::RegKey;
         use winreg::enums::HKEY_CURRENT_USER;
@@ -209,7 +179,6 @@ mod imp {
         Ok(())
     }
 
-    /// Opens the UI in the default browser via `cmd /c start`.
     fn open_browser(url: &str) {
         match std::process::Command::new("cmd")
             .args(["/c", "start", "", url])
@@ -220,8 +189,6 @@ mod imp {
         }
     }
 
-    /// 32x32 RGBA tray glyph (a solid CF-orange circle with an anti-aliased
-    /// edge) — drawn in code so the tray needs no icon asset pipeline.
     fn tray_icon_rgba() -> Vec<u8> {
         const SIZE: u32 = 32;
         let mut rgba = vec![0u8; (SIZE * SIZE * 4) as usize];
@@ -247,12 +214,6 @@ mod imp {
         rgba
     }
 
-    /// Minimal Win32 message pump for the tray window: tray-icon ships no
-    /// pump, and menu clicks surface only as `WM_COMMAND` dispatched to the
-    /// tray hwnd, so this thread must dispatch them itself. PeekMessage polls
-    /// with a short sleep so the loop can also drain menu events and the exit
-    /// flag without a message arriving. Raw FFI keeps the approved dependency
-    /// list unchanged.
     fn pump_messages() {
         unsafe {
             let mut msg = Msg {
@@ -302,7 +263,7 @@ mod imp {
 
 #[cfg(not(target_os = "windows"))]
 mod imp {
-    pub fn spawn(_api_base: String, _open_ui: bool) -> anyhow::Result<()> {
+    pub fn spawn(_api_base: String) -> anyhow::Result<()> {
         eprintln!("tray not supported on this platform; serving without it");
         Ok(())
     }

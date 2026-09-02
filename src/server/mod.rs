@@ -1,8 +1,3 @@
-//! Localhost HTTP API, a thin client of the one ScanController. Routes map
-//! engine state into the `api::types` contract directly (those types ARE the
-//! wire contract); no engine type is serialized. There is no frontend: the
-//! server answers API routes and uniform JSON errors only.
-
 use std::net::Ipv4Addr;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -97,8 +92,6 @@ fn router_with_dir(
         .layer(middleware::from_fn(security_headers))
 }
 
-/// No static frontend is served: every unmatched non-API path (and any
-/// `/api/*` miss) keeps the uniform JSON error envelope.
 async fn not_found(uri: Uri) -> Response {
     let path = uri.path();
     if path.starts_with("/api/") {
@@ -108,19 +101,10 @@ async fn not_found(uri: Uri) -> Response {
     }
 }
 
-/// Wrong method on a known path: 405 with the same JSON envelope as every
-/// other error. axum 0.8 passes no Allow header to this handler; the status
-/// alone is the contract the UI and CLI rely on.
 async fn method_not_allowed() -> Response {
     ApiError::method_not_allowed("method not allowed for this path").into_response()
 }
 
-/// 202 with no body; the run's progress is observable on /api/events. 409
-/// when another scan is already running or starting. The controller slot is
-/// reserved synchronously under its own lock BEFORE the run task is spawned,
-/// so a racing second POST sees the reservation instead of a false "not
-/// running" (the old check-then-spawn gap let a second run slip through and
-/// emit a phantom `Failed` mid-scan).
 async fn start_scan(
     State(state): State<Arc<AppState>>,
     JsonBody(cfg): JsonBody<ScanConfig>,
@@ -147,10 +131,6 @@ async fn start_scan(
     let controller = Arc::clone(&state.controller);
     let last_terminal = Arc::clone(&state.last_terminal);
     tokio::spawn(async move {
-        // Record the terminal the moment the engine emits it — before the
-        // running flag clears — so an SSE client deciding replay-vs-live from
-        // last_terminal can never land in a window where the terminal was
-        // broadcast but is not yet observable.
         let outcome = controller
             .run_reserved_streaming(cfg, |ev| {
                 if matches!(ev, ScanEvent::Finished(_) | ScanEvent::Failed(_)) {
@@ -193,19 +173,11 @@ async fn reset(State(state): State<Arc<AppState>>) -> StatusCode {
     StatusCode::NO_CONTENT
 }
 
-/// Production registrar: the Cloudflare flow has its own per-attempt timeout
-/// and retries (warpgen); the captured runtime handle lets the handler push
-/// it onto a blocking thread.
 fn default_registrar() -> WarpRegistrar {
     let handle = tokio::runtime::Handle::current();
     Arc::new(move |license| handle.block_on(warpgen::register(license.as_deref())))
 }
 
-/// Opt-in WARP registration (review Domain 2): registers a fresh identity
-/// with Cloudflare and returns the rendered wgconf. The UI contract is
-/// `{"license": <string|null>} -> {"wgconf": "..."}`. The network flow can
-/// take up to ~45 s (3 attempts x 15 s), so it runs on a blocking thread;
-/// failures answer the uniform error envelope.
 async fn warp_register(
     State(state): State<Arc<AppState>>,
     JsonBody(req): JsonBody<RegisterRequest>,
@@ -221,20 +193,12 @@ async fn warp_register(
         )));
     }
     let overwrite = req.overwrite;
-    // Held across the registration below on purpose: tokio's async mutex
-    // parks waiters instead of blocking threads, and registration must be
-    // serialized so a second caller sees the identity the first wrote.
     let mut last_attempt = state.register_gate.lock().await;
-    // Refuse to silently clobber an existing identity; the caller must
-    // explicitly opt in (first-time registration has no identity → proceeds).
     if crate::warpgen::has_identity() && !overwrite {
         return Err(ApiError::conflict(
             "identity already registered; pass {\"overwrite\":true} to replace it",
         ));
     }
-    // Check-and-set before doing any work: the limit counts every attempt
-    // that gets past the overwrite guard (the guard rejection above does
-    // not consume the budget).
     if last_attempt.is_some_and(|at| at.elapsed() < REGISTER_COOLDOWN) {
         return Err(ApiError::too_many(
             "registration is rate-limited to one attempt per 60 s",
@@ -253,12 +217,6 @@ async fn warp_register(
     Ok(Json(RegisterResponse { wgconf }))
 }
 
-/// Renders a verified candidate as a ready-to-use vless/trojan URI the user
-/// can drop straight into v2rayN/Hiddify. The candidate IP/port replace the
-/// config's original server; the id, security, SNI, fingerprint and ws
-/// settings are preserved. Failures (unparseable config, unsupported
-/// protocol, oversized SNI) answer the uniform ApiError envelope with
-/// redacted messages.
 async fn export_config(
     JsonBody(req): JsonBody<ExportConfigRequest>,
 ) -> Result<Json<ExportConfigResponse>, ApiError> {
@@ -320,8 +278,6 @@ async fn xray_status() -> Json<XrayStatusPayload> {
 async fn xray_download(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<XrayDownloadResponse>, ApiError> {
-    // Cooldown gate: mirrors the register handler's 1-per-60s pattern so a
-    // stuck client cannot loop download attempts indefinitely.
     {
         let mut last = state.xray_download_gate.lock().await;
         if last.is_some_and(|at| at.elapsed() < XRAY_DOWNLOAD_COOLDOWN) {
@@ -344,8 +300,6 @@ async fn xray_download(
         Err(err) => {
             let sanitized = crate::configs::sanitize_error_text(&format!("{err:#}"));
             let truncated: String = sanitized.chars().take(512).collect();
-            // Network/upstream failures surface as 502; unexpected internal as 500.
-            // xray download is network-bound, so default to upstream_error.
             Err(ApiError::bad_gateway(truncated))
         }
     }

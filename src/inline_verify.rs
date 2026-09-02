@@ -1,12 +1,3 @@
-//! In-process phase-2 tunnel verifier: speaks VLESS and Trojan over
-//! plain TCP/TLS directly, replacing the xray subprocess for the wire-
-//! simple combos. The probe dials the candidate IP, completes the real
-//! protocol handshake (TLS optional, no cert verification — anycast fronting
-//! never matches the probed name), then GETs every probe URL through the
-//! one tunnel. Fragmenting a TLS ClientHello is not possible with stock
-//! rustls, so any fragment preset (including Custom) keeps xray's job; the
-//! hybrid router in `verify.rs` decides per combo.
-
 use std::future::Future;
 use std::io;
 use std::net::{Ipv4Addr, Ipv6Addr};
@@ -28,18 +19,11 @@ use crate::probe::no_verify_client_config;
 use crate::socks;
 use crate::verify::{ProbeRequest, TunnelProbe, TunnelResult};
 
-/// Probe-shaped body cap, far below the socks client's 64 MiB reader cap:
-/// the verifier only needs a /cdn-cgi/trace-sized body, so a hostile server
-/// declaring a huge Content-Length or chunk size must fail the probe instead
-/// of forcing a large zeroed allocation per attempt.
 const MAX_PROBE_BODY_BYTES: usize = 1024 * 1024;
 
-/// Boxable tunnel stream: plain TCP when `security=none`, rustls when `tls`.
 trait AsyncStream: AsyncRead + AsyncWrite + Unpin + Send {}
 impl<T: AsyncRead + AsyncWrite + Unpin + Send> AsyncStream for T {}
 
-/// In-process verifier over one candidate attempt. Holds no state between
-/// attempts beyond the TLS connector (the client config is built once).
 pub struct InlineTunnelProbe {
     connector: TlsConnector,
 }
@@ -58,10 +42,6 @@ impl Default for InlineTunnelProbe {
     }
 }
 
-/// Outcome of a whole multi-URL attempt, mirroring `XrayTunnelProbe`'s
-/// contract: a candidate that refused the handshake, timed out, or failed a
-/// URL yields `passed: false`; the probe call itself only errors on local
-/// failures that should abort the phase.
 struct InlineOutcome {
     passed: bool,
     latency_ms: Option<u32>,
@@ -83,7 +63,6 @@ impl TunnelProbe for InlineTunnelProbe {
             ..
         } = req;
         Box::pin(async move {
-            // One budget for the WHOLE attempt: handshake + every URL.
             match timeout(
                 Duration::from_millis(timeout_ms),
                 run_attempt(&connector, &spec, dial_ip, sni.as_deref(), &probe_urls),
@@ -114,11 +93,6 @@ impl TunnelProbe for InlineTunnelProbe {
     }
 }
 
-/// `probe_urls` are verified sequentially over ONE tunnel when they share a
-/// target (host, port, scheme): keep-alive GETs, like a browser fetch loop.
-/// A stream-level failure tears the tunnel down and retries that URL once on
-/// a fresh tunnel; a non-200 status fails the URL without a retry. A pass
-/// needs every URL to deliver 200; the colo comes from the first trace body.
 async fn run_attempt(
     connector: &TlsConnector,
     spec: &OutboundSpec,
@@ -201,7 +175,6 @@ async fn run_attempt(
     }
 }
 
-/// One probe URL, pre-parsed exactly like the socks client parses it.
 #[derive(Clone)]
 struct Target {
     host: String,
@@ -211,8 +184,6 @@ struct Target {
 }
 
 impl Target {
-    /// Keep-alive only applies to identical targets: the vless/trojan
-    /// header fixes the destination for the lifetime of the connection.
     fn same_target(&self, other: &Target) -> bool {
         self.host == other.host && self.port == other.port && self.https == other.https
     }
@@ -220,8 +191,6 @@ impl Target {
 
 fn parse_target(url: &str) -> Result<Target> {
     let parsed = url::Url::parse(url).context("bad probe URL")?;
-    // The request line must exercise the resource as given: dropping the
-    // query would verify a different endpoint than the user asked for.
     let mut path = parsed.path().to_owned();
     if let Some(q) = parsed.query() {
         path.push('?');
@@ -242,19 +211,11 @@ fn parse_target(url: &str) -> Result<Target> {
     })
 }
 
-/// A tunneled connection ready for HTTP exchanges: protocol header sent,
-/// inner TLS (for https probe targets) up.
 struct LiveTunnel {
     stream: Option<Box<dyn AsyncStream>>,
-    /// The one-time response marker was consumed already; later responses
-    /// on this connection carry no marker.
     marker_consumed: bool,
 }
 
-/// Dial the candidate, complete the outer TLS handshake (when the config
-/// asks for it), write the vless/trojan request header for `target`, and
-/// open the inner TLS connection https targets need (verified against real
-/// roots — the tunnel target is the actual probe host, not anycast junk).
 async fn open_live_tunnel(
     connector: &TlsConnector,
     spec: &OutboundSpec,
@@ -281,9 +242,6 @@ async fn open_live_tunnel(
     })
 }
 
-/// TCP connect plus the outer TLS handshake when `security=tls`. The SNI is
-/// the phase-2 combo's SNI when present, else the config's own server name,
-/// else none (connecting without SNI is safe because verification is off).
 async fn establish(
     connector: &TlsConnector,
     spec: &OutboundSpec,
@@ -316,11 +274,6 @@ fn outer_server_name(
         .unwrap_or_else(|| ServerName::IpAddress(dial_ip.into()))
 }
 
-/// Bytes the client sends before the payload: the vless header is
-/// `[ver 0][uuid 16][addons_len 0][cmd 1][port BE][atyp][addr]` (xray's
-/// `PortThenAddress` order); trojan is `hex(SHA224(password)) \r\n
-/// [cmd 1][atyp][addr][port BE] \r\n` per the official spec — the password
-/// never rides the wire raw.
 fn build_protocol_header(spec: &OutboundSpec, host: &str, port: u16) -> Result<Vec<u8>> {
     match spec.protocol {
         Protocol::Trojan => {
@@ -328,7 +281,7 @@ fn build_protocol_header(spec: &OutboundSpec, host: &str, port: u16) -> Result<V
             let mut out = Vec::with_capacity(56 + 2 + 1 + 1 + host.len() + 2 + 2);
             out.extend_from_slice(hash.as_bytes());
             out.extend_from_slice(b"\r\n");
-            out.push(0x01); // CONNECT
+            out.push(0x01);
             write_socks5_addr(&mut out, host)?;
             out.extend_from_slice(&port.to_be_bytes());
             out.extend_from_slice(b"\r\n");
@@ -338,10 +291,10 @@ fn build_protocol_header(spec: &OutboundSpec, host: &str, port: u16) -> Result<V
             let uuid =
                 parse_uuid(&spec.user_id).ok_or_else(|| anyhow!("vless user id is not a UUID"))?;
             let mut out = Vec::with_capacity(1 + 16 + 1 + 1 + 2 + 1 + host.len());
-            out.push(0x00); // protocol version
+            out.push(0x00);
             out.extend_from_slice(&uuid);
-            out.push(0x00); // addons length
-            out.push(0x01); // TCP command
+            out.push(0x00);
+            out.push(0x01);
             out.extend_from_slice(&port.to_be_bytes());
             write_xray_addr(&mut out, host)?;
             Ok(out)
@@ -350,7 +303,6 @@ fn build_protocol_header(spec: &OutboundSpec, host: &str, port: u16) -> Result<V
     }
 }
 
-/// SOCKS5-style address (trojan): 1 = IPv4, 3 = domain+len, 4 = IPv6.
 fn write_socks5_addr(out: &mut Vec<u8>, host: &str) -> Result<()> {
     if let Ok(ip) = host.parse::<Ipv4Addr>() {
         out.push(0x01);
@@ -369,7 +321,6 @@ fn write_socks5_addr(out: &mut Vec<u8>, host: &str) -> Result<()> {
     Ok(())
 }
 
-/// Xray address atom (vless): 1 = IPv4, 2 = domain+len, 3 = IPv6.
 fn write_xray_addr(out: &mut Vec<u8>, host: &str) -> Result<()> {
     if let Ok(ip) = host.parse::<Ipv4Addr>() {
         out.push(0x01);
@@ -388,9 +339,6 @@ fn write_xray_addr(out: &mut Vec<u8>, host: &str) -> Result<()> {
     Ok(())
 }
 
-/// Sends one GET through the tunnel and parses the response, consuming the
-/// one-time protocol marker on the first exchange. `Err` means the
-/// connection died (the caller re-establishes once and retries).
 async fn exchange(
     mut stream: Box<dyn AsyncStream>,
     marker_consumed: &mut bool,
@@ -409,11 +357,6 @@ async fn exchange(
     Ok((stream, status, body))
 }
 
-/// Consumes the marker a server prepends to the FIRST response: vless
-/// always sends `[version][addons_len][addons]` (xray sends `00 00`), and
-/// some trojan implementations send a legacy `\r\n\x00` ack — xray itself
-/// relays the origin's bytes raw. Bytes that turn out to be HTTP data are
-/// replayed so the HTTP parser sees the raw response either way.
 async fn read_response_marker(
     mut stream: Box<dyn AsyncStream>,
     protocol: Protocol,
@@ -446,8 +389,6 @@ async fn read_response_marker(
     }
 }
 
-/// Yields `prefix` before delegating to `inner`, so a peek that turned out
-/// to be HTTP data is never lost.
 struct PrefixedReader<R> {
     prefix: Vec<u8>,
     pos: usize,
@@ -498,9 +439,6 @@ impl<R: AsyncWrite + Unpin> AsyncWrite for PrefixedReader<R> {
     }
 }
 
-/// Parses one HTTP/1.1 response off a keep-alive stream: the head, then the
-/// body sized by Content-Length / chunked / close-delimited. Delegates to the
-/// shared [`socks::read_response`] reader.
 pub(crate) async fn read_http_response<S: AsyncRead + Unpin + ?Sized>(
     stream: &mut S,
 ) -> Result<(u16, Vec<u8>)> {
@@ -508,9 +446,6 @@ pub(crate) async fn read_http_response<S: AsyncRead + Unpin + ?Sized>(
     Ok((resp.status, resp.body))
 }
 
-/// Parses a UUID string (dashes optional) into its 16 raw bytes, as VLESS
-/// carries them on the wire. Shared with the hybrid router, which only
-/// routes vless combos whose id parses.
 pub(crate) fn parse_uuid(user_id: &str) -> Option<[u8; 16]> {
     let mut hex = String::with_capacity(32);
     for c in user_id.chars() {
@@ -538,11 +473,6 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{LazyLock, Mutex};
 
-    /// One fake server run: which credential the client actually sent (trojan:
-    /// the 56-char hash; vless: the uuid hex) and how many TCP connections it
-    /// accepted (keep-alive assertions live on the count staying at 1). The
-    /// runtime is held so its worker threads keep driving the accept/serve
-    /// tasks for the whole test (a dropped runtime would cancel them).
     struct FakeServer {
         addr: SocketAddr,
         sent_cred: Arc<Mutex<Option<String>>>,
@@ -552,22 +482,14 @@ mod tests {
 
     #[derive(Clone, Copy)]
     enum ServerBehavior {
-        /// Every request answered 200 with a trace body.
         Pass,
-        /// First request 200, second 403 (multi-URL failure path).
         First200Then403,
-        /// Credential mismatch: close without a response.
         Reject,
-        /// Sleep past any reasonable probe timeout.
         Stall,
-        /// The legacy `\r\n\x00` trojan ack precedes the HTTP response.
         AcknowledgeThenPass,
-        /// No vless response header (worker-style endpoints).
         NoVlessHeader,
     }
 
-    /// Single shared test certificate (one rcgen generation, one rustls
-    /// server config for every connection).
     static TLS_SERVER_CONFIG: LazyLock<rustls::ServerConfig> = LazyLock::new(|| {
         let certified = rcgen::generate_simple_self_signed(vec!["localhost".to_owned()]).unwrap();
         rustls::ServerConfig::builder_with_provider(rustls::crypto::ring::default_provider().into())
@@ -587,8 +509,6 @@ mod tests {
         use_tls: bool,
         behavior: ServerBehavior,
     ) -> FakeServer {
-        // Multi-thread: the accept/serve tasks must keep running while the
-        // test drives the probe on its own current-thread runtime.
         let rt = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
             .enable_all()
@@ -643,7 +563,6 @@ mod tests {
         let cred = read_client_header(&mut *conn, protocol).await?;
         *sent_cred.lock().unwrap_or_else(|e| e.into_inner()) = Some(cred);
         if matches!(behavior, ServerBehavior::Reject) {
-            // Leave the connection unresponsive: the client must fail on EOF.
             return Ok(());
         }
         if matches!(behavior, ServerBehavior::Stall) {
@@ -658,7 +577,7 @@ mod tests {
         }
         let mut served = 0u32;
         loop {
-            read_http_request(&mut *conn).await?; // Err = client closed: done
+            read_http_request(&mut *conn).await?;
             let (status, body): (u16, &[u8]) = match behavior {
                 ServerBehavior::First200Then403 if served >= 1 => (403, b"no"),
                 _ => (200, b"ip=1.2.3.4\ncolo=AMS"),
@@ -673,8 +592,6 @@ mod tests {
         }
     }
 
-    /// Server side of the vless/trojan client header: returns the credential
-    /// the client sent (`hex(hash)` for trojan, hex uuid for vless).
     async fn read_client_header(conn: &mut dyn AsyncStream, protocol: Protocol) -> Result<String> {
         match protocol {
             Protocol::Trojan => {
@@ -884,8 +801,6 @@ mod tests {
 
     #[test]
     fn vless_response_without_header_prefix_passes() {
-        // Worker-style endpoints relay the origin's bytes without xray's
-        // `[version][addons]` response header; the HTTP data must be replayed.
         let server = spawn_fake_server(Protocol::Vless, true, ServerBehavior::NoVlessHeader);
         let mut spec = parse_uri(&format!(
             "vless://{VLESS_UUID}@127.0.0.1:443?security=tls&sni=example.com"
@@ -946,7 +861,6 @@ mod tests {
 
     #[test]
     fn refused_connection_is_a_failed_verdict() {
-        // Grab a port and release it: connecting there is refused.
         let port = std::net::TcpListener::bind("127.0.0.1:0")
             .unwrap()
             .local_addr()
@@ -985,9 +899,6 @@ mod tests {
         }
     }
 
-    /// Routing: combos the inline verifier cannot serve must fall through to
-    /// the xray probe (observed via a recording stand-in); servable combos
-    /// must never touch it.
     #[derive(Clone)]
     struct RecordingProbe {
         calls: Arc<Mutex<Vec<String>>>,
@@ -1209,8 +1120,6 @@ mod tests {
         ));
     }
 
-    // --- close-delimited body cap (plan 014) ---------------------------------
-
     fn close_delimited_response(body: &[u8]) -> Vec<u8> {
         let mut resp = b"HTTP/1.1 200 OK\r\n\r\n".to_vec();
         resp.extend_from_slice(body);
@@ -1236,8 +1145,6 @@ mod tests {
         assert_eq!(got.len(), MAX_PROBE_BODY_BYTES);
     }
 
-    // --- probe target query strings (plan 014) -------------------------------
-
     #[test]
     fn parse_target_keeps_the_query_string_in_the_request_line() {
         let target = parse_target("http://probe.test/cdn-cgi/trace?flag=1").unwrap();
@@ -1247,10 +1154,8 @@ mod tests {
             request.starts_with("GET /cdn-cgi/trace?flag=1 HTTP/1.1\r\n"),
             "{request}"
         );
-        // A query-less URL is unchanged.
         let target = parse_target("http://probe.test/cdn-cgi/trace").unwrap();
         assert_eq!(target.path, "/cdn-cgi/trace");
-        // An empty path with a query still yields a requestable target.
         let target = parse_target("http://probe.test?flag=1").unwrap();
         assert_eq!(target.path, "/?flag=1");
     }

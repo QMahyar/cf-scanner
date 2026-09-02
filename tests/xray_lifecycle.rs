@@ -1,16 +1,3 @@
-//! Xray subprocess lifecycle integration tests (Domain 6 review rec 2): the
-//! `xray run -c config.json` spawn/stop/cleanup path exercised WITHOUT a real
-//! xray binary. A fake executable (shell script) re-executes THIS test binary
-//! in child mode (`--exact fake_xray_child`), reads the socks port from the
-//! config xray wrote, and binds it — so `xray::spawn`'s readiness poll
-//! succeeds and the child stays alive until the parent kills it.
-//!
-//! Unix-only: the fake is a shell script, so on Windows the whole file
-//! compiles to an empty test binary (no subprocess is spawned either way).
-//! The full `XrayTunnelProbe` run uses the `CF_SCANNER_DATA_DIR` override in
-//! paths.rs (landed with review/xray) to isolate the probe's work dir and
-//! the cached-binary resolution from the real user data dir.
-
 #![cfg(unix)]
 
 use std::net::SocketAddr;
@@ -23,12 +10,8 @@ use cf_scanner::verify::{ProbeRequest, TunnelProbe, XrayTunnelProbe};
 use cf_scanner::xray;
 use serde_json::json;
 
-/// Serializes the `CF_SCANNER_DATA_DIR` env mutation against the parallel
-/// tests in this binary.
 static ENV_LOCK: Mutex<()> = Mutex::new(());
 
-/// Runs as the fake xray when spawned with `--exact fake_xray_child` (see
-/// `write_fake_xray`); a no-op during a normal test run.
 #[test]
 fn fake_xray_child() {
     let Ok(port) = std::env::var("CF_SCANNER_FAKE_PORT") else {
@@ -37,22 +20,10 @@ fn fake_xray_child() {
     let port: u16 = port.parse().expect("fake port must parse");
     let listener =
         std::net::TcpListener::bind(("127.0.0.1", port)).expect("fake xray binds the socks port");
-    // Hold the port until the parent kills us (stop() / Drop kill the child).
     std::thread::sleep(std::time::Duration::from_secs(120));
     drop(listener);
 }
 
-/// Writes the fake xray executable: touches `marker` on spawn, then
-/// `exec`s this test binary in child mode with the socks port taken from the
-/// `-c <config.json>` argument xray passes (the first `"port"` in the file
-/// is the socks inbound; outbounds come later). `exec` is what makes
-/// `XrayProcess::stop()` effective: it replaces the shell so the killed
-/// child IS the process holding the socks listener.
-///
-/// A matching `<bin>.dgst` is written alongside (same format as the real
-/// cached install) so `xray::ensure_binary`'s use-time checksum
-/// re-verification accepts the fake instead of deleting it and downloading a
-/// real binary.
 fn write_fake_xray(bin_path: &Path, marker: &Path) -> std::io::Result<()> {
     let child_bin = std::env::current_exe()?;
     let script = format!(
@@ -98,9 +69,6 @@ fn pick_ephemeral_port() -> u16 {
     listener.local_addr().expect("local addr").port()
 }
 
-/// Drives `xray::spawn` with an explicit config dir and fake binary: the
-/// subprocess must be launched (marker), the socks inbound must come up, and
-/// `XrayProcess::stop()` must kill it so the port refuses connections again.
 #[tokio::test]
 async fn spawn_launches_fake_xray_and_stop_kills_it() {
     let tmp = unique_dir("cf-scanner-xray-spawn");
@@ -142,16 +110,6 @@ async fn spawn_launches_fake_xray_and_stop_kills_it() {
     std::fs::remove_dir_all(&tmp).ok();
 }
 
-/// Full `XrayTunnelProbe` run against the fake binary in the data dir: the
-/// probe must complete locally (no real xray, no real network) with a failed
-/// tunnel — and every `trial-*` dir must be cleaned up afterwards. Relies on
-/// the `CF_SCANNER_DATA_DIR` override in paths.rs; the guard below keeps the
-/// test honest (it would skip loudly if the seam ever regressed).
-// The guard intentionally spans the probe: sibling tests run on separate
-// runtimes/threads and mutate the same process env, so the lock must stay
-// held while the probe re-reads CF_SCANNER_DATA_DIR. No task can be parked
-// on this std Mutex within one test's runtime, so the await-holding-lock
-// lint is a false positive here.
 #[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn tunnel_probe_lifecycle_spawns_and_cleans_trial_dirs() {
@@ -160,7 +118,6 @@ async fn tunnel_probe_lifecycle_spawns_and_cleans_trial_dirs() {
     let marker = tmp.join("spawned.marker");
     write_fake_xray(&tmp.join("xray"), &marker).expect("fake xray writable");
 
-    // unsafe: process-global env mutation (edition 2024), serialized above.
     unsafe {
         std::env::set_var("CF_SCANNER_DATA_DIR", &tmp);
     }
@@ -204,8 +161,6 @@ async fn tunnel_probe_lifecycle_spawns_and_cleans_trial_dirs() {
         std::env::remove_var("CF_SCANNER_DATA_DIR");
     }
 
-    // The fake binds the socks port but is not a SOCKS server: the handshake
-    // times out and the probe completes locally with a failed tunnel.
     let result = result.expect("probe must complete without a local failure");
     assert!(!result.passed);
     assert!(marker.exists(), "the fake xray must have been spawned");

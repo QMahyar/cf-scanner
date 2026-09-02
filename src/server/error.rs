@@ -1,6 +1,3 @@
-//! Uniform API error envelope: every non-2xx answers
-//! `{"error": <reason>, "message": <human>, "code": <machine>}`.
-
 use axum::Json;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
@@ -144,8 +141,6 @@ pub(crate) fn sanitize_truncate(text: &str) -> String {
     sanitized.chars().take(512).collect()
 }
 
-/// Maps a failed registration onto the uniform envelope by downcasting the
-/// typed [`crate::warpgen::WarpRegisterError`] out of the anyhow chain.
 pub(crate) fn map_register_error(err: anyhow::Error) -> ApiError {
     for cause in err.chain() {
         if let Some(warp_err) = cause.downcast_ref::<crate::warpgen::WarpRegisterError>() {

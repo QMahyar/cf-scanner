@@ -1,9 +1,3 @@
-//! WireGuard/AmneziaWG config parsing (Task 13). Accepts both the standard
-//! wg-quick INI text (as exported by the official WARP client / wgcf) and the
-//! AmneziaWG URI form (`wg://` / `wireguard://`). Input is UNTRUSTED user
-//! paste, so parsing never panics; handshake keys are validated (32B base64)
-//! so a verify run fails fast instead of on the first probe.
-
 use std::collections::BTreeMap;
 
 use anyhow::{Result, anyhow, bail};
@@ -14,14 +8,10 @@ use crate::util::percent_decode;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WgConfig {
-    /// Base64 client private key (Interface/PrivateKey or `private_key=`).
     pub private_key: String,
-    /// Comma-separated `addr/prefix` list; "amneziawarp" style.
     pub address: String,
     pub dns: Option<String>,
     pub mtu: Option<u16>,
-    /// AmneziaWG obfuscation params (all optional; irrelevant for the probe,
-    /// kept so a rendered config round-trips).
     pub amnezia: AmneziaParams,
     pub peer: WgPeer,
 }
@@ -41,16 +31,13 @@ pub struct AmneziaParams {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WgPeer {
-    /// Base64 server public key.
     pub public_key: String,
     pub preshared_key: Option<String>,
     pub allowed_ips: Vec<String>,
-    /// `host:port` or `ip:port`; optional for probe-only configs.
     pub endpoint: Option<String>,
     pub persistent_keepalive: Option<u16>,
 }
 
-/// Parses either form: AmneziaWG URIs (`wg://` / `wireguard://`) vs INI text.
 pub fn parse_wg_entry(entry: &str) -> Result<WgConfig> {
     let text = entry.trim();
     for scheme in ["wg://", "wireguard://"] {
@@ -61,27 +48,6 @@ pub fn parse_wg_entry(entry: &str) -> Result<WgConfig> {
     parse_wgconf(text)
 }
 
-/// Parses wg-quick INI text: `[Interface]` + `[Peer]` sections, `Key = Value`
-/// lines, `#`/`;` full-line comments, case-insensitive keys.
-///
-/// # Examples
-///
-/// ```
-/// use cf_scanner::wgconf::parse_wgconf;
-///
-/// let wg = parse_wgconf(
-///     "[Interface]\n\
-///      PrivateKey = AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\n\
-///      Address = 172.16.0.2/32\n\
-///      [Peer]\n\
-///      PublicKey = bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=\n\
-///      Endpoint = 8.6.112.31:4198\n\
-///      AllowedIPs = 0.0.0.0/0, ::/0\n",
-/// )
-/// .unwrap();
-/// assert_eq!(wg.peer.endpoint.as_deref(), Some("8.6.112.31:4198"));
-/// assert_eq!(wg.peer.allowed_ips, ["0.0.0.0/0", "::/0"]);
-/// ```
 pub fn parse_wgconf(text: &str) -> Result<WgConfig> {
     let mut section: Option<String> = None;
     let mut iface = BTreeMap::new();
@@ -96,7 +62,7 @@ pub fn parse_wgconf(text: &str) -> Result<WgConfig> {
             continue;
         }
         let Some((key, value)) = line.split_once('=') else {
-            continue; // tolerate stray non-key lines without failing the batch
+            continue;
         };
         let key = key.trim().to_ascii_lowercase();
         let value = value.trim().to_owned();
@@ -113,9 +79,6 @@ pub fn parse_wgconf(text: &str) -> Result<WgConfig> {
     build_wg_config(&iface, &peer_map)
 }
 
-/// Parses `scheme://host:port?key=value&...` (AmneziaWG / "warp-uri"
-/// generators). `local_address` joins multiple `addr/prefix` parts with `-`,
-/// as awg configs emit.
 fn parse_awg_uri(entry: &str) -> Result<WgConfig> {
     let url = Url::parse(entry).map_err(|e| anyhow!("bad wg URI: {e}"))?;
     match url.scheme() {
@@ -128,8 +91,6 @@ fn parse_awg_uri(entry: &str) -> Result<WgConfig> {
         .trim_start_matches('[')
         .trim_end_matches(']')
         .to_owned();
-    // The host is rendered verbatim into `Endpoint = {host}:{port}`; conf
-    // parsers read that line raw, so restrict it to hostname/IP grammar.
     if host.is_empty()
         || !host
             .bytes()
@@ -138,9 +99,6 @@ fn parse_awg_uri(entry: &str) -> Result<WgConfig> {
         bail!("wg URI host has invalid characters");
     }
     let port = url.port().ok_or_else(|| anyhow!("wg URI has no port"))?;
-    // Raw query split, NOT `query_pairs`: form-urlencoded decoding would turn
-    // the `+` inside base64 keys into a space (real-world AmneziaWG URIs ship
-    // raw `+`; awg clients only percent-decode).
     let q: BTreeMap<String, String> = url
         .query()
         .map(|raw| {
@@ -275,26 +233,6 @@ fn build_wg_config(
     })
 }
 
-/// Renders a canonical wg-quick text (export + display; Task 14 reuses it).
-///
-/// # Examples
-///
-/// ```
-/// use cf_scanner::wgconf::{parse_wgconf, render_wgconf};
-///
-/// let wg = parse_wgconf(
-///     "[Interface]\n\
-///      PrivateKey = AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\n\
-///      [Peer]\n\
-///      PublicKey = bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=\n",
-/// )
-/// .unwrap();
-///
-/// // The rendered text is canonical and re-parses to an equal config.
-/// let text = render_wgconf(&wg);
-/// assert!(text.contains("[Interface]") && text.contains("[Peer]"));
-/// assert_eq!(parse_wgconf(&text).unwrap(), wg);
-/// ```
 pub fn render_wgconf(wg: &WgConfig) -> String {
     let mut out = String::new();
     out.push_str("[Interface]\n");
@@ -350,7 +288,6 @@ pub fn render_wgconf(wg: &WgConfig) -> String {
     out
 }
 
-/// Decodes a WireGuard base64 key; shared validation for parse + probe.
 pub fn decode_key(b64: &str) -> Result<[u8; 32]> {
     let raw = base64::engine::general_purpose::STANDARD
         .decode(b64)
@@ -521,8 +458,6 @@ mod tests {
 
     #[test]
     fn crlf_line_endings_and_stray_lines_are_tolerated() {
-        // Windows-copied INI text arrives with CRLF; stray non-key lines
-        // (e.g. pasted banner text) must not fail the batch.
         let text = "[Interface]\r\nPrivateKey = AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\r\nthis is not a key line\r\n[Peer]\r\nPublicKey = bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=\r\n";
         let wg = parse_wgconf(text).unwrap();
         assert!(wg.peer.endpoint.is_none());
@@ -534,7 +469,6 @@ mod tests {
 
     #[test]
     fn unknown_sections_and_duplicate_keys_are_handled() {
-        // Unknown sections are skipped; duplicate keys follow last-wins.
         let text = "[Interface]\nPrivateKey = AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\nMTU = 1000\nMTU = 1500\n[Other]\nWhatever = 1\n[Peer]\nPublicKey = bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=\n";
         let wg = parse_wgconf(text).unwrap();
         assert_eq!(wg.mtu, Some(1500));
@@ -555,7 +489,6 @@ mod tests {
 
     #[test]
     fn awg_uri_percent_decodes_key_characters() {
-        // `+`/`/`/`=` inside base64 must survive raw AND percent-encoded.
         let uri = "wg://8.47.69.246:7103?private_key=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA%3D&public_key=bmXOC%2BF1FxEMF9dyiK2H5%2F1SUtzH0JuVo51h2wPfgyo%3D";
         let wg = parse_wg_entry(uri).unwrap();
         assert_eq!(
@@ -570,7 +503,6 @@ mod tests {
 
     #[test]
     fn wg_entry_requires_a_recognized_form() {
-        // Plain text that is neither a URI nor an INI with keys fails.
         assert!(parse_wg_entry("not a config at all").is_err());
         assert!(parse_wg_entry("[Interface]\nAddress = 1.2.3.4/32\n").is_err());
     }

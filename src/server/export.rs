@@ -1,15 +1,3 @@
-//! Export endpoints: turn the last scan's verified candidates into something
-//! a proxy client can consume directly. One server function serves every
-//! format so the client never re-sends configs.
-//!
-//! Formats:
-//! - `subscription` (base64 blob of rewritten URIs) — paste into v2rayN /
-//!   NekoBox / Hiddify / sing-box.
-//! - `raw` — newline-delimited rewritten URIs (no base64 wrapper).
-//! - `singbox` — a minimal sing-box (or Stash) `outbounds` config.
-//! - `clash` — a minimal Mihomo/Clash Meta proxies config.
-//! - result dumps: `json` / `csv` with latency/country/colo metadata.
-
 use std::net::IpAddr;
 
 use axum::extract::{Query, State};
@@ -21,21 +9,18 @@ use crate::configs;
 use crate::server::error::ApiError;
 use crate::server::state::AppState;
 
-/// Serialized result export query for `?format=json` / `?format=csv`.
 #[derive(serde::Deserialize)]
 pub(crate) struct ResultExportQuery {
     #[serde(default)]
     pub format: Option<String>,
 }
 
-/// `?format=base64|raw|singbox|clash` (default base64).
 #[derive(serde::Deserialize)]
 pub(crate) struct BundleQuery {
     #[serde(default)]
     pub format: Option<String>,
 }
 
-/// Content-type for each export; endpoints only allow localhost access.
 fn text_response(body: String, content_type: &'static str, filename: &str) -> Response {
     let mut headers = axum::http::HeaderMap::new();
     headers.insert(header::CONTENT_TYPE, HeaderValue::from_static(content_type));
@@ -49,7 +34,6 @@ fn text_response(body: String, content_type: &'static str, filename: &str) -> Re
     (headers, body).into_response()
 }
 
-/// Best-effort remark (fragment tag) for a verified candidate.
 fn remark_for(v: &Verdict) -> Option<String> {
     let p2 = v.phase2.as_ref()?;
     if !p2.passed {
@@ -63,9 +47,6 @@ fn remark_for(v: &Verdict) -> Option<String> {
     })
 }
 
-/// Ensures every proxy name/tag in a generated config is unique: clients
-/// like Mihomo reject a config whose proxy names collide, and two passing
-/// rows can share a colo and latency (hence the same remark).
 fn unique_tag(tag: String, seen: &mut std::collections::HashMap<String, usize>) -> String {
     let n = seen.entry(tag.clone()).or_insert(0);
     *n += 1;
@@ -76,9 +57,6 @@ fn unique_tag(tag: String, seen: &mut std::collections::HashMap<String, usize>) 
     }
 }
 
-/// Rewrite each passing candidate's original config against its verified
-/// endpoint, returning one importable URI per row (skips rows with no
-/// source config or a render failure).
 fn rewrite_uris(non_null_ips: &[Verdict], configs: &[String]) -> Vec<String> {
     let mut uris = Vec::new();
     for v in non_null_ips {
@@ -133,12 +111,7 @@ fn subscription_body(format: &str, non_null_ips: &[Verdict], configs: &[String])
     };
     text_response(body, ctype, filename)
 }
-/// Minimal sing-box config: one `urltest`  group over the rewrite URIs so
-/// several endpoints can be packed into a single importable file.
 fn singbox_body(uris: &[String]) -> String {
-    // sing-box accepts outbounds keyed by type; we decode each URI back into a
-    // spec via the shared parser rather than string-splicing, so every field
-    // (uuid, password, transport, tls, sni) survives.
     let mut outbounds: Vec<serde_json::Value> = Vec::new();
     let mut seen_tags: std::collections::HashMap<String, usize> = Default::default();
     for uri in uris {
@@ -187,8 +160,6 @@ fn singbox_body(uris: &[String]) -> String {
     serde_json::json!({ "outbounds": outbounds }).to_string()
 }
 
-/// Minimal Clash/Mihomo proxies config; JSON is accepted by Mihomo and is
-/// easier to build safely than hand-rolled YAML.
 fn clash_body(uris: &[String]) -> String {
     let mut proxies: Vec<serde_json::Value> = Vec::new();
     let mut seen_names: std::collections::HashMap<String, usize> = Default::default();
@@ -209,9 +180,6 @@ fn clash_body(uris: &[String]) -> String {
                 "port": spec.port,
             });
             let obj = p.as_object_mut().unwrap();
-            // Only the credential field the protocol actually uses: empty
-            // uuid/password keys on mismatched protocols are noise Mihomo
-            // tolerates but no config needs.
             match spec.protocol {
                 configs::Protocol::Vless | configs::Protocol::Vmess => {
                     obj.insert("uuid".into(), spec.user_id.into());
@@ -240,7 +208,6 @@ fn clash_body(uris: &[String]) -> String {
             proxies.push(p);
         }
     }
-    // Mihomo reads JSON too; emit the same shape as a clash config.
     serde_json::json!({
         "mixed-port": 7890,
         "proxies": proxies,
@@ -248,10 +215,6 @@ fn clash_body(uris: &[String]) -> String {
     .to_string()
 }
 
-/// RFC-4180 field quoting: values containing commas, quotes, or newlines
-/// are wrapped and their quotes doubled. ip/port/latency are numeric so this
-/// only ever fires for country/colo, which are length- and charset-capped
-/// upstream — the quoting is defense in depth, not the only line of defense.
 pub(crate) fn csv_field(v: &str) -> String {
     if v.contains([',', '"', '\n', '\r']) {
         format!("\"{}\"", v.replace('"', "\"\""))
@@ -261,8 +224,6 @@ pub(crate) fn csv_field(v: &str) -> String {
 }
 
 fn result_dump(format: &str, verdicts: &[Verdict]) -> Response {
-    // Verdicts arrive already sorted by latency (engine snapshot_sorted); keep
-    // the order for CSV, and wrap JSON as a stable object for easy parsing.
     let body = match format {
         "json" => serde_json::json!({ "results": verdicts, "count": verdicts.len() }).to_string(),
         _ => {
@@ -304,7 +265,6 @@ fn result_dump(format: &str, verdicts: &[Verdict]) -> Response {
     text_response(body, ctype, filename)
 }
 
-/// `GET /api/bundle?format=...` — the last scan's verified set, rewritten.
 pub(crate) async fn bundle(
     State(state): State<std::sync::Arc<AppState>>,
     Query(q): Query<BundleQuery>,
@@ -323,7 +283,6 @@ pub(crate) async fn bundle(
     subscription_body(format, &results, &configs)
 }
 
-/// `GET /api/results/export?format=json|csv` — metadata dump of the results.
 pub(crate) async fn result_export(
     State(state): State<std::sync::Arc<AppState>>,
     Query(q): Query<ResultExportQuery>,
@@ -341,9 +300,6 @@ pub(crate) async fn result_export(
     result_dump(format, &results)
 }
 
-/// Unknown `?format` values must be rejected, not silently defaulted: the
-/// UI always sends a known one, so an unknown value means a stale client or
-/// a mistyped script, and either deserves a loud 400.
 fn resolve_format<'a>(query: Option<&'a str>, allowed: &[&'a str]) -> Option<&'a str> {
     match query {
         None => Some(allowed.first().copied().unwrap_or("")),

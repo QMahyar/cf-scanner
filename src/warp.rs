@@ -1,17 +1,3 @@
-//! WARP mode: bundled endpoint pools and the WireGuard handshake probe.
-//! boringtun builds a valid Init (MAC1 mandatory; MAC2 zeros are accepted by
-//! WARP); open = a structurally valid HandshakeResponse (92B, type 2) or
-//! CookieReply (64B, type 3) from the probed endpoint. Note: the intent doc's
-//! "receiver-index match" does not hold against real WARP — Cloudflare answers
-//! dummy-key probes with its own session index (verified live 2026-08-13,
-//! wgcf-ecosystem scanners classify on packet shape alone). The socket is
-//! connected to the probed endpoint, so shape is a sound signal.
-//! Dummy-key probes work because Cloudflare answers handshakes for arbitrary
-//! client keys — which is why discovery stays shape-only, while verify mode
-//! (user keypair) runs a FULL session: complete the cryptographic handshake,
-//! then push an encrypted DNS query through the tunnel and require a data
-//! reply. Shape alone cannot tell a dummy-key handshake from a real one.
-
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
@@ -30,19 +16,11 @@ use crate::ranges::CidrPool;
 
 pub const BUNDLED_POOLS: &str = include_str!("../data/warp-pools.txt");
 
-/// WARP server public key (same for every account), base64. Source: official
-/// Project X WARP guide + wgcf; refresh candidate from the registration API
-/// (Task 14) when reachable.
 pub const SERVER_PUBLIC_KEY_B64: &str = "bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=";
 
-/// Dummy static private key: WARP does not care which client key signs the
-/// handshake, only that the Init is well-formed.
 const DUMMY_STATIC_PRIVATE: [u8; 32] = [0u8; 32];
 
 pub fn server_public_key() -> anyhow::Result<PublicKey> {
-    // A registration refresh wins over the bundled constant; the identity
-    // file is only ever written by us (0o600, atomic), so a corrupt entry
-    // falls back silently (warn logged in warpgen).
     let b64 = crate::warpgen::persisted_server_public_key()
         .unwrap_or_else(|| SERVER_PUBLIC_KEY_B64.to_owned());
     let bytes = match base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &b64) {
@@ -63,14 +41,10 @@ pub fn server_public_key() -> anyhow::Result<PublicKey> {
     Ok(PublicKey::from(arr))
 }
 
-/// Bundled WARP pools (embedded; no refresh path — the pools are stable).
 pub fn bundled_pool() -> CidrPool {
     CidrPool::parse(BUNDLED_POOLS).expect("bundled WARP pools must parse")
 }
 
-/// A real UDP WireGuard handshake probe: Init in, Response/Cookie out.
-/// The socket cache is injected so tests never share a process-wide socket
-/// pool and the engine can create per-controller instances.
 pub struct WarpTransport {
     server_public: PublicKey,
     sockets: std::sync::Arc<SocketCache>,
@@ -106,16 +80,8 @@ impl Default for WarpTransport {
     }
 }
 
-/// Bound on sockets held by the per-endpoint reuse cache: a full pool would
-/// otherwise pin ~14K open fds (one per endpoint x port) for the whole scan.
-/// In-flight probes hold their own `Arc`, so evicting an entry never breaks
-/// them; the next probe for that endpoint binds a fresh socket.
 const MAX_SOCKETS: usize = 1024;
 
-/// Per-endpoint connected UDP sockets, reused across `probes_per_endpoint`
-/// attempts of the same endpoint. The engine probes each (ip, port) group
-/// back to back, so a fresh bind per attempt (43K on the full pool) is pure
-/// overhead; at most `MAX_SOCKETS` fds stay open at once.
 #[derive(Default)]
 pub struct SocketCache {
     sockets: tokio::sync::Mutex<HashMap<(Ipv4Addr, u16), Arc<UdpSocket>>>,
@@ -154,10 +120,6 @@ impl SocketCache {
     }
 }
 
-/// The same probe driven by a user's wgconf keypair instead of the dummy key
-/// (Task 13): a real handshake under the user's identity proves the endpoint
-/// works with THEIR config. Endpoint swap = probe the candidate (ip, port);
-/// the config's peer public key stays.
 pub struct WgVerifyTransport {
     static_secret: StaticSecret,
     peer_public: PublicKey,
@@ -240,21 +202,12 @@ impl Transport for WarpTransport {
     }
 }
 
-/// How deeply a probe validates an endpoint.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ProbeDepth {
-    /// Shape-only: a valid Response/Cookie proves liveness (discovery).
     ShapeOnly,
-    /// Full session: cryptographically complete the handshake under the
-    /// caller's keypair, then push an encrypted DNS query through the tunnel
-    /// and require a data reply (verify mode). A shape-only reply cannot
-    /// distinguish a dummy-key handshake from a real one; a data round-trip
-    /// can.
     FullSession,
 }
 
-/// Bound socket, Init in, structurally valid Response/Cookie out — and, at
-/// `ProbeDepth::FullSession`, a completed handshake plus a data round-trip.
 async fn probe_once(
     sockets: &SocketCache,
     static_secret: StaticSecret,
@@ -264,20 +217,9 @@ async fn probe_once(
     timeout_ms: u64,
     depth: ProbeDepth,
 ) -> Result<u32, ProbeError> {
-    // Randomized 10-40ms pacing between handshakes: synchronized Init bursts
-    // trip WARP's per-IP rate shaping and read as false negatives. Bounded,
-    // so a full pool stays fast even at 200 concurrency. Seeded from OS
-    // entropy, not a counter: a counter makes the pacing sequence identical
-    // in every process, which is exactly the synchronized pattern the jitter
-    // exists to break.
     let jitter_ms = 10 + OsRng.next_u32() % 31;
-    // Cancellable jitter: `probe` futures are raced against
-    // `ProbeContext::cancelled()` in `engine::warp` via `select!`, so dropping
-    // the future cancels the sleep.
     tokio::time::sleep(Duration::from_millis(jitter_ms as u64)).await;
 
-    // Fresh index per probe so concurrent sockets can never confuse
-    // each other's receiver-index check.
     let index = {
         let v = NEXT_INDEX.fetch_add(1, Ordering::Relaxed);
         if v == 0 {
@@ -300,13 +242,10 @@ async fn probe_once(
         .await
         .map_err(|_| ProbeError::Refused("udp send failed"))?;
 
-    // Note the receiver index WARP put in its reply only for debugging.
     let mut reply = [0u8; 2048];
     match timeout(Duration::from_millis(timeout_ms), socket.recv(&mut reply)).await {
         Ok(Ok(n)) => {
             if !classify(&reply[..n]) {
-                // Slice to what actually arrived: beyond `n` the buffer holds
-                // stale bytes from previous probes, not packet data.
                 let head = &reply[..n.min(8)];
                 tracing::debug!(
                     len = n,
@@ -331,9 +270,6 @@ async fn probe_once(
     }
 }
 
-/// Handshake half of the full-session probe: validate the Response under our
-/// keypair (boringtun rejects responses not bound to our Init), then prove
-/// the session carries data with an encrypted DNS query to 1.1.1.1.
 async fn finish_full_session(
     tunn: &mut Tunn,
     socket: &UdpSocket,
@@ -343,9 +279,6 @@ async fn finish_full_session(
 ) -> Result<u32, ProbeError> {
     let mut out = [0u8; 2048];
     match tunn.decapsulate(None, response, &mut out) {
-        // Done: handshake complete and authenticated (a response not bound to
-        // our Init fails decryption here). Some stacks also queue a keepalive
-        // frame — send it when present.
         TunnResult::Done => {}
         TunnResult::WriteToNetwork(keepalive) => {
             socket
@@ -359,7 +292,6 @@ async fn finish_full_session(
         _ => return Err(ProbeError::Refused("unexpected handshake result")),
     }
 
-    // Encrypted DNS query (cloudflare.com A) wrapped in IP/UDP for the tunnel.
     let query = build_dns_probe_packet();
     let mut wire = [0u8; 2048];
     let data = match tunn.encapsulate(&query, &mut wire) {
@@ -378,8 +310,6 @@ async fn finish_full_session(
     let received = timeout(Duration::from_millis(rem), socket.recv(&mut reply)).await;
     match received {
         Ok(Ok(n)) => match tunn.decapsulate(None, &reply[..n], &mut out) {
-            // WriteToTunnelV4/V6: the reply decrypted into a valid inner IP
-            // packet under our session keys — data genuinely flowed.
             TunnResult::WriteToTunnelV4(inner, _) | TunnResult::WriteToTunnelV6(inner, _) => {
                 if inner.is_empty() {
                     Err(ProbeError::Refused("empty data reply through tunnel"))
@@ -388,8 +318,6 @@ async fn finish_full_session(
                 }
             }
             TunnResult::WriteToNetwork(_) => {
-                // Keepalive/cookie instead of our data reply: session works
-                // but the endpoint did not answer the query — not verified.
                 Err(ProbeError::Refused("no data reply through tunnel"))
             }
             TunnResult::Done | TunnResult::Err(_) => {
@@ -401,37 +329,35 @@ async fn finish_full_session(
     }
 }
 
-/// Minimal inner IPv4/UDP packet carrying a DNS A query for cloudflare.com,
-/// addressed 172.16.0.2 → 1.1.1.1 (the wgconf Address convention).
 fn build_dns_probe_packet() -> Vec<u8> {
     const SRC: [u8; 4] = [172, 16, 0, 2];
     const DST: [u8; 4] = [1, 1, 1, 1];
 
     let mut dns = Vec::with_capacity(32);
-    dns.extend_from_slice(&[0x1a, 0x2b]); // id
-    dns.extend_from_slice(&[0x01, 0x00]); // flags: RD
-    dns.extend_from_slice(&[0, 1, 0, 0, 0, 0, 0, 0]); // qd=1
-    dns.extend_from_slice(&[10]); // cloudflare
+    dns.extend_from_slice(&[0x1a, 0x2b]);
+    dns.extend_from_slice(&[0x01, 0x00]);
+    dns.extend_from_slice(&[0, 1, 0, 0, 0, 0, 0, 0]);
+    dns.extend_from_slice(&[10]);
     dns.extend_from_slice(b"cloudflare");
     dns.extend_from_slice(&[3]);
     dns.extend_from_slice(b"com");
     dns.push(0);
-    dns.extend_from_slice(&[0, 1, 0, 1]); // A, IN
+    dns.extend_from_slice(&[0, 1, 0, 1]);
 
     let mut udp = Vec::with_capacity(8 + dns.len());
-    udp.extend_from_slice(&[0x9d, 0x34]); // sport 40212
-    udp.extend_from_slice(&[0, 53]); // dport 53
+    udp.extend_from_slice(&[0x9d, 0x34]);
+    udp.extend_from_slice(&[0, 53]);
     udp.extend_from_slice(&((8 + dns.len()) as u16).to_be_bytes());
-    udp.extend_from_slice(&[0, 0]); // checksum 0 (optional over IPv4)
+    udp.extend_from_slice(&[0, 0]);
     udp.extend_from_slice(&dns);
 
     let total = 20 + udp.len();
     let mut ip = Vec::with_capacity(total);
     ip.extend_from_slice(&[0x45, 0x00]);
     ip.extend_from_slice(&(total as u16).to_be_bytes());
-    ip.extend_from_slice(&[0, 1, 0x40, 0x00]); // id, DF
-    ip.extend_from_slice(&[64, 17]); // ttl, proto UDP
-    ip.extend_from_slice(&[0, 0]); // checksum placeholder
+    ip.extend_from_slice(&[0, 1, 0x40, 0x00]);
+    ip.extend_from_slice(&[64, 17]);
+    ip.extend_from_slice(&[0, 0]);
     ip.extend_from_slice(&SRC);
     ip.extend_from_slice(&DST);
     let sum = ones_complement_sum16(&ip);
@@ -440,8 +366,6 @@ fn build_dns_probe_packet() -> Vec<u8> {
     ip
 }
 
-/// RFC 1071 ones-complement checksum over the header (checksum field zeroed
-/// by the caller before summing).
 fn ones_complement_sum16(bytes: &[u8]) -> u16 {
     let mut sum = 0u32;
     for pair in bytes.chunks(2) {
@@ -460,9 +384,6 @@ fn ones_complement_sum16(bytes: &[u8]) -> u16 {
 
 static NEXT_INDEX: AtomicU32 = AtomicU32::new(1);
 
-/// Open = HandshakeResponse (type 2, 92B) or CookieReply (type 3, 64B),
-/// structurally valid per boringtun's parser. No receiver-index check: real
-/// WARP answers dummy-key probes under its own session index (see module doc).
 fn classify(packet: &[u8]) -> bool {
     matches!(
         Tunn::parse_incoming_packet(packet),
@@ -487,8 +408,6 @@ mod tests {
 
     #[test]
     fn persisted_server_key_overrides_the_bundled_constant() {
-        // Serialize against warpgen's identity tests: both mutate the
-        // process-global CF_SCANNER_DATA_DIR override.
         let _guard = crate::warpgen::tests::IDENTITY_LOCK.lock().unwrap();
         let dir = std::env::temp_dir().join("cf-scanner-warp-key-test");
         unsafe { std::env::set_var("CF_SCANNER_DATA_DIR", &dir) };
@@ -525,8 +444,6 @@ mod tests {
 
     #[test]
     fn classify_accepts_any_receiver_index_like_real_warp() {
-        // Live WARP (2026-08-13) replies under its own session index, so a
-        // receiver-index mismatch must not close a structurally valid reply.
         let mut resp = vec![0u8; 92];
         resp[0..4].copy_from_slice(&2u32.to_le_bytes());
         resp[4..8].copy_from_slice(&9_582_336u32.to_le_bytes());
@@ -588,7 +505,6 @@ mod tests {
 
     #[tokio::test]
     async fn probe_times_out_on_a_silent_endpoint() {
-        // A bound-but-dumb UDP socket never replies to an Init.
         let silent = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
         let addr = silent.local_addr().unwrap();
         let err = WarpTransport::new()
@@ -599,10 +515,6 @@ mod tests {
         assert!(matches!(err, ProbeError::Timeout { .. }), "{err:?}");
     }
 
-    /// Full WireGuard session over loopback: `WgVerifyTransport` (built from
-    /// a parsed wgconf) initiates, a boringtun responder completes the
-    /// handshake AND echoes a data packet back through its own tunnel — the
-    /// exact bar FullSession verification sets (handshake + data reply).
     #[tokio::test]
     async fn wg_verify_transport_completes_a_real_handshake_with_a_peer() {
         use rand_core::OsRng;
@@ -651,26 +563,21 @@ mod tests {
                             other => panic!("responder could not answer an Init: {other:?}"),
                         }
                     }
-                    Ok(_) => {
-                        // Post-handshake traffic: decrypt under the session;
-                        // echo the inner packet back through our own tunnel,
-                        // which only works if the handshake truly completed.
-                        match tunn.decapsulate(None, &buf[..n], &mut out) {
-                            TunnResult::WriteToTunnelV4(inner, _) => {
-                                let mut wire = [0u8; 2048];
-                                match tunn.encapsulate(inner, &mut wire) {
-                                    TunnResult::WriteToNetwork(reply) => {
-                                        server_socket.send_to(reply, peer).await.unwrap();
-                                    }
-                                    other => {
-                                        panic!("responder could not encapsulate data: {other:?}")
-                                    }
+                    Ok(_) => match tunn.decapsulate(None, &buf[..n], &mut out) {
+                        TunnResult::WriteToTunnelV4(inner, _) => {
+                            let mut wire = [0u8; 2048];
+                            match tunn.encapsulate(inner, &mut wire) {
+                                TunnResult::WriteToNetwork(reply) => {
+                                    server_socket.send_to(reply, peer).await.unwrap();
+                                }
+                                other => {
+                                    panic!("responder could not encapsulate data: {other:?}")
                                 }
                             }
-                            TunnResult::Done | TunnResult::WriteToNetwork(_) => continue,
-                            other => panic!("responder rejected a data packet: {other:?}"),
                         }
-                    }
+                        TunnResult::Done | TunnResult::WriteToNetwork(_) => continue,
+                        other => panic!("responder rejected a data packet: {other:?}"),
+                    },
                     Err(e) => panic!("responder rejected the packet: {e:?}"),
                 }
             }
@@ -684,9 +591,6 @@ mod tests {
         responder.abort();
     }
 
-    /// A responder that answers the handshake but drops data must NOT pass
-    /// FullSession verification — this is the discrimination the old
-    /// shape-only check could not make.
     #[tokio::test]
     async fn full_session_probe_fails_when_data_is_dropped() {
         use rand_core::OsRng;
@@ -734,7 +638,6 @@ mod tests {
                 {
                     server_socket.send_to(resp, peer).await.unwrap();
                 }
-                // Data packets: silently dropped, like an unregistered peer.
             }
         });
 

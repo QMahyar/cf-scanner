@@ -1,7 +1,5 @@
 use super::*;
 
-/// Shared grammar fixture (see ranges.rs cidr half): endpoint and SNI
-/// cases the UI's TS validators mirror line-for-line.
 #[test]
 fn grammar_fixture_endpoint_and_sni_cases_match_server_rules() {
     let raw = include_str!("../../tests/fixtures/grammar-cases.json");
@@ -30,8 +28,6 @@ fn grammar_fixture_endpoint_and_sni_cases_match_server_rules() {
     }
 }
 
-/// Shared grammar fixture: CIDR cases exercised through the canonical
-/// `api::types::parse_cidr` (the single grammar entry point).
 #[test]
 fn grammar_fixture_cidr_cases_match_parse_cidr() {
     let raw = include_str!("../../tests/fixtures/grammar-cases.json");
@@ -54,9 +50,6 @@ fn grammar_fixture_cidr_cases_match_parse_cidr() {
 
 #[test]
 fn stop_condition_rejects_unknown_fields() {
-    // StopCondition is part of the strict serde contract: unknown keys
-    // inside "stop" must be rejected like every other request struct,
-    // not silently ignored.
     let bad: serde_json::Value = serde_json::json!({"found": 10, "cap": null, "typo": 1});
     assert!(serde_json::from_value::<StopCondition>(bad).is_err());
 }
@@ -148,7 +141,6 @@ fn rejects_zero_found() {
 
 #[test]
 fn accepts_cap_below_found() {
-    // A cap below `found` is valid: the cap wins before the found-count is reached.
     let mut c = valid_config();
     c.stop = StopCondition {
         found: 20,
@@ -271,7 +263,6 @@ fn rejects_bad_probe_url() {
 
 #[test]
 fn probe_urls_replace_the_legacy_single_url() {
-    // A probes-driven request with a blank legacy field stays valid.
     let mut c = valid_config();
     c.phase2 = Some(Phase2Config {
         configs: vec!["vless://uuid@example.com:443".to_owned()],
@@ -316,8 +307,6 @@ fn rejects_too_many_or_oversized_probe_urls() {
 }
 
 fn valid_config_with(p2: Phase2Config) -> Result<(), ConfigError> {
-    // Configs are checked before probe URLs, so the probe validation
-    // only runs when at least one config entry exists.
     let mut p2 = p2;
     p2.configs = vec!["vless://uuid@example.com:443".to_owned()];
     let mut c = valid_config();
@@ -367,8 +356,6 @@ fn probe_urls_round_trip_through_serde() {
         "{json}"
     );
     assert_eq!(serde_json::from_str::<Phase2Config>(&json).unwrap(), p2);
-    // Omitted fields keep old payloads decoding: probe_urls defaults to
-    // the empty list and an explicit probe_url round-trips as-is.
     let legacy = r#"{"configs":["vless://uuid@example.com:443"],"fragment":"off","snis":[],"probe_url":"https://cp.cloudflare.com/","concurrency":3}"#;
     let decoded: Phase2Config = serde_json::from_str(legacy).unwrap();
     assert!(decoded.probe_urls.is_empty());
@@ -376,7 +363,6 @@ fn probe_urls_round_trip_through_serde() {
         decoded.probe_url, "https://cp.cloudflare.com/",
         "an explicit probe_url survives decoding"
     );
-    // A payload with no probe_url at all falls back to the default.
     let bare = r#"{"configs":["vless://uuid@example.com:443"],"fragment":"off","snis":[],"concurrency":3}"#;
     let decoded: Phase2Config = serde_json::from_str(bare).unwrap();
     assert_eq!(decoded.probe_url, DEFAULT_PROBE_URL);
@@ -555,7 +541,6 @@ fn summary_cancelled_round_trips() {
 
 #[test]
 fn ports_are_deduped_for_the_cap() {
-    // 100 raw entries collapse to 2 unique ports: valid, not an error.
     let mut c = valid_config();
     c.ports = (0..100).map(|_| Port::new(443)).collect();
     assert_eq!(c.validate(), Ok(()));
@@ -740,7 +725,6 @@ fn rejects_out_of_bounds_custom_fragment_ranges() {
             "expected {bad:?} in {field} to be rejected"
         );
     }
-    // Bounds edges are accepted.
     let mut c = valid_config();
     c.phase2 = Some(Phase2Config {
         configs: vec!["vless://uuid@example.com:443".to_owned()],
@@ -757,8 +741,6 @@ fn rejects_out_of_bounds_custom_fragment_ranges() {
 
 #[test]
 fn rejects_stop_values_above_the_frontend_cap() {
-    // The frontend's validators cap found/cap at 100_000_000; the server
-    // must not accept more (contract parity, review finding).
     let mut c = valid_config();
     c.stop.found = MAX_STOP_VALUE + 1;
     assert_eq!(
@@ -780,7 +762,6 @@ fn rejects_stop_values_above_the_frontend_cap() {
         c.validate(),
         Err(ConfigError::InvalidCap(MAX_STOP_VALUE + 1))
     );
-    // Edges are accepted.
     let mut c = valid_config();
     c.stop = StopCondition {
         found: MAX_STOP_VALUE,
@@ -850,12 +831,10 @@ fn rejects_invalid_snis() {
             "expected {bad:?} to be rejected"
         );
     }
-    // A non-empty snis list must not smuggle "" (it becomes an override).
     let c = phase2_with_snis(vec!["".to_owned()]);
     assert!(matches!(c.validate(), Err(ConfigError::InvalidSni(_, _))));
     let c = phase2_with_snis(vec!["ok.example".to_owned(), "nope_sni".to_owned()]);
     assert!(matches!(c.validate(), Err(ConfigError::InvalidSni(_, _))));
-    // An empty list stays the "use each config's own SNI" sentinel.
     let c = phase2_with_snis(vec![]);
     assert_eq!(c.validate(), Ok(()));
 }
@@ -896,7 +875,6 @@ fn parse_endpoint_rejects_invalid_input() {
 
 #[test]
 fn validate_endpoint_and_parse_endpoint_agree() {
-    // WarpConfig validation must accept exactly what the shared parser does.
     for good in ["1.2.3.4", "1.2.3.4:2408", "1.2.3.4:443"] {
         let w = WarpConfig {
             custom_endpoints: vec![good.to_owned()],
@@ -915,8 +893,6 @@ fn validate_endpoint_and_parse_endpoint_agree() {
 
 #[test]
 fn cidr_validation_delegates_to_ranges_parser() {
-    // The shared ranges parser masks host bits; validation must still
-    // accept host-ful CIDRs like the legacy validator did.
     for good in ["1.2.3.99/24", "203.0.113.0/24", "2001:db8::1/64"] {
         let mut c = valid_config();
         c.custom_cidrs = vec![good.to_owned()];
@@ -935,32 +911,30 @@ fn cidr_validation_delegates_to_ranges_parser() {
     }
 }
 
-// --- non-routable + default-WARP-port guards (plan 017) ---
-
 #[test]
 fn rejects_non_routable_custom_cidrs() {
     for cidr in [
-        "127.0.0.1/32",           // loopback
-        "169.254.0.0/16",         // link-local
-        "0.0.0.0/8",              // unspecified block
-        "10.0.0.0/8",             // RFC1918
-        "172.16.0.0/12",          // RFC1918
-        "192.168.1.0/24",         // RFC1918
-        "100.64.0.0/10",          // CGNAT
-        "100.127.255.255/32",     // CGNAT top edge
-        "::1/128",                // loopback v6
-        "::/128",                 // unspecified v6
-        "fc00::/7",               // ULA
-        "fe80::/10",              // link-local v6
-        "::ffff:127.0.0.1/128",   // loopback, mapped
-        "::ffff:169.254.0.1/128", // link-local, mapped
-        "::ffff:10.0.0.0/104",    // RFC1918 10/8, mapped
-        "::ffff:192.168.1.0/120", // RFC1918 /24, mapped
-        "::ffff:100.64.0.1/128",  // CGNAT, mapped
-        "224.0.0.0/4",            // multicast
-        "240.0.0.0/4",            // reserved
-        "255.255.255.255/32",     // broadcast
-        "::ffff:224.0.0.1/128",   // multicast, mapped
+        "127.0.0.1/32",
+        "169.254.0.0/16",
+        "0.0.0.0/8",
+        "10.0.0.0/8",
+        "172.16.0.0/12",
+        "192.168.1.0/24",
+        "100.64.0.0/10",
+        "100.127.255.255/32",
+        "::1/128",
+        "::/128",
+        "fc00::/7",
+        "fe80::/10",
+        "::ffff:127.0.0.1/128",
+        "::ffff:169.254.0.1/128",
+        "::ffff:10.0.0.0/104",
+        "::ffff:192.168.1.0/120",
+        "::ffff:100.64.0.1/128",
+        "224.0.0.0/4",
+        "240.0.0.0/4",
+        "255.255.255.255/32",
+        "::ffff:224.0.0.1/128",
     ] {
         let mut c = valid_config();
         c.custom_cidrs = vec![cidr.to_owned()];
@@ -969,7 +943,6 @@ fn rejects_non_routable_custom_cidrs() {
             "custom_cidrs {cidr} must be rejected"
         );
     }
-    // TEST-NET ranges stay routable.
     assert_eq!(valid_config().validate(), Ok(()));
 }
 
@@ -987,13 +960,11 @@ fn rejects_non_routable_warp_endpoints() {
         c.validate(),
         Err(ConfigError::NonRoutableEndpoint(_))
     ));
-    // Multicast endpoints must be rejected too.
     c.warp.as_mut().unwrap().custom_endpoints = vec!["224.0.0.1".to_owned()];
     assert!(matches!(
         c.validate(),
         Err(ConfigError::NonRoutableEndpoint(_))
     ));
-    // Public endpoint accepted.
     c.warp.as_mut().unwrap().custom_endpoints = vec!["203.0.113.1".to_owned()];
     assert_eq!(c.validate(), Ok(()));
 }
@@ -1003,20 +974,18 @@ fn rejects_default_warp_port_in_warp_mode() {
     let mut c = valid_config();
     c.mode = Mode::Warp;
     c.custom_cidrs = vec![];
-    c.ports = vec![Port::new(DEFAULT_PORT)]; // 443 = CDN default
+    c.ports = vec![Port::new(DEFAULT_PORT)];
     c.warp = Some(WarpConfig {
         custom_endpoints: vec!["203.0.113.1".to_owned()],
         ..WarpConfig::default()
     });
     assert_eq!(c.validate(), Err(ConfigError::DefaultWarpPort));
-    // Real WARP port list passes.
     c.ports = vec![Port::new(2408), Port::new(500)];
     assert_eq!(c.validate(), Ok(()));
 }
 
 #[test]
 fn default_warp_port_not_rejected_in_cdn_mode() {
-    // CDN mode happily accepts port 443 — the guard only fires for WARP.
     let c = valid_config();
     assert_eq!(c.validate(), Ok(()));
 }
