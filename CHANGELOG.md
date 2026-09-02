@@ -3,6 +3,32 @@
 All notable changes to CF-Scanner are documented here, grouped by
 Added / Changed / Fixed / Deprecated / Removed / Security, newest on top.
 
+## [Unreleased]
+
+### Removed
+- **HTTP server, browser UI, and system tray (ADR-013).** CF-Scanner is now a
+  pure CLI. The `serve` command, `--tray`, `--autostart`, the Svelte 5
+  frontend (`ui/`), and the axum API (`src/server/`) were deleted. The
+  `wix/` MSI packaging and the npm wrapper are unaffected; the npm package
+  installs the same binary with no UI to serve. A future UI may be added
+  later on top of the CLI-first engine.
+- **Runtime deps:** `axum` (kept as a dev-dependency for warpgen's mock
+  registration server), `rust-embed`, `tokio-stream`, `tray-icon`,
+  `winreg`.
+
+### Changed
+- **Export moved from HTTP to CLI.** `scan --export FILE --export-format
+  csv|json|base64|raw|singbox|clash` writes results/bundles to a file (`-`
+  = stdout) via the new `src/export.rs`, replacing the removed
+  `/api/bundle` and `/api/results/export` endpoints.
+- CI drops the `ui` and `ui-a11y` jobs; all Rust gates are unchanged.
+
+### Fixed
+- **`spawn_with_retry` could reuse the same ephemeral port across retries.**
+  The OS can hand back a just-released port immediately, so a retry could
+  bind the same port that failed. Retries now re-pick until the port
+  differs from every previous attempt.
+
 ## [0.12.2] - 2026-08-28
 
 ### Fixed
