@@ -158,6 +158,7 @@ mod imp {
     fn post_scan(client: &reqwest::blocking::Client, api_base: &str, payload: &serde_json::Value) {
         let response = client
             .post(format!("{api_base}/api/scan"))
+            .header("X-Requested-With", "cf-scanner")
             .json(payload)
             .send();
         match response {
@@ -168,7 +169,11 @@ mod imp {
     }
 
     fn post_cancel(client: &reqwest::blocking::Client, api_base: &str) {
-        match client.post(format!("{api_base}/api/cancel")).send() {
+        match client
+            .post(format!("{api_base}/api/cancel"))
+            .header("X-Requested-With", "cf-scanner")
+            .send()
+        {
             Ok(response) if response.status().is_success() => {}
             Ok(response) => tracing::warn!("tray: cancel request rejected ({})", response.status()),
             Err(err) => tracing::warn!("tray: cancel request failed: {err}"),

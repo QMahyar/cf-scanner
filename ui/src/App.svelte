@@ -76,10 +76,20 @@
       onResult: (v) => applyResult(v),
       onPhase2: (p) => (app.phase2 = p),
       onFinished: (s) => {
+        // The final refetch is async; if the user starts scan B before it
+        // lands, its payload belongs to scan A and must not repopulate the
+        // (already reset) results list. startedAt is re-stamped on every
+        // start, so a changed value disqualifies the in-flight fetch.
+        const gen = app.startedAt;
         app.summary = s;
         app.running = false;
         app.phase2 = null;
-        api.results().then((r) => setResults(r.results)).catch(() => {});
+        api
+          .results()
+          .then((r) => {
+            if (app.startedAt === gen) setResults(r.results);
+          })
+          .catch(() => {});
         notifyFinished(s);
       },
       onFailed: (msg) => {

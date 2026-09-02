@@ -225,9 +225,7 @@ body {
 html[lang="fa"] body {
   line-height: 1.8;
 }
-html[lang="fa"] .tracking-wider,
-html[lang="fa"] .tracking-widest,
-html[lang="fa"] .tracking-tight {
+html[lang="fa"] .tracking-wider {
   letter-spacing: normal !important;
 }
 /* Technical tokens stay LTR mono even inside RTL prose */
@@ -258,7 +256,6 @@ summary:focus-visible {
 [hidden] {
   display: none !important;
 }
-.visually-hidden,
 .sr-only {
   position: absolute;
   width: 1px;
@@ -573,13 +570,6 @@ main {
 html[data-theme="light"] .card--danger {
   border-color: rgba(239, 68, 68, 0.15);
 }
-.card__head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  margin-block-end: 12px;
-}
 .card__title {
   font-size: var(--fs-lg);
   font-weight: 700;
@@ -713,8 +703,7 @@ input[type="checkbox"]:focus-visible {
   outline: 2px solid rgba(var(--accent-rgb), 0.7);
   outline-offset: 2px;
 }
-.btn:active:not(:disabled),
-.btn.is-active:not(:disabled) {
+.btn:active:not(:disabled) {
   transform: scale(0.97);
 }
 .btn:disabled {
@@ -794,14 +783,6 @@ input[type="checkbox"]:focus-visible {
   background: var(--accent-bg);
   border-color: rgba(var(--accent-rgb), 0.35);
 }
-.btn-ghost-danger {
-  background: var(--danger-bg);
-  border-color: rgba(var(--danger-rgb, 239, 68, 68), 0.3);
-  color: var(--danger);
-}
-.btn-ghost-danger:hover:not(:disabled) {
-  background: rgba(239, 68, 68, 0.3);
-}
 .btn-icon {
   width: 36px;
   height: 36px;
@@ -843,20 +824,6 @@ input[type="checkbox"]:focus-visible {
 }
 .group:hover .icon-chip {
   transform: translateX(2px) translateY(-1px) scale(1.06);
-}
-.spin {
-  width: 14px;
-  height: 14px;
-  border: 2px solid currentColor;
-  border-block-start-color: transparent;
-  border-inline-end-color: transparent;
-  border-radius: 50%;
-  animation: sp 0.7s linear infinite;
-}
-@keyframes sp {
-  to {
-    transform: rotate(360deg);
-  }
 }
 
 /* ── Chips / pills / badges ── */

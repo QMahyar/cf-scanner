@@ -21,6 +21,9 @@ pub(crate) fn banned_ip(ip: &IpAddr) -> bool {
             v4.is_private()
                 || v4.is_link_local()
                 || v4.is_multicast()
+                // CGNAT 100.64.0.0/10: shared-tenant ISP space, never a
+                // routable scan target.
+                || (v4.octets()[0] == 100 && v4.octets()[1] & 0xC0 == 64)
                 // `is_reserved` (240/4, incl. broadcast) is still unstable on
                 // the pinned toolchain; the mask spells the same range.
                 || v4.octets()[0] & 0xF0 == 240
@@ -36,6 +39,7 @@ pub(crate) fn banned_ip(ip: &IpAddr) -> bool {
                     || v4.is_private()
                     || v4.is_link_local()
                     || v4.is_multicast()
+                    || (v4.octets()[0] == 100 && v4.octets()[1] & 0xC0 == 64)
                     || v4.octets()[0] & 0xF0 == 240
                     || v4.octets()[0] == 0;
             }

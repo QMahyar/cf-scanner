@@ -2,6 +2,7 @@ import { ApiError, api } from "./api";
 import { t } from "./i18n.svelte";
 import { markDirty, phase2Only } from "./resultsView.svelte";
 import type { Mode, ScanConfig, ScanSummary, Verdict } from "./types";
+import { WARP_SWEEP_CAP } from "./validators";
 
 export interface UiState {
   running: boolean;
@@ -105,26 +106,6 @@ export class UiStore {
     markDirty();
   }
 
-  resetForTests(): void {
-    this.#index.clear();
-    this.#tickWindow.length = 0;
-    const init = initialState();
-    // keep singleton identity — mutate fields instead of replacing $state proxy
-    this.state.running = init.running;
-    this.state.startedAt = init.startedAt;
-    this.state.progress = init.progress;
-    this.state.phase2 = init.phase2;
-    this.state.results = init.results;
-    this.state.summary = init.summary;
-    this.state.error = init.error;
-    this.state.proMode = init.proMode;
-    this.state.lastScanConfigs = init.lastScanConfigs;
-    this.state.lastScanVerified = init.lastScanVerified;
-    this.state.frozenPhase1 = init.frozenPhase1;
-    this.state.statusHasCandidates = init.statusHasCandidates;
-    markDirty();
-  }
-
   recordTick(p: { scanned: number; found: number }): void {
     const last = this.#tickWindow[this.#tickWindow.length - 1];
     if (last && p.scanned < last.scanned) this.#tickWindow.length = 0;
@@ -213,10 +194,6 @@ export function resetResults(): void {
   return _store.resetResults();
 }
 
-export function resetForTests(): void {
-  return _store.resetForTests();
-}
-
 export function recordTick(p: { scanned: number; found: number }): void {
   return _store.recordTick(p);
 }
@@ -288,7 +265,7 @@ export function simpleConfig(
   if (mode === "Warp") {
     return {
       mode: "Warp",
-      target: { Count: Math.min(testCount, 5000) },
+      target: { Count: Math.min(testCount, WARP_SWEEP_CAP) },
       ports: [2408, 500, 1701, 4500],
       stop: { found, cap: null },
       exclude: [],
@@ -366,6 +343,3 @@ export function downloadFile(text: string, filename: string, mime = "text/plain"
   a.click();
   setTimeout(() => URL.revokeObjectURL(url), 5_000);
 }
-
-// Expose the singleton for tests that need direct access
-export const _uiStore = _store;

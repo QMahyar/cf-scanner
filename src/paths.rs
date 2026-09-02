@@ -59,18 +59,12 @@ pub fn xray_binary_path() -> Result<PathBuf> {
     Ok(data_dir()?.join(name))
 }
 
-/// Restricts a secret-bearing file (identity keys, profiles, trial configs)
-/// to the current user: a protected DACL with one grant replaces whatever
-/// inherited ACEs the parent directory contributed. Unix callers don't need
-/// this — secrets are written 0o600 at open time; this closes the Windows
-/// half of the same boundary. Owner-only suffices because nothing on this
-/// machine legitimately needs SYSTEM/Admins read access to these files.
-///
-/// Prefer [`write_secret`] for new writes: it creates the file via
-/// `CreateFile2` with the DACL set at creation time. This function remains
-/// the fallback for files that must be written with [`std::fs::write`]
-/// first (e.g. atomic-rename flows where the temp file is created by
-/// `write_private`).
+/// Restricts a secret-bearing file (identity keys, trial configs) to the
+/// current user: a protected DACL with one grant replaces whatever inherited
+/// ACEs the parent directory contributed. Used by [`write_secret`] when it
+/// must degrade from `CreateFile2`: the file is created empty, locked down,
+/// and only then written, so the secret bytes never exist under inherited
+/// ACEs.
 #[cfg(windows)]
 pub fn lock_down_to_owner(path: &std::path::Path) -> std::io::Result<()> {
     use std::os::windows::ffi::OsStrExt as _;
@@ -280,11 +274,16 @@ pub fn write_secret(path: &std::path::Path, data: &[u8]) -> std::io::Result<()> 
 
     let guard = match windows_security::build_owner_dacl() {
         Ok(v) => v,
-        // WHY: if we cannot build the DACL, degrade to the old
-        // write-then-lock-down path rather than failing the save.
+        // WHY: if we cannot build the DACL, degrade to a two-step path —
+        // create the file EMPTY, lock it down, and only then write the
+        // secret bytes — so the data never exists under inherited ACEs.
+        // The final write can still fail (disk full, AV lock); failing the
+        // save beats writing plaintext-readable secrets.
         Err(_) => {
-            std::fs::write(path, data)?;
-            return lock_down_to_owner(path);
+            std::fs::File::create(path)?;
+            lock_down_to_owner(path)?;
+            let mut file = std::fs::OpenOptions::new().write(true).open(path)?;
+            return file.write_all(data);
         }
     };
     let sa = guard.security_attributes();
@@ -319,10 +318,13 @@ pub fn write_secret(path: &std::path::Path, data: &[u8]) -> std::io::Result<()> 
         }
         Err(_) => {
             // WHY: CreateFile2 failed (path issue, permissions, etc.).
-            // Degrade to the previous write-then-lock-down pattern so the
-            // save never fails due to a DACL issue.
-            std::fs::write(path, data)?;
-            lock_down_to_owner(path)
+            // Same degrade path as the DACL-build failure above: create
+            // empty, lock down, then write, so the secret never exists
+            // under inherited ACEs.
+            std::fs::File::create(path)?;
+            lock_down_to_owner(path)?;
+            let mut file = std::fs::OpenOptions::new().write(true).open(path)?;
+            file.write_all(data)
         }
     }
 }

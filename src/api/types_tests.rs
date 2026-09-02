@@ -946,6 +946,8 @@ fn rejects_non_routable_custom_cidrs() {
         "10.0.0.0/8",             // RFC1918
         "172.16.0.0/12",          // RFC1918
         "192.168.1.0/24",         // RFC1918
+        "100.64.0.0/10",          // CGNAT
+        "100.127.255.255/32",     // CGNAT top edge
         "::1/128",                // loopback v6
         "::/128",                 // unspecified v6
         "fc00::/7",               // ULA
@@ -954,6 +956,7 @@ fn rejects_non_routable_custom_cidrs() {
         "::ffff:169.254.0.1/128", // link-local, mapped
         "::ffff:10.0.0.0/104",    // RFC1918 10/8, mapped
         "::ffff:192.168.1.0/120", // RFC1918 /24, mapped
+        "::ffff:100.64.0.1/128",  // CGNAT, mapped
         "224.0.0.0/4",            // multicast
         "240.0.0.0/4",            // reserved
         "255.255.255.255/32",     // broadcast

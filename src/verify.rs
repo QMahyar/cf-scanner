@@ -64,6 +64,28 @@ pub trait TunnelProbe: Send + Sync {
     ) -> Pin<Box<dyn Future<Output = Result<TunnelResult>> + Send + '_>>;
 }
 
+/// Test-only probe that passes every dial: lets server-level tests fill the
+/// verdict store and phase-2 configs without spawning xray.
+#[cfg(test)]
+pub struct PassAllProbe;
+
+#[cfg(test)]
+impl TunnelProbe for PassAllProbe {
+    fn probe(
+        &self,
+        _req: ProbeRequest<'_>,
+    ) -> Pin<Box<dyn Future<Output = Result<TunnelResult>> + Send + '_>> {
+        Box::pin(async move {
+            Ok(TunnelResult {
+                passed: true,
+                latency_ms: Some(7),
+                colo: Some("LAX".to_owned()),
+                verifier: None,
+            })
+        })
+    }
+}
+
 /// Real probe: writes an xray config dialing `dial_ip` into a fresh trial
 /// directory, spawns `xray run`, GETs the probe URL through its socks
 /// inbound, and kills the subprocess. Trial dirs live under the data dir so

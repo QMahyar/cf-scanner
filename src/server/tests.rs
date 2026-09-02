@@ -194,11 +194,15 @@ async fn post_scan(addr: SocketAddr, body: &str) -> u16 {
     post_scan_full(addr, body).await.0
 }
 
+/// Marker the guard requires on every state-changing request (mirrors the
+/// UI's api.ts and the tray client).
+pub(crate) const CSRF_MARKER: &str = "X-Requested-With: cf-scanner\r\n";
+
 /// POST /api/scan returning the status AND the raw response text, so
 /// tests can assert on the error envelope's message.
 async fn post_scan_full(addr: SocketAddr, body: &str) -> (u16, String) {
     let req = format!(
-        "POST /api/scan HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        "POST /api/scan HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\n{CSRF_MARKER}Content-Length: {}\r\nConnection: close\r\n\r\n{}",
         body.len(),
         body
     );
@@ -206,7 +210,7 @@ async fn post_scan_full(addr: SocketAddr, body: &str) -> (u16, String) {
 }
 async fn post_register(addr: SocketAddr, body: &str) -> (u16, String) {
     let req = format!(
-        "POST /api/warp/register HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        "POST /api/warp/register HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\n{CSRF_MARKER}Content-Length: {}\r\nConnection: close\r\n\r\n{}",
         body.len(),
         body
     );
@@ -467,7 +471,7 @@ async fn concurrent_scan_starts_emit_no_phantom_failed() {
         let body = body.clone();
         posts.push(tokio::spawn(async move {
             let req = format!(
-                "POST /api/scan HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                "POST /api/scan HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\n{CSRF_MARKER}Content-Length: {}\r\nConnection: close\r\n\r\n{}",
                 body.len(),
                 body
             );
@@ -687,9 +691,9 @@ async fn second_scan_while_running_is_conflict() {
 #[tokio::test]
 async fn cancel_and_reset_are_noops_without_scan() {
     let addr = serve(FakeTransport::new()).await;
-    let (status, _) = request(addr, "POST /api/cancel HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 0\r\nConnection: close\r\n\r\n", None).await;
+    let (status, _) = request(addr, &format!("POST /api/cancel HTTP/1.1\r\nHost: 127.0.0.1\r\n{CSRF_MARKER}Content-Length: 0\r\nConnection: close\r\n\r\n"), None).await;
     assert_eq!(status, 204);
-    let (status, _) = request(addr, "POST /api/reset HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 0\r\nConnection: close\r\n\r\n", None).await;
+    let (status, _) = request(addr, &format!("POST /api/reset HTTP/1.1\r\nHost: 127.0.0.1\r\n{CSRF_MARKER}Content-Length: 0\r\nConnection: close\r\n\r\n"), None).await;
     assert_eq!(status, 204);
 }
 
@@ -885,7 +889,7 @@ async fn malformed_json_gets_uniform_error_envelope() {
     let addr = serve(FakeTransport::new()).await;
     let (status, text) = request(
         addr,
-        "POST /api/scan HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: 7\r\nConnection: close\r\n\r\n{nojson",
+        "POST /api/scan HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nX-Requested-With: cf-scanner\r\nContent-Length: 7\r\nConnection: close\r\n\r\n{nojson",
         None,
     )
     .await;
@@ -928,7 +932,7 @@ async fn concurrent_scan_starts_do_not_double_spawn() {
     let body = serde_json::to_string(&cfg(1, 1)).unwrap();
     let a = tokio::spawn(async move {
         let req = format!(
-            "POST /api/scan HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            "POST /api/scan HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\n{CSRF_MARKER}Content-Length: {}\r\nConnection: close\r\n\r\n{}",
             body.len(),
             body
         );
@@ -937,7 +941,7 @@ async fn concurrent_scan_starts_do_not_double_spawn() {
     let body = serde_json::to_string(&cfg(1, 1)).unwrap();
     let b = tokio::spawn(async move {
         let req = format!(
-            "POST /api/scan HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            "POST /api/scan HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\n{CSRF_MARKER}Content-Length: {}\r\nConnection: close\r\n\r\n{}",
             body.len(),
             body
         );
@@ -1360,7 +1364,7 @@ async fn scan_path_still_accepts_wgconf_configs() {
 
 async fn post_export(addr: SocketAddr, body: &str) -> (u16, String) {
     let req = format!(
-        "POST /api/config/export HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        "POST /api/config/export HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\n{CSRF_MARKER}Content-Length: {}\r\nConnection: close\r\n\r\n{}",
         body.len(),
         body
     );
@@ -1516,7 +1520,11 @@ async fn bundle_endpoints_serve_subscription_and_metadata_formats() {
         ("/api/results/export?format=csv", "ip,port,latency_ms"),
         ("/api/results/export?format=json", "\"count\":0"),
     ] {
-        let res = client.get(format!("http://{addr}{path}")).send().await.unwrap();
+        let res = client
+            .get(format!("http://{addr}{path}"))
+            .send()
+            .await
+            .unwrap();
         assert_eq!(res.status(), 200, "{path}");
         assert!(
             res.headers().get("cache-control").is_some(),
@@ -1525,6 +1533,225 @@ async fn bundle_endpoints_serve_subscription_and_metadata_formats() {
         let body = res.text().await.unwrap();
         assert!(body.contains(expect), "{path}: {body}");
     }
+}
+
+#[tokio::test]
+async fn bundle_endpoints_reject_unknown_formats_with_400() {
+    let addr = serve(FakeTransport::new()).await;
+    let client = reqwest::Client::new();
+    for path in [
+        "/api/bundle?format=yaml",
+        "/api/bundle?format=",
+        "/api/results/export?format=xml",
+    ] {
+        let res = client
+            .get(format!("http://{addr}{path}"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status(), 400, "{path}");
+        let body = res.text().await.unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(parsed["code"], "bad_request", "{path}: {body}");
+    }
+}
+
+#[tokio::test]
+async fn bundle_and_export_serve_seeded_results_with_unique_tags() {
+    // A phase-2 scan whose probe passes for every candidate: the verdict
+    // store and last_phase2_configs fill, so the export endpoints exercise
+    // their full rewrite pipeline instead of the empty state.
+    let t = FakeTransport::new();
+    for i in 0..8u8 {
+        t.insert(format!("203.0.113.{i}").parse().unwrap(), 443, Ok(10));
+    }
+    let probe = crate::verify::PassAllProbe;
+    let controller = Arc::new(ScanController::with_probes(
+        Arc::new(t),
+        Arc::new(crate::configs::RealSubFetch),
+        Arc::new(probe),
+    ));
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(
+            listener,
+            router_with_dir(
+                controller,
+                RangesState::load_text(BUNDLED_RANGES, None),
+                canned_registrar(),
+                addr.port(),
+                canned_xray_fetch(),
+            ),
+        )
+        .await
+        .unwrap();
+    });
+    let mut c = cfg(8, 100);
+    c.phase2 = Some(Phase2Config {
+        configs: vec![
+            "vless://aaaaaaaa-bbbb-cccc-dddd-eeeeffff0000@1.2.3.4:443".to_owned(),
+            "vless://aaaaaaaa-bbbb-cccc-dddd-eeeeffff0000@5.6.7.8:443".to_owned(),
+        ],
+        ..Phase2Config::default()
+    });
+    let body = serde_json::to_string(&c).unwrap();
+    let (status, _) = post_scan_full(addr, &body).await;
+    assert_eq!(status, 202, "scan must start");
+    wait_until_idle(addr).await;
+
+    let client = reqwest::Client::new();
+    // Raw bundle: every passing candidate is rewritten against its config.
+    let res = client
+        .get(format!("http://{addr}/api/bundle?format=raw"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), 200);
+    let raw = res.text().await.unwrap();
+    let uris: Vec<&str> = raw.lines().filter(|l| !l.is_empty()).collect();
+    assert!(!uris.is_empty(), "passing rows must produce URIs: {raw}");
+    for uri in uris {
+        assert!(uri.starts_with("vless://"), "{uri}");
+        assert!(uri.contains("203.0.113."), "{uri}");
+    }
+    // Clash: proxy names must be unique even when colo/latency repeat.
+    let res = client
+        .get(format!("http://{addr}/api/bundle?format=clash"))
+        .send()
+        .await
+        .unwrap();
+    let clash = res.text().await.unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&clash).unwrap();
+    let names: Vec<&str> = parsed["proxies"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| p["name"].as_str().unwrap())
+        .collect();
+    let unique: std::collections::HashSet<_> = names.iter().collect();
+    assert_eq!(
+        names.len(),
+        unique.len(),
+        "proxy names must be unique: {names:?}"
+    );
+    // Mismatched protocol fields stay absent (no empty uuid on trojan etc.).
+    for p in parsed["proxies"].as_array().unwrap() {
+        let has_uuid = p.get("uuid").is_some();
+        let has_password = p.get("password").is_some();
+        assert!(
+            has_uuid ^ has_password || (!has_uuid && !has_password),
+            "exactly one credential field per proxy: {p}"
+        );
+    }
+    // Sing-box: tags unique too.
+    let res = client
+        .get(format!("http://{addr}/api/bundle?format=singbox"))
+        .send()
+        .await
+        .unwrap();
+    let singbox: serde_json::Value = serde_json::from_str(&res.text().await.unwrap()).unwrap();
+    let tags: Vec<&str> = singbox["outbounds"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|o| o["tag"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        tags.len(),
+        tags.iter().collect::<std::collections::HashSet<_>>().len()
+    );
+
+    // Results export carries the rows with their metadata.
+    let res = client
+        .get(format!("http://{addr}/api/results/export?format=csv"))
+        .send()
+        .await
+        .unwrap();
+    let csv = res.text().await.unwrap();
+    assert!(csv.contains("203.0.113."), "{csv}");
+    assert_eq!(csv.lines().count() - 1, 8, "{csv}");
+    let res = client
+        .get(format!("http://{addr}/api/results/export?format=json"))
+        .send()
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_str(&res.text().await.unwrap()).unwrap();
+    assert_eq!(json["count"], 8);
+}
+
+#[test]
+fn csv_export_quotes_fields_containing_separators() {
+    use crate::server::export::csv_field;
+    assert_eq!(csv_field("LAX"), "LAX");
+    assert_eq!(csv_field("a,b"), "\"a,b\"");
+    assert_eq!(csv_field("say \"hi\""), "\"say \"\"hi\"\"\"");
+    assert_eq!(csv_field("line\nbreak"), "\"line\nbreak\"");
+}
+
+#[tokio::test]
+async fn export_endpoints_keep_their_documented_no_param_defaults() {
+    let addr = serve(FakeTransport::new()).await;
+    let client = reqwest::Client::new();
+    // No ?format: bundle defaults to base64 (sub filename), results export
+    // to csv (header row) — regression guard for the resolve_format default.
+    let res = client
+        .get(format!("http://{addr}/api/bundle"))
+        .send()
+        .await
+        .unwrap();
+    let disposition = res
+        .headers()
+        .get("content-disposition")
+        .unwrap()
+        .to_str()
+        .unwrap();
+    assert!(disposition.contains("cf-scanner-sub.txt"), "{disposition}");
+    let res = client
+        .get(format!("http://{addr}/api/results/export"))
+        .send()
+        .await
+        .unwrap();
+    let body = res.text().await.unwrap();
+    assert!(
+        body.starts_with("ip,port,latency_ms,country,colo,phase2_passed,phase2_latency_ms\n"),
+        "{body}"
+    );
+}
+
+#[tokio::test]
+async fn mutating_requests_require_the_csrf_marker() {
+    let addr = serve(FakeTransport::new()).await;
+    // POST without the marker is rejected even with a valid Host.
+    let (status, text) = request(
+        addr,
+        "POST /api/cancel HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+        None,
+    )
+    .await;
+    assert_eq!(status, 403, "{text}");
+    let parsed: serde_json::Value = serde_json::from_str(json_body(&text)).unwrap();
+    assert_eq!(parsed["code"], "forbidden");
+    // With the marker it passes the guard (204 noop cancel).
+    let (status, _) = request(
+        addr,
+        &format!(
+            "POST /api/cancel HTTP/1.1\r\nHost: 127.0.0.1\r\n{CSRF_MARKER}Content-Length: 0\r\nConnection: close\r\n\r\n"
+        ),
+        None,
+    )
+    .await;
+    assert_eq!(status, 204);
+    // GET stays open without the marker.
+    let (status, _) = request(
+        addr,
+        "GET /api/status HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n",
+        None,
+    )
+    .await;
+    assert_eq!(status, 200);
 }
 
 // --- A9 / A13 / A17 new coverage ---
@@ -1568,7 +1795,7 @@ async fn json_rejection_is_sanitized_and_truncated() {
         "{{\"mode\":\"Cdn\",\"target\":{{\"Preset\":\"Quick\"}},\"ports\":[443],\"bad\":\"{big}\"\nsecond line with control \x07 and https://user:pass@example.com/secret?token=abc#frag"
     );
     let req = format!(
-        "POST /api/scan HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        "POST /api/scan HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\n{CSRF_MARKER}Content-Length: {}\r\nConnection: close\r\n\r\n{}",
         body.len(),
         body
     );
@@ -1811,8 +2038,10 @@ async fn lagged_stream_stays_alive_with_terminal_snapshot() {
 }
 
 async fn post_xray_download(addr: SocketAddr) -> (u16, String) {
-    let req = "POST /api/xray/download HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
-    request(addr, req, None).await
+    let req = format!(
+        "POST /api/xray/download HTTP/1.1\r\nHost: 127.0.0.1\r\n{CSRF_MARKER}Content-Length: 0\r\nConnection: close\r\n\r\n"
+    );
+    request(addr, &req, None).await
 }
 
 #[tokio::test]
@@ -1847,7 +2076,9 @@ async fn post_to_get_only_returns_405_with_code() {
     let addr = serve(FakeTransport::new()).await;
     let (status, text) = request(
         addr,
-        "POST /api/status HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+        &format!(
+            "POST /api/status HTTP/1.1\r\nHost: 127.0.0.1\r\n{CSRF_MARKER}Content-Length: 0\r\nConnection: close\r\n\r\n"
+        ),
         None,
     )
     .await;
@@ -1863,7 +2094,7 @@ async fn post_scan_with_wrong_content_type_returns_415() {
     let (status, text) = request(
         addr,
         &format!(
-            "POST /api/scan HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            "POST /api/scan HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: text/plain\r\nX-Requested-With: cf-scanner\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
             body.len(),
             body
         ),
@@ -1934,7 +2165,9 @@ async fn events_after_reset_does_not_replay_old_terminal() {
     wait_until_idle(addr).await;
     let (status, _) = request(
         addr,
-        "POST /api/reset HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+        &format!(
+            "POST /api/reset HTTP/1.1\r\nHost: 127.0.0.1\r\n{CSRF_MARKER}Content-Length: 0\r\nConnection: close\r\n\r\n"
+        ),
         None,
     )
     .await;

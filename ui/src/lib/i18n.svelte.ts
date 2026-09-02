@@ -4,7 +4,6 @@ export type Locale = "en" | "fa";
  * i18n lib). Values take `{n}`-style slots interpolated by t(); digits stay
  * Latin because numbers here are technical data rendered in mono spans. */
 const EN = {
-  "app.tagline": "find working Cloudflare endpoints",
   "live.live": "Live",
   "live.offline": "Offline",
   "live.connecting": "Connecting…",
@@ -68,7 +67,6 @@ const EN = {
     "flip the Pro switch up top for phase-2 verification, WARP identity and exports",
   "table.verified": "verified with your keypair",
   "table.maxLatency": "max latency (ms)",
-  "table.maxLatency.hide": "Hide rows slower than this ceiling",
   "table.sort.latency": "latency",
   "table.sort.ip": "ip",
   "table.copyAllTitle": "Copy every displayed endpoint, one ip:port per line",
@@ -169,17 +167,15 @@ const EN = {
   "pro.action.skipWithCount": "Skip to Phase 2 ({n})",
   "pro.hint.noCap": "no cap at high concurrency can run very long",
   "pro.hint.skipSuggestion": "hit rate is tailing off — {found} working so far. Use Skip to Phase 2 to verify what you have.",
-  "pro.status.phase2Progress": "phase 2: {done}/{total} verified…",
   "pro.confirm.skipLow": "Only {found} working endpoint{s} so far — verifying now may find nothing. Skip to Phase 2 anyway?",
   "pro.error.stopTimeout": "Couldn't stop phase 1 in time — press Stop and start Phase 2 from the form.",
   "pro.error.downloadFailed": "download failed",
   // --- Tunnel-test keys (map ticket T3, phase separation): the CDN tier is
   // renamed "Phase 2" → "Tunnel test" (mechanism nouns over outcome
-  // adjectives) and renders as its own independently copyable list. These
-  // sit alongside the old table.phase2.* / pro.phase2.* /
-  // pro.status.phase2Progress keys, which stay as aliases until T4
-  // migrates call sites. UI decision recorded in tasks/wayfinder-map.md,
-  // intentionally without an ADR.
+  // adjectives) and renders as its own independently copyable list. The old
+  // table.phase2.* / pro.phase2.* keys were retired with their call sites.
+  // UI decision recorded in tasks/wayfinder-map.md, intentionally without an
+  // ADR.
   "results.candidatesHeading": "Candidates",
   "results.verifiedHeading": "Tunnel test",
   "table.copyAll.passingTitle": "Copy only tunnel-passing endpoints",
@@ -219,7 +215,6 @@ const EN = {
   "app.live.connectingTitle": "Connecting to the local scan engine…",
   // Step 1 new keys
   "table.verifiedTitle": "Every probe ran under your wgconf private key, not a dummy key",
-  "simple.handshakeTitle": "passed a real TLS handshake",
   "simple.howtoAria": "What a scan does",
   "simple.emptyGuidanceAria": "No results guidance",
   "app.switchLanguage": "Switch language",
@@ -252,7 +247,6 @@ const EN = {
   "tooltip.wgconf":
     "Your WireGuard/AmneziaWG config. Paste the whole .conf or an awg:// / wg:// link. Enables verify-with-real-keypair — the probe proves your key connects, not just that the port is open. Never saved to disk.",
   "empty.action.tryFull": "Try Full preset",
-  "empty.action.widenPorts": "Add common ports",
   "empty.action.switchWarp": "Switch to WARP",
   "qr.tooLong": "Too long for a QR code — copy the text instead.",
   "qr.hint": "Scan with your proxy client's camera to import.",
@@ -308,7 +302,6 @@ const EN = {
 } as const;
 
 const FA: Record<keyof typeof EN, string> = {
-  "app.tagline": "یافتن اندپوینت‌های سالم کلادفلر",
   "live.live": "متصل",
   "live.offline": "قطع",
   "live.connecting": "در حال اتصال…",
@@ -372,7 +365,6 @@ const FA: Record<keyof typeof EN, string> = {
     "کلید Pro در بالا را بزنید تا تأیید مرحله دوم، هویت WARP، پروفایل‌ها و خروجی‌ها فعال شود",
   "table.verified": "تأییدشده با کلید خصوصی شما",
   "table.maxLatency": "حداکثر تأخیر (ms)",
-  "table.maxLatency.hide": "ردیف‌های کندتر از این سقف پنهان می‌شوند",
   "table.sort.latency": "تأخیر",
   "table.sort.ip": "IP",
   "table.copyAllTitle": "کپی همهٔ اندپوینت‌ها، هر خط یک ip:port",
@@ -441,8 +433,8 @@ const FA: Record<keyof typeof EN, string> = {
   "pro.warp.wgconfReadError": "خواندن «{name}» ممکن نشد",
   "pro.warp.rangesSizeError": "«{name}» برابر {kb} KB است — فهرست‌ها حداکثر ۲۵۶ KB",
   "pro.warp.rangesEmpty": "«{name}» هیچ خط IP یا CIDR نداشت",
-  "pro.warp.rangesImported": "{count} خط وارد شد",
-  "pro.warp.rangesImportedSkipped": "{count} خط وارد شد · {skipped} رد شد",
+  "pro.warp.rangesImported": "{count} خط{s} وارد شد",
+  "pro.warp.rangesImportedSkipped": "{count} خط{s} وارد شد · {skipped} رد شد",
   "pro.warp.identityGroup": "هویت و تأیید WARP",
   "pro.warp.verifyHint": "برای تأیید واقعی به wgconf بالا نیاز دارد",
   "pro.warp.verify": "تأیید با کلید واقعی این هویت",
@@ -472,17 +464,15 @@ const FA: Record<keyof typeof EN, string> = {
   "pro.action.skipWithCount": "پرش به مرحله ۲ ({n})",
   "pro.hint.noCap": "بدون حداکثر، با هم‌زمانی بالا اسکن ممکن است بسیار طولانی شود",
   "pro.hint.skipSuggestion": "نرخ موفقیت رو به کاهش است — تاکنون {found} مورد سالم. از پرش به مرحله ۲ برای تأیید استفاده کنید.",
-  "pro.status.phase2Progress": "مرحله ۲: {done}/{total} تأیید شد…",
-  "pro.confirm.skipLow": "تاکنون فقط {found} اندپوینت سالم — ممکن است تأیید چیزی پیدا نکند. باز هم به مرحله ۲ برویم؟",
+  "pro.confirm.skipLow": "تاکنون فقط {found} اندپوینت{s} سالم — ممکن است تأیید چیزی پیدا نکند. باز هم به مرحله ۲ برویم؟",
   "pro.error.stopTimeout": "توقف مرحله ۱ به‌موقع ممکن نشد — «توقف» را بزنید و مرحله ۲ را از فرم شروع کنید.",
   "pro.error.downloadFailed": "دانلود ناموفق بود",
   // --- Tunnel-test keys (map ticket T3, phase separation): the CDN tier is
   // renamed "Phase 2" → "Tunnel test" (mechanism nouns over outcome
-  // adjectives) and renders as its own independently copyable list. These
-  // sit alongside the old table.phase2.* / pro.phase2.* /
-  // pro.status.phase2Progress keys, which stay as aliases until T4
-  // migrates call sites. UI decision recorded in tasks/wayfinder-map.md,
-  // intentionally without an ADR.
+  // adjectives) and renders as its own independently copyable list. The old
+  // table.phase2.* / pro.phase2.* keys were retired with their call sites.
+  // UI decision recorded in tasks/wayfinder-map.md, intentionally without an
+  // ADR.
   "results.candidatesHeading": "کاندیدها",
   "results.verifiedHeading": "آزمون تونل",
   "table.copyAll.passingTitle": "کپی فقط اندپوینت‌های قبول‌شده از تونل",
@@ -519,7 +509,6 @@ const FA: Record<keyof typeof EN, string> = {
   "app.live.connectingTitle": "در حال اتصال به موتور اسکن محلی…",
   // Step 1 new keys
   "table.verifiedTitle": "هر پروب با کلید خصوصی wgconf شما اجرا شده، نه کلید ساختگی",
-  "simple.handshakeTitle": "به یک TLS handshake واقعی پاسخ داده است",
   "simple.howtoAria": "عملکرد اسکن",
   "simple.emptyGuidanceAria": "راهنمای نتیجه خالی",
   "app.switchLanguage": "تغییر زبان",
@@ -552,7 +541,6 @@ const FA: Record<keyof typeof EN, string> = {
   "tooltip.wgconf":
     "کانفیگ WireGuard/AmneziaWG شما. کل ‎.conf‎ یا لینک awg://‎ و wg://‎ را بچسبانید. با «تأیید با کلید واقعی» پروب ثابت می‌کند کلید خود شما وصل می‌شود، نه فقط باز بودن پورت. هرگز روی دیسک ذخیره نمی‌شود.",
   "empty.action.tryFull": "امتحان با Full",
-  "empty.action.widenPorts": "افزودن پورت‌های پرکاربرد",
   "empty.action.switchWarp": "تغییر به WARP",
   "qr.tooLong": "برای QR خیلی طولانی است — به‌جای آن متن را کپی کنید.",
   "qr.hint": "با دوربین کلاینت پروکسی خود اسکن کنید تا وارد شود.",
@@ -608,6 +596,11 @@ const FA: Record<keyof typeof EN, string> = {
 };
 
 export type MsgKey = keyof typeof EN;
+
+/** Exposed for tests: en/fa parity is asserted in i18n.test.ts. */
+export function dictionaries(): { en: Record<string, string>; fa: Record<string, string> } {
+  return { en: EN, fa: FA };
+}
 
 function detect(): Locale {
   try {

@@ -481,7 +481,7 @@
     if (!hydrated) return;
     const snapshot = persistedFormState(form);
     pendingPersist = snapshot;
-    const t = setTimeout(() => {
+    const timer = setTimeout(() => {
       pendingPersist = null;
       try {
         localStorage.setItem(FORM_PERSIST_KEY, snapshot);
@@ -489,7 +489,7 @@
         /* storage unavailable (private mode/quota): persistence is best-effort */
       }
     }, 300);
-    return () => clearTimeout(t);
+    return () => clearTimeout(timer);
   });
 
   onDestroy(() => {
@@ -521,14 +521,27 @@
   });
   // Throttled screen-reader announcement for phase-2 progress: update at
   // most every 10 s so the aria-live region doesn't chatter on every tick.
+  // The latch lives outside reactivity (plain let, untracked): the template
+  // reads phase2Announce when app.phase2 changes, and the throttle gate
+  // decides whether to refresh the spoken text. No state write happens
+  // during derived evaluation — the two plain lets are neither reactive nor
+  // written anywhere the compiler tracks.
   let lastPhase2Announce = 0;
   let phase2Announced = "";
   const phase2Announce = $derived.by(() => {
-    if (!app.phase2) { lastPhase2Announce = 0; return ""; }
+    const p2 = app.phase2;
+    if (!p2) {
+      // A fresh phase-2 run must announce immediately, not ride the tail of
+      // the previous run's 10 s window.
+      lastPhase2Announce = 0;
+      return "";
+    }
+    const text = t("pro.tunnel.progress", { done: p2.done, total: p2.total });
     const now = Date.now();
-    if (now - lastPhase2Announce < 10_000) return phase2Announced;
-    lastPhase2Announce = now;
-    phase2Announced = t("pro.tunnel.progress", { done: app.phase2.done, total: app.phase2.total });
+    if (now - lastPhase2Announce >= 10_000) {
+      lastPhase2Announce = now;
+      phase2Announced = text;
+    }
     return phase2Announced;
   });
 </script>

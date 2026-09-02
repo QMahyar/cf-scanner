@@ -488,9 +488,6 @@ pub async fn ensure_binary(fetch: &impl BinaryFetch) -> Result<PathBuf> {
         return Ok(path.clone());
     }
     // cached binary vanished or truncated: treat as miss
-    if let Some(Err(message)) = &snapshot {
-        return Err(anyhow!(message.clone()));
-    }
     // Slow path: hold the async lock across resolution so concurrent
     // attempts share ONE download instead of stampeding the origin.
     let mut guard = state.lock().await;
@@ -536,7 +533,11 @@ async fn cached_matches_dgst(bin: &Path) -> bool {
     let Ok(bytes) = tokio::fs::read(bin).await else {
         return false;
     };
-    hex_lower(&Sha256::digest(&bytes)) == expected
+    // Hashing up to 64 MiB is CPU-bound: keep it off the runtime workers.
+    match tokio::task::spawn_blocking(move || hex_lower(&Sha256::digest(&bytes))).await {
+        Ok(actual) => actual == expected,
+        Err(_) => false,
+    }
 }
 
 /// Downloads the pinned release, verifies its `.dgst` SHA-256, extracts the
@@ -553,10 +554,6 @@ pub async fn download_binary(fetch: &impl BinaryFetch) -> Result<PathBuf> {
     let zip = zip?;
     let dgst = dgst?;
     let expected = parse_dgst(&String::from_utf8_lossy(&dgst), asset)?;
-    let actual = hex_lower(&Sha256::digest(&zip));
-    if actual != expected {
-        bail!("xray checksum mismatch: got {actual}, want {expected}");
-    }
 
     let dest = paths::xray_binary_path()?;
     if dest.exists() {
@@ -565,6 +562,12 @@ pub async fn download_binary(fetch: &impl BinaryFetch) -> Result<PathBuf> {
     let dgst_dest = dgst_path(&dest);
     let install_dest = dest.clone();
     tokio::task::spawn_blocking(move || -> Result<()> {
+        // Verify BEFORE anything lands on disk: hashing the 64 MiB zip is
+        // CPU-bound, so it runs inside this blocking closure.
+        let actual = hex_lower(&Sha256::digest(&zip));
+        if actual != expected {
+            bail!("xray checksum mismatch: got {actual}, want {expected}");
+        }
         if let Some(parent) = install_dest.parent() {
             std::fs::create_dir_all(parent)?;
         }

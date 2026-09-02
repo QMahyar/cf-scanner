@@ -35,7 +35,6 @@ impl ScanController {
     /// with min latency and loss %. `scanned` counts completed groups, so
     /// totals stay readable in the UI.
     pub(super) async fn run_warp(&self, cfg: ScanConfig, seed: u64) -> Result<ScanSummary> {
-        cfg.validate()?;
         let warp = cfg.warp.clone().unwrap_or_default();
         let probes_per_endpoint = warp.probes_per_endpoint.max(1) as u64;
         // Verification (Task 13): probe under the user's keypair from their

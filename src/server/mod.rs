@@ -124,10 +124,37 @@ async fn fallback(uri: Uri) -> Response {
         "/" | "/index.html" => EMBEDDED_INDEX,
         p => p.trim_start_matches('/'),
     };
-    ui_response(file).unwrap_or_else(|| ApiError::not_found("not found").into_response())
+    ui_response(file)
+        .await
+        .unwrap_or_else(|| ApiError::not_found("not found").into_response())
 }
 
-fn ui_response(file: &str) -> Option<Response> {
+fn ui_mime(file: &str) -> &'static str {
+    match file.rsplit('.').next().unwrap_or("") {
+        "html" => "text/html; charset=utf-8",
+        "js" | "mjs" => "text/javascript",
+        "css" => "text/css",
+        "woff2" => "font/woff2",
+        "woff" => "font/woff",
+        "svg" => "image/svg+xml",
+        "json" => "application/json",
+        _ => "application/octet-stream",
+    }
+}
+
+fn ui_headers(file: &str) -> axum::http::HeaderMap {
+    let mut headers = axum::http::HeaderMap::new();
+    headers.insert(
+        axum::http::header::CONTENT_TYPE,
+        ui_mime(file).parse().unwrap(),
+    );
+    headers.insert("content-security-policy", SECURITY_CSP.parse().unwrap());
+    headers.insert("x-content-type-options", "nosniff".parse().unwrap());
+    headers.insert("referrer-policy", "no-referrer".parse().unwrap());
+    headers
+}
+
+async fn ui_response(file: &str) -> Option<Response> {
     #[cfg(debug_assertions)]
     {
         // Debug prefers live disk files so `cd ui && npm run build` is visible
@@ -145,43 +172,13 @@ fn ui_response(file: &str) -> Option<Response> {
             });
         if !escapes {
             let disk_path = std::path::Path::new("ui/dist").join(file);
-            if let Ok(bytes) = std::fs::read(&disk_path) {
-                let mime = match file.rsplit('.').next().unwrap_or("") {
-                    "html" => "text/html; charset=utf-8",
-                    "js" | "mjs" => "text/javascript",
-                    "css" => "text/css",
-                    "woff2" => "font/woff2",
-                    "woff" => "font/woff",
-                    "svg" => "image/svg+xml",
-                    "json" => "application/json",
-                    _ => "application/octet-stream",
-                };
-                let mut headers = axum::http::HeaderMap::new();
-                headers.insert(axum::http::header::CONTENT_TYPE, mime.parse().unwrap());
-                headers.insert("content-security-policy", SECURITY_CSP.parse().unwrap());
-                headers.insert("x-content-type-options", "nosniff".parse().unwrap());
-                headers.insert("referrer-policy", "no-referrer".parse().unwrap());
-                return Some((headers, bytes).into_response());
+            if let Ok(bytes) = tokio::fs::read(&disk_path).await {
+                return Some((ui_headers(file), bytes).into_response());
             }
         }
     }
     let data = UiAssets::get(file)?;
-    let mime = match file.rsplit('.').next().unwrap_or("") {
-        "html" => "text/html; charset=utf-8",
-        "js" | "mjs" => "text/javascript",
-        "css" => "text/css",
-        "woff2" => "font/woff2",
-        "woff" => "font/woff",
-        "svg" => "image/svg+xml",
-        "json" => "application/json",
-        _ => "application/octet-stream",
-    };
-    let mut headers = axum::http::HeaderMap::new();
-    headers.insert(axum::http::header::CONTENT_TYPE, mime.parse().unwrap());
-    headers.insert("content-security-policy", SECURITY_CSP.parse().unwrap());
-    headers.insert("x-content-type-options", "nosniff".parse().unwrap());
-    headers.insert("referrer-policy", "no-referrer".parse().unwrap());
-    Some((headers, data.data).into_response())
+    Some((ui_headers(file), data.data).into_response())
 }
 
 /// Wrong method on a known path: 405 with the same JSON envelope as every
@@ -436,7 +433,9 @@ async fn ranges(State(state): State<Arc<AppState>>) -> Json<RangesPayload> {
 }
 
 async fn index() -> Response {
-    ui_response(EMBEDDED_INDEX).expect("ui/dist/index.html is embedded at compile time")
+    ui_response(EMBEDDED_INDEX)
+        .await
+        .expect("ui/dist/index.html is embedded at compile time")
 }
 
 #[cfg(test)]

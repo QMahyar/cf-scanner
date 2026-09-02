@@ -12,7 +12,7 @@
   } from "../store.svelte";
   import { ResultsView } from "../resultsView.svelte";
   import { t } from "../i18n.svelte";
-  import { humanizeSeconds } from "../validators";
+  import { humanizeSeconds, WARP_SWEEP_CAP } from "../validators";
   import { toast } from "../toast.svelte";
   import type { Mode, Verdict } from "../types";
 
@@ -205,12 +205,12 @@
             <input
               class="field mono field-num"
               type="number"
-              min={scanMode === "Warp" ? 100 : 100}
-              max={scanMode === "Warp" ? 5000 : 100000}
+              min={100}
+              max={scanMode === "Warp" ? WARP_SWEEP_CAP : 100000}
               step={scanMode === "Warp" ? 50 : 500}
               bind:value={testUpTo}
               onchange={() => {
-                const cap = scanMode === "Warp" ? 5000 : 100_000;
+                const cap = scanMode === "Warp" ? WARP_SWEEP_CAP : 100_000;
                 testUpTo = Math.min(cap, Math.max(100, Math.trunc(Number(testUpTo)) || 800));
               }}
               aria-label={t("simple.testUpTo")}
@@ -222,7 +222,7 @@
             </span>
           {/if}
         </div>
-        {#if scanMode === "Warp" && testUpTo >= 5000}
+        {#if scanMode === "Warp" && testUpTo >= WARP_SWEEP_CAP}
           <p class="field__hint mt-1">{t("simple.warpCapHint")}</p>
         {/if}
       </div>

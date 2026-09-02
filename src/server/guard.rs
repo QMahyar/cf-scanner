@@ -53,6 +53,12 @@ pub(crate) fn origin_allowed(origin: &str, cfg: GuardConfig) -> bool {
 /// Rejects requests that are not from the local UI: a foreign Host header,
 /// a cross-origin browser request (Origin / Sec-Fetch-Site), or no Host at
 /// all. Browsers and curl always send Host; the UI is same-origin.
+///
+/// State-changing methods additionally require a custom header
+/// (`X-Requested-With: cf-scanner`). Browsers never attach custom headers to
+/// cross-site form submissions or navigation requests, so this closes the
+/// CSRF gap on legacy browsers that send neither Origin nor Sec-Fetch-Site —
+/// the layers above already cover every modern browser.
 pub(crate) async fn localhost_only(
     State(cfg): State<GuardConfig>,
     request: Request,
@@ -78,6 +84,23 @@ pub(crate) async fn localhost_only(
         && site != "none"
     {
         return Err(ApiError::forbidden("cross-site request rejected"));
+    }
+    if matches!(
+        *request.method(),
+        axum::http::Method::POST
+            | axum::http::Method::PUT
+            | axum::http::Method::DELETE
+            | axum::http::Method::PATCH
+    ) {
+        let marker = headers
+            .get("x-requested-with")
+            .and_then(|v| v.to_str().ok())
+            .map(str::trim);
+        if marker != Some("cf-scanner") {
+            return Err(ApiError::forbidden(
+                "missing X-Requested-With marker for a state-changing request",
+            ));
+        }
     }
     Ok(next.run(request).await)
 }

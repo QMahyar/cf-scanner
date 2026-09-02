@@ -111,4 +111,21 @@ describe("ResultsView semantics (characterization)", () => {
     expect(capped.capped).toBe(true);
     expect(capped.renderCap).toBe(500);
   });
+
+  it("show-more (renderLimit bump + markDirty) reveals fresh rows", () => {
+    const many: Verdict[] = Array.from({ length: 1200 }, (_, i) =>
+      row(`10.0.${Math.floor(i / 256)}.${i % 256}`, 443, i),
+    );
+    const capped = new ResultsView(() => many, "candidates");
+    expect(capped.visible.length).toBe(500);
+    capped.renderLimit += capped.renderCap;
+    capped.markDirty();
+    expect(capped.visible.length).toBe(1000);
+    expect(capped.visible.at(-1)).toBe(many[999]);
+    expect(capped.capped).toBe(true);
+    capped.renderLimit += capped.renderCap;
+    capped.markDirty();
+    expect(capped.visible.length).toBe(1200);
+    expect(capped.capped).toBe(false);
+  });
 });

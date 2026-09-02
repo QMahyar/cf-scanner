@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { onDestroy } from "svelte";
   import { Check, Copy, Download, FileJson2, FileSpreadsheet, Link2, QrCode, ShieldCheck } from "@lucide/svelte";
   import { api } from "../api";
   import type { Verdict } from "../types";
@@ -76,9 +77,24 @@
   let copiedPickedUris = $state(false);
   let copiedPassing = $state(false);
 
+  // Every flash/announce timer is tracked so a mid-flight unmount can't fire
+  // into dead state, and a rapid repeat click resets its previous timer.
+  const timers = new Set<ReturnType<typeof setTimeout>>();
+  function later(fn: () => void, ms: number): void {
+    const id = setTimeout(() => {
+      timers.delete(id);
+      fn();
+    }, ms);
+    timers.add(id);
+  }
+  onDestroy(() => {
+    for (const id of timers) clearTimeout(id);
+    timers.clear();
+  });
+
   function announce(msg: string): void {
     toast = msg;
-    setTimeout(() => (toast = ""), 2400);
+    later(() => (toast = ""), 2400);
   }
 
   async function copyText(text: string, n: number) {
@@ -94,7 +110,7 @@
     try {
       await navigator.clipboard.writeText(`${r.ip}:${r.port}`);
       copiedIdx = i;
-      setTimeout(() => (copiedIdx = null), 1200);
+      later(() => (copiedIdx = null), 1200);
     } catch {
       /* clipboard unavailable */
     }
@@ -103,7 +119,7 @@
   async function copyAll() {
     await copyText(filteredEndpoints(chipRows, view.maxLatency), chipRows.length);
     copiedAll = true;
-    setTimeout(() => (copiedAll = false), 1200);
+    later(() => (copiedAll = false), 1200);
   }
 
   /** The passing list copies independently of the active chip: banked
@@ -112,7 +128,7 @@
   async function copyPassing() {
     await copyText(passedRows.map(keyOf).join("\n"), passedRows.length);
     copiedPassing = true;
-    setTimeout(() => (copiedPassing = false), 1200);
+    later(() => (copiedPassing = false), 1200);
   }
 
   /** The original config URI this row's phase 2 verified with; null when the
@@ -130,7 +146,7 @@
       const { uri } = await api.exportUri(config, r.ip, r.port);
       await navigator.clipboard.writeText(uri);
       copiedUriIdx = i;
-      setTimeout(() => (copiedUriIdx = null), 1200);
+      later(() => (copiedUriIdx = null), 1200);
     } catch (e) {
       app.error = errorText(e);
     }
@@ -139,7 +155,7 @@
   async function copyPickedIps() {
     await copyText(view.picked.map(keyOf).join("\n"), view.picked.length);
     copiedPickedIps = true;
-    setTimeout(() => (copiedPickedIps = false), 1200);
+    later(() => (copiedPickedIps = false), 1200);
   }
 
   /** Export each picked passing row through its original config; rows with
@@ -155,7 +171,7 @@
       );
       await copyText(uris.map((u) => u.uri).join("\n"), uris.length);
       copiedPickedUris = true;
-      setTimeout(() => (copiedPickedUris = false), 1200);
+      later(() => (copiedPickedUris = false), 1200);
     } catch (e) {
       app.error = errorText(e);
     }
@@ -182,13 +198,15 @@
       const text = await api.bundle(format);
       if (format === "singbox") {
         downloadFile(text, "cf-scanner-singbox.json", "application/json");
+        pushToast(`${t("export.subscription")} ✓`);
       } else if (format === "clash") {
         downloadFile(text, "cf-scanner-clash.yaml", "text/yaml");
+        pushToast(`${t("export.subscription")} ✓`);
+      } else if (format === "raw") {
+        pushToast(t("export.subscriptionRaw"));
       } else {
         pushToast(t("export.subscription"));
       }
-      if (format === "raw") pushToast(t("export.subscriptionRaw"));
-      if (format === "singbox" || format === "clash") pushToast(`${t("export.subscription")} ✓`);
     } catch (e) {
       pushToast(errorText(e), "err");
     }
@@ -589,7 +607,15 @@
       <span class="mono">
         {t("table.renderCap", { visible: visibleRows.length, total: chipRows.length })}
       </span>
-      <button class="pill" onclick={() => (view.renderLimit += view.renderCap)}>
+      <button
+        class="pill"
+        onclick={() => {
+          view.renderLimit += view.renderCap;
+          // renderLimit feeds the view's cached visible/capped getters; the
+          // version-cache only invalidates on markDirty.
+          view.markDirty();
+        }}
+      >
         {t("table.showMore", { n: Math.min(view.renderCap, chipRows.length - visibleRows.length) })}
       </button>
     </div>

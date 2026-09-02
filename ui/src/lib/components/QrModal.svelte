@@ -9,12 +9,41 @@
     onclose,
   }: { payload: string; title: string; onclose: () => void } = $props();
 
+  let modal: HTMLDivElement | null = $state(null);
   let canvas: HTMLCanvasElement | null = $state(null);
   let tooLong = $state(false);
 
   onMount(() => {
     if (canvas) tooLong = !render(canvas, payload);
+    // Focus lands on the dialog so Escape/Tab work for keyboard users, and
+    // the previously-focused control regains focus when the modal closes.
+    const prev = document.activeElement as HTMLElement | null;
+    modal?.focus();
+    return () => prev?.focus?.();
   });
+
+  function onkeydown(e: KeyboardEvent) {
+    if (e.key === "Escape") {
+      onclose();
+      return;
+    }
+    // Minimal focus trap: Tab wraps within the dialog's focusable controls.
+    if (e.key !== "Tab" || !modal) return;
+    const focusables = [
+      ...modal.querySelectorAll<HTMLElement>("button:not([disabled])"),
+    ];
+    if (focusables.length === 0) return;
+    const first = focusables[0];
+    const last = focusables[focusables.length - 1];
+    const active = document.activeElement;
+    if (e.shiftKey && (active === first || active === modal)) {
+      e.preventDefault();
+      last.focus();
+    } else if (!e.shiftKey && (active === last || active === modal)) {
+      e.preventDefault();
+      first.focus();
+    }
+  }
 
   function download() {
     if (!canvas || tooLong) return;
@@ -31,7 +60,8 @@
   aria-modal="true"
   aria-labelledby="qr-title"
   tabindex="-1"
-  onkeydown={(e) => e.key === "Escape" && onclose()}
+  bind:this={modal}
+  {onkeydown}
   onclick={(e) => e.target === e.currentTarget && onclose()}
 >
   <div class="modal__panel">

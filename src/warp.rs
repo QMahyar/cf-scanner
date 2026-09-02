@@ -21,13 +21,12 @@ use std::time::Duration;
 use anyhow::Result;
 use boringtun::noise::{Tunn, TunnResult};
 use boringtun::x25519::{PublicKey, StaticSecret};
+use rand_core::{OsRng, RngCore as _};
 use tokio::net::UdpSocket;
 use tokio::time::timeout;
 
 use crate::probe::{ProbeError, Transport};
 use crate::ranges::CidrPool;
-
-static JITTER_COUNTER: AtomicU32 = AtomicU32::new(0);
 
 pub const BUNDLED_POOLS: &str = include_str!("../data/warp-pools.txt");
 
@@ -241,7 +240,6 @@ impl Transport for WarpTransport {
     }
 }
 
-/// One WG handshake attempt shared by both transports: reuses the endpoint's
 /// How deeply a probe validates an endpoint.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ProbeDepth {
@@ -268,21 +266,15 @@ async fn probe_once(
 ) -> Result<u32, ProbeError> {
     // Randomized 10-40ms pacing between handshakes: synchronized Init bursts
     // trip WARP's per-IP rate shaping and read as false negatives. Bounded,
-    // so a full pool stays fast even at 200 concurrency.
-    let jitter_ms = {
-        let c = JITTER_COUNTER.fetch_add(1, Ordering::Relaxed);
-        let mut rng = crate::engine::SplitMix64::new(c as u64);
-        10 + rng.next_u64() % 31
-    };
+    // so a full pool stays fast even at 200 concurrency. Seeded from OS
+    // entropy, not a counter: a counter makes the pacing sequence identical
+    // in every process, which is exactly the synchronized pattern the jitter
+    // exists to break.
+    let jitter_ms = 10 + OsRng.next_u32() % 31;
     // Cancellable jitter: `probe` futures are raced against
     // `ProbeContext::cancelled()` in `engine::warp` via `select!`, so dropping
-    // the future must cancel the sleep. Wrapping it in `select!` makes the
-    // cancellation explicit and avoids holding the runtime's timer across a
-    // cancelled probe.
-    tokio::select! {
-        _ = tokio::time::sleep(Duration::from_millis(jitter_ms)) => {},
-        _ = std::future::pending::<()>() => {},
-    }
+    // the future cancels the sleep.
+    tokio::time::sleep(Duration::from_millis(jitter_ms as u64)).await;
 
     // Fresh index per probe so concurrent sockets can never confuse
     // each other's receiver-index check.
@@ -313,10 +305,16 @@ async fn probe_once(
     match timeout(Duration::from_millis(timeout_ms), socket.recv(&mut reply)).await {
         Ok(Ok(n)) => {
             if !classify(&reply[..n]) {
+                // Slice to what actually arrived: beyond `n` the buffer holds
+                // stale bytes from previous probes, not packet data.
+                let head = &reply[..n.min(8)];
                 tracing::debug!(
                     len = n,
-                    wg_type = u32::from_le_bytes(reply[..n.min(4)].try_into().unwrap_or([0; 4])),
-                    recv_index = reply
+                    wg_type = head
+                        .first_chunk::<4>()
+                        .map(|b| u32::from_le_bytes(*b))
+                        .unwrap_or(0),
+                    recv_index = head
                         .get(4..8)
                         .map(|b| u32::from_le_bytes(b.try_into().unwrap())),
                     "non-handshake WARP reply"

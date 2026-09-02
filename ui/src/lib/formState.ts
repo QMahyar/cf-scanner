@@ -1,14 +1,5 @@
 import type { CdnPreset, FragmentPreset, FragmentWire, Mode, ScanConfig } from "./types";
 
-/** PascalCase wire value → lowercase form value; unknown/legacy values fall
- * back to the form default so a profile saved by any version still loads. */
-function fragmentFromWire(wire: string | undefined): FragmentPreset {
-  const lower = (wire ?? "").toLowerCase();
-  return ["off", "light", "medium", "heavy", "custom"].includes(lower)
-    ? (lower as FragmentPreset)
-    : "off";
-}
-
 import {
   CDN_HTTPS_PORTS,
   WARP_EXTENDED_PORTS,
@@ -105,46 +96,6 @@ export function defaultFormState(): FormState {
     warpEndpoints: "",
     wgconf: "",
     verifyWarp: false,
-  };
-}
-
-/** Pure ScanConfig → FormState: inverse of buildConfig for every field it
- * owns, so loading a profile reproduces the exact inputs that built it
- * (ports/cidrs rejoin lines or commas, cap "" = none, Count target flips
- * useCount). Server-unmappable extras (probe_urls, custom_fragment,
- * phase-2 concurrency) fall back to defaults since the form cannot edit
- * them. */
-export function formStateFromConfig(cfg: ScanConfig): FormState {
-  const d = defaultFormState();
-  const catalog = portCatalog(cfg.mode);
-  const known = new Set([...catalog.primary, ...catalog.extended]);
-  const selected = cfg.ports.filter((p) => known.has(p));
-  const custom = cfg.ports.filter((p) => !known.has(p));
-  return {
-    mode: cfg.mode,
-    preset: !("Count" in cfg.target) ? cfg.target.Preset : d.preset,
-    count: "Count" in cfg.target ? cfg.target.Count : d.count,
-    useCount: "Count" in cfg.target,
-    // A profile whose ports are all unknown to the current catalog keeps at
-    // least the mode default checked, so the form never renders zero chips.
-    selectedPorts: selected.length > 0 ? selected : d.selectedPorts,
-    customPortsText: custom.join(", "),
-    concurrency: cfg.concurrency,
-    timeoutMs: cfg.timeout_ms,
-    includeV6: cfg.include_v6 ?? false,
-    stopFound: cfg.stop.found,
-    capText: cfg.stop.cap === null ? "" : String(cfg.stop.cap),
-    customCidrs: cfg.custom_cidrs.join("\n"),
-    exclude: cfg.exclude.join("\n"),
-    phase2On: cfg.mode === "Cdn" && !!cfg.phase2,
-    configsText: cfg.phase2?.configs.join("\n") ?? "",
-    fragment: fragmentFromWire(cfg.phase2?.fragment),
-    snis: cfg.phase2?.snis.join(", ") ?? "",
-    probeUrl: cfg.phase2?.probe_url || d.probeUrl,
-    warpProbes: cfg.warp?.probes_per_endpoint ?? d.warpProbes,
-    warpEndpoints: cfg.warp?.custom_endpoints.join("\n") ?? "",
-    wgconf: cfg.warp?.wgconf ?? "",
-    verifyWarp: cfg.warp?.verify_with_wgconf ?? false,
   };
 }
 

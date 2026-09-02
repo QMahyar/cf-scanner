@@ -101,21 +101,17 @@ fn sanitize_url_for_error(url: &str) -> String {
 /// HTTPS GET with extra request headers (e.g. `User-Agent`), used by the
 /// phase-2 subscription fetcher which must not send the bare default UA.
 pub async fn fetch_tls_with_headers(url: &str, extra_headers: &str) -> Result<String> {
-    let body = fetch_tls_parts(url, extra_headers).await?;
+    let body = fetch_tls_inner(url, extra_headers).await?;
     Ok(String::from_utf8_lossy(&body).into_owned())
 }
 
 /// HTTPS GET returning raw bytes (binary downloads like the xray zip).
 pub async fn fetch_bytes(url: &str) -> Result<Vec<u8>> {
-    fetch_tls_parts(url, "Accept: */*").await
-}
-
-async fn fetch_tls_parts(url: &str, extra_headers: &str) -> Result<Vec<u8>> {
-    fetch_tls_inner(url, extra_headers).await
+    fetch_tls_inner(url, "Accept: */*").await
 }
 
 async fn fetch_tls(url: &str) -> Result<String> {
-    let body = fetch_tls_parts(url, "Accept: application/json").await?;
+    let body = fetch_tls_inner(url, "Accept: application/json").await?;
     Ok(String::from_utf8_lossy(&body).into_owned())
 }
 
@@ -138,8 +134,8 @@ async fn fetch_tls_inner(url: &str, extra_headers: &str) -> Result<Vec<u8>> {
         if name.is_empty() || value.is_empty() {
             continue;
         }
-        if http::header::HeaderName::from_bytes(name.as_bytes()).is_err()
-            || http::header::HeaderValue::from_bytes(value.as_bytes()).is_err()
+        if reqwest::header::HeaderName::from_bytes(name.as_bytes()).is_err()
+            || reqwest::header::HeaderValue::from_bytes(value.as_bytes()).is_err()
         {
             continue;
         }

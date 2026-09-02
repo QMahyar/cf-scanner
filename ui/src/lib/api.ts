@@ -66,6 +66,12 @@ async function unwrap<T>(res: Response): Promise<T> {
   return res.json() as Promise<T>;
 }
 
+/** State-changing requests carry this marker: browsers never attach custom
+ * headers to cross-site form posts, so the server's guard treats its
+ * presence as proof the request came from this app's JS, not a hostile page
+ * (covers legacy browsers that send neither Origin nor Sec-Fetch-Site). */
+const CSRF_MARKERS = { "X-Requested-With": "cf-scanner" };
+
 export const api = {
   status: () =>
     fetch("/api/status", { cache: "no-store", signal: AbortSignal.timeout(8000) }).then(
@@ -78,7 +84,7 @@ export const api = {
   scan: (cfg: ScanConfig) =>
     fetch("/api/scan", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", ...CSRF_MARKERS },
       body: JSON.stringify(cfg),
       cache: "no-store",
       signal: AbortSignal.timeout(8000),
@@ -86,19 +92,21 @@ export const api = {
   cancel: () =>
     fetch("/api/cancel", {
       method: "POST",
+      headers: CSRF_MARKERS,
       cache: "no-store",
       signal: AbortSignal.timeout(8000),
     }).then(assertOk),
   reset: () =>
     fetch("/api/reset", {
       method: "POST",
+      headers: CSRF_MARKERS,
       cache: "no-store",
       signal: AbortSignal.timeout(8000),
     }).then(assertOk),
   exportUri: (config: string, ip: string, port: number) =>
     fetch("/api/config/export", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", ...CSRF_MARKERS },
       body: JSON.stringify({ config, ip, port }),
       cache: "no-store",
       signal: AbortSignal.timeout(8000),
@@ -108,13 +116,17 @@ export const api = {
     fetch(`/api/bundle?format=${format}`, {
       cache: "no-store",
       signal: AbortSignal.timeout(8000),
-    }).then((res) => res.text()),
+    })
+      .then(assertOk)
+      .then((res) => res.text()),
   /** Metadata dump (json/csv) of the current results. */
   resultsExport: (format: "json" | "csv" = "csv") =>
     fetch(`/api/results/export?format=${format}`, {
       cache: "no-store",
       signal: AbortSignal.timeout(8000),
-    }).then((res) => res.text()),
+    })
+      .then(assertOk)
+      .then((res) => res.text()),
   xrayStatus: () =>
     fetch("/api/xray/status", { cache: "no-store", signal: AbortSignal.timeout(8000) }).then(
       unwrap<XrayStatusPayload>,
@@ -122,6 +134,7 @@ export const api = {
   xrayDownload: () =>
     fetch("/api/xray/download", {
       method: "POST",
+      headers: CSRF_MARKERS,
       cache: "no-store",
       signal: AbortSignal.timeout(8000),
     }).then(unwrap<{ success: boolean; path?: string | null; error?: string | null }>),
@@ -132,7 +145,7 @@ export const api = {
   warpRegister: (license: string | null, overwrite: boolean) =>
     fetch("/api/warp/register", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", ...CSRF_MARKERS },
       body: JSON.stringify({ license: license || null, overwrite }),
       cache: "no-store",
       signal: AbortSignal.timeout(8000),

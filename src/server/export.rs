@@ -1,4 +1,4 @@
-//! Export endpouints: turn the last scan's verified candidates into something
+//! Export endpoints: turn the last scan's verified candidates into something
 //! a proxy client can consume directly. One server function serves every
 //! format so the client never re-sends configs.
 //!
@@ -18,9 +18,10 @@ use axum::response::{IntoResponse, Response};
 
 use crate::api::types::Verdict;
 use crate::configs;
+use crate::server::error::ApiError;
 use crate::server::state::AppState;
 
-/// Serialized result export for `?format=json` / `?format=csv`.
+/// Serialized result export query for `?format=json` / `?format=csv`.
 #[derive(serde::Deserialize)]
 pub(crate) struct ResultExportQuery {
     #[serde(default)]
@@ -60,6 +61,19 @@ fn remark_for(v: &Verdict) -> Option<String> {
         Some(l) => format!("CF-{place}-{l}ms"),
         None => format!("CF-{place}"),
     })
+}
+
+/// Ensures every proxy name/tag in a generated config is unique: clients
+/// like Mihomo reject a config whose proxy names collide, and two passing
+/// rows can share a colo and latency (hence the same remark).
+fn unique_tag(tag: String, seen: &mut std::collections::HashMap<String, usize>) -> String {
+    let n = seen.entry(tag.clone()).or_insert(0);
+    *n += 1;
+    if *n == 1 {
+        tag
+    } else {
+        format!("{tag}-{}", *n)
+    }
 }
 
 /// Rewrite each passing candidate's original config against its verified
@@ -126,11 +140,16 @@ fn singbox_body(uris: &[String]) -> String {
     // spec via the shared parser rather than string-splicing, so every field
     // (uuid, password, transport, tls, sni) survives.
     let mut outbounds: Vec<serde_json::Value> = Vec::new();
+    let mut seen_tags: std::collections::HashMap<String, usize> = Default::default();
     for uri in uris {
         if let Ok(spec) = configs::parse_uri(uri) {
+            let tag = unique_tag(
+                spec.tag.clone().unwrap_or_else(|| "cf-scanner".into()),
+                &mut seen_tags,
+            );
             let mut ob = serde_json::json!({
                 "type": spec.protocol.as_str(),
-                "tag": spec.tag.clone().unwrap_or_else(|| "cf-scanner".into()),
+                "tag": tag,
                 "server": spec.server,
                 "server_port": spec.port,
             });
@@ -172,10 +191,14 @@ fn singbox_body(uris: &[String]) -> String {
 /// easier to build safely than hand-rolled YAML.
 fn clash_body(uris: &[String]) -> String {
     let mut proxies: Vec<serde_json::Value> = Vec::new();
+    let mut seen_names: std::collections::HashMap<String, usize> = Default::default();
     for uri in uris {
         if let Ok(spec) = configs::parse_uri(uri) {
             let mut p = serde_json::json!({
-                "name": spec.tag.clone().unwrap_or_else(|| "cf-scanner".into()),
+                "name": unique_tag(
+                    spec.tag.clone().unwrap_or_else(|| "cf-scanner".into()),
+                    &mut seen_names,
+                ),
                 "type": match spec.protocol {
                     configs::Protocol::Vless => "vless",
                     configs::Protocol::Vmess => "vmess",
@@ -184,10 +207,19 @@ fn clash_body(uris: &[String]) -> String {
                 },
                 "server": spec.server,
                 "port": spec.port,
-                "uuid": if matches!(spec.protocol, configs::Protocol::Vless | configs::Protocol::Vmess) { spec.user_id.clone() } else { String::new() },
-                "password": if matches!(spec.protocol, configs::Protocol::Trojan | configs::Protocol::Shadowsocks) { spec.user_id.clone() } else { String::new() },
             });
             let obj = p.as_object_mut().unwrap();
+            // Only the credential field the protocol actually uses: empty
+            // uuid/password keys on mismatched protocols are noise Mihomo
+            // tolerates but no config needs.
+            match spec.protocol {
+                configs::Protocol::Vless | configs::Protocol::Vmess => {
+                    obj.insert("uuid".into(), spec.user_id.into());
+                }
+                configs::Protocol::Trojan | configs::Protocol::Shadowsocks => {
+                    obj.insert("password".into(), spec.user_id.into());
+                }
+            }
             if spec.protocol == configs::Protocol::Shadowsocks {
                 if let Some(m) = &spec.method {
                     obj.insert("cipher".into(), m.clone().into());
@@ -216,6 +248,18 @@ fn clash_body(uris: &[String]) -> String {
     .to_string()
 }
 
+/// RFC-4180 field quoting: values containing commas, quotes, or newlines
+/// are wrapped and their quotes doubled. ip/port/latency are numeric so this
+/// only ever fires for country/colo, which are length- and charset-capped
+/// upstream — the quoting is defense in depth, not the only line of defense.
+pub(crate) fn csv_field(v: &str) -> String {
+    if v.contains([',', '"', '\n', '\r']) {
+        format!("\"{}\"", v.replace('"', "\"\""))
+    } else {
+        v.to_owned()
+    }
+}
+
 fn result_dump(format: &str, verdicts: &[Verdict]) -> Response {
     // Verdicts arrive already sorted by latency (engine snapshot_sorted); keep
     // the order for CSV, and wrap JSON as a stable object for easy parsing.
@@ -226,18 +270,22 @@ fn result_dump(format: &str, verdicts: &[Verdict]) -> Response {
                 String::from("ip,port,latency_ms,country,colo,phase2_passed,phase2_latency_ms\n");
             for v in verdicts {
                 let p2 = v.phase2.as_ref();
-                out.push_str(&format!(
-                    "{},{},{},{},{},{},{}\n",
-                    v.ip,
-                    v.port,
+                let fields = [
+                    v.ip.to_string(),
+                    v.port.to_string(),
                     v.latency_ms.map(|x| x.to_string()).unwrap_or_default(),
-                    v.country.as_deref().unwrap_or(""),
-                    v.colo.as_deref().unwrap_or(""),
-                    p2.map(|p| if p.passed { "1" } else { "0" }).unwrap_or(""),
+                    v.country.as_deref().unwrap_or("").to_owned(),
+                    v.colo.as_deref().unwrap_or("").to_owned(),
+                    p2.map(|p| if p.passed { "1" } else { "0" })
+                        .unwrap_or("")
+                        .to_owned(),
                     p2.and_then(|p| p.latency_ms)
                         .map(|x| x.to_string())
                         .unwrap_or_default(),
-                ));
+                ];
+                let quoted: Vec<String> = fields.iter().map(|f| csv_field(f)).collect();
+                out.push_str(&quoted.join(","));
+                out.push('\n');
             }
             out
         }
@@ -261,7 +309,15 @@ pub(crate) async fn bundle(
     State(state): State<std::sync::Arc<AppState>>,
     Query(q): Query<BundleQuery>,
 ) -> Response {
-    let format = q.format.as_deref().unwrap_or("base64");
+    const FORMATS: [&str; 4] = ["base64", "raw", "singbox", "clash"];
+    let Some(format) = resolve_format(q.format.as_deref(), &FORMATS) else {
+        return ApiError::bad_request(format!(
+            "unknown format {:?}; expected one of {}",
+            q.format.as_deref().unwrap_or(""),
+            FORMATS.join("|")
+        ))
+        .into_response();
+    };
     let configs = state.controller.phase2_configs();
     let results = state.controller.results();
     subscription_body(format, &results, &configs)
@@ -272,7 +328,26 @@ pub(crate) async fn result_export(
     State(state): State<std::sync::Arc<AppState>>,
     Query(q): Query<ResultExportQuery>,
 ) -> Response {
-    let format = q.format.as_deref().unwrap_or("csv");
+    const FORMATS: [&str; 2] = ["csv", "json"];
+    let Some(format) = resolve_format(q.format.as_deref(), &FORMATS) else {
+        return ApiError::bad_request(format!(
+            "unknown format {:?}; expected one of {}",
+            q.format.as_deref().unwrap_or(""),
+            FORMATS.join("|")
+        ))
+        .into_response();
+    };
     let results = state.controller.results();
     result_dump(format, &results)
+}
+
+/// Unknown `?format` values must be rejected, not silently defaulted: the
+/// UI always sends a known one, so an unknown value means a stale client or
+/// a mistyped script, and either deserves a loud 400.
+fn resolve_format<'a>(query: Option<&'a str>, allowed: &[&'a str]) -> Option<&'a str> {
+    match query {
+        None => Some(allowed.first().copied().unwrap_or("")),
+        Some(f) if allowed.contains(&f) => Some(f),
+        Some(_) => None,
+    }
 }

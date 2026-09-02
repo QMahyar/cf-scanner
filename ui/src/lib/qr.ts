@@ -79,7 +79,9 @@ const N2 = 3;
 const N3 = 40;
 const N4 = 10;
 
-function gen(text: string): { size: number; modules: Uint8Array[] } | null {
+/** Builds the module matrix for `text`, or null when it exceeds the v25
+ * byte capacity. Exposed for tests; `render` is the UI entry point. */
+export function gen(text: string): { size: number; modules: Uint8Array[] } | null {
   const bytes = new TextEncoder().encode(text);
   let ver = 1;
   while (ver <= 25 && dataCw(ver) * 8 - 4 - (ver < 10 ? 8 : 16) < bytes.length * 8) ver++;

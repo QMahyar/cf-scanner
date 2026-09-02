@@ -37,7 +37,7 @@ copy/save working IPs one-per-line — all in one binary, no external services.
 ## 2. Tech Stack (versions pinned to researched sources)
 
 - Rust edition 2024; `tokio` (async runtime), `clap` 4 (CLI)
-- `axum` (HTTP API), `tower-http` (static files), SSE via axum streams
+- `axum` (HTTP API), `rust-embed` (embedded UI assets), SSE via axum streams
 - TLS probing: `tokio-rustls` + `rustls` (no OpenSSL)
 - `serde` / `serde_json` (API + configs)
 - Xray phase 2: spawn official `xray` binary subprocess, local socks
@@ -63,11 +63,10 @@ copy/save working IPs one-per-line — all in one binary, no external services.
   max 64 distinct; concurrency 1-1000 (default 64); timeout 100-30000 ms
   (default 3000); scan count ≤100_000; `stop.found`/`cap` ≤100_000_000;
   warp endpoints ≤2048, `probes_per_endpoint` 1-10; phase2 entries ≤8, each
-  ≤8 KiB, SNIs ≤256 B, probe URLs ≤2 KiB, `wgconf` ≤64 KiB; profiles ≤50
-  (2 MiB body cap, wgconf stripped on persist).
+   ≤8 KiB, SNIs ≤256 B, probe URLs ≤2 KiB, `wgconf` ≤64 KiB (2 MiB body cap).
 - Configuration: hand-rolled JSON in the platform data dir (`identity.json`
-  for WARP keys with 0600 on Unix, `profiles.json` up to 50 `ScanConfig`s with
-  wgconf stripped on persist, `refreshed-ranges.json` + `refreshed-ranges-v6.json`);
+  for WARP keys with 0600 on Unix, `refreshed-ranges.json` +
+  `refreshed-ranges-v6.json`);
   no config crate, no TOML. CLI `--phase2-configs` accepts local file paths;
   the HTTP API accepts URLs/URIs only (file paths are CLI-only, validated at
   `server/mod.rs::start_scan`).
@@ -213,7 +212,9 @@ pub struct Verdict {
   CIDRs, URI schemes, caps from §2) and reject over-cap requests (413 for
   profiles, 422 `invalid_config` for scan caps); check `.dgst` checksums for
   downloaded xray binaries; bind 127.0.0.1 only unless an explicit flag changes
-  it; keep challenge content (configs, generated keys) out of logs.
+  it; keep challenge content (configs, generated keys) out of logs; require
+  `X-Requested-With: cf-scanner` on all state-changing API requests (CSRF
+  hardening — the server guard rejects mutating methods without it).
 - **Ask first:** adding dependencies; changing the API contract
   (`src/api/`); modifying dist/release config; bundling a new binary or data
   file; changing the default scan behavior.
@@ -239,8 +240,6 @@ pub struct Verdict {
       exported as text/.conf; WARP+ binding option present
 - [ ] Results: last-scan-only + reset; sort by latency/country/datacenter/loss;
       copy with ports / raw IPs (one per line, no trailing whitespace); save
-- [ ] Profiles: up to 50 presaved ScanConfigs, wgconf stripped on persist, 0600
-      on Unix, round-tripped via `/api/profiles`
 - [ ] GeoIP: country via embedded mmdb offline; datacenter colo via
       /cdn-cgi/trace in phase 2
 - [ ] Frontend: Svelte 5 SPA in `ui/` → committed `ui/dist` via rust-embed,
