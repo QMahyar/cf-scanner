@@ -22,9 +22,6 @@ export interface RangesPayload {
 
 export type LiveStatus = "connecting" | "live" | "offline";
 
-/** Failure from a non-2xx API response. Carries the HTTP status and the
- * server envelope's detail so callers can route messages to form fields
- * (400/422) instead of only showing a global banner. */
 export class ApiError extends Error {
   readonly status: number;
   readonly detail: string;
@@ -45,14 +42,10 @@ async function apiErrorFrom(res: Response): Promise<ApiError> {
     if (body?.error) summary = body.error;
     if (body?.message) detail = body.message;
   } catch {
-    /* non-JSON error body */
   }
   return new ApiError(res.status, summary, detail);
 }
 
-/** 202 (scan accepted) and 204 carry no body but still use the ApiError
- * envelope on failure — pass their Response through this to get
- * unwrap()-style thrown Errors. */
 export async function assertOk(res: Response): Promise<Response> {
   if (!res.ok) throw await apiErrorFrom(res);
   return res;
@@ -60,16 +53,10 @@ export async function assertOk(res: Response): Promise<Response> {
 
 async function unwrap<T>(res: Response): Promise<T> {
   if (!res.ok) throw await apiErrorFrom(res);
-  // 202 (scan accepted) and 204 carry no body: parsing them as JSON throws
-  // "Unexpected end of JSON input" even though the request succeeded.
   if (res.status === 202 || res.status === 204) return undefined as T;
   return res.json() as Promise<T>;
 }
 
-/** State-changing requests carry this marker: browsers never attach custom
- * headers to cross-site form posts, so the server's guard treats its
- * presence as proof the request came from this app's JS, not a hostile page
- * (covers legacy browsers that send neither Origin nor Sec-Fetch-Site). */
 const CSRF_MARKERS = { "X-Requested-With": "cf-scanner" };
 
 export const api = {
@@ -111,7 +98,6 @@ export const api = {
       cache: "no-store",
       signal: AbortSignal.timeout(8000),
     }).then(unwrap<{ uri: string }>),
-  /** Subscription bundle from the last scan's verified set. */
   bundle: (format: "base64" | "raw" | "singbox" | "clash" = "base64") =>
     fetch(`/api/bundle?format=${format}`, {
       cache: "no-store",
@@ -119,7 +105,6 @@ export const api = {
     })
       .then(assertOk)
       .then((res) => res.text()),
-  /** Metadata dump (json/csv) of the current results. */
   resultsExport: (format: "json" | "csv" = "csv") =>
     fetch(`/api/results/export?format=${format}`, {
       cache: "no-store",
@@ -152,11 +137,6 @@ export const api = {
     }).then(unwrap<{ wgconf: string }>),
 };
 
-/** Live event stream. The server keeps idle connections open (a replayed
- * terminal is context, not an end-of-stream), so one EventSource lasts the
- * whole session; browsers reconnect transparently on drop. onStatus tracks
- * the real connection: live on open, connecting while the browser
- * auto-reconnects, offline only when navigator says the network is gone. */
 export function subscribe(handlers: {
   onProgress?: (p: ScanProgress) => void;
   onResult?: (v: Verdict) => void;

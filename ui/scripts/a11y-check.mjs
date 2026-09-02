@@ -1,8 +1,3 @@
-// A11y gate: axe-core over the built UI in real Chromium — desktop + mobile,
-// simple + Pro, on the four views a real user sees. Serves ui/dist statically
-// (no API): the UI degrades to its offline state, which is exactly the state
-// being scanned. Fails on any serious/critical violation; screenshots land in
-// ui/a11y-screens (gitignored) so CI artifacts show what was scanned.
 import { createServer } from "node:http";
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { dirname, extname, join, resolve } from "node:path";
@@ -47,16 +42,12 @@ const SCANS = [
 const browser = await chromium.launch();
 const failures = [];
 for (const [name, viewport, pro] of SCANS) {
-  // axe-core/playwright injects via CDP on a real BrowserContext; the
-  // browser.newPage() shortcut creates an implicit one it cannot use.
   const context = await browser.newContext({ viewport });
   const page = await context.newPage();
   await page.goto(`${base}/`, { waitUntil: "load" });
   if (pro) {
     await page.getByRole("button", { name: "Pro", exact: true }).click();
   }
-  // Scroll through so IntersectionObserver reveals everything: axe must see
-  // real pixels, not opacity-0 pre-reveal content.
   await page.evaluate(async () => {
     for (let y = 0; y < document.body.scrollHeight; y += 400) {
       window.scrollTo(0, y);

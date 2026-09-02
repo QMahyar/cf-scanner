@@ -34,8 +34,6 @@
     live === "live" ? "var(--success)" : live === "offline" ? "var(--danger)" : "var(--text-ghost)",
   );
 
-  /** F5 mid-scan: the engine keeps last-scan state in memory, so pull it
-   * once instead of showing a blank page until the next SSE tick. */
   async function hydrate() {
     try {
       const [s, r] = await Promise.all([api.status(), api.results()]);
@@ -49,7 +47,6 @@
       }
       if (s.is_running) app.running = true;
     } catch {
-      /* server unreachable; the live pill reports connectivity */
     }
   }
 
@@ -76,10 +73,6 @@
       onResult: (v) => applyResult(v),
       onPhase2: (p) => (app.phase2 = p),
       onFinished: (s) => {
-        // The final refetch is async; if the user starts scan B before it
-        // lands, its payload belongs to scan A and must not repopulate the
-        // (already reset) results list. startedAt is re-stamped on every
-        // start, so a changed value disqualifies the in-flight fetch.
         const gen = app.startedAt;
         app.summary = s;
         app.running = false;
@@ -107,9 +100,6 @@
     setProMode(pro);
   }
 
-  /** Desktop notification on scan completion — tab may be in the background
-   * during a multi-minute scan. Opt-in via Notification permission (prompted
-   * on first Start); silently no-ops when denied/unavailable. */
   function notifyFinished(s: ScanSummary) {
     try {
       if (typeof Notification === "undefined" || Notification.permission !== "granted") return;
@@ -120,11 +110,9 @@
         n.close();
       };
     } catch {
-      /* Notification unavailable */
     }
   }
 
-  /** APG tabs keyboard pattern: arrows move selection + focus, Home/End jump. */
   function tabKeydown(e: KeyboardEvent) {
     if (e.key !== "ArrowLeft" && e.key !== "ArrowRight" && e.key !== "Home" && e.key !== "End")
       return;

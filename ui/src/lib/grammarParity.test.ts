@@ -12,9 +12,6 @@ const RUNNERS: Record<Kind, (s: string) => { ok: boolean }> = {
 };
 
 describe("grammar parity with tests/fixtures/grammar-cases.json", () => {
-  // The fixture is the shared contract between the Rust validators
-  // (src/api/types.rs, src/ranges.rs) and this TS mirror. Every case must
-  // land the same way on both sides.
   for (const c of grammarCases as Case[]) {
     it(`${c.kind}: ${JSON.stringify(c.input)} → ${c.expect}`, () => {
       const runner = RUNNERS[c.kind];

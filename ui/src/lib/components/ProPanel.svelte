@@ -49,21 +49,14 @@
   let validationErrors = $state<FieldIssue[]>([]);
   let form = $state<FormState>(defaultFormState());
 
-  /** Keys the user has edited — live inline validation only lights up these
-   * so untouched fields stay quiet until a submit attempt. */
   let touched = $state<Partial<Record<FormField, boolean>>>({});
-  /** Server 400/422 messages routed to identifiable fields; cleared per
-   * field as soon as the user edits it again. */
   let serverFieldErrors = $state<Partial<Record<FormField, string>>>({});
-  /** Flip after the localStorage restore attempt so the persist effect
-   * never writes defaults over a saved form before hydration. */
   let hydrated = $state(false);
 
   let xray = $state<XrayStatusPayload | null>(null);
   let xrayBusy = $state(false);
   let xrayError = $state<string | null>(null);
 
-  /** WARP endpoints file import (local to WARP section). */
   const WARP_RANGES_MAX_BYTES = 256 * 1024;
   let warpRangesFileInput = $state<HTMLInputElement | null>(null);
   let warpRangesNote = $state<{ ok: boolean; text: string } | null>(null);
@@ -117,11 +110,6 @@
     });
   }
 
-  /** Skip-to-Phase-2 (plan T6): cancel the running phase-1 scan, then verify
-   * its banked candidates immediately via phase2_only. preserveResults
-   * freezes the current rows into frozenPhase1 instead of wiping them, so
-   * the candidates list keeps its content while tunnel verdicts upsert over
-   * the live rows. */
   let skipping = $state(false);
 
   const configsListed = $derived(
@@ -166,7 +154,7 @@
         app.error = t("pro.error.stopTimeout");
         return;
       }
-      const cfg = buildConfig(form); // may throw FormValidationError
+      const cfg = buildConfig(form);
       cfg.phase2_only = true;
       validationErrors = [];
       await startScan(cfg, { preserveResults: true });
@@ -183,9 +171,6 @@
     }
   }
 
-  /** Verify banked while idle (wayfinder T4): same phase2_only path as
-   * skip-to-phase-2 but with no cancel step — nothing is running. The form
-   * is the config source so profile/persisted values apply unchanged. */
   let verifyingBanked = $state(false);
   const canVerifyBanked = $derived(
     !app.running &&
@@ -206,10 +191,7 @@
   async function verifyBanked() {
     verifyingBanked = true;
     try {
-      const cfg = buildConfig(form); // may throw FormValidationError
-      // phase2_only never dials phase-1 targets, but the wire contract still
-      // demands at least one port — pin the CDN default rather than shipping
-      // the scan form's whole port list.
+      const cfg = buildConfig(form);
       cfg.ports = [443];
       cfg.phase2_only = true;
       validationErrors = [];
@@ -218,7 +200,7 @@
       if (!outcome.ok && outcome.rejected) {
         const routed = routeServerDetail(outcome.rejected.detail);
         if (Object.keys(routed).length > 0) {
-          app.error = null; // routed to the fields; keep the banner quiet
+          app.error = null;
           serverFieldErrors = { ...serverFieldErrors, ...routed };
         }
       }
@@ -234,19 +216,12 @@
     verifyingBanked = false;
   }
 
-  // --- Two-list phase separation (wayfinder T4) ---
-  // Read-side split over ONE store array, never duplicated: candidates shows
-  // the frozen pre-verify snapshot when one exists (frozen rows all lack
-  // phase2 — freeze only happens on phase2_only+preserveResults starts), so
-  // it can never double-count rows that also appear as verified.
   const candidatesView = new ResultsView(
     () => app.frozenPhase1 ?? app.results,
     "candidates",
   );
   const verifiedView = new ResultsView(() => app.results, "verified");
 
-  /** xl breakpoint mirror for JS-side card switching; CSS still owns layout
-   * via grid-cols-2 so a missed event can only affect which cards render. */
   let wide = $state(false);
   $effect(() => {
     const mq = window.matchMedia("(min-width: 1280px)");
@@ -256,7 +231,6 @@
     return () => mq.removeEventListener("change", onChange);
   });
 
-  /** Which list renders below lg; ignored at lg+ where both cards show. */
   let activeList = $state<"all" | "verified">("all");
 
   const showCandidatesCard = $derived(app.results.length > 0 || app.running);
@@ -266,12 +240,8 @@
 
   let scanAdvancedOpen = $state(false);
   let warpAdvancedOpen = $state(false);
-  /** Custom-ports field renders only on demand; a restored form that
-      already carries custom ports reopens it automatically. */
   let customPortsOpen = $state(false);
 
-  // A routed error on any collapsed knob pops the disclosure open so its
-  // inline message is never hidden inside it.
   $effect(() => {
     if (fieldErrors.concurrency || fieldErrors.timeoutMs || fieldErrors.capText)
       scanAdvancedOpen = true;
@@ -292,9 +262,6 @@
     }
   });
 
-  // The click-time summary list is a snapshot; once the form validates
-  // cleanly again (or the mode flip resets ports), retire it so a stale
-  // "Fix these before starting" can't outlive its problems.
   $effect(() => {
     if (allIssues.length === 0 && validationErrors.length > 0) {
       validationErrors = [];
@@ -305,8 +272,6 @@
     allIssues.filter((i) => i.field !== null && touched[i.field]),
   );
 
-  /** field → first translated message: client issues for touched fields,
-   * overlaid by server-routed errors (which are cleared on edit). */
   const fieldErrors = $derived.by(() => {
     const map: Partial<Record<FormField, string>> = {};
     for (const i of liveIssues)
@@ -314,9 +279,6 @@
     return Object.assign(map, serverFieldErrors);
   });
 
-  /** Server ConfigError strings → form fields, most-specific-first:
-   * "invalid endpoint …: port is not a number" must hit warpEndpoints
-   * before the generic port rule. Unmatched messages stay in the banner. */
   const SERVER_FIELD_MATCHERS: ReadonlyArray<readonly [RegExp, FormField]> = [
     [/wgconf|wireguard|amnezia/i, "wgconf"],
     [/probes_per_endpoint/i, "warpProbes"],
@@ -341,12 +303,10 @@
   }
 
   async function start() {
-    // Prompt once, on a user gesture (browser requirement); see SimpleStart.
     try {
       if (typeof Notification !== "undefined" && Notification.permission === "default")
         void Notification.requestPermission();
     } catch {
-      /* Notification unavailable */
     }
     starting = true;
     serverFieldErrors = {};
@@ -357,7 +317,7 @@
       if (!outcome.ok && outcome.rejected) {
         const routed = routeServerDetail(outcome.rejected.detail);
         if (Object.keys(routed).length > 0) {
-          app.error = null; // routed to the fields; keep the banner quiet
+          app.error = null;
           serverFieldErrors = routed;
         }
       }
@@ -391,9 +351,6 @@
     delete serverFieldErrors.customPortsText;
   }
 
-  /** Chip-row shortcuts: select the mode's whole catalog (primary +
-   * extended, regardless of whether the details list is expanded) or wipe
-   * the selection. Both mark touched so live validation reacts. */
   function selectAllPorts() {
     const catalog = portCatalog(form.mode);
     form.selectedPorts = [...catalog.primary, ...catalog.extended];
@@ -407,11 +364,6 @@
     delete serverFieldErrors.customPortsText;
   }
 
-  // Flipping CDN ↔ WARP swaps the chip catalog: re-default the selection so
-  // stale cross-family ports can't linger silently. The guard keeps this
-  // from firing on hydration or cross-mode profile loads (either would wipe
-  // the restored selection back to defaults) — only a real user flip after
-  // hydration resets, and a profile load suppresses it once.
   let lastMode = $state<Mode | null>(null);
   let suppressPortReset = $state(false);
   $effect(() => {
@@ -429,8 +381,6 @@
     form.customPortsText = "";
   });
 
-  /** Blur-time cleanup for the line-based textareas: trims, drops blank and
-   * duplicate lines — a pasted bulk list can never leave ghost empties. */
   function normalizeField(field: "customCidrs" | "exclude" | "warpEndpoints" | "configsText") {
     const next = normalizeLines(form[field]);
     if (next !== form[field]) {
@@ -455,7 +405,6 @@
     try {
       xray = await api.xrayStatus();
     } catch {
-      /* status endpoint unreachable; chip stays hidden */
     }
   }
 
@@ -472,10 +421,6 @@
     xrayBusy = false;
   }
 
-  /** Persist every change (debounced ~300 ms); wgconf is excluded inside
-   * persistedFormState so keys never reach disk. The snapshot awaiting its
-   * debounce is also flushed on unmount, so toggling Pro off right after an
-   * edit cannot lose the last keystrokes. */
   let pendingPersist: string | null = null;
   $effect(() => {
     if (!hydrated) return;
@@ -486,7 +431,6 @@
       try {
         localStorage.setItem(FORM_PERSIST_KEY, snapshot);
       } catch {
-        /* storage unavailable (private mode/quota): persistence is best-effort */
       }
     }, 300);
     return () => clearTimeout(timer);
@@ -499,7 +443,6 @@
       try {
         localStorage.setItem(FORM_PERSIST_KEY, pendingPersist);
       } catch {
-        /* storage unavailable */
       }
       pendingPersist = null;
     }
@@ -513,26 +456,16 @@
         if (restored) form = restored;
       }
     } catch {
-      /* storage unavailable */
     }
     hydrated = true;
 
     void loadXray();
   });
-  // Throttled screen-reader announcement for phase-2 progress: update at
-  // most every 10 s so the aria-live region doesn't chatter on every tick.
-  // The latch lives outside reactivity (plain let, untracked): the template
-  // reads phase2Announce when app.phase2 changes, and the throttle gate
-  // decides whether to refresh the spoken text. No state write happens
-  // during derived evaluation — the two plain lets are neither reactive nor
-  // written anywhere the compiler tracks.
   let lastPhase2Announce = 0;
   let phase2Announced = "";
   const phase2Announce = $derived.by(() => {
     const p2 = app.phase2;
     if (!p2) {
-      // A fresh phase-2 run must announce immediately, not ride the tail of
-      // the previous run's 10 s window.
       lastPhase2Announce = 0;
       return "";
     }

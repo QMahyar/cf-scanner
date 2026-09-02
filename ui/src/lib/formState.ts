@@ -22,11 +22,6 @@ import {
   validateSni,
 } from "./validators";
 
-/** Everything the Pro panel can set, exactly as the user typed it.
- * Ports are a checkbox selection from the curated Cloudflare catalogs plus a
- * free-text custom field; buildConfig merges and validates both at start
- * time. Text fields stay text so "cleared" is representable (e.g. capText ""
- * = no hard cap). */
 export interface FormState {
   mode: Mode;
   preset: CdnPreset;
@@ -52,26 +47,18 @@ export interface FormState {
   verifyWarp: boolean;
 }
 
-/** Ports offered as chips for a mode: the official catalog first, then the
- * community-verified extended WARP list behind a disclosure. */
 export function portCatalog(mode: Mode): { primary: number[]; extended: number[] } {
   return mode === "Warp"
     ? { primary: WARP_PRIMARY_PORTS, extended: WARP_EXTENDED_PORTS }
     : { primary: CDN_HTTPS_PORTS, extended: [] };
 }
 
-/** Mode's default checked chips; exported so the panel can re-default the
- * selection when the user flips CDN ↔ WARP mid-form. WARP defaults to the
- * whole catalog (primary + extended) — WireGuard answers on any of them, so
- * a first WARP scan should sweep everything known; CDN stays conservative
- * on 443 only. */
 export function defaultSelectedPorts(mode: Mode): number[] {
   return mode === "Warp"
     ? [...WARP_PRIMARY_PORTS, ...WARP_EXTENDED_PORTS]
     : [443];
 }
 
-/** Pro panel defaults; simple mode keeps its own in simpleConfig(). */
 export function defaultFormState(): FormState {
   return {
     mode: "Cdn",
@@ -101,9 +88,6 @@ export function defaultFormState(): FormState {
 
 export type FormField = keyof FormState;
 
-/** One validation problem: which FormState key failed (null = form-wide) and
- * what to tell the user. The field key lets the UI light up the exact input.
- * `key` is an i18n key; `params` carries interpolation values. */
 export interface FieldIssue {
   field: FormField | null;
   key: string;
@@ -119,8 +103,6 @@ export class FormValidationError extends Error {
     this.issues = issues;
   }
 
-  /** Flat messages for click-time summary lists — resolved at render time
-   * via t() since formState is i18n-free by design. */
   get errors(): FieldIssue[] {
     return this.issues;
   }
@@ -160,9 +142,6 @@ function wholeNumber(
   return n;
 }
 
-/** Per-line syntax checks for the free-text list fields, mirroring the
- * server grammar via validators.ts. Runs inside buildConfig so live inline
- * errors, scan start and profile save all share one verdict. */
 function checkLines(
   text: string,
   field: FormField,
@@ -183,8 +162,6 @@ function checkLines(
   }
   for (const line of list) {
     const v = parse(line);
-    // `=== false`, not truthiness: without tsconfig strictNullChecks the
-    // truthy form does not narrow this discriminated union.
     if (v.ok === false) {
       issues.push({ field, key: `${keyPrefix}.invalid`, params: { detail: v.message } });
       continue;
@@ -243,14 +220,9 @@ function parseCap(text: string, issues: FieldIssue[]): number | null {
   return cap;
 }
 
-/** Pure FormState → ScanConfig. Throws FormValidationError listing every
- * problem it found instead of silently mangling input into NaN/0. */
 export function buildConfig(f: FormState): ScanConfig {
   const issues: FieldIssue[] = [];
 
-  // Chips + custom merge into one deduped, ascending port list. The WARP
-  // default-port guard stays even though no WARP chip is 443: a user can
-  // still type 443 as a custom port.
   const customPorts = parseCustomPorts(f.customPortsText, issues);
   const ports = [...new Set([...f.selectedPorts, ...customPorts])].sort((a, b) => a - b);
   if (ports.length === 0) {
@@ -303,8 +275,6 @@ export function buildConfig(f: FormState): ScanConfig {
     issues,
   );
 
-  // Free-text lists: same grammar the server enforces, checked at entry so
-  // inline errors and profile-save gating match scan-time 400s exactly.
   checkLines(f.customCidrs, "customCidrs", "issue.customCidrs", parseCidr, true, MAX_CIDRS, issues);
   checkLines(f.exclude, "exclude", "issue.exclude", parseCidr, false, MAX_CIDRS, issues);
   if (f.mode === "Warp") {
@@ -351,8 +321,6 @@ export function buildConfig(f: FormState): ScanConfig {
         });
         break;
       }
-      // Server-side API rule: share URIs and subscription URLs carry a
-      // scheme; local xray JSON paths are CLI-only.
       if (!c.includes("://")) {
         const snippet = c.slice(0, 32) + (c.length > 32 ? "\u2026" : "");
         issues.push({
@@ -422,14 +390,8 @@ export function buildConfig(f: FormState): ScanConfig {
   return cfg;
 }
 
-/** localStorage key for the persisted Pro-panel form. Bump to reset users'
- * saved forms when FormState changes shape (restore merges over defaults,
- * so additive keys never need a bump). */
 export const FORM_PERSIST_KEY = "cf-form-v1";
 
-/** FormState → JSON for localStorage. wgconf is deliberately dropped: it
- * carries a WireGuard private key and must not sit on disk in plaintext;
- * verifyWarp without it is meaningless so it is reset too. */
 export function persistedFormState(f: FormState): string {
   const copy: FormState = { ...f };
   copy.wgconf = "";
@@ -437,9 +399,6 @@ export function persistedFormState(f: FormState): string {
   return JSON.stringify(copy);
 }
 
-/** Inverse of persistedFormState: parse + merge known keys over defaults so
- * older/newer shapes stay forward-compatible. Returns null when unparseable
- * or not an object; mistyped values fall back to their defaults. */
 export function formStateFromPersisted(raw: string): FormState | null {
   let parsed: unknown;
   try {
@@ -459,8 +418,6 @@ export function formStateFromPersisted(raw: string): FormState | null {
   }
 
   if (!["Cdn", "Warp"].includes(out.mode)) out.mode = d.mode;
-  // Sanitize the port selection: integers 1-65535 only, and at least the
-  // mode default so a corrupted blob can't produce a zero-port form.
   out.selectedPorts = out.selectedPorts.filter(
     (p) => Number.isInteger(p) && p >= 1 && p <= 65535,
   );

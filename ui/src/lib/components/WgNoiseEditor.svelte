@@ -2,11 +2,6 @@
   import { RotateCcw } from "@lucide/svelte";
   import { t } from "../i18n.svelte";
 
-  /** Client-side AmneziaWG noise editor (research §5). Edits the junk /
-   * init-padding / magic-header keys of the pasted WireGuard/AmneziaWG
-   * config in place — plain INI or base64-INI URIs (awg:// wg://
-   * wireguard://). Everything else in the config is preserved byte-for-byte;
-   * keys never leave the page. */
   let { text, onchange }: { text: string; onchange: (next: string) => void } =
     $props();
 
@@ -32,8 +27,6 @@
     return btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
   }
 
-  /** Split the pasted config into (scheme, ini). Null when the payload isn't
-   * an editable INI (subscription blobs, JSON, garbage). */
   function splitContainer(raw: string): { scheme: string | null; ini: string } | null {
     const trimmed = raw.trim();
     const uri = /^(awg|wg|wireguard):\/\/(.*)$/is.exec(trimmed);
@@ -63,8 +56,6 @@
     return m ? m[1] : null;
   }
 
-  /** Replace the key's line inside [Interface], or insert it right after the
-   * section header when absent — every other byte stays identical. */
   function writeKey(ini: string, key: NoiseKey, value: string): string {
     const { start, end } = interfaceBounds(ini);
     const section = ini.slice(start, end);
@@ -97,8 +88,6 @@
     if (!container) return;
     const clean = raw.trim();
     if (clean === "") {
-      // Clearing a field removes its line entirely (engine treats missing
-      // keys as defaults), except H* which must stay explicit once present.
       if (!H_KEYS.includes(key)) {
         const { start, end } = interfaceBounds(container.ini);
         const section = container.ini
@@ -112,8 +101,6 @@
     pushIni(writeKey(container.ini, key, clean));
   }
 
-  /** Research §5 presets — values validated against amneziawg kernel limits
-   * and real provider configs. */
   const PRESETS: Record<"off" | "light" | "heavy", Record<NoiseKey, string>> = {
     off: { Jc: "0", Jmin: "0", Jmax: "0", S1: "0", S2: "0", H1: "1", H2: "2", H3: "3", H4: "4" },
     light: {

@@ -80,7 +80,6 @@
     try {
       rangesInfo = await api.ranges();
     } catch (e) {
-      /* non-critical; keep rangesInfo null */
     }
   }
 

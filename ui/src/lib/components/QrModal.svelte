@@ -15,8 +15,6 @@
 
   onMount(() => {
     if (canvas) tooLong = !render(canvas, payload);
-    // Focus lands on the dialog so Escape/Tab work for keyboard users, and
-    // the previously-focused control regains focus when the modal closes.
     const prev = document.activeElement as HTMLElement | null;
     modal?.focus();
     return () => prev?.focus?.();
@@ -27,7 +25,6 @@
       onclose();
       return;
     }
-    // Minimal focus trap: Tab wraps within the dialog's focusable controls.
     if (e.key !== "Tab" || !modal) return;
     const focusables = [
       ...modal.querySelectorAll<HTMLElement>("button:not([disabled])"),

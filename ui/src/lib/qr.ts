@@ -1,8 +1,3 @@
-// QR encoder (byte mode, EC level M, versions 1-25). Zero-dependency TypeScript
-// port of the encoder used by Q Proxy's panel.html — renders straight to a
-// canvas, no `qrcode` npm dependency.
-//
-// `render(canvas, text): boolean` returns false when text is too long for v25.
 
 const EC = [10, 16, 26, 18, 24, 16, 18, 22, 22, 26, 30, 22, 22, 24, 24, 28, 28, 26, 26, 26, 26, 28, 28, 28, 28];
 const NB = [1, 1, 1, 2, 2, 4, 4, 4, 5, 5, 5, 8, 9, 9, 10, 10, 11, 13, 14, 16, 17, 17, 18, 20, 21];
@@ -79,8 +74,6 @@ const N2 = 3;
 const N3 = 40;
 const N4 = 10;
 
-/** Builds the module matrix for `text`, or null when it exceeds the v25
- * byte capacity. Exposed for tests; `render` is the UI entry point. */
 export function gen(text: string): { size: number; modules: Uint8Array[] } | null {
   const bytes = new TextEncoder().encode(text);
   let ver = 1;

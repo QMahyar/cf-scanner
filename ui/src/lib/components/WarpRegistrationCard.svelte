@@ -39,7 +39,6 @@
       confCopied = true;
       setTimeout(() => (confCopied = false), 1200);
     } catch {
-      /* clipboard unavailable */
     }
   }
 

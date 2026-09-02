@@ -12,8 +12,6 @@ export const phase2Only = (r: Verdict) => r.phase2 != null;
 const DEFAULT_RENDER_CAP = 500;
 
 export interface ResultsViewOptions {
-  /** Overrides the default render cap; ResultsTable keeps owning its
-   * RENDER_CAP constant and passes it in. */
   renderCap?: number;
 }
 
@@ -29,8 +27,6 @@ function compareLatency(a: number | null, b: number | null): number {
   return a - b;
 }
 
-/** Octet-wise numeric IP order (10.0.0.2 < 10.0.0.10); localeCompare would
- * put 10.0.0.10 before 10.0.0.2. */
 function compareIp(a: string, b: string): number {
   const ao = a.split(".").map(Number);
   const bo = b.split(".").map(Number);
@@ -42,21 +38,12 @@ function compareIp(a: string, b: string): number {
   return 0;
 }
 
-/** One column's view over app.results: phase predicate + latency cap +
- * tri-state sort + row selection + render cap, all runes-based so instances
- * stay reactive wherever they're read. Selection mutations replace the Set
- * whole — $state does not track in-place Set mutation. */
 export class ResultsView {
-  /** Active sort column; null = engine order (tri-state). */
   sortCol = $state<SortCol | null>("latency");
   sortDir = $state<"asc" | "desc">("asc");
   maxLatency = $state<number | null>(null);
   selected = $state(new Set<string>());
   renderLimit = $state(DEFAULT_RENDER_CAP);
-  /** Bumped by markDirty() to invalidate the cache; read but NEVER written
-   * inside a getter (Svelte 5 throws state_unsafe_mutation on writes during
-   * derived/template evaluation — the old #dirty flag broke Simple-mode
-   * results on the first live-scan tick). */
   #version = $state(0);
 
   readonly #source: () => readonly Verdict[];
@@ -84,9 +71,6 @@ export class ResultsView {
     this.#version++;
   }
 
-  /** Detach from the module-level dirty fan-out: a destroyed component's
-   * view (the Pro toggle recreates both views) must stop being retained —
-   * and stop receiving markDirty — via _instances. */
   destroy(): void {
     _instances.delete(this);
   }
@@ -95,14 +79,8 @@ export class ResultsView {
     return this.#renderCap;
   }
 
-  // total is cheap and drives component skeleton/empty-state switching —
-  // keep it $derived so the component re-renders when items arrive.
   total = $derived.by(() => this.#source().length);
 
-  // Lazy cached fields: recomputed only when #version changes. The version is
-  // a $state read (so templates re-run on markDirty) but the write happens
-  // ONLY in markDirty(), never inside these getters — Svelte 5 forbids writing
-  // state during derived/template evaluation (see the constructor comment).
 
   get matched(): Verdict[] {
     void this.#version;
@@ -124,7 +102,6 @@ export class ResultsView {
   }
 
   get rows(): Verdict[] {
-    // Recomputed together with matched above.
     void this.matched;
     return this.#rowsCache;
   }
@@ -139,8 +116,6 @@ export class ResultsView {
     return this.#cappedCache;
   }
 
-  // picked/allPicked depend on selection ($state), not on data mutations,
-  // so they recompute on every read — cheap Set lookup over matched.
   get picked(): Verdict[] {
     return this.matched.filter((r) => this.selected.has(keyOf(r)));
   }
@@ -153,17 +128,14 @@ export class ResultsView {
     const dir = this.sortDir === "asc" ? 1 : -1;
     if (this.sortCol === "ip") return dir * compareIp(a.ip, b.ip);
     if (this.sortCol === "country") {
-      // Missing country sinks last; colo breaks ties.
       const ac = a.country ?? "\uffff";
       const bc = b.country ?? "\uffff";
       return dir * (ac.localeCompare(bc) || (a.colo ?? "").localeCompare(b.colo ?? ""));
     }
     const cmp = compareLatency(a.latency_ms, b.latency_ms);
-    // Missing latency sinks to the bottom whichever way the sort runs.
     return a.latency_ms === null || b.latency_ms === null ? cmp : dir * cmp;
   }
 
-  /** Tri-state per research §7: asc → desc → scan order. */
   cycleSort(col: SortCol): void {
     if (this.sortCol !== col) {
       this.sortCol = col;

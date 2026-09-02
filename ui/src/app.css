@@ -1,14 +1,6 @@
 @import "tailwindcss";
 @import "@fontsource-variable/vazirmatn/wght.css";
 
-/*
- * "Q Proxy midnight glass" design system, ported 1:1 from Q Proxy's
- * panel.html (E:\Code\Q Proxy\src\ui). Dark default (#05080f glass over
- * dotgrid + noise + drifting blobs), light theme, four accent swatches
- * (cyan/violet/green/amber), cyan = accent = CTA color, system font stacks
- * with Vazirmatn for Arabic script. RTL via logical properties. Reduced
- * motion flattens every animation.
- */
 
 :root {
   color-scheme: dark;
@@ -70,9 +62,6 @@
   --shadow-modal: 0 32px 64px -16px rgba(2, 6, 17, 0.75), 0 0 0 1px rgba(255, 255, 255, 0.03),
     inset 0 1px 0 rgba(255, 255, 255, 0.05);
 
-  /* Legacy editorial-token aliases: components and inline styles written
-     against the old "Field Notes" palette keep rendering correctly by
-     pointing at the Q Proxy palette. */
   --paper: var(--bg);
   --paper-2: var(--surface-2);
   --paper-3: var(--surface-2);
@@ -148,7 +137,6 @@ html[data-theme="light"] {
   --cyan-pale: #0e7490;
   --cyan-bright: #06b6d4;
 }
-/* Accent overrides must come after the light block or light forces cyan */
 html[data-theme="light"][data-accent="violet"] {
   --accent-rgb: 124, 58, 237;
   --cyan: #7c3aed;
@@ -221,14 +209,12 @@ body {
   line-height: 1.5;
   min-height: 100dvh;
 }
-/* Arabic script needs taller leading */
 html[lang="fa"] body {
   line-height: 1.8;
 }
 html[lang="fa"] .tracking-wider {
   letter-spacing: normal !important;
 }
-/* Technical tokens stay LTR mono even inside RTL prose */
 [dir="rtl"] .mono {
   direction: ltr;
   unicode-bidi: isolate;
@@ -272,7 +258,6 @@ summary:focus-visible {
   font-variant-numeric: tabular-nums;
 }
 
-/* ── Background texture: dotgrid + noise + drifting accent blobs ── */
 .texture-wrap {
   position: fixed;
   inset: 0;
@@ -328,7 +313,6 @@ summary:focus-visible {
   }
 }
 
-/* ── Topbar ── */
 header.topbar,
 main {
   position: relative;
@@ -486,7 +470,6 @@ html[data-theme="light"] .swatch {
   background: linear-gradient(135deg, #fbbf24, #f97316);
 }
 
-/* ── Page scaffolding ── */
 main {
   max-width: 1080px;
   margin-inline: auto;
@@ -511,7 +494,6 @@ main {
   min-width: 0;
 }
 
-/* Canonical form grid + numeric field helpers (layout only) */
 .grid-form {
   display: grid;
   gap: 0.75rem 1rem;
@@ -542,7 +524,6 @@ main {
   width: 10ch;
 }
 
-/* ── Cards ── */
 .card {
   position: relative;
   background: var(--surface);
@@ -576,7 +557,6 @@ html[data-theme="light"] .card--danger {
   letter-spacing: -0.01em;
 }
 
-/* Flat ruled panel aliases kept for nested surfaces */
 .shell {
   position: relative;
   background: var(--surface);
@@ -596,7 +576,6 @@ html[data-theme="light"] .card--danger {
   background: transparent;
 }
 
-/* ── Fields ── */
 .field__label {
   display: block;
   font-size: var(--fs-sm);
@@ -658,12 +637,10 @@ textarea.field {
   padding-block: 8px;
   resize: vertical;
   line-height: 1.6;
-  /* every textarea in this app holds technical text (configs, CIDRs, endpoints) */
   font-family: var(--font-mono);
   font-size: 0.78rem;
   word-break: break-all;
 }
-/* iOS Safari zooms the viewport when focusing inputs under 16px */
 @media (max-width: 767px) {
   .field {
     font-size: 16px;
@@ -678,7 +655,6 @@ input[type="checkbox"]:focus-visible {
   outline-offset: 2px;
 }
 
-/* ── Buttons ── */
 .btn {
   display: inline-flex;
   align-items: center;
@@ -761,7 +737,6 @@ input[type="checkbox"]:focus-visible {
   border-color: rgba(var(--accent-rgb), 0.2);
   transform: translateY(-1px);
 }
-/* Q Proxy ghost = subtle filled chip (surface-2 + border), not invisible */
 .btn-ghost {
   background: var(--surface-2);
   border-color: var(--border-strong);
@@ -807,7 +782,6 @@ input[type="checkbox"]:focus-visible {
   background: var(--success);
   color: #052014;
 }
-/* Trailing-icon chip inside a primary CTA */
 .icon-chip {
   display: inline-flex;
   align-items: center;
@@ -826,7 +800,6 @@ input[type="checkbox"]:focus-visible {
   transform: translateX(2px) translateY(-1px) scale(1.06);
 }
 
-/* ── Chips / pills / badges ── */
 .pill {
   display: inline-flex;
   align-items: center;
@@ -862,7 +835,6 @@ button.pill:disabled {
   opacity: 0.5;
   pointer-events: none;
 }
-/* selected chip language: accent wash + pale text */
 .pill[aria-pressed="true"],
 .pill.pill-on {
   color: var(--cyan-pale);
@@ -891,7 +863,6 @@ html[data-theme="light"] .stat-chip {
   border-color: var(--border);
 }
 
-/* ── Segmented control ── */
 .seg {
   display: inline-flex;
   background: rgba(255, 255, 255, 0.04);
@@ -930,7 +901,6 @@ html[data-theme="light"] .seg {
   }
 }
 
-/* ── Tables ── */
 table.tbl {
   width: 100%;
   border-collapse: collapse;
@@ -965,7 +935,6 @@ table.tbl {
 .dot-cyan {
   background: rgba(var(--accent-rgb), 0.7);
 }
-/* Inline latency micro-bar: color band + width cue, right-aligned cell */
 .lat-cell {
   display: inline-flex;
   align-items: center;
@@ -1011,7 +980,6 @@ table.tbl {
   color: var(--danger);
 }
 
-/* ── Progress / skeleton / empty states ── */
 .progress {
   height: 6px;
   background: var(--surface-3);
@@ -1099,7 +1067,6 @@ html[data-theme="light"] .empty-icon {
   line-height: 1.625;
 }
 
-/* ── Modals ── */
 .modal {
   position: fixed;
   inset: 0;
@@ -1168,7 +1135,6 @@ html[data-theme="light"] .empty-icon {
   margin-block-end: 12px;
 }
 
-/* ── Disclosures: Q Proxy accordion (▸ rotates on open) ── */
 details > summary {
   cursor: pointer;
   list-style: none;
@@ -1189,7 +1155,6 @@ details[open] > summary::before {
   rotate: 90deg;
 }
 
-/* Micro eyebrow tag preceding major headings */
 .eyebrow {
   display: flex;
   align-items: center;
@@ -1205,7 +1170,6 @@ details[open] > summary::before {
   background: transparent;
 }
 
-/* ── Toasts ── */
 .toasts {
   position: fixed;
   top: calc(16px + env(safe-area-inset-top));
@@ -1322,7 +1286,6 @@ details[open] > summary::before {
   }
 }
 
-/* ── Motion / scroll helpers ── */
 @keyframes fade-in {
   from {
     opacity: 0;
@@ -1334,7 +1297,6 @@ details[open] > summary::before {
 .fade-in {
   animation: fade-in 200ms var(--ease-out) both;
 }
-/* Scroll entry reveal: IntersectionObserver toggles .revealed once. */
 .reveal {
   opacity: 0;
   transform: translateY(12px);
@@ -1359,7 +1321,6 @@ details[open] > summary::before {
   }
 }
 
-/* Coarse pointers need ~44px hit targets; desktop keeps its compact density */
 @media (pointer: coarse), (max-width: 767px) {
   .btn {
     height: 44px;
@@ -1379,7 +1340,6 @@ details[open] > summary::before {
   }
 }
 
-/* ── Mobile header wrap: tabs drop to a full-width second row ── */
 @media (max-width: 767px) {
   .topbar {
     flex-wrap: wrap;
@@ -1391,7 +1351,6 @@ details[open] > summary::before {
   }
 }
 
-/* ── Mobile table stacking: each row becomes a card with data-l labels ── */
 @media (max-width: 767px) {
   .tbl thead {
     display: none;
@@ -1420,7 +1379,6 @@ details[open] > summary::before {
   }
 }
 
-/* ── Branded switch (Q Proxy): label > hidden input + track + thumb ── */
 .switch {
   display: inline-flex;
   align-items: center;
@@ -1490,7 +1448,6 @@ details[open] > summary::before {
   font-weight: 600;
 }
 
-/* ── Help popover (Q Proxy .help-wrap): ?-icon + hover/focus popup ── */
 .field__label-row {
   display: flex;
   align-items: center;
@@ -1552,7 +1509,6 @@ details[open] > summary::before {
   opacity: 1;
 }
 
-/* ── Empty-state action row ── */
 .empty-actions {
   margin-top: 1.5rem;
   display: flex;

@@ -1,11 +1,3 @@
-/** Curated Cloudflare port catalogs for the scan form's port picker.
- * Sources: CDN — developers.cloudflare.com/fundamentals/reference/network-ports
- * ("Network ports compatible with Cloudflare's proxy", HTTPS proxied section;
- * plain-HTTP ports are excluded because phase-1 probes perform TLS handshakes).
- * WARP primary — Cloudflare One client firewall docs (WireGuard default 2408,
- * fallbacks 500/1701/4500). WARP extended — community scanner consensus lists
- * (the same ports wg-class tools sweep); WireGuard-only, so MASQUE's 443 is
- * deliberately absent. */
 
 export const CDN_HTTPS_PORTS: number[] = [443, 2053, 2083, 2087, 2096, 8443];
 

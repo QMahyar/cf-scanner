@@ -23,7 +23,6 @@ function remove(id: number): void {
   }, 220);
 }
 
-/** Q Proxy-style slide-in toast (top inline-end corner, progress bar). */
 export function toast(msg: string, kind: ToastKind = "ok"): void {
   const id = nextId++;
   const total = kind === "err" ? ERR_MS : OK_MS;

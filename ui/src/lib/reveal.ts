@@ -1,5 +1,3 @@
-/** Scroll-entry reveal: adds .reveal, then .revealed once when the element
- * enters the viewport. IntersectionObserver only; no scroll listeners. */
 export function reveal(node: HTMLElement, opts: { delay?: number } = {}) {
   if (typeof IntersectionObserver === "undefined") return;
   node.classList.add("reveal");

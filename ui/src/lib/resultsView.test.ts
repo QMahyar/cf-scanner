@@ -59,7 +59,7 @@ describe("ResultsView semantics (characterization)", () => {
   });
 
   it("latency sort desc keeps missing latency at the bottom", () => {
-    view.cycleSort("latency"); // asc → desc
+    view.cycleSort("latency");
     expect(view.rows[view.rows.length - 1].ip).toBe("1.1.1.4");
     expect(view.rows[0].ip).toBe("9.9.9.9");
   });
@@ -77,15 +77,14 @@ describe("ResultsView semantics (characterization)", () => {
   });
 
   it("tri-state cycle returns to engine order", () => {
-    view.cycleSort("latency"); // desc
-    view.cycleSort("latency"); // null (engine order)
+    view.cycleSort("latency");
+    view.cycleSort("latency");
     expect(view.sortCol).toBe(null);
     expect(view.rows.map((r) => r.ip)).toEqual(FIXTURE.map((r) => r.ip));
   });
 
   it("verified phase filters to phase2 rows only", () => {
     const verified = new ResultsView(() => FIXTURE, "verified");
-    // total is the raw source length by design; matched applies the predicate.
     expect(verified.total).toBe(FIXTURE.length);
     expect(verified.matched.length).toBe(2);
     expect(verified.matched.every((r) => r.phase2 != null)).toBe(true);

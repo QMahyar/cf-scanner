@@ -6,7 +6,6 @@ export default defineConfig({
     svelte({
       preprocess: vitePreprocess(),
       compilerOptions: {
-        // Match vite.config.ts: runes-only, never legacy auto-subscription.
         runes: true,
       },
     }),

@@ -16,8 +16,6 @@ import {
 
 describe("MAX_* mirrors of src/api/types.rs", () => {
   it("keeps the bounds the server enforces", () => {
-    // Keep in sync with api/types.rs MAX_*; the grammar fixture pins the
-    // grammar, this pins the bounds.
     expect(MAX_PORTS).toBe(64);
     expect(MAX_CIDRS).toBe(64);
     expect(MAX_SNI_BYTES).toBe(256);

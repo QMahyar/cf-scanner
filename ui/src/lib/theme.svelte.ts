@@ -10,22 +10,15 @@ export const ACCENTS: ReadonlyArray<{ id: Accent; label: string }> = [
   { id: "amber", label: "Amber" },
 ];
 
-/** Mirrors Q Proxy's head bootstrap: stored value wins, otherwise the OS
- * preference decides light vs dark. Runs at mount and again from the
- * external <head> script /cfs-theme.js (CSP keeps script-src 'self', so the
- * pre-paint bootstrap cannot be inline) so no flash happens before
- * hydration. */
 export function resolveInitialTheme(): Theme {
   try {
     const s = localStorage.getItem(THEME_KEY);
     if (s === "light" || s === "dark") return s;
   } catch {
-    /* storage unavailable */
   }
   try {
     if (window.matchMedia?.("(prefers-color-scheme: light)").matches) return "light";
   } catch {
-    /* matchMedia unavailable */
   }
   return "dark";
 }
@@ -35,7 +28,6 @@ export function resolveInitialAccent(): Accent {
     const a = localStorage.getItem(ACCENT_KEY);
     if (a === "violet" || a === "green" || a === "amber") return a;
   } catch {
-    /* storage unavailable */
   }
   return "cyan";
 }
@@ -53,7 +45,6 @@ let current = $state<{ theme: Theme; accent: Accent }>({
   accent: "cyan",
 });
 
-/** Apply persisted/OS theme + accent before first paint; returns nothing. */
 export function initTheme(): void {
   current = { theme: resolveInitialTheme(), accent: resolveInitialAccent() };
   apply(current.theme, current.accent);
@@ -72,7 +63,6 @@ export function setTheme(next: Theme): void {
   try {
     localStorage.setItem(THEME_KEY, next);
   } catch {
-    /* storage unavailable */
   }
 }
 
@@ -86,6 +76,5 @@ export function setAccent(next: Accent): void {
   try {
     localStorage.setItem(ACCENT_KEY, next);
   } catch {
-    /* storage unavailable */
   }
 }

@@ -30,8 +30,6 @@ export interface ScanConfig {
   include_v6?: boolean;
   concurrency: number;
   timeout_ms: number;
-  /** Verify the LAST scan's stored candidates only, skipping phase 1
-   * (server: serde default false; requires phase2 configs). */
   phase2_only?: boolean;
   phase2?: Phase2Config | null;
   warp?: WarpConfig | null;
@@ -82,7 +80,5 @@ export interface ResultsPayload {
 export interface StatusPayload {
   version: string;
   is_running: boolean;
-  /** Banked phase-1 candidates survive server-side between runs; lets the
-   * idle Verify-banked button appear after an F5 before results hydrate. */
   has_candidates?: boolean;
 }

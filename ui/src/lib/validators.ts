@@ -1,9 +1,3 @@
-/** Line-by-line TypeScript mirror of the server's validation grammar
- * (src/api/types.rs + src/ranges.rs). Single source of truth for the form:
- * buildConfig, the live inline errors and the ranges-import classifier all
- * consume these, so invalid data is caught at entry instead of as a server
- * 400 round-trip — and profile save gates on exactly the same rules as scan
- * start. Bounds mirror the MAX_* constants in api/types.rs. */
 
 export const MAX_SCAN_COUNT = 100_000;
 export const MAX_PORTS = 64;
@@ -15,19 +9,13 @@ export const MAX_SNI_BYTES = 256;
 export const MAX_PROBE_URL_BYTES = 2 * 1024;
 export const MAX_WGCONF_BYTES = 64 * 1024;
 export const MAX_ENDPOINTS = 2048;
-// WARP sweep cap: the engine silently caps testCount to this (store.svelte.ts
-// simpleConfig). Mirrors the server-side sweep bound; surface it in the UI.
 export const WARP_SWEEP_CAP = 5000;
 
 export type Verdict<T> = { ok: true; value: T } | { ok: false; message: string };
 
 const IPV4_OCTET = /^(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)$/;
-// Rust's u8/u16 from_str accepts a single leading '+', so the numeric
-// mirrors do too (fixture-pinned).
 const DECIMAL = /^\+?\d+$/;
 
-/** Strict dotted-quad IPv4: four octets 0–255, leading zeros rejected
- * (mirrors Rust's std Ipv4Addr parse). */
 export function isIpv4(s: string): boolean {
   const parts = s.split(".");
   return (
@@ -36,9 +24,6 @@ export function isIpv4(s: string): boolean {
   );
 }
 
-/** Structural IPv6 check (groups of 1–4 hex digits, one `::` compression
- * allowed). The server re-parses strictly; this catches the obvious garbage
- * without reimplementing the full RFC grammar. */
 export function isIpv6(s: string): boolean {
   if (!s || !s.includes(":") || /[^0-9a-f:.]/i.test(s)) return false;
   const double = s.match(/::/g);
@@ -57,13 +42,9 @@ function isIp(s: string): boolean {
   return isIpv4(s) || isIpv6(s);
 }
 
-/** Mirror of `parse_endpoint` (api/types.rs): `ip` or `ip:port`, IPv4 only
- * by design, port 1–65535 when present. */
 export function parseEndpoint(line: string): Verdict<string> {
   const s = line.trim();
   const colon = s.lastIndexOf(":");
-  // The server trims host and port segments independently (" 1.2.3.4 : 443 "
-  // is valid there); mirror that, not whole-line trim only.
   const host = (colon === -1 ? s : s.slice(0, colon)).trim();
   const portStr = colon === -1 ? null : s.slice(colon + 1).trim();
   if (host.includes(":")) {
@@ -73,8 +54,6 @@ export function parseEndpoint(line: string): Verdict<string> {
     return { ok: false, message: `${line}: not an IPv4 address` };
   }
   if (portStr !== null) {
-    // Empty port ("1.2.3.4:") must mirror the server's rejection — the
-    // fixture pins it as err.
     if (!DECIMAL.test(portStr)) {
       return { ok: false, message: `${line}: port is not a number` };
     }
@@ -86,17 +65,12 @@ export function parseEndpoint(line: string): Verdict<string> {
   return { ok: true, value: s };
 }
 
-/** Mirror of `parse_cidr` (ranges.rs): `addr/prefix`, strict v4 or
- * structural v6, prefix within family bits, v6 /0 rejected (host count
- * exceeds u128 server-side). Returns the canonical `addr/prefix`. */
 export function parseCidr(line: string): Verdict<string> {
   const s = line.trim();
   const slash = s.lastIndexOf("/");
   if (slash === -1) {
     return { ok: false, message: `${line}: needs a /prefix (e.g. 1.2.3.0/24)` };
   }
-  // The server trims the address and prefix segments independently
-  // (" 1.2.3.0 / 24 " is valid there); mirror that.
   const addr = s.slice(0, slash).trim();
   const prefixStr = s.slice(slash + 1).trim();
   const v6 = addr.includes(":");
@@ -117,11 +91,7 @@ export function parseCidr(line: string): Verdict<string> {
   return { ok: true, value: s };
 }
 
-/** Mirror of `validate_sni` (api/types.rs): a raw IP or an RFC 1035-style
- * hostname (per-label ≤63, total ≤253, alnum + hyphen, no edge hyphens). */
 export function validateSni(s: string): Verdict<string> {
-  // The server does NOT trim: surrounding whitespace makes the value
-  // invalid there, so the mirror rejects it too (fixture-pinned parity).
   if (isIp(s)) return { ok: true, value: s };
   if (s.length > 253) return { ok: false, message: `${s}: hostname exceeds 253 characters` };
   const ok =
@@ -139,7 +109,6 @@ export function validateSni(s: string): Verdict<string> {
     : { ok: false, message: `${s}: must be a hostname (a-z 0-9 -) or an IP` };
 }
 
-/** Mirror of the phase-2 probe-URL rule: non-empty http(s), ≤2048 bytes. */
 export function validateProbeUrl(url: string): Verdict<string> {
   const v = url.trim();
   if (!/^https?:\/\//.test(v)) {
@@ -151,11 +120,8 @@ export function validateProbeUrl(url: string): Verdict<string> {
   return { ok: true, value: v };
 }
 
-/** Mirror of the server's non-routable guard: loopback, RFC 1918, link-local
- * and unspecified v4 space can never be scan targets. Conservative on
- * purpose — anything borderline is left for the server to decide. */
 export function isRoutableIpv4(ip: string): boolean {
-  if (!isIpv4(ip)) return true; // v6/other shapes: defer to server rules
+  if (!isIpv4(ip)) return true;
   const o = ip.split(".").map(Number);
   const [a, b] = [o[0], o[1]];
   if (a === 0 || a === 10 || a === 127) return false;
@@ -165,8 +131,6 @@ export function isRoutableIpv4(ip: string): boolean {
   return true;
 }
 
-/** Trim → drop blank lines → dedupe (order preserved). Applied on blur so a
- * pasted bulk list can never leave ghost empty lines behind. */
 export function normalizeLines(text: string): string {
   const seen = new Set<string>();
   const out: string[] = [];
@@ -179,7 +143,6 @@ export function normalizeLines(text: string): string {
   return out.join("\n");
 }
 
-/** Humanize seconds for ETAs: 59s stays raw, past that 1m 20s / 1h 05m. */
 export function humanizeSeconds(total: number): string {
   if (total < 60) return `${total}s`;
   const h = Math.floor(total / 3600);

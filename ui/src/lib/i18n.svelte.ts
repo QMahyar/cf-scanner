@@ -1,8 +1,5 @@
 export type Locale = "en" | "fa";
 
-/** Tiny two-locale dictionary (research §8: two locales don't justify an
- * i18n lib). Values take `{n}`-style slots interpolated by t(); digits stay
- * Latin because numbers here are technical data rendered in mono spans. */
 const EN = {
   "live.live": "Live",
   "live.offline": "Offline",
@@ -82,7 +79,6 @@ const EN = {
   "empty.filtered.body": "{hidden} results are hidden by the max-latency filter.",
   "empty.filtered.clear": "Clear filter",
   "toast.bulkCopied": "Copied {n} lines to clipboard",
-  // --- ProPanel / extended coverage ---
   "pro.xray.foundFallback": "xray binary found",
   "pro.xray.missingUnder": "not found — expected under {dir}",
   "pro.xray.missing": "missing",
@@ -170,12 +166,6 @@ const EN = {
   "pro.confirm.skipLow": "Only {found} working endpoint{s} so far — verifying now may find nothing. Skip to Phase 2 anyway?",
   "pro.error.stopTimeout": "Couldn't stop phase 1 in time — press Stop and start Phase 2 from the form.",
   "pro.error.downloadFailed": "download failed",
-  // --- Tunnel-test keys (map ticket T3, phase separation): the CDN tier is
-  // renamed "Phase 2" → "Tunnel test" (mechanism nouns over outcome
-  // adjectives) and renders as its own independently copyable list. The old
-  // table.phase2.* / pro.phase2.* keys were retired with their call sites.
-  // UI decision recorded in tasks/wayfinder-map.md, intentionally without an
-  // ADR.
   "results.candidatesHeading": "Candidates",
   "results.verifiedHeading": "Tunnel test",
   "table.copyAll.passingTitle": "Copy only tunnel-passing endpoints",
@@ -194,14 +184,12 @@ const EN = {
   "pro.tunnel.toggle":
     "Verify with a real tunnel: each config is tried through found endpoints",
   "pro.tunnel.progress": "tunnel tests: {done}/{total}…",
-  // ResultsTable extended
   "table.col.endpoint": "Endpoint",
   "table.col.latency": "Latency",
   "table.col.country": "Country",
   "table.renderCap": "first {visible} of {total} — narrow the filter or show more",
   "table.showMore": "show {n} more",
   "table.actions": "Actions",
-  // WgNoiseEditor
   "wgnoise.heading": "AmneziaWG noise",
   "wgnoise.headingScheme": "AmneziaWG noise ({scheme}:// · base64 INI)",
   "wgnoise.headingIni": "AmneziaWG noise (INI)",
@@ -209,11 +197,9 @@ const EN = {
   "wgnoise.placeholder.lohi": "lo-hi",
   "wgnoise.placeholder.dash": "—",
   "wgnoise.limits": "Jc 0–128 · Jmin<Jmax<1280 · S1≤1132, S2≤1188, S1+56≠S2 · H 5–2147483647 unique",
-  // App
   "app.live.liveTitle": "Connected to the local scan engine — results stay on this machine",
   "app.live.offlineTitle": "Engine unreachable — showing last known state",
   "app.live.connectingTitle": "Connecting to the local scan engine…",
-  // Step 1 new keys
   "table.verifiedTitle": "Every probe ran under your wgconf private key, not a dummy key",
   "simple.howtoAria": "What a scan does",
   "simple.emptyGuidanceAria": "No results guidance",
@@ -262,9 +248,7 @@ const EN = {
   "export.qr": "QR",
   "table.copyUriAria": "Copy ip:port",
   "table.copyExportAria": "Copy importable URI",
-  // Step 4 new keys
   "simple.progressAnnounce": "{working} working, {checked} checked",
-  // Issue keys (FieldIssue → i18n)
   "issue.ports.noneSelected": "Ports: check at least one port or enter a custom one",
   "issue.ports.tooMany": "Ports: at most {max} unique ports (got {got})",
   "issue.ports.warpUdp443": "WARP speaks WireGuard, not MASQUE \u2014 UDP 443 only serves MASQUE (try 2408, 500, 1701 or 4500)",
@@ -467,12 +451,6 @@ const FA: Record<keyof typeof EN, string> = {
   "pro.confirm.skipLow": "تاکنون فقط {found} اندپوینت{s} سالم — ممکن است تأیید چیزی پیدا نکند. باز هم به مرحله ۲ برویم؟",
   "pro.error.stopTimeout": "توقف مرحله ۱ به‌موقع ممکن نشد — «توقف» را بزنید و مرحله ۲ را از فرم شروع کنید.",
   "pro.error.downloadFailed": "دانلود ناموفق بود",
-  // --- Tunnel-test keys (map ticket T3, phase separation): the CDN tier is
-  // renamed "Phase 2" → "Tunnel test" (mechanism nouns over outcome
-  // adjectives) and renders as its own independently copyable list. The old
-  // table.phase2.* / pro.phase2.* keys were retired with their call sites.
-  // UI decision recorded in tasks/wayfinder-map.md, intentionally without an
-  // ADR.
   "results.candidatesHeading": "کاندیدها",
   "results.verifiedHeading": "آزمون تونل",
   "table.copyAll.passingTitle": "کپی فقط اندپوینت‌های قبول‌شده از تونل",
@@ -507,7 +485,6 @@ const FA: Record<keyof typeof EN, string> = {
   "app.live.liveTitle": "متصل به موتور اسکن محلی — نتایج روی همین دستگاه می‌ماند",
   "app.live.offlineTitle": "موتور در دسترس نیست — آخرین وضعیت ذخیره نمایش داده می‌شود",
   "app.live.connectingTitle": "در حال اتصال به موتور اسکن محلی…",
-  // Step 1 new keys
   "table.verifiedTitle": "هر پروب با کلید خصوصی wgconf شما اجرا شده، نه کلید ساختگی",
   "simple.howtoAria": "عملکرد اسکن",
   "simple.emptyGuidanceAria": "راهنمای نتیجه خالی",
@@ -556,9 +533,7 @@ const FA: Record<keyof typeof EN, string> = {
   "export.qr": "QR",
   "table.copyUriAria": "کپی ip:port",
   "table.copyExportAria": "کپی URI قابل‌ورود",
-  // Step 4 new keys
   "simple.progressAnnounce": "{working} سالم، {checked} بررسی‌شده",
-  // Issue keys (FieldIssue → i18n)
   "issue.ports.noneSelected": "پورت‌ها: حداقل یک پورت انتخاب کنید یا پورت دلخواه وارد کنید",
   "issue.ports.tooMany": "پورت‌ها: حداکثر {max} پورت یکتا (باز شده {got})",
   "issue.ports.warpUdp443": "WARP با WireGuard کار می‌کند نه MASQUE — پورت ۴۴۳ روی UDP فقط MASQUE است (۲۴۰۸، ۵۰۰، ۱۷۰۱ یا ۴۵۰۰ را امتحان کنید)",
@@ -597,7 +572,6 @@ const FA: Record<keyof typeof EN, string> = {
 
 export type MsgKey = keyof typeof EN;
 
-/** Exposed for tests: en/fa parity is asserted in i18n.test.ts. */
 export function dictionaries(): { en: Record<string, string>; fa: Record<string, string> } {
   return { en: EN, fa: FA };
 }
@@ -607,7 +581,6 @@ function detect(): Locale {
     const saved = localStorage.getItem("cf-lang");
     if (saved === "fa" || saved === "en") return saved;
   } catch {
-    /* storage unavailable */
   }
   const langs = navigator.languages?.length ? navigator.languages : [navigator.language];
   return langs.some((l) => l.toLowerCase().startsWith("fa")) ? "fa" : "en";
@@ -624,7 +597,6 @@ export function setLocale(next: Locale): void {
   try {
     localStorage.setItem("cf-lang", next);
   } catch {
-    /* storage unavailable */
   }
   applyDocumentLang();
 }
@@ -633,8 +605,6 @@ export function toggleLocale(): void {
   setLocale(locale === "fa" ? "en" : "fa");
 }
 
-/** Mirrors the locale onto <html lang/dir> before first paint and on every
- * change, so CSS logical properties flip with it (research §8 checklist). */
 export function applyDocumentLang(): void {
   const el = document.documentElement;
   el.lang = locale;
@@ -647,8 +617,6 @@ function fill(template: string, params: Record<string, string | number>): string
   );
 }
 
-/** Translate `key` for the active locale; `{slot}` interpolation via
- * `params`. Falls back to English when a key is missing from fa. */
 export function t(key: MsgKey, params?: Record<string, string | number>): string {
   const template = locale === "fa" ? (FA[key] ?? EN[key]) : EN[key];
   return params ? fill(template, params) : template;

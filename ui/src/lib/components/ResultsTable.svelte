@@ -14,16 +14,12 @@
     headingKey,
     emptyKind,
   }: {
-    /** One column's precomputed pipeline (predicate/sort/filter/selection);
-     * this component only renders it. */
     view: ResultsView;
     headingKey: MsgKey;
     emptyKind: "candidates" | "verified" | "simple";
   } = $props();
   const app = ui();
 
-  /** Chip subfilter (candidates card only): the view's phase predicate scopes
-   * the column; these narrow what's displayed inside it. */
   type Chip = "all" | "verified" | "unverified";
   let chip = $state<Chip>("all");
 
@@ -32,9 +28,6 @@
     return chip === "verified" ? r.phase2?.passed === true : r.phase2?.passed !== true;
   }
 
-  /** Chip applied over view.rows in view sort order; the render cap slices
-   * THIS list so "show more" always reveals rows matching the active chip.
-   * Counts for chips and copy buttons come from view.matched (uncapped). */
   const { chipRows, passedRows, tunnelSummary } = $derived.by(() => {
     const rows = view.rows;
     const matched = view.matched;
@@ -54,16 +47,11 @@
   const visibleRows = $derived(chipRows.slice(0, view.renderLimit));
   const capped = $derived(chipRows.length > view.renderLimit);
 
-  // Approximates the old "new results array clears selection": selection now
-  // lives on the view, whose source ref can't be observed from here — but a
-  // fresh scan empties the column first, and that is the moment stale ticked
-  // keys must go. Mid-run upserts keep total > 0, so they never reset.
   $effect(() => {
     if (view.total === 0) view.resetSelection();
   });
 
   let headCheckbox = $state<HTMLInputElement | null>(null);
-  // indeterminate is property-only (no attribute), so drive it imperatively
   $effect(() => {
     if (headCheckbox)
       headCheckbox.indeterminate = view.picked.length > 0 && !view.allPicked;
@@ -77,8 +65,6 @@
   let copiedPickedUris = $state(false);
   let copiedPassing = $state(false);
 
-  // Every flash/announce timer is tracked so a mid-flight unmount can't fire
-  // into dead state, and a rapid repeat click resets its previous timer.
   const timers = new Set<ReturnType<typeof setTimeout>>();
   function later(fn: () => void, ms: number): void {
     const id = setTimeout(() => {
@@ -102,7 +88,6 @@
       await navigator.clipboard.writeText(text);
       announce(t("toast.bulkCopied", { n }));
     } catch {
-      /* clipboard unavailable */
     }
   }
 
@@ -112,7 +97,6 @@
       copiedIdx = i;
       later(() => (copiedIdx = null), 1200);
     } catch {
-      /* clipboard unavailable */
     }
   }
 
@@ -122,18 +106,12 @@
     later(() => (copiedAll = false), 1200);
   }
 
-  /** The passing list copies independently of the active chip: banked
-   * candidates stay visible while passing rows are what users actually
-   * paste into a proxy client. */
   async function copyPassing() {
     await copyText(passedRows.map(keyOf).join("\n"), passedRows.length);
     copiedPassing = true;
     later(() => (copiedPassing = false), 1200);
   }
 
-  /** The original config URI this row's phase 2 verified with; null when the
-   * row never passed or the index points outside lastScanConfigs (fresh page
-   * after F5 — the server keeps configs in memory only). */
   function exportableConfig(r: Verdict): string | null {
     if (!r.phase2?.passed) return null;
     return app.lastScanConfigs[r.phase2.config_index] ?? null;
@@ -158,8 +136,6 @@
     later(() => (copiedPickedIps = false), 1200);
   }
 
-  /** Export each picked passing row through its original config; rows with
-   * no usable config are skipped silently rather than failing the batch. */
   async function copyPickedUris() {
     const entries = view.picked
       .map((r) => ({ r, config: exportableConfig(r) }))
@@ -184,7 +160,6 @@
     return "var(--lat-slow)";
   }
 
-  // --- Bundle / metadata export + QR (competitor-derived) ------------------
   let qrPayload = $state<string | null>(null);
   let qrTitle = $state("");
 
@@ -223,8 +198,6 @@
     }
   }
 
-  /** Base64 subscription copied to the clipboard (mobile clients accept a
-   * pasted blob directly). Falls back to a file download like exportText. */
   async function copySubscription() {
     try {
       const text = await api.bundle("base64");
@@ -253,8 +226,6 @@
     }
   }
 
-  /** The importable URI for one verified row, or null when the row has no
-   * usable source config (fresh page after F5). */
   async function rowUri(r: Verdict): Promise<string | null> {
     const config = exportableConfig(r);
     if (!config) return null;

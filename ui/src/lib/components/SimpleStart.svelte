@@ -24,9 +24,6 @@
   let copiedAll = $state<ExportHow | null>(null);
   let tick = $state(0);
 
-  // Throttled screen-reader announcement: update at most every 10 s so the
-  // aria-live region doesn't chatter on every tick. Side-effect moved to
-  // $effect — $derived must stay pure.
   let lastAnnounce = 0;
   let announced = $state("");
   const progressAnnounce = $derived(announced);
@@ -43,8 +40,6 @@
     });
   });
 
-  // Preset sample sizes; CDN samples candidates on 443, WARP sweeps
-  // endpoints across the official port set. Custom reveals one field.
   type SizeKey = "quick" | "normal" | "big" | "custom";
   const SIZES: Record<SizeKey, { cdn: number; warp: number }> = {
     quick: { cdn: 4_000, warp: 2_000 },
@@ -69,22 +64,16 @@
   });
 
   async function start() {
-    // Prompt once, on a user gesture (browser requirement); denied/unavailable
-    // is fine — completion notification is a nicety, not a feature gate.
     try {
       if (typeof Notification !== "undefined" && Notification.permission === "default")
         void Notification.requestPermission();
     } catch {
-      /* Notification unavailable */
     }
     starting = true;
     await startScan(simpleConfig(findUpTo, scanMode, effectiveTest));
     starting = false;
   }
 
-  /** Simple mode's "best" bar, unchanged: passed the tunnel test or never
-   * had one to run. Lives here (not resultsView.ts) because T4 may not edit
-   * that file; ResultsView still owns sort/latency-filter/cap semantics. */
   const passOrUntested = (r: Verdict) => (r.phase2 ? r.phase2.passed : true);
 
   const unfilteredBest = $derived(app.results.filter(passOrUntested));
@@ -96,7 +85,6 @@
   const SHOWN = 9;
   const hiddenCount = $derived(Math.max(0, best.length - SHOWN));
 
-  /** Rate/ETA recomputed on every progress tick — good enough for a hint. */
   const pace = $derived.by(() => {
     void tick;
     if (!app.running || app.startedAt === null || app.progress.scanned <= 0)
@@ -136,8 +124,6 @@
       await navigator.clipboard.writeText(`${r.ip}:${r.port}`);
       toast(t("results.copied"));
     } catch {
-      // Clipboard API can fail (e.g. insecure context); the bulk export path
-      // has a download fallback, but per-card copy has no fallback.
       toast(t("simple.copyFailed"), "err");
     }
   }

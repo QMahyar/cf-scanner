@@ -5,8 +5,8 @@ describe("qr encoder invariants", () => {
   it("encodes a short URI at the smallest version with a square module grid", () => {
     const q = gen("vless://id@example.com:443");
     expect(q).not.toBeNull();
-    expect(q!.size).toBeGreaterThanOrEqual(21); // v1 minimum
-    expect(q!.size).toBeLessThanOrEqual(29); // small payload stays small
+    expect(q!.size).toBeGreaterThanOrEqual(21);
+    expect(q!.size).toBeLessThanOrEqual(29);
     expect(q!.modules.length).toBe(q!.size);
     for (const row of q!.modules) expect(row.length).toBe(q!.size);
   });

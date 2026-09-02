@@ -8,8 +8,6 @@ describe("i18n en/fa parity", () => {
   });
 
   it("every interpolation slot in an en template exists in its fa twin", () => {
-    // Slot drift between locales would make fill() leave a literal {slot}
-    // in the rendered string for one language only.
     const { en, fa } = dictionaries();
     for (const [key, template] of Object.entries(en)) {
       const slots = [...template.matchAll(/\{(\w+)\}/g)].map((m) => m[1]).sort();

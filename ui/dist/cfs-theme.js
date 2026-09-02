@@ -1,7 +1,3 @@
-/* Theme/accent bootstrap: must run before first paint to avoid a flash when
-   the stored theme differs from the CSS default. Loaded as a normal
-   same-origin script so the locked-down CSP (script-src 'self', no inline)
-   keeps holding. Mirrors lib/theme.svelte.ts keys. */
 (function () {
   try {
     var a = localStorage.getItem("cfs_accent");

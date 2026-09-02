@@ -13,19 +13,9 @@ export interface UiState {
   summary: ScanSummary | null;
   error: string | null;
   proMode: boolean;
-  /** Original phase-2 config URIs from the last started scan, indexed by
-   * Verdict.config_index; lets result rows export importable URIs. */
   lastScanConfigs: string[];
-  /** True when the last WARP scan probed under the user's real keypair
-   * (verify_with_wgconf) — results are then labeled as verified. */
   lastScanVerified: boolean;
-  /** Phase-1 rows snapshotted when a banked-candidates verify
-   * (phase2_only + preserveResults) started, so a frozen candidates list can
-   * keep showing what was banked while applyResult upserts tunnel-test
-   * verdicts over the live rows. Null on every other scan. */
   frozenPhase1: Verdict[] | null;
-  /** Hydrated by App from /api/status has_candidates (banked candidates
-   * survive a page reload server-side); false until that hydration runs. */
   statusHasCandidates: boolean;
 }
 
@@ -68,7 +58,6 @@ export class UiStore {
     try {
       localStorage.setItem("cf-pro-mode", on ? "1" : "0");
     } catch {
-      /* storage unavailable */
     }
   }
 
@@ -110,8 +99,6 @@ export class UiStore {
     const last = this.#tickWindow[this.#tickWindow.length - 1];
     if (last && p.scanned < last.scanned) this.#tickWindow.length = 0;
     this.#tickWindow.push({ scanned: p.scanned, found: p.found });
-    // Window must span ≤500 scanned ending at the NEWEST tick; using the
-    // pre-push tail here kept the window one tick too long.
     while (this.#tickWindow.length > 2 && p.scanned - this.#tickWindow[0].scanned > 500)
       this.#tickWindow.shift();
   }
@@ -220,22 +207,14 @@ export function hasCandidates(): boolean {
 
 export function errorText(e: unknown): string {
   const msg = e instanceof Error ? e.message : String(e);
-  // Raw fetch failures read like a bug; tell the user what "network error"
-  // means in this app's topology (engine on localhost).
   if (/failed to fetch|networkerror|load failed|fetch failed/i.test(msg)) {
     return `${msg} — ${t("error.networkHint")}`;
   }
   return msg;
 }
 
-/** The one place a scan starts: resets last-scan results (unless the caller
- * asks to preserve them for a banked-candidates verify), POSTs the config,
- * flips the running flag, and surfaces failures — callers never duplicate
- * that sequence. Never throws; check ui().error, and use the returned
- * rejection to route 400/422 messages into per-field errors. */
 export interface StartOutcome {
   ok: boolean;
-  /** Set when the POST was rejected with a status the UI can map to fields. */
   rejected: { status: number; detail: string } | null;
 }
 
@@ -250,13 +229,6 @@ export async function stopScan(): Promise<void> {
   return _store.stopScan();
 }
 
-/** Default simple-mode configs: best defaults for a first-run user, per the
- * 2026-08-23 research synthesis (docs/research/2026-08-23-ui-v2-research.md):
- * CDN probes a random sample of `testCount` candidates on 443 (400–800 band
- * avoids tripping ISP/CF scan limits while surfacing hits fast); WARP sweeps
- * the official WireGuard ports over a small bounded candidate count. Stop
- * target default 20 follows the dominant competitor precedent (N=10 family,
- * midpoint of common asks). */
 export function simpleConfig(
   found = 20,
   mode: Mode = "Cdn",
@@ -303,16 +275,11 @@ export function filteredEndpoints(results: Verdict[], maxLatency: number | null)
 }
 export type ExportHow = "clipboard" | "share" | "download";
 
-/** Export chain from research §7: clipboard first (localhost is a secure
- * context), then the mobile share sheet when present, then an unconditional
- * Blob .txt download as the final fallback. Returns how it resolved so the
- * caller can show honest feedback. */
 export async function exportText(text: string, filename: string): Promise<ExportHow> {
   try {
     await navigator.clipboard.writeText(text);
     return "clipboard";
   } catch {
-    /* fall through to share/download */
   }
   const file = new File([text], filename, { type: "text/plain" });
   if (navigator.canShare?.({ files: [file] })) {
@@ -320,7 +287,6 @@ export async function exportText(text: string, filename: string): Promise<Export
       await navigator.share({ files: [file], title: filename });
       return "share";
     } catch (e) {
-      // User-cancelled shares must not silently degrade into a download.
       if (e instanceof DOMException && e.name === "AbortError") return "share";
     }
   }
@@ -333,8 +299,6 @@ export async function exportText(text: string, filename: string): Promise<Export
   return "download";
 }
 
-/** Unconditional file download of raw text (used for JSON/CSV/bundle files
- * where a MIME type matters and the share sheet is less useful). */
 export function downloadFile(text: string, filename: string, mime = "text/plain"): void {
   const url = URL.createObjectURL(new Blob([text], { type: `${mime};charset=utf-8` }));
   const a = document.createElement("a");
