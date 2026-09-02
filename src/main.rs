@@ -2,14 +2,13 @@ use std::io::IsTerminal as _;
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
-use std::time::Duration;
 
-use anyhow::{Context as _, Result, anyhow, bail};
+use anyhow::{Result, anyhow, bail};
 use cf_scanner::api;
 use cf_scanner::api::types::{
     CdnPreset, DEFAULT_CONCURRENCY, Mode, Port, ScanConfig, ScanEvent, ScanTarget, StopCondition,
 };
-use cf_scanner::{cli_wizard, engine, paths, probe, ranges, server, tray, warpgen};
+use cf_scanner::{cli_wizard, engine, paths, probe, ranges, warpgen};
 use clap::{Parser, Subcommand, ValueEnum};
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::filter::LevelFilter;
@@ -35,7 +34,6 @@ struct Cli {
 
 const EXAMPLES: &str = "\
 Examples:
-  cf-scanner serve                        Start the localhost API (default port 8765)
   cf-scanner scan --preset quick          Fast CDN sweep (1 IP per /24)
   cf-scanner scan --mode warp --count 512 WARP endpoint discovery
   cf-scanner scan --phase2-configs vless://... --phase2-fragment medium
@@ -44,14 +42,6 @@ Results print as newline-delimited JSON; pipe to jq for processing.";
 
 #[derive(Subcommand)]
 enum Command {
-    Serve {
-        #[arg(long, default_value_t = 8765)]
-        port: u16,
-        #[arg(long)]
-        tray: bool,
-        #[arg(long, num_args = 0..=1, default_missing_value = "enable")]
-        autostart: Option<AutostartArg>,
-    },
     Scan {
         #[command(flatten)]
         args: Box<ScanArgs>,
@@ -226,18 +216,34 @@ struct ScanArgs {
 
     #[arg(long, help_heading = "Tuning")]
     seed: Option<u64>,
+
+    #[arg(long, help_heading = "Export")]
+    export: Option<PathBuf>,
+
+    #[arg(
+        long,
+        requires = "export",
+        value_enum,
+        default_value_t = ExportFormatArg::Csv,
+        help_heading = "Export"
+    )]
+    export_format: ExportFormatArg,
+}
+
+#[derive(Copy, Clone, PartialEq, Eq, Debug, ValueEnum)]
+enum ExportFormatArg {
+    Csv,
+    Json,
+    Base64,
+    Raw,
+    Singbox,
+    Clash,
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, Debug, ValueEnum)]
 enum ModeArg {
     Cdn,
     Warp,
-}
-
-#[derive(Copy, Clone, PartialEq, Eq, Debug, ValueEnum)]
-enum AutostartArg {
-    Enable,
-    Remove,
 }
 
 #[derive(Copy, Clone, ValueEnum)]
@@ -480,11 +486,6 @@ fn env_filter(verbose: bool, rust_log: Option<&str>) -> EnvFilter {
 
 async fn run(cli: Cli) -> Result<()> {
     match cli.command {
-        Command::Serve {
-            port,
-            tray,
-            autostart,
-        } => serve(port, tray, autostart).await,
         Command::Scan { args } => run_scan(*args).await,
         Command::Wizard => {
             let controller = Arc::new(engine::ScanController::new(Arc::new(
@@ -619,6 +620,50 @@ async fn run_scan(args: ScanArgs) -> Result<()> {
             summary.found
         );
     }
+    if let Some(path) = args.export.as_deref() {
+        write_export(&controller, path, args.export_format)?;
+    }
+    Ok(())
+}
+
+fn export_format_name(format: ExportFormatArg) -> &'static str {
+    match format {
+        ExportFormatArg::Csv => "csv",
+        ExportFormatArg::Json => "json",
+        ExportFormatArg::Base64 => "base64",
+        ExportFormatArg::Raw => "raw",
+        ExportFormatArg::Singbox => "singbox",
+        ExportFormatArg::Clash => "clash",
+    }
+}
+
+fn write_export(
+    controller: &Arc<engine::ScanController>,
+    path: &std::path::Path,
+    format: ExportFormatArg,
+) -> Result<()> {
+    let format_name = export_format_name(format);
+    let results = controller.results();
+    let body = match format {
+        ExportFormatArg::Csv | ExportFormatArg::Json => {
+            cf_scanner::export::render_results(format_name, &results)
+        }
+        ExportFormatArg::Base64
+        | ExportFormatArg::Raw
+        | ExportFormatArg::Singbox
+        | ExportFormatArg::Clash => {
+            let configs = controller.phase2_configs();
+            cf_scanner::export::render_bundle(format_name, &results, &configs)
+        }
+    }
+    .map_err(|e| anyhow!("export failed: {e}"))?;
+    if path.as_os_str() == "-" {
+        println!("{body}");
+    } else {
+        std::fs::write(path, body)
+            .map_err(|e| anyhow!("could not write {}: {e}", path.display()))?;
+        eprintln!("results exported to {}", path.display());
+    }
     Ok(())
 }
 
@@ -657,120 +702,6 @@ fn run_export_config(
     Ok(uri)
 }
 
-async fn serve(port: u16, tray_enabled: bool, autostart: Option<AutostartArg>) -> Result<()> {
-    if autostart == Some(AutostartArg::Remove) {
-        tray::set_autostart(false)?;
-        if cfg!(target_os = "windows") {
-            eprintln!(
-                "autostart removed: HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run\\{}",
-                tray::RUN_VALUE_NAME
-            );
-        }
-    }
-    ensure_autostart_valid(tray_enabled, autostart)?;
-    let controller = Arc::new(engine::ScanController::new(Arc::new(
-        probe::TlsTransport::new(),
-    )));
-    let listener = match tokio::net::TcpListener::bind(("127.0.0.1", port)).await {
-        Ok(listener) => listener,
-        Err(err) => return Err(anyhow!("{}", bind_error(port, &err))),
-    };
-    let bind_addr = listener.local_addr()?;
-    let url = serve_url(bind_addr);
-    eprintln!("CF-Scanner running at {url}");
-    if autostart == Some(AutostartArg::Enable) {
-        tray::set_autostart(true)?;
-        if cfg!(target_os = "windows") {
-            eprintln!(
-                "autostart registered: HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run\\{}",
-                tray::RUN_VALUE_NAME
-            );
-        }
-    }
-    if tray_enabled {
-        if let Err(err) = tray::spawn(url.clone()) {
-            tracing::warn!("could not start system tray: {err:#}");
-        }
-    }
-    const SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
-    let (shutdown_fired_tx, mut shutdown_fired) = tokio::sync::watch::channel(false);
-    let mut server = tokio::spawn(async move {
-        axum::serve(
-            listener,
-            server::router(controller.clone(), bind_addr.port()),
-        )
-        .with_graceful_shutdown(async move {
-            shutdown_signal(controller, tray_enabled).await;
-            let _ = shutdown_fired_tx.send(true);
-        })
-        .await
-    });
-    tokio::select! {
-        res = &mut server => {
-            res.context("server task failed")??;
-        }
-        _ = async {
-            let _ = shutdown_fired.changed().await;
-            tokio::time::sleep(SHUTDOWN_GRACE).await;
-        } => {
-            tracing::info!("shutdown grace elapsed; closing remaining connections");
-            server.abort();
-        }
-    }
-    Ok(())
-}
-
-fn ensure_autostart_valid(tray_enabled: bool, autostart: Option<AutostartArg>) -> Result<()> {
-    if autostart == Some(AutostartArg::Enable) && !tray_enabled {
-        return Err(anyhow!("--autostart requires --tray"));
-    }
-    Ok(())
-}
-
-fn bind_error(port: u16, err: &std::io::Error) -> String {
-    if err.kind() == std::io::ErrorKind::AddrInUse {
-        format!("port {port} in use — try: cf-scanner serve --port <other>")
-    } else {
-        format!("could not bind 127.0.0.1:{port}: {err}")
-    }
-}
-
-fn serve_url(addr: std::net::SocketAddr) -> String {
-    format!("http://{addr}")
-}
-
-async fn shutdown_signal(controller: Arc<engine::ScanController>, tray_enabled: bool) {
-    if tray_enabled {
-        tokio::select! {
-            ctrl_c = tokio::signal::ctrl_c() => {
-                if let Err(err) = ctrl_c {
-                    tracing::error!("could not listen for Ctrl+C: {err}");
-                }
-            }
-            _ = tray_exit_requested() => {
-                tracing::info!("tray Exit requested");
-            }
-        }
-    } else if let Err(err) = tokio::signal::ctrl_c().await {
-        tracing::error!("could not listen for Ctrl+C: {err}");
-    }
-    tracing::info!("shutting down; cancelling any active scan");
-    controller.cancel();
-    if tray_enabled {
-        tray::request_exit();
-    }
-}
-
-async fn tray_exit_requested() {
-    let mut ticker = tokio::time::interval(std::time::Duration::from_millis(100));
-    loop {
-        ticker.tick().await;
-        if tray::exit_requested() {
-            return;
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -802,6 +733,8 @@ mod tests {
             warp_verify: false,
             warp_wgconf_file: None,
             seed: None,
+            export: None,
+            export_format: ExportFormatArg::Csv,
         }
     }
 
@@ -1266,63 +1199,6 @@ mod tests {
     }
 
     #[test]
-    fn serve_tray_flags_parse_and_autostart_shapes() {
-        let cli = Cli::try_parse_from(["cf-scanner", "serve", "--tray"]).unwrap();
-        match cli.command {
-            Command::Serve {
-                port,
-                tray,
-                autostart,
-            } => {
-                assert_eq!(port, 8765);
-                assert!(tray);
-                assert_eq!(autostart, None);
-            }
-            _ => panic!("expected serve"),
-        }
-        let cli = Cli::try_parse_from(["cf-scanner", "serve", "--tray", "--autostart"]).unwrap();
-        match cli.command {
-            Command::Serve {
-                autostart: Some(AutostartArg::Enable),
-                ..
-            } => {}
-            _ => panic!("bare --autostart must mean enable"),
-        }
-        let cli = Cli::try_parse_from(["cf-scanner", "serve", "--autostart", "enable"]).unwrap();
-        assert!(matches!(
-            cli.command,
-            Command::Serve {
-                autostart: Some(AutostartArg::Enable),
-                ..
-            }
-        ));
-        let cli = Cli::try_parse_from(["cf-scanner", "serve", "--autostart", "remove"]).unwrap();
-        assert!(matches!(
-            cli.command,
-            Command::Serve {
-                autostart: Some(AutostartArg::Remove),
-                ..
-            }
-        ));
-        assert!(
-            Cli::try_parse_from(["cf-scanner", "serve", "--autostart", "bogus"]).is_err(),
-            "unknown --autostart values must be rejected"
-        );
-    }
-
-    #[test]
-    fn autostart_enable_requires_tray_but_remove_does_not() {
-        assert!(ensure_autostart_valid(false, Some(AutostartArg::Enable)).is_err());
-        let err = ensure_autostart_valid(false, Some(AutostartArg::Enable)).unwrap_err();
-        assert!(err.to_string().contains("--tray"), "{err:#}");
-        assert!(ensure_autostart_valid(true, Some(AutostartArg::Enable)).is_ok());
-        assert!(ensure_autostart_valid(false, Some(AutostartArg::Remove)).is_ok());
-        assert!(ensure_autostart_valid(true, Some(AutostartArg::Remove)).is_ok());
-        assert!(ensure_autostart_valid(true, None).is_ok());
-        assert!(ensure_autostart_valid(false, None).is_ok());
-    }
-
-    #[test]
     fn verbose_flag_parses_before_and_after_subcommand() {
         let cli =
             Cli::try_parse_from(["cf-scanner", "--verbose", "scan", "--count", "10"]).unwrap();
@@ -1334,11 +1210,7 @@ mod tests {
         let cli =
             Cli::try_parse_from(["cf-scanner", "scan", "--count", "10", "--verbose"]).unwrap();
         assert!(cli.verbose);
-        assert!(
-            !Cli::try_parse_from(["cf-scanner", "serve"])
-                .unwrap()
-                .verbose
-        );
+        assert!(!Cli::try_parse_from(["cf-scanner", "scan"]).unwrap().verbose);
     }
 
     #[test]
@@ -1357,30 +1229,6 @@ mod tests {
         assert_eq!(env_filter(true, Some("")).to_string(), "info");
         assert_eq!(env_filter(false, Some("")).to_string(), "error");
         assert_eq!(env_filter(true, Some("  ")).to_string(), "info");
-    }
-
-    #[test]
-    fn bind_error_hints_when_port_is_taken() {
-        let taken = std::io::Error::new(std::io::ErrorKind::AddrInUse, "in use");
-        assert_eq!(
-            bind_error(8765, &taken),
-            "port 8765 in use — try: cf-scanner serve --port <other>"
-        );
-        let denied = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "denied");
-        let msg = bind_error(8765, &denied);
-        assert!(
-            msg.contains("127.0.0.1:8765") && msg.contains("denied"),
-            "{msg}"
-        );
-        assert!(!msg.contains("in use — try"), "{msg}");
-    }
-
-    #[test]
-    fn serve_url_uses_the_bound_addr() {
-        let v4 = "127.0.0.1:8765".parse::<std::net::SocketAddr>().unwrap();
-        assert_eq!(serve_url(v4), "http://127.0.0.1:8765");
-        let v6 = "[::1]:9000".parse::<std::net::SocketAddr>().unwrap();
-        assert_eq!(serve_url(v6), "http://[::1]:9000");
     }
 
     #[test]

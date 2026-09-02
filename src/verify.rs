@@ -288,8 +288,20 @@ where
     Fut: Future<Output = Result<T>>,
 {
     let mut last_err: Option<anyhow::Error> = None;
+    let mut tried: Vec<u16> = Vec::new();
     for attempt_no in 1..=3u32 {
-        let socks_port = pick_ephemeral_port().context("no free port for xray inbound")?;
+        let socks_port = {
+            let mut picked = None;
+            for _ in 0..16 {
+                let candidate = pick_ephemeral_port().context("no free port for xray inbound")?;
+                if !tried.contains(&candidate) {
+                    picked = Some(candidate);
+                    break;
+                }
+            }
+            picked.ok_or_else(|| anyhow!("no distinct ephemeral port after 16 picks"))?
+        };
+        tried.push(socks_port);
         match attempt(socks_port).await {
             Ok(value) => return Ok(value),
             Err(err) if attempt_no < 3 => {

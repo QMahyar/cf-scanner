@@ -1,5 +1,11 @@
 # Spec: CF-Scanner
 
+> **SUPERSEDED 2026-09-02:** the product is now a pure CLI — the HTTP
+> server, browser UI, and tray described below were removed (ADR-012).
+> Commands and architecture live in `README.md` and `AGENTS.md`. The
+> engine/scan-model sections remain accurate; every `serve`/`ui/`/tray
+> reference is historical.
+
 Status: APPROVED (v0.4.0 baseline; deltas tracked in CHANGELOG/ADRs/review report)
 Date: 2026-08-12
 Source of truth: `docs/intent/cf-scanner.md` (confirmed user intent + verified

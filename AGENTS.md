@@ -1,11 +1,11 @@
 # CF-Scanner agent rules
 
-Single cross-platform Rust binary that finds working Cloudflare IPs/endpoints
+Single cross-platform Rust CLI that finds working Cloudflare IPs/endpoints
 on ISP-restricted networks. CDN/proxy mode (TCP/TLS phase-1 scan; xray-backed
 phase-2 real-config verification with DPI fragmentation) + WARP mode (UDP
 endpoint discovery with WireGuard handshake probes, optional wgconf
-verification, opt-in config registration). Localhost HTTP API + embedded
-browser UI + CLI, all over one in-process engine.
+verification, opt-in config registration). Pure CLI + interactive wizard
+over one in-process engine: no HTTP server, no browser UI, no tray.
 
 ## Source of truth (read before coding)
 
@@ -28,7 +28,7 @@ browser UI + CLI, all over one in-process engine.
 
 ```
 cargo build --release     # build
-cargo run -- serve        # dev: API + UI on 127.0.0.1:8765 (UI: cd ui && npm ci && npm run build first, or it serves the committed ui/dist)
+cargo run -- scan --mode cdn --preset quick   # dev: run a scan
 cargo test                # unit + integration tests
 cargo clippy --all-targets -- -D warnings
 cargo fmt --check
@@ -68,12 +68,11 @@ npm publishing knowledge (AGENTS must know, condensed from `docs/release-process
 
 ## Architecture
 
-- Single process. CLI, HTTP server, wizard, frontend = thin clients of ONE
-  engine (ScanController) and ONE API contract in `src/api/types.rs`.
+- Single process. CLI + wizard = thin clients of ONE engine (ScanController)
+  and ONE contract in `src/api/types.rs`.
 - Contract first: `src/api/` defines ScanConfig/Verdict/StopCondition/events;
-  engine returns domain types; server maps domain → API. Never serialize
-  engine types directly. Engine consumes `api::types` directly by design
-  (ADR-011). Do not "fix" this without revisiting the ADR.
+  engine consumes `api::types` directly by design (ADR-011). Do not "fix"
+  this without revisiting the ADR.
 - Probe transports are injectable (trait) so tests never touch the network.
 - xray = subprocess (`xray run -c config.json`, local socks inbound). The
   crates.io `xray-core` crate is ONLY a gRPC client. Do not use it to embed.
@@ -88,10 +87,12 @@ npm publishing knowledge (AGENTS must know, condensed from `docs/release-process
 - Results: last-scan-only, in memory; reset clears. NO history, NO telemetry.
 - GeoIP: db-ip Lite mmdb embedded via include_bytes! + maxminddb 0.30
   (geoip2 types built in). Country offline; datacenter = colo from
-  /cdn-cgi/trace (phase 2 only). Attribution required (CC BY 4.0, footer link).
+  /cdn-cgi/trace (phase 2 only). Attribution required (CC BY 4.0, README link).
 - CLI agents: `scan` prints newline-delimited JSON on stdout + final summary;
   stderr carries human-only noise (progress ticker is TTY-gated).
   `--json-errors` prints `{"error": ...}` on stdout for failures.
+  `--export FILE --export-format csv|json|base64|raw|singbox|clash` writes
+  results/bundles to a file (`-` = stdout) via `src/export.rs`.
 
 ### v0.8.0 invariants (do not regress)
 
@@ -102,8 +103,7 @@ npm publishing knowledge (AGENTS must know, condensed from `docs/release-process
 - The verdict store flushes are plain pushes (`BATCH_FLUSH=256`) + lazy
   `sort_if_dirty` (latency asc, ip/port tiebreak). Never read the raw store
   expecting sorted order; go through `results()`.
-- Event broadcast capacity is 4096; SSE `TerminalBounded` survives `Lagged`
-  (replays last terminal snapshot, keeps listening) instead of closing.
+- Event broadcast capacity is 4096.
 - WARP: `SocketCache` is per-controller (`ScanController::warp_cache`),
   injected via `WarpTransport::with_cache`; never hold its lock across
   `.await`; no global static socket cache. Server pubkey resolves ONCE per
@@ -112,12 +112,8 @@ npm publishing knowledge (AGENTS must know, condensed from `docs/release-process
   through `ranges::HTTP_CLIENT` whose redirect policy enforces
   `validate_fetch_url` per hop. The client has NO global timeout, so every
   call site MUST set `.timeout(...)`.
-- Error envelopes carry a machine `code` field (`status_to_code`); typed
-  `warpgen::WarpRegisterError` maps registration failures to 504/429/502 in
-  `server.rs::map_register_error`. New error paths must set a code.
 - `ScanConfig`/`Phase2Config`/`WarpConfig` are `deny_unknown_fields`: any NEW
-  request field needs `#[serde(default)]`, and unknown keys are rejected
-  (axum maps that to 422 → code `invalid_config`).
+  request field needs `#[serde(default)]`.
 
 ## Code conventions
 
@@ -133,8 +129,7 @@ npm publishing knowledge (AGENTS must know, condensed from `docs/release-process
 
 - Always: cargo test + clippy -D warnings + fmt --check before committing;
   validate user input (ports, CIDRs, URI schemes); verify `.dgst` checksums
-  for downloaded xray binaries; bind 127.0.0.1 only, port configurable via
-  `--port`; keep configs/keys out of logs.
+  for downloaded xray binaries; keep configs/keys out of logs.
 - Ask first: adding dependencies; changing `src/api/`; dist/release config;
   bundling new binaries/data files; changing default scan behavior.
   **Versions & releases are USER-GATED:** never bump any version string
@@ -164,6 +159,6 @@ npm publishing knowledge (AGENTS must know, condensed from `docs/release-process
 - Toolchain is pinned by `rust-toolchain.toml` (= CI's 1.88); the version-
   parity CI job requires Cargo.toml == npm package.json == RELEASE_TAG on
   every release bump. Bump all three or CI fails.
-- Frontend is Svelte 5 (runes-only) in `ui/src` → committed `ui/dist`,
-  embedded via rust-embed. After UI changes: `cd ui && npm run check &&
-  npm run build`, then commit dist together with src.
+- This is a pure CLI (server/tray/UI were removed 2026-09-02). axum survives
+  only as a dev-dependency (warpgen's mock registration server in tests).
+  Do not reintroduce serve/tray/UI code.

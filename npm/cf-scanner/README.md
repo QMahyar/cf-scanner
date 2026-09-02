@@ -19,8 +19,8 @@ cf-scanner scan --mode cdn --preset quick
 # WARP scan
 cf-scanner scan --mode warp --count 100
 
-# Start the web UI
-cf-scanner serve
+# Export results (csv, json, base64, raw, singbox, clash)
+cf-scanner scan --mode cdn --preset quick --export results.csv
 ```
 
 ## Supported Platforms

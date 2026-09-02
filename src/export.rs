@@ -1,37 +1,40 @@
 use std::net::IpAddr;
 
-use axum::extract::{Query, State};
-use axum::http::{HeaderValue, header};
-use axum::response::{IntoResponse, Response};
-
 use crate::api::types::Verdict;
 use crate::configs;
-use crate::server::error::ApiError;
-use crate::server::state::AppState;
 
-#[derive(serde::Deserialize)]
-pub(crate) struct ResultExportQuery {
-    #[serde(default)]
-    pub format: Option<String>,
+pub const BUNDLE_FORMATS: [&str; 4] = ["base64", "raw", "singbox", "clash"];
+pub const RESULT_FORMATS: [&str; 2] = ["csv", "json"];
+
+pub fn render_bundle(
+    format: &str,
+    verdicts: &[Verdict],
+    configs: &[String],
+) -> Result<String, String> {
+    resolve_format(format, &BUNDLE_FORMATS)
+        .ok_or_else(|| unknown_format(format, &BUNDLE_FORMATS))
+        .map(|fmt| bundle_body(fmt, verdicts, configs))
 }
 
-#[derive(serde::Deserialize)]
-pub(crate) struct BundleQuery {
-    #[serde(default)]
-    pub format: Option<String>,
+pub fn render_results(format: &str, verdicts: &[Verdict]) -> Result<String, String> {
+    resolve_format(format, &RESULT_FORMATS)
+        .ok_or_else(|| unknown_format(format, &RESULT_FORMATS))
+        .map(|fmt| result_dump(fmt, verdicts))
 }
 
-fn text_response(body: String, content_type: &'static str, filename: &str) -> Response {
-    let mut headers = axum::http::HeaderMap::new();
-    headers.insert(header::CONTENT_TYPE, HeaderValue::from_static(content_type));
-    if let Ok(n) = HeaderValue::from_str(filename) {
-        headers.insert(header::CONTENT_DISPOSITION, n);
+fn unknown_format(format: &str, allowed: &[&str]) -> String {
+    format!(
+        "unknown format {format:?}; expected one of {}",
+        allowed.join("|")
+    )
+}
+
+fn resolve_format<'a>(format: &'a str, allowed: &[&'a str]) -> Option<&'a str> {
+    if allowed.contains(&format) {
+        Some(format)
+    } else {
+        None
     }
-    headers.insert(
-        header::CACHE_CONTROL,
-        HeaderValue::from_static("no-store, max-age=0"),
-    );
-    (headers, body).into_response()
 }
 
 fn remark_for(v: &Verdict) -> Option<String> {
@@ -79,10 +82,10 @@ fn rewrite_uris(non_null_ips: &[Verdict], configs: &[String]) -> Vec<String> {
     uris
 }
 
-fn subscription_body(format: &str, non_null_ips: &[Verdict], configs: &[String]) -> Response {
+fn bundle_body(format: &str, non_null_ips: &[Verdict], configs: &[String]) -> String {
     let uris = rewrite_uris(non_null_ips, configs);
     let joined = uris.join("\n");
-    let body = match format {
+    match format {
         "raw" => joined,
         "singbox" => singbox_body(&uris),
         "clash" => clash_body(&uris),
@@ -90,27 +93,9 @@ fn subscription_body(format: &str, non_null_ips: &[Verdict], configs: &[String])
             &base64::engine::general_purpose::STANDARD,
             joined.as_bytes(),
         ),
-    };
-    let (ctype, filename) = match format {
-        "raw" => (
-            "text/plain; charset=utf-8",
-            "attachment; filename=\"cf-scanner.txt\"",
-        ),
-        "singbox" => (
-            "application/json; charset=utf-8",
-            "attachment; filename=\"cf-scanner-singbox.json\"",
-        ),
-        "clash" => (
-            "text/yaml; charset=utf-8",
-            "attachment; filename=\"cf-scanner-clash.yaml\"",
-        ),
-        _ => (
-            "text/plain; charset=utf-8",
-            "attachment; filename=\"cf-scanner-sub.txt\"",
-        ),
-    };
-    text_response(body, ctype, filename)
+    }
 }
+
 fn singbox_body(uris: &[String]) -> String {
     let mut outbounds: Vec<serde_json::Value> = Vec::new();
     let mut seen_tags: std::collections::HashMap<String, usize> = Default::default();
@@ -223,8 +208,8 @@ pub(crate) fn csv_field(v: &str) -> String {
     }
 }
 
-fn result_dump(format: &str, verdicts: &[Verdict]) -> Response {
-    let body = match format {
+fn result_dump(format: &str, verdicts: &[Verdict]) -> String {
+    match format {
         "json" => serde_json::json!({ "results": verdicts, "count": verdicts.len() }).to_string(),
         _ => {
             let mut out =
@@ -250,60 +235,18 @@ fn result_dump(format: &str, verdicts: &[Verdict]) -> Response {
             }
             out
         }
-    };
-    let (ctype, filename) = if format == "json" {
-        (
-            "application/json; charset=utf-8",
-            "attachment; filename=\"cf-scanner-results.json\"",
-        )
-    } else {
-        (
-            "text/csv; charset=utf-8",
-            "attachment; filename=\"cf-scanner-results.csv\"",
-        )
-    };
-    text_response(body, ctype, filename)
+    }
 }
 
-pub(crate) async fn bundle(
-    State(state): State<std::sync::Arc<AppState>>,
-    Query(q): Query<BundleQuery>,
-) -> Response {
-    const FORMATS: [&str; 4] = ["base64", "raw", "singbox", "clash"];
-    let Some(format) = resolve_format(q.format.as_deref(), &FORMATS) else {
-        return ApiError::bad_request(format!(
-            "unknown format {:?}; expected one of {}",
-            q.format.as_deref().unwrap_or(""),
-            FORMATS.join("|")
-        ))
-        .into_response();
-    };
-    let configs = state.controller.phase2_configs();
-    let results = state.controller.results();
-    subscription_body(format, &results, &configs)
-}
+#[cfg(test)]
+mod tests {
+    use super::csv_field;
 
-pub(crate) async fn result_export(
-    State(state): State<std::sync::Arc<AppState>>,
-    Query(q): Query<ResultExportQuery>,
-) -> Response {
-    const FORMATS: [&str; 2] = ["csv", "json"];
-    let Some(format) = resolve_format(q.format.as_deref(), &FORMATS) else {
-        return ApiError::bad_request(format!(
-            "unknown format {:?}; expected one of {}",
-            q.format.as_deref().unwrap_or(""),
-            FORMATS.join("|")
-        ))
-        .into_response();
-    };
-    let results = state.controller.results();
-    result_dump(format, &results)
-}
-
-fn resolve_format<'a>(query: Option<&'a str>, allowed: &[&'a str]) -> Option<&'a str> {
-    match query {
-        None => Some(allowed.first().copied().unwrap_or("")),
-        Some(f) if allowed.contains(&f) => Some(f),
-        Some(_) => None,
+    #[test]
+    fn csv_field_quotes_metacharacters() {
+        assert_eq!(csv_field("LAX"), "LAX");
+        assert_eq!(csv_field("a,b"), "\"a,b\"");
+        assert_eq!(csv_field("say \"hi\""), "\"say \"\"hi\"\"\"");
+        assert_eq!(csv_field("line\nbreak"), "\"line\nbreak\"");
     }
 }

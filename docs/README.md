@@ -29,6 +29,7 @@ Titles below match the files exactly.
 - [ADR-010: API hardening — localhost-only, register rate limit, overwrite guard](decisions/ADR-010-api-hardening.md)
 - [ADR-011: Contract boundary — shared API types are the contract](decisions/ADR-011-contract-boundary.md)
 - [ADR-012: Review-scope decisions](decisions/ADR-012-review-scope-decisions.md)
+- [ADR-013: Pure CLI — remove the HTTP server, browser UI, and tray](decisions/ADR-013-pure-cli.md)
 
 ## Engineering
 
@@ -44,8 +45,5 @@ Titles below match the files exactly.
 
 ## Quality
 
-- [ui-research-report.md](ui-research-report.md): a frontend research
-  snapshot from before 0.2.0. It is annotated; "Needs change" there is not
-  open work.
 - [qa-runbook.md](qa-runbook.md): the manual QA runbook for live checks:
   phase 2, WARP, registration, and ranges refresh

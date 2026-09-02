@@ -26,7 +26,7 @@ fn help_exits_zero_and_documents_scan() {
     let text = stdout_of(&out);
     assert!(text.contains("Usage:"), "{text}");
     assert!(text.contains("scan"), "{text}");
-    assert!(text.contains("serve"), "{text}");
+    assert!(text.contains("wizard"), "{text}");
 }
 
 #[test]
