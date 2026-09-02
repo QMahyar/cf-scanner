@@ -491,10 +491,8 @@
 {/snippet}
 
 <div class="fade-in flex flex-col gap-8">
-  <!-- scan form -->
   <section class="shell">
     <div class="core px-6 py-8 sm:px-8 sm:py-10">
-    <!-- delegated touched/server-error tracking + Ctrl+Enter accelerator -->
     <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
     <form onsubmit={onFormSubmit} oninput={markTouched} onchange={markTouched} onkeydown={onFormKeydown}>
       <h1 class="view-title" style="margin-block: 0 16px; font-size: 1.25rem">
@@ -528,8 +526,6 @@
             <span class="mb-1 block" style="color: var(--ink-muted)">
               {t("pro.field.target")}
             </span>
-            <!-- Amounts live in the labels; no separate hint line, no
-                 custom-count checkbox — Custom reveals the field itself. -->
             <div
               class="flex flex-wrap items-center gap-1.5 rounded-2xl p-1.5"
               style="background: var(--paper-3)"
@@ -691,9 +687,6 @@
           {@render fieldError("stopFound")}
         </label>
 
-        <!-- Tuning knobs live behind one disclosure: concurrency is how many
-             probes run at once, the cap is a run-wide probe budget. Related
-             but rarely touched together with target/ports selection. -->
         <div class="span-all">
           <details bind:open={scanAdvancedOpen}>
             <summary class="cursor-pointer text-xs font-semibold" style="color: var(--ink-muted)">
@@ -846,7 +839,6 @@
           </div>
         </div>
       {:else}
-        <!-- phase-2 toggle sits above the section it reveals -->
         <label class="mt-4 switch" style="color: var(--ink-muted)">
           <input type="checkbox" name="phase2On" bind:checked={form.phase2On} />
           <span class="switch__track"><span class="switch__thumb"></span></span>
@@ -875,8 +867,6 @@
       {/if}
 
       <div aria-hidden="true" class="h-[7.5rem] sm:h-20"></div>
-      <!-- sticky actions: one canonical Start/Stop pair, visible even with
-           phase-2/WARP textareas expanded -->
       <div
         class="sticky bottom-0 z-10 -ms-6 sm:-ms-8 -me-6 sm:-me-8 -mb-8 sm:-mb-10 mt-5 px-6 sm:px-8 pt-3"
         style="background: color-mix(in srgb, var(--bg) 88%, transparent); backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px); border-block-start: 1px solid var(--border); padding-bottom: max(1rem, env(safe-area-inset-bottom));"
@@ -956,8 +946,6 @@
 
   {#if showCandidatesCard || showVerifiedCard}
     {#if wide}
-      <!-- xl+: bento — both lists side by side, each independently
-           sortable/copyable via its own ResultsView. -->
       <div class="grid items-start gap-4 xl:grid-cols-2">
         {#if showCandidatesCard}
           <ResultsTable
@@ -977,7 +965,6 @@
     {:else}
       {#if showCandidatesCard && showVerifiedCard}
         <div class="flex justify-center">
-          <!-- Same segmented pattern as the simple-mode CDN/WARP switch. -->
           <div class="seg" role="radiogroup" aria-label={t("results.heading")}>
             <button
               type="button"

@@ -297,9 +297,6 @@
         style="color: var(--ink-muted)"
       >
         {t("table.maxLatency")}
-        <!-- WHY select not free input: three meaningful ceilings match the
-             latency colour bands; a text field invited arbitrary values the
-             colour coding could never reflect. -->
         <select
           class="field mono !w-20 text-center"
           value={view.maxLatency ?? ""}
@@ -423,8 +420,6 @@
     </div>
   {/if}
 
-  <!-- Skeleton rows while phase 1 runs with nothing banked yet (research §7:
-       never show "no records" mid-run). -->
   {#if view.total === 0 && app.running}
     <div class="px-4 py-3 text-xs" aria-busy="true">
       <p class="mono" style="color: var(--text-dim)">{t("table.skeleton")}</p>
