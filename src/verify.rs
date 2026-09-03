@@ -340,7 +340,12 @@ impl HybridTunnelProbe {
         preset: &FragmentPreset,
         custom: Option<&CustomFragment>,
     ) -> bool {
-        if *preset != FragmentPreset::Off || custom.is_some() || spec.ws.is_some() {
+        if *preset != FragmentPreset::Off
+            || custom.is_some()
+            || spec.ws.is_some()
+            || spec.grpc.is_some()
+            || spec.xhttp.is_some()
+        {
             return false;
         }
         if !(spec.security.eq_ignore_ascii_case("tls")

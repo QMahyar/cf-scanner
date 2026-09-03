@@ -49,7 +49,7 @@ fn fragment_outbound(preset: &FragmentPreset, custom: Option<&CustomFragment>) -
 }
 
 pub fn build_outbound(spec: &OutboundSpec, dial_ip: Ipv4Addr, sni_override: Option<&str>) -> Value {
-    let mut stream = json!({"network": if spec.ws.is_some() { "ws" } else { "tcp" }});
+    let mut stream = json!({"network": spec.network()});
     if spec.security == "tls" {
         let mut tls = json!({});
         tls["serverName"] = Value::from(
@@ -75,6 +75,23 @@ pub fn build_outbound(spec: &OutboundSpec, dial_ip: Ipv4Addr, sni_override: Opti
             ws_json["packetEncoding"] = Value::String(pe.clone());
         }
         stream["wsSettings"] = ws_json;
+    }
+    if let Some(grpc) = &spec.grpc {
+        let mut grpc_json = json!({"serviceName": grpc.service_name});
+        if grpc.mode.as_deref() == Some("multi") {
+            grpc_json["multiMode"] = Value::from(true);
+        }
+        stream["grpcSettings"] = grpc_json;
+    }
+    if let Some(xhttp) = &spec.xhttp {
+        let mut xhttp_json = json!({"path": xhttp.path});
+        if let Some(host) = &xhttp.host {
+            xhttp_json["host"] = Value::String(host.clone());
+        }
+        if let Some(mode) = &xhttp.mode {
+            xhttp_json["mode"] = Value::String(mode.clone());
+        }
+        stream["splithttpSettings"] = xhttp_json;
     }
 
     let mut outbound = match spec.protocol {
@@ -643,6 +660,8 @@ mod tests {
                 host: Some("front.example.com".to_owned()),
                 packet_encoding: Some("xudp".to_owned()),
             }),
+            grpc: None,
+            xhttp: None,
             tag: None,
             alter_id: 0,
             vmess_security: None,
@@ -736,6 +755,40 @@ mod tests {
         let stream = &cfg["outbounds"][0]["streamSettings"];
         assert_eq!(stream["tlsSettings"]["serverName"], "front.me");
         assert_eq!(stream["wsSettings"]["headers"]["Host"], "front.me");
+    }
+
+    #[test]
+    fn grpc_transport_emits_grpc_settings() {
+        let mut s = spec();
+        s.ws = None;
+        s.grpc = Some(crate::configs::GrpcSettings {
+            service_name: "grpc-svc".to_owned(),
+            mode: Some("multi".to_owned()),
+        });
+        let cfg = build_config(&s, dial(), &FragmentPreset::Off, None, None, 28011).unwrap();
+        let stream = &cfg["outbounds"][0]["streamSettings"];
+        assert_eq!(stream["network"], "grpc");
+        assert_eq!(stream["grpcSettings"]["serviceName"], "grpc-svc");
+        assert_eq!(stream["grpcSettings"]["multiMode"], true);
+        assert!(stream.get("wsSettings").is_none());
+    }
+
+    #[test]
+    fn xhttp_transport_emits_splithttp_settings() {
+        let mut s = spec();
+        s.ws = None;
+        s.xhttp = Some(crate::configs::XhttpSettings {
+            path: "/xh".to_owned(),
+            host: Some("front.example.com".to_owned()),
+            mode: Some("stream".to_owned()),
+        });
+        let cfg = build_config(&s, dial(), &FragmentPreset::Off, None, None, 28012).unwrap();
+        let stream = &cfg["outbounds"][0]["streamSettings"];
+        assert_eq!(stream["network"], "splithttp");
+        assert_eq!(stream["splithttpSettings"]["path"], "/xh");
+        assert_eq!(stream["splithttpSettings"]["host"], "front.example.com");
+        assert_eq!(stream["splithttpSettings"]["mode"], "stream");
+        assert!(stream.get("wsSettings").is_none());
     }
 
     #[test]

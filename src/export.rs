@@ -177,6 +177,25 @@ fn singbox_body(uris: &[String]) -> String {
                     transport["headers"] = serde_json::json!({ "Host": host });
                 }
                 obj.insert("transport".into(), transport);
+            } else if let Some(grpc) = &spec.grpc {
+                let transport = serde_json::json!({
+                    "type": "grpc",
+                    "service_name": grpc.service_name,
+                });
+                obj.insert("transport".into(), transport);
+            } else if let Some(xhttp) = &spec.xhttp {
+                let mut transport = serde_json::json!({ "type": "splithttp", "path": xhttp.path });
+                if let Some(host) = &xhttp.host
+                    && !host.is_empty()
+                {
+                    transport["host"] = host.clone().into();
+                }
+                if let Some(mode) = &xhttp.mode
+                    && !mode.is_empty()
+                {
+                    transport["mode"] = mode.clone().into();
+                }
+                obj.insert("transport".into(), transport);
             }
             outbounds.push(ob);
         }
@@ -242,6 +261,26 @@ fn clash_body(uris: &[String]) -> String {
                     opts["headers"] = serde_json::json!({ "Host": host });
                 }
                 obj.insert("ws-opts".into(), opts);
+            } else if let Some(grpc) = &spec.grpc {
+                obj.insert("network".into(), "grpc".into());
+                obj.insert(
+                    "grpc-opts".into(),
+                    serde_json::json!({ "grpc-service-name": grpc.service_name }),
+                );
+            } else if let Some(xhttp) = &spec.xhttp {
+                obj.insert("network".into(), "xhttp".into());
+                let mut opts = serde_json::json!({ "path": xhttp.path });
+                if let Some(host) = &xhttp.host
+                    && !host.is_empty()
+                {
+                    opts["host"] = host.clone().into();
+                }
+                if let Some(mode) = &xhttp.mode
+                    && !mode.is_empty()
+                {
+                    opts["mode"] = mode.clone().into();
+                }
+                obj.insert("xhttp-opts".into(), opts);
             }
             proxies.push(p);
         }
@@ -549,5 +588,32 @@ mod tests {
         assert_eq!(p["type"], "ss");
         assert_eq!(p["cipher"], "aes-128-gcm");
         assert_eq!(p["password"], "pass");
+    }
+
+    #[test]
+    fn singbox_clash_emit_grpc_and_xhttp_transports() {
+        let grpc = "vless://11111111-2222-3333-4444-555555555555@5.6.7.8:443?security=tls&type=grpc&serviceName=grpc-svc";
+        let sb: serde_json::Value = serde_json::from_str(&singbox_body(&[grpc.into()])).unwrap();
+        let ob = &sb["outbounds"][0];
+        assert_eq!(ob["transport"]["type"], "grpc");
+        assert_eq!(ob["transport"]["service_name"], "grpc-svc");
+        let cl: serde_json::Value = serde_json::from_str(&clash_body(&[grpc.into()])).unwrap();
+        let p = &cl["proxies"][0];
+        assert_eq!(p["network"], "grpc");
+        assert_eq!(p["grpc-opts"]["grpc-service-name"], "grpc-svc");
+
+        let xhttp = "vless://11111111-2222-3333-4444-555555555555@5.6.7.8:443?security=tls&type=xhttp&path=%2Fxh&host=cdn.example.com&mode=stream";
+        let sb: serde_json::Value = serde_json::from_str(&singbox_body(&[xhttp.into()])).unwrap();
+        let ob = &sb["outbounds"][0];
+        assert_eq!(ob["transport"]["type"], "splithttp");
+        assert_eq!(ob["transport"]["path"], "/xh");
+        assert_eq!(ob["transport"]["host"], "cdn.example.com");
+        assert_eq!(ob["transport"]["mode"], "stream");
+        let cl: serde_json::Value = serde_json::from_str(&clash_body(&[xhttp.into()])).unwrap();
+        let p = &cl["proxies"][0];
+        assert_eq!(p["network"], "xhttp");
+        assert_eq!(p["xhttp-opts"]["path"], "/xh");
+        assert_eq!(p["xhttp-opts"]["host"], "cdn.example.com");
+        assert_eq!(p["xhttp-opts"]["mode"], "stream");
     }
 }
