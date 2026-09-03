@@ -543,6 +543,42 @@ fn loss_threshold_and_idle_hold_validate_and_round_trip() {
 }
 
 #[test]
+fn neighbor_count_defaults_off_validates_and_round_trips() {
+    let mut c = valid_config();
+    assert_eq!(c.neighbor_count, 0, "neighbor scanning must default off");
+    c.neighbor_count = MAX_NEIGHBORS;
+    assert_eq!(c.validate(), Ok(()), "the limit value must be accepted");
+    c.neighbor_count = MAX_NEIGHBORS + 1;
+    assert_eq!(
+        c.validate(),
+        Err(ConfigError::InvalidNeighbor(MAX_NEIGHBORS + 1))
+    );
+    c.neighbor_count = 4;
+    let json = serde_json::to_string(&c).unwrap();
+    assert!(json.contains("\"neighbor_count\":4"), "{json}");
+    let back: ScanConfig = serde_json::from_str(&json).unwrap();
+    assert_eq!(c, back);
+}
+
+#[test]
+fn neighbor_count_omitted_field_deserializes_as_zero() {
+    let json = r#"{
+        "mode": "Cdn",
+        "target": {"Count": 10},
+        "ports": [443],
+        "stop": {"found": 1, "cap": null},
+        "exclude": [],
+        "custom_cidrs": [],
+        "concurrency": 10,
+        "timeout_ms": 3000,
+        "phase2": null,
+        "warp": null
+    }"#;
+    let cfg: ScanConfig = serde_json::from_str(json).unwrap();
+    assert_eq!(cfg.neighbor_count, 0, "omitted field must default to 0");
+}
+
+#[test]
 fn event_tags_are_snake_case() {
     let json = serde_json::to_string(&ScanEvent::Finished(ScanSummary {
         scanned: 0,

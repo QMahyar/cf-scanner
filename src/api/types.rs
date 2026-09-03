@@ -191,6 +191,8 @@ pub struct ScanConfig {
     pub loss_threshold: Option<u32>,
     #[serde(default)]
     pub idle_hold_ms: u64,
+    #[serde(default)]
+    pub neighbor_count: u32,
 }
 
 impl Default for ScanConfig {
@@ -210,6 +212,7 @@ impl Default for ScanConfig {
             warp: None,
             loss_threshold: None,
             idle_hold_ms: 0,
+            neighbor_count: 0,
         }
     }
 }
@@ -395,6 +398,9 @@ impl ScanConfig {
             }
             if self.idle_hold_ms > MAX_IDLE_HOLD_MS {
                 return Err(ConfigError::InvalidIdleHold(self.idle_hold_ms));
+            }
+            if self.neighbor_count > MAX_NEIGHBORS {
+                return Err(ConfigError::InvalidNeighbor(self.neighbor_count));
             }
             for cidr in self.exclude.iter().chain(self.custom_cidrs.iter()) {
                 parse_cidr(cidr)?;

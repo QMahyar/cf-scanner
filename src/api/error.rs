@@ -1,4 +1,4 @@
-use super::limits::{DEFAULT_PORT, MAX_ENDPOINTS, MAX_IDLE_HOLD_MS};
+use super::limits::{DEFAULT_PORT, MAX_ENDPOINTS, MAX_IDLE_HOLD_MS, MAX_NEIGHBORS};
 
 #[derive(Debug, PartialEq, Eq, thiserror::Error)]
 pub enum ConfigError {
@@ -86,6 +86,8 @@ pub enum ConfigError {
     InvalidLossThreshold(u32),
     #[error("idle_hold_ms {0} out of range 0-{MAX_IDLE_HOLD_MS}")]
     InvalidIdleHold(u64),
+    #[error("neighbor_count {0} out of range 0-{MAX_NEIGHBORS}")]
+    InvalidNeighbor(u32),
     #[error(
         "warp scans need explicit UDP ports; the CDN default {DEFAULT_PORT} is not valid (pass e.g. 2408,500)"
     )]
