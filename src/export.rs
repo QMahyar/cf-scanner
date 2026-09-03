@@ -382,6 +382,21 @@ mod tests {
     }
 
     #[test]
+    fn render_results_csv_header_schema() {
+        const EXPECTED: &str = "ip,port,latency_ms,country,colo,phase2_passed,phase2_latency_ms,sent,received,loss_pct,fail_reason";
+        let out = render_results("csv", &[passing("1.2.3.4", 443, None)]).unwrap();
+        let mut lines = out.lines();
+        assert_eq!(lines.next(), Some(EXPECTED));
+        for row in lines {
+            assert_eq!(
+                row.split(',').count(),
+                EXPECTED.split(',').count(),
+                "row/header column mismatch: {row}"
+            );
+        }
+    }
+
+    #[test]
     fn render_results_csv_includes_loss_and_fail_reason_columns() {
         let mut failed = passing("9.9.9.9", 443, None);
         failed.phase2 = None;
