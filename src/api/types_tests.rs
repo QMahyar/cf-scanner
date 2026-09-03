@@ -543,6 +543,26 @@ fn loss_threshold_and_idle_hold_validate_and_round_trip() {
 }
 
 #[test]
+fn min_latency_validate_and_round_trip() {
+    let mut c = valid_config();
+    assert_eq!(c.min_latency_ms, None);
+    c.min_latency_ms = Some(0);
+    assert_eq!(c.validate(), Err(ConfigError::InvalidMinLatency(0)));
+    c.min_latency_ms = Some(MAX_MIN_LATENCY_MS + 1);
+    assert_eq!(
+        c.validate(),
+        Err(ConfigError::InvalidMinLatency(MAX_MIN_LATENCY_MS + 1))
+    );
+    c.min_latency_ms = Some(MAX_MIN_LATENCY_MS);
+    assert_eq!(c.validate(), Ok(()));
+    c.min_latency_ms = Some(1);
+    assert_eq!(c.validate(), Ok(()));
+    let json = serde_json::to_string(&c).unwrap();
+    let back: ScanConfig = serde_json::from_str(&json).unwrap();
+    assert_eq!(c, back);
+}
+
+#[test]
 fn event_tags_are_snake_case() {
     let json = serde_json::to_string(&ScanEvent::Finished(ScanSummary {
         scanned: 0,
