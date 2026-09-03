@@ -100,6 +100,25 @@ pub enum Verifier {
     Xray,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ProbeMode {
+    Tcp,
+    #[default]
+    Tls,
+    Http,
+}
+
+impl std::fmt::Display for ProbeMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Tcp => write!(f, "tcp"),
+            Self::Tls => write!(f, "tls"),
+            Self::Http => write!(f, "http"),
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CustomFragment {
@@ -191,6 +210,10 @@ pub struct ScanConfig {
     pub loss_threshold: Option<u32>,
     #[serde(default)]
     pub idle_hold_ms: u64,
+    #[serde(default)]
+    pub probe_mode: ProbeMode,
+    #[serde(default = "default_accepted_http_codes")]
+    pub accepted_http_codes: Vec<u16>,
 }
 
 impl Default for ScanConfig {
@@ -210,6 +233,8 @@ impl Default for ScanConfig {
             warp: None,
             loss_threshold: None,
             idle_hold_ms: 0,
+            probe_mode: ProbeMode::Tls,
+            accepted_http_codes: default_accepted_http_codes(),
         }
     }
 }
@@ -396,6 +421,14 @@ impl ScanConfig {
             if self.idle_hold_ms > MAX_IDLE_HOLD_MS {
                 return Err(ConfigError::InvalidIdleHold(self.idle_hold_ms));
             }
+            for code in &self.accepted_http_codes {
+                if !(100..=599).contains(code) {
+                    return Err(ConfigError::InvalidHttpStatusCode(*code));
+                }
+            }
+            if self.probe_mode == ProbeMode::Http && self.accepted_http_codes.is_empty() {
+                return Err(ConfigError::EmptyHttpCodes);
+            }
             for cidr in self.exclude.iter().chain(self.custom_cidrs.iter()) {
                 parse_cidr(cidr)?;
             }
@@ -412,6 +445,9 @@ impl ScanConfig {
                     }
                 }
                 Mode::Warp => {
+                    if self.probe_mode != ProbeMode::Tls {
+                        return Err(ConfigError::ProbeWrongMode);
+                    }
                     if self.phase2_only {
                         return Err(ConfigError::Phase2OnlyWrongMode);
                     }

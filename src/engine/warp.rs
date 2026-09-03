@@ -154,10 +154,13 @@ impl ScanController {
                             break;
                         };
                         match outcome {
-                            Ok((latency, probe_sent, probe_received)) => {
-                                latency_ms = Some(latency_ms.map_or(latency, |m| m.min(latency)));
-                                sent += probe_sent;
-                                received += probe_received;
+                            Ok(probe) => {
+                                latency_ms =
+                                    Some(latency_ms.map_or(probe.latency_ms, |m| {
+                                        m.min(probe.latency_ms)
+                                    }));
+                                sent += probe.sent;
+                                received += probe.received;
                             }
                             Err(_) => {
                                 sent += 1;

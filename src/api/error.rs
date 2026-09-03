@@ -84,6 +84,12 @@ pub enum ConfigError {
     NonRoutableEndpoint(String),
     #[error("loss_threshold {0} out of range 0-100")]
     InvalidLossThreshold(u32),
+    #[error("http status code {0} out of range 100-599")]
+    InvalidHttpStatusCode(u16),
+    #[error("http probe mode requires at least one accepted status code")]
+    EmptyHttpCodes,
+    #[error("probe modes are CDN-only; WARP uses WireGuard handshake probes")]
+    ProbeWrongMode,
     #[error("idle_hold_ms {0} out of range 0-{MAX_IDLE_HOLD_MS}")]
     InvalidIdleHold(u64),
     #[error(

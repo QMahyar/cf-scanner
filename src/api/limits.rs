@@ -18,6 +18,12 @@ pub fn default_probe_url() -> String {
     DEFAULT_PROBE_URL.to_owned()
 }
 
+pub const DEFAULT_ACCEPTED_HTTP_CODES: &[u16] = &[200, 301, 302];
+
+pub fn default_accepted_http_codes() -> Vec<u16> {
+    DEFAULT_ACCEPTED_HTTP_CODES.to_vec()
+}
+
 pub const MAX_SCAN_COUNT: u32 = 100_000;
 pub const MAX_PORTS: usize = 64;
 pub const MAX_CIDRS: usize = 64;
