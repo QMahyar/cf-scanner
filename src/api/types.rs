@@ -190,6 +190,8 @@ pub struct ScanConfig {
     #[serde(default)]
     pub loss_threshold: Option<u32>,
     #[serde(default)]
+    pub min_latency_ms: Option<u32>,
+    #[serde(default)]
     pub idle_hold_ms: u64,
 }
 
@@ -209,6 +211,7 @@ impl Default for ScanConfig {
             phase2: None,
             warp: None,
             loss_threshold: None,
+            min_latency_ms: None,
             idle_hold_ms: 0,
         }
     }
@@ -392,6 +395,11 @@ impl ScanConfig {
                 && t > 100
             {
                 return Err(ConfigError::InvalidLossThreshold(t));
+            }
+            if let Some(t) = self.min_latency_ms
+                && !(1..=MAX_MIN_LATENCY_MS).contains(&t)
+            {
+                return Err(ConfigError::InvalidMinLatency(t));
             }
             if self.idle_hold_ms > MAX_IDLE_HOLD_MS {
                 return Err(ConfigError::InvalidIdleHold(self.idle_hold_ms));

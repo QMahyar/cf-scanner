@@ -1,4 +1,4 @@
-use super::limits::{DEFAULT_PORT, MAX_ENDPOINTS, MAX_IDLE_HOLD_MS};
+use super::limits::{DEFAULT_PORT, MAX_ENDPOINTS, MAX_IDLE_HOLD_MS, MAX_MIN_LATENCY_MS};
 
 #[derive(Debug, PartialEq, Eq, thiserror::Error)]
 pub enum ConfigError {
@@ -84,6 +84,8 @@ pub enum ConfigError {
     NonRoutableEndpoint(String),
     #[error("loss_threshold {0} out of range 0-100")]
     InvalidLossThreshold(u32),
+    #[error("min_latency_ms {0} out of range 1-{MAX_MIN_LATENCY_MS}")]
+    InvalidMinLatency(u32),
     #[error("idle_hold_ms {0} out of range 0-{MAX_IDLE_HOLD_MS}")]
     InvalidIdleHold(u64),
     #[error(

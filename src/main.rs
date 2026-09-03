@@ -151,6 +151,14 @@ struct ScanArgs {
     #[arg(
         long,
         value_name = "MS",
+        help_heading = "Tuning",
+        long_help = "Drop results whose handshake latency is below MS (throttled routes look fast but stall); default keeps everything"
+    )]
+    min_latency: Option<u32>,
+
+    #[arg(
+        long,
+        value_name = "MS",
         default_value_t = 0,
         help_heading = "Tuning",
         long_help = "After the TLS handshake, hold the connection idle for MS and fail the probe if it is reset (0 = off)"
@@ -322,6 +330,12 @@ fn build_scan_config(args: &ScanArgs) -> Result<ScanConfig> {
     if args.loss_threshold.is_some_and(|t| t > 100) {
         bail!("--loss-threshold must be 0-100");
     }
+    if args
+        .min_latency
+        .is_some_and(|t| t == 0 || t > api::types::MAX_MIN_LATENCY_MS)
+    {
+        bail!("--min-latency must be 1-{}", api::types::MAX_MIN_LATENCY_MS);
+    }
     if args.idle_hold_ms > api::types::MAX_IDLE_HOLD_MS {
         bail!("--idle-hold-ms must be 0-{}", api::types::MAX_IDLE_HOLD_MS);
     }
@@ -428,6 +442,7 @@ fn build_scan_config(args: &ScanArgs) -> Result<ScanConfig> {
         phase2_only: args.phase2_only,
         warp,
         loss_threshold: args.loss_threshold,
+        min_latency_ms: args.min_latency,
         idle_hold_ms: args.idle_hold_ms,
     };
     cfg.validate()
@@ -805,6 +820,7 @@ mod tests {
             export: None,
             export_format: ExportFormatArg::Csv,
             loss_threshold: None,
+            min_latency: None,
             idle_hold_ms: 0,
         }
     }
@@ -905,6 +921,34 @@ mod tests {
         a.idle_hold_ms = api::types::MAX_IDLE_HOLD_MS + 1;
         let err = build_scan_config(&a).unwrap_err();
         assert!(err.to_string().contains("--idle-hold-ms"), "{err:#}");
+    }
+
+    #[test]
+    fn min_latency_builds_scan_config() {
+        let argv = ["cf-scanner", "scan", "--min-latency", "250"];
+        let a = match Cli::try_parse_from(argv).unwrap().command {
+            Command::Scan { args } => *args,
+            _ => unreachable!(),
+        };
+        let cfg = build_scan_config(&a).unwrap();
+        assert_eq!(cfg.min_latency_ms, Some(250));
+        assert_eq!(
+            build_scan_config(&args()).unwrap().min_latency_ms,
+            None,
+            "the latency lower bound must default to off"
+        );
+    }
+
+    #[test]
+    fn min_latency_out_of_range_is_rejected() {
+        let mut a = args();
+        a.min_latency = Some(0);
+        let err = build_scan_config(&a).unwrap_err();
+        assert!(err.to_string().contains("--min-latency"), "{err:#}");
+        let mut a = args();
+        a.min_latency = Some(api::types::MAX_MIN_LATENCY_MS + 1);
+        let err = build_scan_config(&a).unwrap_err();
+        assert!(err.to_string().contains("--min-latency"), "{err:#}");
     }
 
     #[test]
