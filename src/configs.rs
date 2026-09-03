@@ -16,6 +16,9 @@ use crate::ranges;
 
 const SUB_UA: &str = "cf-scanner/0.1.0";
 const WS: &str = "ws";
+const GRPC: &str = "grpc";
+const XHTTP: &str = "xhttp";
+const SPLITHTTP: &str = "splithttp";
 const MAX_ERROR_LINE_BYTES: usize = 512;
 const MAX_USER_ID_BYTES: usize = 1024;
 const MAX_SERVER_BYTES: usize = 1024;
@@ -133,9 +136,25 @@ pub struct OutboundSpec {
     pub tls_server_name: Option<String>,
     pub fingerprint: Option<String>,
     pub ws: Option<WsSettings>,
+    pub grpc: Option<GrpcSettings>,
+    pub xhttp: Option<XhttpSettings>,
     pub tag: Option<String>,
     pub alter_id: u16,
     pub vmess_security: Option<String>,
+}
+
+impl OutboundSpec {
+    pub fn network(&self) -> &'static str {
+        if self.ws.is_some() {
+            WS
+        } else if self.grpc.is_some() {
+            GRPC
+        } else if self.xhttp.is_some() {
+            SPLITHTTP
+        } else {
+            "tcp"
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -143,6 +162,19 @@ pub struct WsSettings {
     pub path: String,
     pub host: Option<String>,
     pub packet_encoding: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GrpcSettings {
+    pub service_name: String,
+    pub mode: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct XhttpSettings {
+    pub path: String,
+    pub host: Option<String>,
+    pub mode: Option<String>,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -268,6 +300,21 @@ fn render_sip002(
         if let Some(packet_encoding) = &ws.packet_encoding {
             add("packetencoding", packet_encoding);
         }
+    } else if let Some(grpc) = &spec.grpc {
+        add("type", GRPC);
+        add("serviceName", &grpc.service_name);
+        if let Some(mode) = &grpc.mode {
+            add("mode", mode);
+        }
+    } else if let Some(xhttp) = &spec.xhttp {
+        add("type", XHTTP);
+        add("path", &xhttp.path);
+        if let Some(host) = &xhttp.host {
+            add("host", host);
+        }
+        if let Some(mode) = &xhttp.mode {
+            add("mode", mode);
+        }
     }
     for (key, value) in extras {
         params.push(format!(
@@ -290,6 +337,8 @@ const MANAGED_SIP002_KEYS: &[&str] = &[
     "path",
     "host",
     "packetencoding",
+    "servicename",
+    "mode",
     "id",
     "password",
 ];
@@ -344,14 +393,29 @@ fn render_vmess(
     if let Some(scy) = &spec.vmess_security {
         payload.insert("scy".into(), serde_json::json!(scy));
     }
-    let net = if spec.ws.is_some() { "ws" } else { "tcp" };
+    let net = spec.network();
     payload.insert("net".into(), serde_json::json!(net));
     payload.insert("type".into(), serde_json::json!("none"));
-    if let Some(ws) = &spec.ws {
-        payload.insert("path".into(), serde_json::json!(ws.path));
-        if let Some(host) = &ws.host {
-            payload.insert("host".into(), serde_json::json!(host));
+    match (&spec.ws, &spec.grpc, &spec.xhttp) {
+        (Some(ws), _, _) => {
+            payload.insert("path".into(), serde_json::json!(ws.path));
+            if let Some(host) = &ws.host {
+                payload.insert("host".into(), serde_json::json!(host));
+            }
         }
+        (_, Some(grpc), _) => {
+            payload.insert("path".into(), serde_json::json!(grpc.service_name));
+            if let Some(mode) = &grpc.mode {
+                payload.insert("mode".into(), serde_json::json!(mode));
+            }
+        }
+        (_, _, Some(xhttp)) => {
+            payload.insert("path".into(), serde_json::json!(xhttp.path));
+            if let Some(host) = &xhttp.host {
+                payload.insert("host".into(), serde_json::json!(host));
+            }
+        }
+        _ => {}
     }
     let tls = if spec.security == "tls" {
         "tls"
@@ -504,14 +568,32 @@ fn parse_sip002(entry: &str) -> Result<OutboundSpec> {
         }
     });
     reject_unsupported_security(&security)?;
-    let ws = match q.get("type").map(String::as_str) {
-        Some(WS) => Some(WsSettings {
-            path: q.get("path").cloned().unwrap_or_else(|| "/".to_owned()),
-            host: q.get("host").cloned(),
-            packet_encoding: q.get("packetencoding").filter(|v| !v.is_empty()).cloned(),
-        }),
-        _ => None,
-    };
+    let mut ws = None;
+    let mut grpc = None;
+    let mut xhttp = None;
+    match q.get("type").map(String::as_str) {
+        Some(WS) => {
+            ws = Some(WsSettings {
+                path: q.get("path").cloned().unwrap_or_else(|| "/".to_owned()),
+                host: q.get("host").cloned(),
+                packet_encoding: q.get("packetencoding").filter(|v| !v.is_empty()).cloned(),
+            });
+        }
+        Some(GRPC) => {
+            grpc = Some(GrpcSettings {
+                service_name: q.get("servicename").cloned().unwrap_or_default(),
+                mode: q.get("mode").cloned(),
+            });
+        }
+        Some(XHTTP) | Some(SPLITHTTP) => {
+            xhttp = Some(XhttpSettings {
+                path: q.get("path").cloned().unwrap_or_else(|| "/".to_owned()),
+                host: q.get("host").cloned(),
+                mode: q.get("mode").cloned(),
+            });
+        }
+        _ => {}
+    }
 
     finish_spec(OutboundSpec {
         protocol,
@@ -523,6 +605,8 @@ fn parse_sip002(entry: &str) -> Result<OutboundSpec> {
         tls_server_name: q.get("sni").cloned(),
         fingerprint: q.get("fp").cloned(),
         ws,
+        grpc,
+        xhttp,
         tag: url.fragment().map(percent_decode),
         alter_id: 0,
         vmess_security: None,
@@ -560,14 +644,35 @@ fn parse_vmess(entry: &str) -> Result<OutboundSpec> {
     reject_unsupported_security(&security)?;
     let alter_id: u16 = get_flex("aid").and_then(|a| a.parse().ok()).unwrap_or(0);
     let vmess_security = get("scy").filter(|s| !s.is_empty()).map(str::to_owned);
-    let ws = match get("net") {
-        Some(WS) => Some(WsSettings {
-            path: get("path").unwrap_or("/").to_owned(),
-            host: get("host").filter(|h| !h.is_empty()).map(str::to_owned),
-            packet_encoding: None,
-        }),
-        _ => None,
-    };
+    let mut ws = None;
+    let mut grpc = None;
+    let mut xhttp = None;
+    match get("net") {
+        Some(WS) => {
+            ws = Some(WsSettings {
+                path: get("path").unwrap_or("/").to_owned(),
+                host: get("host").filter(|h| !h.is_empty()).map(str::to_owned),
+                packet_encoding: None,
+            });
+        }
+        Some(GRPC) => {
+            grpc = Some(GrpcSettings {
+                service_name: get("servicename")
+                    .or_else(|| get("path"))
+                    .unwrap_or("")
+                    .to_owned(),
+                mode: get("mode").filter(|m| !m.is_empty()).map(str::to_owned),
+            });
+        }
+        Some(XHTTP) | Some(SPLITHTTP) => {
+            xhttp = Some(XhttpSettings {
+                path: get("path").unwrap_or("/").to_owned(),
+                host: get("host").filter(|h| !h.is_empty()).map(str::to_owned),
+                mode: get("mode").filter(|m| !m.is_empty()).map(str::to_owned),
+            });
+        }
+        _ => {}
+    }
     finish_spec(OutboundSpec {
         protocol: Protocol::Vmess,
         server: server.to_owned(),
@@ -578,6 +683,8 @@ fn parse_vmess(entry: &str) -> Result<OutboundSpec> {
         tls_server_name: get("sni").filter(|s| !s.is_empty()).map(str::to_owned),
         fingerprint: get("fp").filter(|s| !s.is_empty()).map(str::to_owned),
         ws,
+        grpc,
+        xhttp,
         tag: tag.as_deref().map(percent_decode),
         alter_id,
         vmess_security,
@@ -628,6 +735,8 @@ fn parse_ss(entry: &str) -> Result<OutboundSpec> {
         tls_server_name: None,
         fingerprint: None,
         ws: None,
+        grpc: None,
+        xhttp: None,
         tag: tag.as_deref().map(percent_decode),
         alter_id: 0,
         vmess_security: None,
@@ -690,19 +799,53 @@ pub fn parse_xray_json(text: &str) -> Result<OutboundSpec> {
             .map(|s| s.security.clone())
             .unwrap_or_else(|| "none".to_owned());
         reject_unsupported_security(&security)?;
-        let ws = if network == WS {
-            let w = stream.and_then(|s| s.ws_settings.as_ref());
-            Some(WsSettings {
-                path: w.map(|w| w.path.clone()).unwrap_or_else(|| "/".to_owned()),
-                host: w
-                    .and_then(|w| w.headers.as_ref())
-                    .and_then(|h| h.host.clone()),
-                packet_encoding: w
-                    .and_then(|w| w.packet_encoding.as_ref())
-                    .and_then(value_to_string),
-            })
-        } else {
-            None
+        let (ws, grpc, xhttp) = match network {
+            WS => {
+                let w = stream.and_then(|s| s.ws_settings.as_ref());
+                (
+                    Some(WsSettings {
+                        path: w.map(|w| w.path.clone()).unwrap_or_else(|| "/".to_owned()),
+                        host: w
+                            .and_then(|w| w.headers.as_ref())
+                            .and_then(|h| h.host.clone()),
+                        packet_encoding: w
+                            .and_then(|w| w.packet_encoding.as_ref())
+                            .and_then(value_to_string),
+                    }),
+                    None,
+                    None,
+                )
+            }
+            GRPC => {
+                let g = stream.and_then(|s| s.grpc_settings.as_ref());
+                (
+                    None,
+                    Some(GrpcSettings {
+                        service_name: g.and_then(|g| g.service_name.clone()).unwrap_or_default(),
+                        mode: g
+                            .map(|g| g.multi_mode)
+                            .unwrap_or(false)
+                            .then(|| "multi".to_owned()),
+                    }),
+                    None,
+                )
+            }
+            XHTTP | SPLITHTTP => {
+                let x = stream
+                    .and_then(|s| s.xhttp_settings.as_ref().or(s.splithttp_settings.as_ref()));
+                (
+                    None,
+                    None,
+                    Some(XhttpSettings {
+                        path: x
+                            .and_then(|x| x.path.clone())
+                            .unwrap_or_else(|| "/".to_owned()),
+                        host: x.and_then(|x| x.host.clone()),
+                        mode: x.and_then(|x| x.mode.clone()),
+                    }),
+                )
+            }
+            _ => (None, None, None),
         };
 
         return finish_spec(OutboundSpec {
@@ -719,6 +862,8 @@ pub fn parse_xray_json(text: &str) -> Result<OutboundSpec> {
                 .and_then(|s| s.tls_settings.as_ref())
                 .and_then(|t| t.fingerprint.clone()),
             ws,
+            grpc,
+            xhttp,
             tag: out.tag.clone(),
             alter_id: vmess_meta.0,
             vmess_security: vmess_meta.1,
@@ -764,6 +909,25 @@ fn finish_spec(spec: OutboundSpec) -> Result<OutboundSpec> {
         }
         if let Some(pe) = &ws.packet_encoding {
             check_len("ws packetencoding", pe, MAX_FIELD_VALUE_BYTES)?;
+        }
+    }
+    if let Some(grpc) = &spec.grpc {
+        check_len(
+            "grpc serviceName",
+            &grpc.service_name,
+            MAX_FIELD_VALUE_BYTES,
+        )?;
+        if let Some(mode) = &grpc.mode {
+            check_len("grpc mode", mode, MAX_FIELD_VALUE_BYTES)?;
+        }
+    }
+    if let Some(xhttp) = &spec.xhttp {
+        check_len("xhttp path", &xhttp.path, MAX_FIELD_VALUE_BYTES)?;
+        if let Some(host) = &xhttp.host {
+            check_len("xhttp host", host, MAX_FIELD_VALUE_BYTES)?;
+        }
+        if let Some(mode) = &xhttp.mode {
+            check_len("xhttp mode", mode, MAX_FIELD_VALUE_BYTES)?;
         }
     }
     if let Some(scy) = &spec.vmess_security {
@@ -875,6 +1039,12 @@ struct XrayStreamSettings {
     tls_settings: Option<XrayTlsSettings>,
     #[serde(default, rename = "wsSettings")]
     ws_settings: Option<XrayWsSettings>,
+    #[serde(default, rename = "grpcSettings")]
+    grpc_settings: Option<XrayGrpcSettings>,
+    #[serde(default, rename = "xhttpSettings")]
+    xhttp_settings: Option<XrayXhttpSettings>,
+    #[serde(default, rename = "splithttpSettings")]
+    splithttp_settings: Option<XrayXhttpSettings>,
 }
 
 #[derive(Deserialize)]
@@ -897,6 +1067,24 @@ struct XrayWsSettings {
 struct XrayWsHeaders {
     #[serde(default, rename = "Host")]
     host: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct XrayGrpcSettings {
+    #[serde(default, rename = "serviceName")]
+    service_name: Option<String>,
+    #[serde(default, rename = "multiMode")]
+    multi_mode: bool,
+}
+
+#[derive(Deserialize)]
+struct XrayXhttpSettings {
+    #[serde(default)]
+    path: Option<String>,
+    #[serde(default)]
+    host: Option<String>,
+    #[serde(default)]
+    mode: Option<String>,
 }
 
 #[cfg(test)]
@@ -1105,6 +1293,120 @@ mod tests {
             })
         );
         assert_eq!(spec.tag.as_deref(), Some("xray-tag"));
+    }
+
+    #[test]
+    fn parses_grpc_transport_uri() {
+        let spec = parse_uri(
+            "vless://u@1.2.3.4:443?security=tls&sni=s.example.com&type=grpc&serviceName=grpc-svc&mode=multi",
+        )
+        .unwrap();
+        assert_eq!(spec.protocol, Protocol::Vless);
+        assert_eq!(spec.network(), "grpc");
+        assert_eq!(spec.grpc.as_ref().unwrap().service_name, "grpc-svc");
+        assert_eq!(spec.grpc.as_ref().unwrap().mode.as_deref(), Some("multi"));
+        assert!(spec.ws.is_none());
+        assert!(spec.xhttp.is_none());
+
+        let defaults = parse_uri("trojan://secret@example.com:443?type=grpc").unwrap();
+        assert_eq!(defaults.network(), "grpc");
+        assert_eq!(defaults.grpc.as_ref().unwrap().service_name, "");
+        assert!(defaults.grpc.as_ref().unwrap().mode.is_none());
+    }
+
+    #[test]
+    fn parses_xhttp_transport_uri() {
+        let spec = parse_uri(
+            "vless://u@1.2.3.4:443?security=tls&type=xhttp&path=%2Fxh&host=cdn.example.com&mode=stream",
+        )
+        .unwrap();
+        assert_eq!(spec.network(), "splithttp");
+        assert_eq!(spec.xhttp.as_ref().unwrap().path, "/xh");
+        assert_eq!(
+            spec.xhttp.as_ref().unwrap().host.as_deref(),
+            Some("cdn.example.com")
+        );
+        assert_eq!(spec.xhttp.as_ref().unwrap().mode.as_deref(), Some("stream"));
+        assert!(spec.ws.is_none());
+
+        let legacy = parse_uri("vless://u@1.2.3.4:443?type=splithttp&path=/x").unwrap();
+        assert_eq!(legacy.network(), "splithttp");
+        assert_eq!(legacy.xhttp.as_ref().unwrap().path, "/x");
+
+        let defaults = parse_uri("trojan://secret@example.com:443?type=xhttp").unwrap();
+        assert_eq!(defaults.xhttp.as_ref().unwrap().path, "/");
+        assert!(defaults.xhttp.as_ref().unwrap().host.is_none());
+    }
+
+    #[test]
+    fn parses_vmess_grpc_and_xhttp_payloads() {
+        let std = base64::engine::general_purpose::STANDARD;
+        let grpc = r#"{"v":"2","add":"1.2.3.4","port":"443","id":"u","net":"grpc","path":"grpc-svc","mode":"multi","tls":"tls"}"#;
+        let spec = parse_uri(&format!("vmess://{}", std.encode(grpc))).unwrap();
+        assert_eq!(spec.network(), "grpc");
+        assert_eq!(spec.grpc.as_ref().unwrap().service_name, "grpc-svc");
+        assert_eq!(spec.grpc.as_ref().unwrap().mode.as_deref(), Some("multi"));
+
+        let legacy_path_key =
+            r#"{"v":"2","add":"1.2.3.4","port":"443","id":"u","net":"grpc","path":"svc"}"#;
+        let spec = parse_uri(&format!("vmess://{}", std.encode(legacy_path_key))).unwrap();
+        assert_eq!(spec.grpc.as_ref().unwrap().service_name, "svc");
+
+        let xhttp = r#"{"v":"2","add":"1.2.3.4","port":"443","id":"u","net":"xhttp","path":"/xh","host":"cdn.example.com","mode":"auto","tls":"tls"}"#;
+        let spec = parse_uri(&format!("vmess://{}", std.encode(xhttp))).unwrap();
+        assert_eq!(spec.network(), "splithttp");
+        assert_eq!(spec.xhttp.as_ref().unwrap().path, "/xh");
+        assert_eq!(
+            spec.xhttp.as_ref().unwrap().host.as_deref(),
+            Some("cdn.example.com")
+        );
+        assert_eq!(spec.xhttp.as_ref().unwrap().mode.as_deref(), Some("auto"));
+    }
+
+    #[test]
+    fn parses_xray_json_grpc_and_xhttp_outbounds() {
+        let grpc = r#"{"outbounds":[{"protocol":"vless",
+          "settings":{"vnext":[{"address":"1.2.3.4","port":443,"users":[{"id":"u"}]}]},
+          "streamSettings":{"network":"grpc","security":"tls",
+            "tlsSettings":{"serverName":"s.example.com"},
+            "grpcSettings":{"serviceName":"grpc-svc","multiMode":true}}}]}"#;
+        let spec = parse_xray_json(grpc).unwrap();
+        assert_eq!(spec.network(), "grpc");
+        assert_eq!(spec.grpc.as_ref().unwrap().service_name, "grpc-svc");
+        assert_eq!(spec.grpc.as_ref().unwrap().mode.as_deref(), Some("multi"));
+        assert_eq!(spec.tls_server_name.as_deref(), Some("s.example.com"));
+
+        let xhttp = r#"{"outbounds":[{"protocol":"trojan",
+          "settings":{"servers":[{"address":"1.2.3.4","port":443,"password":"pw"}]},
+          "streamSettings":{"network":"xhttp","security":"none",
+            "xhttpSettings":{"path":"/xh","host":"cdn.example.com","mode":"auto"}}}]}"#;
+        let spec = parse_xray_json(xhttp).unwrap();
+        assert_eq!(spec.network(), "splithttp");
+        assert_eq!(spec.xhttp.as_ref().unwrap().path, "/xh");
+        assert_eq!(
+            spec.xhttp.as_ref().unwrap().host.as_deref(),
+            Some("cdn.example.com")
+        );
+        assert_eq!(spec.xhttp.as_ref().unwrap().mode.as_deref(), Some("auto"));
+    }
+
+    #[test]
+    fn grpc_and_xhttp_survive_uri_to_xray_json_round_trip() {
+        for uri in [
+            "vless://u@1.2.3.4:443?security=tls&type=grpc&serviceName=grpc-svc&mode=multi",
+            "vless://u@1.2.3.4:443?security=tls&type=grpc&serviceName=grpc-svc",
+            "vless://u@1.2.3.4:443?security=tls&type=xhttp&path=/xh&host=front.example.com&mode=stream",
+            "trojan://secret@1.2.3.4:443?type=xhttp&path=/xh",
+        ] {
+            let spec = parse_uri(uri).unwrap();
+            let outbound =
+                crate::xray::build_outbound(&spec, "104.17.160.217".parse().unwrap(), None);
+            let json = serde_json::json!({ "outbounds": [outbound] });
+            let back = parse_xray_json(&json.to_string()).unwrap();
+            assert_eq!(back.grpc, spec.grpc, "{json}");
+            assert_eq!(back.xhttp, spec.xhttp, "{json}");
+            assert_eq!(back.network(), spec.network(), "{json}");
+        }
     }
 
     #[test]
@@ -1382,6 +1684,8 @@ mod tests {
         );
         assert_eq!(back.fingerprint, spec.fingerprint);
         assert_eq!(back.ws, spec.ws);
+        assert_eq!(back.grpc, spec.grpc);
+        assert_eq!(back.xhttp, spec.xhttp);
     }
 
     #[test]
@@ -1390,6 +1694,9 @@ mod tests {
             "vless://aaaaaaaa-bbbb-cccc-dddd-eeeeffff0000@104.17.160.217:2096?security=tls&sni=edgetunnel.workers.dev&fp=chrome",
             "vless://00000000-0000-0000-0000-000000000000@1.2.3.4:443",
             "vless://aaaaaaaa-bbbb-cccc-dddd-eeeeffff0000@104.17.160.217:2096?security=tls&type=ws&path=/&host=front.example.com&fp=chrome&sni=front.example.com&packetencoding=xudp",
+            "vless://aaaaaaaa-bbbb-cccc-dddd-eeeeffff0000@104.17.160.217:2096?security=tls&type=grpc&serviceName=grpc-svc&mode=multi",
+            "vless://aaaaaaaa-bbbb-cccc-dddd-eeeeffff0000@104.17.160.217:2096?security=tls&type=grpc&serviceName=grpc-svc",
+            "vless://aaaaaaaa-bbbb-cccc-dddd-eeeeffff0000@104.17.160.217:2096?security=tls&type=xhttp&path=/xh&host=front.example.com&mode=stream",
             "vless://aaaaaaaa-bbbb-cccc-dddd-eeeeffff0000@104.17.160.217:2096?security=tls&sni=orig.example.com",
         ] {
             let override_sni = uri.contains("override").then_some("b.me");
@@ -1566,6 +1873,31 @@ mod tests {
         ))
         .unwrap();
         assert_eq!(spec.security, "none");
+    }
+
+    #[test]
+    fn export_config_uri_round_trips_grpc_and_xhttp() {
+        for uri in [
+            "vless://u@1.2.3.4:443?security=tls&sni=orig.example.com&type=grpc&serviceName=grpc-svc&mode=multi",
+            "vless://u@1.2.3.4:443?security=tls&type=xhttp&path=/xh&host=front.example.com&mode=stream",
+        ] {
+            let out = export_config_uri(uri, DIAL_IP.parse().unwrap(), 2096, None, None).unwrap();
+            let back = parse_uri(&out).unwrap();
+            assert_eq!(back.server, DIAL_IP);
+            assert_eq!(back.port, 2096);
+            assert_eq!(back.grpc, parse_uri(uri).unwrap().grpc, "{out}");
+            assert_eq!(back.xhttp, parse_uri(uri).unwrap().xhttp, "{out}");
+        }
+        let grpc_out = export_config_uri(
+            "vless://u@1.2.3.4:443?security=tls&type=grpc&serviceName=svc&flow=xtls-rprx-vision",
+            DIAL_IP.parse().unwrap(),
+            443,
+            None,
+            None,
+        )
+        .unwrap();
+        assert!(grpc_out.contains("serviceName=svc"), "{grpc_out}");
+        assert!(grpc_out.contains("flow=xtls-rprx-vision"), "{grpc_out}");
     }
 
     #[test]

@@ -173,6 +173,8 @@ async fn tunnel_probe_lifecycle_spawns_and_cleans_trial_dirs() {
         tls_server_name: None,
         fingerprint: None,
         ws: None,
+        grpc: None,
+        xhttp: None,
         tag: None,
         alter_id: 0,
         vmess_security: None,

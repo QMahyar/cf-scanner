@@ -492,6 +492,8 @@ proptest! {
             tls_server_name: Some(host.clone()),
             fingerprint: Some("chrome".to_owned()),
             ws: None,
+            grpc: None,
+            xhttp: None,
             tag: None,
             alter_id: 0,
             vmess_security: None,
