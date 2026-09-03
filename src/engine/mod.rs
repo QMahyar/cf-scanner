@@ -1,6 +1,7 @@
 mod cdn;
 mod phase2;
 mod plan;
+mod speed;
 mod warp;
 
 pub use plan::{PlanItem, SplitMix64, plan};

@@ -218,6 +218,25 @@ struct ScanArgs {
     )]
     phase2_concurrency: Option<u8>,
 
+    #[arg(
+        long,
+        requires = "phase2_configs",
+        help_heading = "Phase 2 (xray verification)",
+        long_help = "After the stop condition and phase-2 verification, download an 8 MiB sample \
+                     through each verified endpoint (via xray) and record MB/s. CDN mode only."
+    )]
+    speed_test: bool,
+
+    #[arg(
+        long,
+        value_name = "MBPS",
+        requires = "phase2_configs",
+        requires = "speed_test",
+        help_heading = "Phase 2 (xray verification)",
+        long_help = "Drop endpoints that measure below MB/s from the working set (requires --speed-test)"
+    )]
+    min_speed: Option<f32>,
+
     #[arg(long, help_heading = "WARP")]
     warp_probes: Option<u8>,
 
@@ -359,6 +378,12 @@ fn build_scan_config(args: &ScanArgs) -> Result<ScanConfig> {
             "--phase2-only needs phase-1 results from a running scan; one-shot scans cannot use it"
         ));
     }
+    if args.speed_test && mode == Mode::Warp {
+        return Err(anyhow!("--speed-test is CDN-only; it requires --phase2-configs"));
+    }
+    if args.min_speed.is_some() && !args.speed_test {
+        return Err(anyhow!("--min-speed requires --speed-test"));
+    }
     if let Some(warning) = cap_warning(args) {
         eprintln!("warning: {warning}");
     }
@@ -429,6 +454,8 @@ fn build_scan_config(args: &ScanArgs) -> Result<ScanConfig> {
         warp,
         loss_threshold: args.loss_threshold,
         idle_hold_ms: args.idle_hold_ms,
+        speed_test: args.speed_test,
+        min_speed_mbps: args.min_speed,
     };
     cfg.validate()
         .map_err(|e| anyhow!("invalid scan config: {e}"))?;
@@ -806,6 +833,8 @@ mod tests {
             export_format: ExportFormatArg::Csv,
             loss_threshold: None,
             idle_hold_ms: 0,
+            speed_test: false,
+            min_speed: None,
         }
     }
 
@@ -1299,6 +1328,60 @@ mod tests {
                 "https://b.example/".to_owned()
             ]
         );
+    }
+
+    #[test]
+    fn speed_test_requires_phase2_configs_and_is_opt_in() {
+        assert!(
+            Cli::try_parse_from(["cf-scanner", "scan", "--speed-test"]).is_err(),
+            "--speed-test without --phase2-configs must fail at parse level"
+        );
+        let cfg = build_scan_config(&args()).unwrap();
+        assert!(!cfg.speed_test, "the speed test is strictly opt-in");
+        assert_eq!(cfg.min_speed_mbps, None);
+        let mut a = args();
+        a.phase2_configs = vec!["vless://a@1.2.3.4:443".to_owned()];
+        a.speed_test = true;
+        let cfg = build_scan_config(&a).unwrap();
+        assert!(cfg.speed_test);
+        assert_eq!(cfg.min_speed_mbps, None);
+    }
+
+    #[test]
+    fn min_speed_requires_speed_test() {
+        assert!(
+            Cli::try_parse_from(["cf-scanner", "scan", "--min-speed", "5"]).is_err(),
+            "--min-speed without --speed-test must fail at parse level"
+        );
+        let mut a = args();
+        a.phase2_configs = vec!["vless://a@1.2.3.4:443".to_owned()];
+        a.min_speed = Some(5.0);
+        let err = build_scan_config(&a).unwrap_err();
+        assert!(err.to_string().contains("--speed-test"), "{err:#}");
+        let mut a = args();
+        a.phase2_configs = vec!["vless://a@1.2.3.4:443".to_owned()];
+        a.speed_test = true;
+        a.min_speed = Some(2.5);
+        let cfg = build_scan_config(&a).unwrap();
+        assert_eq!(cfg.min_speed_mbps, Some(2.5));
+    }
+
+    #[test]
+    fn min_speed_zero_is_rejected_with_a_flag_named_error() {
+        let mut a = args();
+        a.speed_test = true;
+        a.min_speed = Some(0.0);
+        let err = build_scan_config(&a).unwrap_err();
+        assert!(err.to_string().contains("--min-speed"), "{err:#}");
+    }
+
+    #[test]
+    fn warp_mode_rejects_speed_test() {
+        let mut a = args();
+        a.mode = ModeArg::Warp;
+        a.speed_test = true;
+        let err = build_scan_config(&a).unwrap_err();
+        assert!(err.to_string().contains("--speed-test"), "{err:#}");
     }
 
     #[test]

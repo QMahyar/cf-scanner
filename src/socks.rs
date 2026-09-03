@@ -1,6 +1,6 @@
 use std::io;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
 use rustls::RootCertStore;
@@ -245,6 +245,118 @@ pub async fn get_via_socks(url: &str, socks: SocketAddr, timeout_ms: u64) -> Res
     )
     .await
     .context("tunnel probe timed out")?
+}
+
+const SPEED_TEST_CHUNK: usize = 64 * 1024;
+
+/// Download up to `max_bytes` from `url` through a SOCKS5 proxy, timing the
+/// transfer. Returns (bytes_read, elapsed_seconds). A short body (the server
+/// closes early) is not an error — `max_bytes` is a cap, not a target.
+pub(crate) async fn timed_download_via_socks(
+    url: &str,
+    socks: SocketAddr,
+    max_bytes: usize,
+    timeout: Duration,
+) -> Result<(u64, f64)> {
+    tokio::time::timeout(
+        timeout,
+        timed_download_via_socks_inner(url, socks, max_bytes),
+    )
+    .await
+    .map_err(|_| anyhow!("speed test timed out"))?
+}
+
+async fn timed_download_via_socks_inner(
+    url: &str,
+    socks: SocketAddr,
+    max_bytes: usize,
+) -> Result<(u64, f64)> {
+    let parsed = url::Url::parse(url).context("bad speed test URL")?;
+    let use_tls = parsed.scheme() == "https";
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| anyhow!("speed test URL has no host"))?
+        .to_owned();
+    let port = parsed.port_or_known_default().unwrap_or(80);
+    let mut path = parsed.path().to_owned();
+    if let Some(q) = parsed.query() {
+        path.push('?');
+        path.push_str(q);
+    }
+    let path = if path.is_empty() {
+        "/".to_owned()
+    } else {
+        path
+    };
+
+    let mut stream = TcpStream::connect(socks).await?;
+    let _ = stream.set_nodelay(true);
+    socks5_connect(&mut stream, &host, port).await?;
+    let request = http_request(&host, &path, "Accept: */*");
+    let started = Instant::now();
+    let total = if use_tls {
+        let server_name =
+            rustls::pki_types::ServerName::try_from(host.clone()).context("invalid hostname")?;
+        let mut tls = tls_connector().connect(server_name, stream).await?;
+        io_step(tls.write_all(request.as_bytes()), "request write").await?;
+        let _ = tls.shutdown().await;
+        count_download(&mut tls, max_bytes).await?
+    } else {
+        io_step(stream.write_all(request.as_bytes()), "request write").await?;
+        let _ = stream.shutdown().await;
+        count_download(&mut stream, max_bytes).await?
+    };
+    let elapsed = started.elapsed().as_secs_f64();
+    Ok((total, elapsed))
+}
+
+async fn count_download<S: AsyncRead + Unpin + ?Sized>(rd: &mut S, max_bytes: usize) -> Result<u64> {
+    let mut head = Vec::new();
+    let mut byte = [0u8; 1];
+    while !head.ends_with(b"\r\n\r\n") {
+        if head.len() >= MAX_HEADER_BYTES {
+            bail!("response headers exceed the {MAX_HEADER_BYTES} cap");
+        }
+        rd.read_exact(&mut byte)
+            .await
+            .context("reading response headers")?;
+        head.push(byte[0]);
+    }
+    let head_str = std::str::from_utf8(&head).context("response headers are not utf-8")?;
+    let status = head_str
+        .lines()
+        .next()
+        .context("empty HTTP response")?
+        .split_whitespace()
+        .nth(1)
+        .and_then(|s| s.parse::<u16>().ok())
+        .context("malformed status line")?;
+    if status != 200 {
+        bail!("speed test got HTTP {status}");
+    }
+    let cap = max_bytes as u64;
+    let mut total: u64 = 0;
+    let mut chunk = vec![0u8; SPEED_TEST_CHUNK];
+    loop {
+        if total >= cap {
+            break;
+        }
+        match rd.read(&mut chunk).await {
+            Ok(0) => break,
+            Ok(n) => total = total.saturating_add(n as u64).min(cap),
+            Err(err) if err.kind() == io::ErrorKind::Interrupted => continue,
+            Err(err) if err.kind() == io::ErrorKind::UnexpectedEof => {
+                // WHY: rustls reports a peer close without TLS close_notify as
+                // UnexpectedEof; for a close-delimited body that is the
+                // terminator, not a failure (0.5.0 invariant).
+                break;
+            }
+            Err(err) => {
+                return Err(anyhow::Error::new(err).context("reading speed test body"));
+            }
+        }
+    }
+    Ok(total)
 }
 
 async fn get_via_socks_inner(url: &str, socks: SocketAddr) -> Result<Vec<u8>> {

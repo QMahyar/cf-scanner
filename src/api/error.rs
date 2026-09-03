@@ -86,6 +86,14 @@ pub enum ConfigError {
     InvalidLossThreshold(u32),
     #[error("idle_hold_ms {0} out of range 0-{MAX_IDLE_HOLD_MS}")]
     InvalidIdleHold(u64),
+    #[error("--speed-test requires --phase2-configs (it measures phase-2 verified endpoints)")]
+    SpeedTestNeedsConfigs,
+    #[error("--speed-test is only valid in Cdn mode")]
+    SpeedTestWrongMode,
+    #[error("--min-speed requires --speed-test")]
+    MinSpeedNeedsSpeedTest,
+    #[error("--min-speed must be a finite number greater than 0")]
+    InvalidMinSpeed,
     #[error(
         "warp scans need explicit UDP ports; the CDN default {DEFAULT_PORT} is not valid (pass e.g. 2408,500)"
     )]

@@ -63,6 +63,66 @@ impl TunnelProbe for PassAllProbe {
 
 pub struct XrayTunnelProbe;
 
+impl XrayTunnelProbe {
+    /// Open a one-shot xray tunnel session for `spec` dialing `dial_ip`.
+    /// Finish with `cleanup().await` (or `proc.stop()`, with the drop guard as
+    /// a fire-and-forget fallback) so the trial config dir is removed.
+    pub async fn open_tunnel_session(
+        spec: &OutboundSpec,
+        preset: &FragmentPreset,
+        custom: Option<&CustomFragment>,
+        sni: Option<&str>,
+        dial_ip: Ipv4Addr,
+    ) -> Result<TunnelSession> {
+        let work_dir = paths::data_dir().context("no data directory for trial configs")?;
+        sweep_stale_trial_dirs_async(&work_dir).await;
+        let trial_dir = make_trial_dir(&work_dir).await?;
+
+        let fetch = xray::RealFetch;
+        let xray_bin = xray::ensure_binary(&fetch).await.with_context(|| {
+            "no verified xray binary (cached copy failed its checksum or the download failed)"
+        })?;
+        let proc = spawn_with_retry(dial_ip, |socks_port| {
+            let spec = spec.clone();
+            let preset = preset.clone();
+            let custom = custom.cloned();
+            let sni = sni.map(str::to_owned);
+            let trial_dir = trial_dir.clone();
+            let xray_bin = xray_bin.clone();
+            async move {
+                let cfg = xray::build_config(
+                    &spec,
+                    dial_ip,
+                    &preset,
+                    custom.as_ref(),
+                    sni.as_deref(),
+                    socks_port,
+                )?;
+                xray::spawn(&trial_dir, &xray_bin, &cfg).await
+            }
+        })
+        .await?;
+        Ok(TunnelSession {
+            proc,
+            trial_dir: trial_dir.clone(),
+            _guard: TrialDirGuard(trial_dir),
+        })
+    }
+}
+
+pub struct TunnelSession {
+    pub proc: xray::XrayProcess,
+    trial_dir: PathBuf,
+    _guard: TrialDirGuard,
+}
+
+impl TunnelSession {
+    pub(crate) async fn cleanup(mut self) {
+        self.proc.stop().await;
+        cleanup_trial_dir(&self.trial_dir).await;
+    }
+}
+
 impl TunnelProbe for XrayTunnelProbe {
     fn probe(
         &self,

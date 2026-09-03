@@ -191,6 +191,10 @@ pub struct ScanConfig {
     pub loss_threshold: Option<u32>,
     #[serde(default)]
     pub idle_hold_ms: u64,
+    #[serde(default)]
+    pub speed_test: bool,
+    #[serde(default)]
+    pub min_speed_mbps: Option<f32>,
 }
 
 impl Default for ScanConfig {
@@ -210,6 +214,8 @@ impl Default for ScanConfig {
             warp: None,
             loss_threshold: None,
             idle_hold_ms: 0,
+            speed_test: false,
+            min_speed_mbps: None,
         }
     }
 }
@@ -244,6 +250,8 @@ pub struct Phase2Verdict {
     pub config_index: Option<u32>,
     #[serde(default)]
     pub verifier: Option<Verifier>,
+    #[serde(default)]
+    pub speed_test_mbps: Option<f32>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -396,6 +404,14 @@ impl ScanConfig {
             if self.idle_hold_ms > MAX_IDLE_HOLD_MS {
                 return Err(ConfigError::InvalidIdleHold(self.idle_hold_ms));
             }
+            if let Some(min) = self.min_speed_mbps {
+                if !self.speed_test {
+                    return Err(ConfigError::MinSpeedNeedsSpeedTest);
+                }
+                if !min.is_finite() || min <= 0.0 {
+                    return Err(ConfigError::InvalidMinSpeed);
+                }
+            }
             for cidr in self.exclude.iter().chain(self.custom_cidrs.iter()) {
                 parse_cidr(cidr)?;
             }
@@ -407,6 +423,9 @@ impl ScanConfig {
                     if self.phase2_only && self.phase2.is_none() {
                         return Err(ConfigError::Phase2OnlyNeedsConfigs);
                     }
+                    if self.speed_test && self.phase2.is_none() {
+                        return Err(ConfigError::SpeedTestNeedsConfigs);
+                    }
                     if let Some(p2) = &self.phase2 {
                         validate_phase2(p2)?;
                     }
@@ -417,6 +436,9 @@ impl ScanConfig {
                     }
                     if self.phase2.is_some() {
                         return Err(ConfigError::Phase2WrongMode);
+                    }
+                    if self.speed_test {
+                        return Err(ConfigError::SpeedTestWrongMode);
                     }
                     if let ScanTarget::Preset(_) = self.target {
                         return Err(ConfigError::WarpPresetNotAllowed);
