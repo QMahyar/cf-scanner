@@ -563,6 +563,84 @@ fn min_latency_validate_and_round_trip() {
 }
 
 #[test]
+fn colo_filter_defaults_empty_and_round_trips() {
+    let c = valid_config();
+    assert!(c.colo_filter.is_empty());
+    let json = r#"{
+        "mode": "Cdn",
+        "target": {"Count": 10},
+        "ports": [443],
+        "stop": {"found": 1, "cap": null},
+        "exclude": [],
+        "custom_cidrs": [],
+        "concurrency": 10,
+        "timeout_ms": 3000
+    }"#;
+    let cfg: ScanConfig = serde_json::from_str(json).unwrap();
+    assert!(
+        cfg.colo_filter.is_empty(),
+        "omitted colo_filter must deserialize as empty"
+    );
+    let mut c = valid_config();
+    c.colo_filter = vec!["HKG".to_owned(), "NRT".to_owned()];
+    assert_eq!(c.validate(), Ok(()));
+    let json = serde_json::to_string(&c).unwrap();
+    assert!(json.contains("\"colo_filter\":[\"HKG\",\"NRT\"]"), "{json}");
+    let back: ScanConfig = serde_json::from_str(&json).unwrap();
+    assert_eq!(c, back);
+}
+
+#[test]
+fn colo_filter_rejects_bad_codes() {
+    for bad in ["HK", "HKGNRT", "H1G", "", "hkg ", "hk-g"] {
+        let mut c = valid_config();
+        c.colo_filter = vec![bad.to_owned()];
+        assert_eq!(
+            c.validate(),
+            Err(ConfigError::InvalidColo(bad.to_owned())),
+            "{bad:?} must be rejected"
+        );
+    }
+    let mut c = valid_config();
+    c.colo_filter = vec!["HKGN".to_owned()];
+    assert_eq!(c.validate(), Ok(()), "4-letter codes are allowed");
+}
+
+#[test]
+fn colo_filter_rejects_too_many_entries() {
+    let mut c = valid_config();
+    c.colo_filter = (0..MAX_COLO_CODES + 1)
+        .map(|i| {
+            format!(
+                "A{}{}",
+                (b'A' + (i / 26) as u8) as char,
+                (b'A' + (i % 26) as u8) as char
+            )
+        })
+        .collect();
+    assert_eq!(
+        c.validate(),
+        Err(ConfigError::TooManyColos(MAX_COLO_CODES + 1))
+    );
+    c.colo_filter.truncate(MAX_COLO_CODES);
+    assert_eq!(c.validate(), Ok(()));
+}
+
+#[test]
+fn colo_filter_is_cdn_only() {
+    let mut c = valid_config();
+    c.mode = Mode::Warp;
+    c.colo_filter = vec!["HKG".to_owned()];
+    assert_eq!(c.validate(), Err(ConfigError::ColoWrongMode));
+    c.colo_filter = Vec::new();
+    assert_ne!(
+        c.validate(),
+        Err(ConfigError::ColoWrongMode),
+        "an empty colo filter must not trip the CDN-only check"
+    );
+}
+
+#[test]
 fn event_tags_are_snake_case() {
     let json = serde_json::to_string(&ScanEvent::Finished(ScanSummary {
         scanned: 0,

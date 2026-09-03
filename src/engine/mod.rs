@@ -492,6 +492,15 @@ async fn cancelled_signal(mut rx: watch::Receiver<bool>) {
     }
 }
 
+fn colo_in_filter(filter: &[String], colo: &str) -> bool {
+    filter.iter().any(|f| f.eq_ignore_ascii_case(colo))
+}
+
+/// True when `colo` is known but not accepted by the filter; unknown colo never rejects.
+fn colo_rejected(filter: &[String], colo: Option<&str>) -> bool {
+    !filter.is_empty() && colo.is_some_and(|c| !colo_in_filter(filter, c))
+}
+
 struct ProbeContext {
     cancel: watch::Receiver<bool>,
     stop: StopCondition,
@@ -504,6 +513,8 @@ struct ProbeContext {
     dirty: Arc<AtomicBool>,
     events: broadcast::Sender<ScanEvent>,
     geo: Arc<Geo>,
+    colo_filter: Arc<Vec<String>>,
+    colo_warned: AtomicBool,
 }
 
 impl ProbeContext {
@@ -522,6 +533,21 @@ impl ProbeContext {
 
     fn milestone_due(&self, observed: u64) -> bool {
         claim_milestone(&self.last_milestone, observed, self.cadence)
+    }
+
+    fn colo_allowed(&self, colo: Option<&str>) -> bool {
+        if self.colo_filter.is_empty() {
+            return true;
+        }
+        match colo {
+            Some(c) => colo_in_filter(&self.colo_filter, c),
+            None => {
+                if !self.colo_warned.swap(true, Ordering::Relaxed) {
+                    tracing::warn!("--colo filter set but no colo data available for result");
+                }
+                true
+            }
+        }
     }
 
     fn progress(&self, scanned: u64, found: u64) {
@@ -558,6 +584,24 @@ mod tests {
             );
             tokio::time::sleep(Duration::from_millis(2)).await;
         }
+    }
+
+    #[test]
+    fn colo_filter_matching_is_case_insensitive_and_unknown_colo_passes() {
+        let filter = vec!["HKG".to_owned(), "NRT".to_owned()];
+        assert!(colo_in_filter(&filter, "hkg"));
+        assert!(colo_in_filter(&filter, "NRT"));
+        assert!(!colo_in_filter(&filter, "FRA"));
+        assert!(
+            !colo_rejected(&filter, None),
+            "unknown colo must pass through"
+        );
+        assert!(!colo_rejected(&filter, Some("HKG")));
+        assert!(colo_rejected(&filter, Some("fra")));
+        assert!(
+            !colo_rejected(&[], Some("FRA")),
+            "an empty filter must reject nothing"
+        );
     }
 
     #[test]

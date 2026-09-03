@@ -1,4 +1,6 @@
-use super::limits::{DEFAULT_PORT, MAX_ENDPOINTS, MAX_IDLE_HOLD_MS, MAX_MIN_LATENCY_MS};
+use super::limits::{
+    DEFAULT_PORT, MAX_COLO_CODES, MAX_ENDPOINTS, MAX_IDLE_HOLD_MS, MAX_MIN_LATENCY_MS,
+};
 
 #[derive(Debug, PartialEq, Eq, thiserror::Error)]
 pub enum ConfigError {
@@ -92,4 +94,10 @@ pub enum ConfigError {
         "warp scans need explicit UDP ports; the CDN default {DEFAULT_PORT} is not valid (pass e.g. 2408,500)"
     )]
     DefaultWarpPort,
+    #[error("colo filter is CDN-only; WARP endpoints have no colo")]
+    ColoWrongMode,
+    #[error("colo filter must have at most {MAX_COLO_CODES} entries, got {0}")]
+    TooManyColos(usize),
+    #[error("invalid colo code {0:?}: expected 3-5 ASCII letters")]
+    InvalidColo(String),
 }

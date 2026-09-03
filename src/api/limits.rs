@@ -36,3 +36,4 @@ pub const MAX_SNI_HOSTNAME_CHARS: usize = 253;
 pub const MAX_ENDPOINTS: usize = 2048;
 pub const MAX_SUBSCRIPTION_SPECS: usize = 2048;
 pub const MAX_PHASE2_TOTAL_SPECS: usize = 4096;
+pub const MAX_COLO_CODES: usize = 16;
