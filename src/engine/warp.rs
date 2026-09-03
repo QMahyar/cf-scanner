@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 use std::net::IpAddr;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Instant;
 
 use anyhow::{Context as _, Result, anyhow, bail};
@@ -78,6 +78,8 @@ impl ScanController {
             dirty: self.store_dirty.clone(),
             events: self.events.clone(),
             geo: self.geo.clone(),
+            colo_filter: Arc::new(Vec::new()),
+            colo_warned: AtomicBool::new(false),
         });
 
         let concurrency = usize::from(cfg.concurrency).max(1);

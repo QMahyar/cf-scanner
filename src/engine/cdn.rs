@@ -1,6 +1,6 @@
 use std::net::IpAddr;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Instant;
 
 use anyhow::{Result, anyhow};
@@ -77,6 +77,8 @@ impl ScanController {
             dirty: self.store_dirty.clone(),
             events: self.events.clone(),
             geo: self.geo.clone(),
+            colo_filter: Arc::new(cfg.colo_filter.clone()),
+            colo_warned: AtomicBool::new(false),
         });
 
         let concurrency = usize::from(cfg.concurrency).max(1);
@@ -166,8 +168,7 @@ impl ScanController {
                             if !acceptable {
                                 None
                             } else {
-                                ctx.found.fetch_add(1, Ordering::Relaxed);
-                                let verdict = Verdict {
+                                Some(Verdict {
                                     ip: task.ip,
                                     port: task.port,
                                     latency_ms: Some(latency_ms),
@@ -178,10 +179,7 @@ impl ScanController {
                                     received,
                                     loss_pct: Some(loss_pct),
                                     fail_reason: None,
-                                };
-                                let _ =
-                                    ctx.events.send(ScanEvent::Result(Box::new(verdict.clone())));
-                                Some(verdict)
+                                })
                             }
                         }
                         Err(err) => Some(Verdict {
@@ -197,7 +195,13 @@ impl ScanController {
                             fail_reason: Some(err.reason().to_owned()),
                         }),
                     };
+                    let verdict = verdict.filter(|v| ctx.colo_allowed(v.colo.as_deref()));
                     if let Some(verdict) = verdict {
+                        if verdict.latency_ms.is_some() {
+                            ctx.found.fetch_add(1, Ordering::Relaxed);
+                            let _ =
+                                ctx.events.send(ScanEvent::Result(Box::new(verdict.clone())));
+                        }
                         batch.push(verdict);
                         if batch.len() >= BATCH_FLUSH {
                             merge_sorted(&ctx.store, &ctx.dirty, std::mem::take(&mut batch));
@@ -683,6 +687,40 @@ mod tests {
             sampled[0], sampled[1],
             "the same seed must sample the same host set"
         );
+    }
+
+    #[tokio::test]
+    async fn colo_filter_keeps_unknown_colo_results_with_a_warning_path() {
+        let t = FakeTransport::new()
+            .ok("203.0.113.0".parse().unwrap(), 443, 50)
+            .ok("203.0.113.1".parse().unwrap(), 443, 10);
+        let (c, _) = controller(Arc::new(t));
+        let mut cfg = ok_cfg(2, None);
+        cfg.colo_filter = vec!["HKG".to_owned()];
+        let pool = ranges::CidrPool::parse("203.0.113.0/31").unwrap();
+        let summary = c.run_seeded_with_pool(cfg, 1, pool).await.unwrap();
+        assert_eq!(
+            summary.found, 2,
+            "phase-1 verdicts carry no colo and must pass through the filter"
+        );
+        let results = c.results();
+        assert_eq!(results.len(), 2);
+        assert!(results.iter().all(|v| v.colo.is_none()));
+    }
+
+    #[tokio::test]
+    async fn colo_filter_off_keeps_everything() {
+        let t = FakeTransport::new()
+            .ok("203.0.113.0".parse().unwrap(), 443, 50)
+            .ok("203.0.113.1".parse().unwrap(), 443, 10);
+        let (c, _) = controller(Arc::new(t));
+        let pool = ranges::CidrPool::parse("203.0.113.0/31").unwrap();
+        let summary = c
+            .run_seeded_with_pool(ok_cfg(2, None), 1, pool)
+            .await
+            .unwrap();
+        assert_eq!(summary.found, 2);
+        assert_eq!(c.results().len(), 2);
     }
 
     #[tokio::test]

@@ -163,6 +163,15 @@ struct ScanArgs {
     #[arg(long, value_delimiter = ',', help_heading = "Candidate selection")]
     custom_cidrs: Vec<String>,
 
+    #[arg(
+        long,
+        value_delimiter = ',',
+        value_name = "IATA",
+        help_heading = "Candidate selection",
+        long_help = "Keep only phase-2 results whose Cloudflare colo matches one of these IATA codes (e.g. HKG,NRT); results without colo data pass through with a one-time warning"
+    )]
+    colo: Vec<String>,
+
     #[arg(long, help_heading = "Candidate selection")]
     ipv6: bool,
 
@@ -349,6 +358,17 @@ fn build_scan_config(args: &ScanArgs) -> Result<ScanConfig> {
             "--custom-cidrs is CDN-only; WARP takes --warp-endpoints"
         ));
     }
+    if mode == Mode::Warp && !args.colo.is_empty() {
+        return Err(anyhow!("--colo is CDN-only; WARP endpoints have no colo"));
+    }
+    let colo_filter: Vec<String> = args
+        .colo
+        .iter()
+        .map(|c| c.trim().to_ascii_uppercase())
+        .collect();
+    if colo_filter.iter().any(|c| c.is_empty()) {
+        return Err(anyhow!("--colo entries must be non-empty IATA codes"));
+    }
     if mode == Mode::Warp && !args.phase2_configs.is_empty() {
         return Err(anyhow!(
             "--phase2-configs is CDN-only; xray verification does not apply to WARP"
@@ -429,6 +449,7 @@ fn build_scan_config(args: &ScanArgs) -> Result<ScanConfig> {
         warp,
         loss_threshold: args.loss_threshold,
         idle_hold_ms: args.idle_hold_ms,
+        colo_filter,
     };
     cfg.validate()
         .map_err(|e| anyhow!("invalid scan config: {e}"))?;
@@ -789,6 +810,7 @@ mod tests {
             timeout_ms: 3000,
             exclude: vec![],
             custom_cidrs: vec![],
+            colo: vec![],
             ipv6: false,
             phase2_configs: vec![],
             phase2_only: false,
@@ -841,6 +863,71 @@ mod tests {
             ScanTarget::Count(cf_scanner::warp::bundled_pool().host_count() as u32),
             "WARP without --count must scan the whole bundled pool"
         );
+    }
+
+    #[test]
+    fn colo_flag_builds_the_filter_normalized() {
+        let argv = [
+            "cf-scanner",
+            "scan",
+            "--colo",
+            " hkg ,Nrt ",
+            "--count",
+            "10",
+        ];
+        let scan_args = match Cli::try_parse_from(argv).unwrap().command {
+            Command::Scan { args } => *args,
+            _ => unreachable!(),
+        };
+        let cfg = build_scan_config(&scan_args).unwrap();
+        assert_eq!(
+            cfg.colo_filter,
+            vec!["HKG".to_owned(), "NRT".to_owned()],
+            "colo codes must trim and normalize to uppercase"
+        );
+        assert_eq!(
+            build_scan_config(&args()).unwrap().colo_filter,
+            Vec::<String>::new()
+        );
+    }
+
+    #[test]
+    fn colo_rejects_bad_codes() {
+        let mut a = args();
+        a.colo = vec!["HKG".to_owned(), "x1".to_owned()];
+        let err = build_scan_config(&a).unwrap_err();
+        assert!(
+            err.to_string().contains("--colo") || err.to_string().contains("colo"),
+            "{err:#}"
+        );
+        let mut a = args();
+        a.colo = vec!["TOOLONGCODE".to_owned()];
+        assert!(build_scan_config(&a).is_err());
+        let mut a = args();
+        a.colo = vec!["".to_owned()];
+        let err = build_scan_config(&a).unwrap_err();
+        assert!(err.to_string().contains("--colo"), "{err:#}");
+    }
+
+    #[test]
+    fn warp_mode_rejects_colo_with_a_flag_named_error() {
+        let mut a = args();
+        a.mode = ModeArg::Warp;
+        a.colo = vec!["HKG".to_owned()];
+        let err = build_scan_config(&a).unwrap_err();
+        assert!(err.to_string().contains("--colo"), "{err:#}");
+    }
+
+    #[test]
+    fn colo_flag_round_trips_validate() {
+        let argv = ["cf-scanner", "scan", "--colo", "HKG,NRT", "--count", "10"];
+        let a = match Cli::try_parse_from(argv).unwrap().command {
+            Command::Scan { args } => *args,
+            _ => unreachable!(),
+        };
+        let cfg = build_scan_config(&a).unwrap();
+        cfg.validate()
+            .expect("a CLI-built colo filter must pass ScanConfig::validate");
     }
 
     #[test]

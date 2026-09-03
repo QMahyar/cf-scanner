@@ -7,7 +7,7 @@ use anyhow::{Context as _, Result, anyhow, bail};
 use tokio::sync::watch;
 use tokio::task::JoinSet;
 
-use super::{ScanController, Store, cancelled_signal, claim_milestone};
+use super::{ScanController, Store, cancelled_signal, claim_milestone, colo_rejected};
 use crate::api::types::{
     Phase2Config, Phase2Progress, Phase2Verdict, ScanConfig, ScanEvent, Verdict, Verifier,
 };
@@ -68,6 +68,7 @@ impl ScanController {
         let first_error: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
         let cap = cfg.stop.cap;
         let stop_found = cfg.stop.found as usize;
+        let colo_filter = cfg.colo_filter.clone();
 
         let specs = Arc::new(specs);
         let snis = Arc::new(snis);
@@ -93,6 +94,7 @@ impl ScanController {
             let snis = snis.clone();
             let probe_urls = probe_urls.clone();
             let p2 = p2.clone();
+            let colo_filter = colo_filter.clone();
             let timeout_ms = cfg.timeout_ms;
             tasks.spawn(async move {
                 loop {
@@ -141,6 +143,7 @@ impl ScanController {
                         Ok(result) => {
                             completed.fetch_add(1, Ordering::Relaxed);
                             let colo = result.colo.clone();
+                            let colo_kept = !colo_rejected(&colo_filter, colo.as_deref());
                             let verdict = Phase2Verdict {
                                 passed: result.passed,
                                 fragment: p2.fragment.clone(),
@@ -150,7 +153,7 @@ impl ScanController {
                                 config_index: Some(*config_idx),
                                 verifier: result.verifier.and_then(parse_verifier),
                             };
-                            if result.passed {
+                            if result.passed && colo_kept {
                                 passed
                                     .lock()
                                     .unwrap_or_else(|e| e.into_inner())
@@ -163,7 +166,9 @@ impl ScanController {
                             }
                             let overshoot =
                                 passed.lock().unwrap_or_else(|e| e.into_inner()).len() > stop_found;
-                            if let Some(updated) =
+                            if !colo_kept {
+                                remove_verdict(&store, ip, port, &pos_index);
+                            } else if let Some(updated) =
                                 update_verdict_phase2(&store, ip, port, verdict, colo, &pos_index)
                             {
                                 let _ = events.send(ScanEvent::Result(Box::new(updated)));
@@ -377,6 +382,18 @@ fn update_verdict_phase2(
     Some(results[pos].clone())
 }
 
+/// Drops a stored verdict and invalidates the cached position index.
+fn remove_verdict(store: &Store, ip: Ipv4Addr, port: u16, pos_index: &PosIndex) {
+    let mut results = store.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(pos) = results
+        .iter()
+        .position(|v| v.ip == IpAddr::V4(ip) && v.port == port)
+    {
+        results.remove(pos);
+        *pos_index.lock().unwrap_or_else(|e| e.into_inner()) = Arc::new(HashMap::new());
+    }
+}
+
 fn parse_verifier(tag: &str) -> Option<Verifier> {
     match tag {
         "inline" => Some(Verifier::Inline),
@@ -459,6 +476,7 @@ mod tests {
         err_text: Option<&'static str>,
         rendezvous: Option<Arc<tokio::sync::Barrier>>,
         url_lists: std::sync::Arc<std::sync::Mutex<Vec<Vec<String>>>>,
+        colo_for_all: Option<String>,
     }
 
     impl FakeTunnelProbe {
@@ -471,6 +489,14 @@ mod tests {
                 err_text: None,
                 rendezvous: None,
                 url_lists: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+                colo_for_all: None,
+            }
+        }
+
+        fn with_colo(self, colo: &str) -> Self {
+            Self {
+                colo_for_all: Some(colo.to_owned()),
+                ..self
             }
         }
 
@@ -525,7 +551,7 @@ mod tests {
                 Ok(TunnelResult {
                     passed,
                     latency_ms: passed.then_some(7),
-                    colo: None,
+                    colo: this.colo_for_all.clone(),
                     verifier: None,
                 })
             })
@@ -553,6 +579,54 @@ mod tests {
     }
 
     const VLESS: &str = "vless://aaaaaaaa-bbbb-cccc-dddd-eeeeffff0000@1.2.3.4:443";
+
+    #[tokio::test]
+    async fn colo_filter_drops_known_foreign_colo_results_in_phase2() {
+        let t = FakeTransport::new()
+            .ok("203.0.113.1".parse().unwrap(), 443, 50)
+            .ok("203.0.113.2".parse().unwrap(), 443, 10);
+        let probe = FakeTunnelProbe::new()
+            .with_colo("FRA")
+            .pass("203.0.113.1".parse().unwrap())
+            .pass("203.0.113.2".parse().unwrap());
+        let c = p2_controller(t, FakeSub(""), probe.clone());
+        let mut cfg = ok_cfg(2, None);
+        cfg.colo_filter = vec!["HKG".to_owned()];
+        cfg.phase2 = Some(p2_cfg(&[VLESS], &[]));
+        run_local(&c, cfg, 1).await.unwrap();
+        assert_eq!(probe.attempts.load(Ordering::Relaxed), 2);
+        assert!(
+            c.results().iter().all(|v| v.colo.as_deref() != Some("FRA")),
+            "known foreign-colo verdicts must never be stored: {:#?}",
+            c.results()
+        );
+        assert!(
+            c.results().iter().all(|v| v.phase2.is_none()),
+            "rejected candidates must not keep a phase-2 verdict row"
+        );
+    }
+
+    #[tokio::test]
+    async fn colo_filter_keeps_matching_and_unknown_colo_results_in_phase2() {
+        let t = FakeTransport::new()
+            .ok("203.0.113.1".parse().unwrap(), 443, 50)
+            .ok("203.0.113.2".parse().unwrap(), 443, 10);
+        let probe = FakeTunnelProbe::new()
+            .with_colo("hkg")
+            .pass("203.0.113.1".parse().unwrap());
+        let c = p2_controller(t, FakeSub(""), probe);
+        let mut cfg = ok_cfg(2, None);
+        cfg.colo_filter = vec!["HKG".to_owned()];
+        cfg.phase2 = Some(p2_cfg(&[VLESS], &[]));
+        run_local(&c, cfg, 1).await.unwrap();
+        let results = c.results();
+        let kept = results
+            .iter()
+            .find(|v| v.ip == "203.0.113.1".parse::<IpAddr>().unwrap())
+            .expect("the matching-colo endpoint must be kept");
+        assert_eq!(kept.colo.as_deref(), Some("hkg"));
+        assert!(kept.phase2.as_ref().is_some_and(|p| p.passed));
+    }
 
     #[tokio::test]
     async fn phase2_skips_v6_candidates() {

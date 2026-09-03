@@ -191,6 +191,8 @@ pub struct ScanConfig {
     pub loss_threshold: Option<u32>,
     #[serde(default)]
     pub idle_hold_ms: u64,
+    #[serde(default)]
+    pub colo_filter: Vec<String>,
 }
 
 impl Default for ScanConfig {
@@ -210,6 +212,7 @@ impl Default for ScanConfig {
             warp: None,
             loss_threshold: None,
             idle_hold_ms: 0,
+            colo_filter: Vec::new(),
         }
     }
 }
@@ -396,6 +399,16 @@ impl ScanConfig {
             if self.idle_hold_ms > MAX_IDLE_HOLD_MS {
                 return Err(ConfigError::InvalidIdleHold(self.idle_hold_ms));
             }
+            if self.colo_filter.len() > MAX_COLO_CODES {
+                return Err(ConfigError::TooManyColos(self.colo_filter.len()));
+            }
+            for code in &self.colo_filter {
+                let valid =
+                    (3..=5).contains(&code.len()) && code.bytes().all(|b| b.is_ascii_alphabetic());
+                if !valid {
+                    return Err(ConfigError::InvalidColo(code.clone()));
+                }
+            }
             for cidr in self.exclude.iter().chain(self.custom_cidrs.iter()) {
                 parse_cidr(cidr)?;
             }
@@ -417,6 +430,9 @@ impl ScanConfig {
                     }
                     if self.phase2.is_some() {
                         return Err(ConfigError::Phase2WrongMode);
+                    }
+                    if !self.colo_filter.is_empty() {
+                        return Err(ConfigError::ColoWrongMode);
                     }
                     if let ScanTarget::Preset(_) = self.target {
                         return Err(ConfigError::WarpPresetNotAllowed);
