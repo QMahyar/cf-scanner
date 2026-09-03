@@ -11,7 +11,7 @@ use rand_core::{OsRng, RngCore as _};
 use tokio::net::UdpSocket;
 use tokio::time::timeout;
 
-use crate::probe::{ProbeError, Transport};
+use crate::probe::{ProbeError, ProbeOutcome, Transport};
 use crate::ranges::CidrPool;
 
 pub const BUNDLED_POOLS: &str = include_str!("../data/warp-pools.txt");
@@ -185,7 +185,7 @@ impl Transport for WgVerifyTransport {
                 ProbeDepth::FullSession,
             )
             .await
-            .map(|latency| (latency, 1, 1))
+            .map(ProbeOutcome::plain)
         })
     }
 }
@@ -216,7 +216,7 @@ impl Transport for WarpTransport {
                 ProbeDepth::ShapeOnly,
             )
             .await
-            .map(|latency| (latency, 1, 1))
+            .map(ProbeOutcome::plain)
         })
     }
 }
@@ -542,7 +542,7 @@ mod tests {
             .probe(Ipv4Addr::LOCALHOST.into(), addr.port(), 2000, 0)
             .await
             .unwrap()
-            .0;
+            .latency_ms;
         assert!(lat < 2000);
         server_task.await.unwrap();
     }
@@ -631,7 +631,7 @@ mod tests {
             .probe(Ipv4Addr::LOCALHOST.into(), addr.port(), 2000, 0)
             .await
             .unwrap()
-            .0;
+            .latency_ms;
         assert!(lat < 2000);
         responder.abort();
     }

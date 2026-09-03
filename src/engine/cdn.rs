@@ -13,6 +13,7 @@ use super::{
 };
 use crate::api::types::{ScanConfig, ScanEvent, ScanProgress, ScanSummary, Verdict};
 use crate::engine::plan::{SplitMix64, plan};
+use crate::probe::ProbeOutcome;
 use crate::ranges;
 
 #[derive(Clone)]
@@ -159,7 +160,13 @@ impl ScanController {
                     };
                     ctx.scanned.fetch_add(1, Ordering::Relaxed);
                     let verdict = match outcome {
-                        Ok((latency_ms, sent, received)) => {
+                        Ok(probe) => {
+                            let ProbeOutcome {
+                                latency_ms,
+                                sent,
+                                received,
+                                colo,
+                            } = probe;
                             let loss_pct = sent
                                 .saturating_sub(received)
                                 .saturating_mul(100)
@@ -175,7 +182,7 @@ impl ScanController {
                                     port: task.port,
                                     latency_ms: Some(latency_ms),
                                     country: ctx.geo.country(task.ip),
-                                    colo: None,
+                                    colo,
                                     phase2: None,
                                     sent,
                                     received,
@@ -561,6 +568,21 @@ mod tests {
             Some("refused"),
             "the new run's failure verdict must replace the old success"
         );
+    }
+
+    #[tokio::test]
+    async fn http_probe_colo_reaches_the_verdict() {
+        let t = FakeTransport::new().ok_colo("203.0.113.1".parse().unwrap(), 443, 12, "LHR");
+        let (c, _) = controller(Arc::new(t));
+        let pool = ranges::CidrPool::parse("203.0.113.1/32").unwrap();
+        let _ = c
+            .run_seeded_with_pool(ok_cfg(1, None), 1, pool)
+            .await
+            .unwrap();
+        let results = c.results();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].colo.as_deref(), Some("LHR"));
+        assert_eq!(results[0].latency_ms, Some(12));
     }
 
     #[tokio::test]

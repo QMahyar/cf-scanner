@@ -229,6 +229,89 @@ fn include_v6_round_trips_through_serde() {
 }
 
 #[test]
+fn probe_mode_defaults_to_tls_and_parses_lowercase() {
+    let json = r#"{
+        "mode": "Cdn",
+        "target": {"Count": 10},
+        "ports": [443],
+        "stop": {"found": 1, "cap": null},
+        "exclude": [],
+        "custom_cidrs": [],
+        "concurrency": 10,
+        "timeout_ms": 3000
+    }"#;
+    let cfg: ScanConfig = serde_json::from_str(json).unwrap();
+    assert_eq!(cfg.probe_mode, ProbeMode::Tls);
+    assert_eq!(
+        cfg.accepted_http_codes,
+        default_accepted_http_codes(),
+        "omitted accepted_http_codes must deserialize to the default set"
+    );
+    for (text, expected) in [
+        ("tcp", ProbeMode::Tcp),
+        ("tls", ProbeMode::Tls),
+        ("http", ProbeMode::Http),
+    ] {
+        let cfg: ScanConfig = serde_json::from_str(&json.replace(
+            "\"timeout_ms\": 3000",
+            &format!("\"timeout_ms\": 3000, \"probe_mode\": \"{text}\""),
+        ))
+        .unwrap();
+        assert_eq!(cfg.probe_mode, expected);
+    }
+    let bad = json.replace(
+        "\"timeout_ms\": 3000",
+        "\"timeout_ms\": 3000, \"probe_mode\": \"quic\"",
+    );
+    assert!(serde_json::from_str::<ScanConfig>(&bad).is_err());
+}
+
+#[test]
+fn probe_mode_round_trips_through_serde() {
+    let mut c = valid_config();
+    c.probe_mode = ProbeMode::Http;
+    c.accepted_http_codes = vec![200, 204];
+    let json = serde_json::to_string(&c).unwrap();
+    assert!(json.contains("\"probe_mode\":\"http\""), "{json}");
+    assert!(json.contains("\"accepted_http_codes\":[200,204]"), "{json}");
+    let back: ScanConfig = serde_json::from_str(&json).unwrap();
+    assert_eq!(c, back);
+}
+
+#[test]
+fn rejects_bad_http_status_codes() {
+    let mut c = valid_config();
+    c.accepted_http_codes = vec![200, 99];
+    assert_eq!(c.validate(), Err(ConfigError::InvalidHttpStatusCode(99)));
+    let mut c = valid_config();
+    c.accepted_http_codes = vec![600];
+    assert_eq!(c.validate(), Err(ConfigError::InvalidHttpStatusCode(600)));
+}
+
+#[test]
+fn http_mode_rejects_empty_accepted_codes() {
+    let mut c = valid_config();
+    c.probe_mode = ProbeMode::Http;
+    c.accepted_http_codes = Vec::new();
+    assert_eq!(c.validate(), Err(ConfigError::EmptyHttpCodes));
+    c.probe_mode = ProbeMode::Tls;
+    assert_eq!(c.validate(), Ok(()), "tls mode ignores the empty list");
+}
+
+#[test]
+fn rejects_non_tls_probe_mode_in_warp() {
+    let mut c = valid_config();
+    c.mode = Mode::Warp;
+    c.ports = vec![Port::new(2408)];
+    c.probe_mode = ProbeMode::Http;
+    assert_eq!(c.validate(), Err(ConfigError::ProbeWrongMode));
+    c.probe_mode = ProbeMode::Tcp;
+    assert_eq!(c.validate(), Err(ConfigError::ProbeWrongMode));
+    c.probe_mode = ProbeMode::Tls;
+    assert_eq!(c.validate(), Ok(()));
+}
+
+#[test]
 fn rejects_phase2_in_warp_mode() {
     let mut c = valid_config();
     c.mode = Mode::Warp;

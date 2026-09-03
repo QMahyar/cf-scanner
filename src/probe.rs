@@ -24,6 +24,8 @@ pub enum ProbeError {
     Timeout { timeout_ms: u64 },
     #[error("tls handshake failed: {0}")]
     Tls(&'static str),
+    #[error("http status {0} not accepted")]
+    HttpStatus(u16),
 }
 
 impl ProbeError {
@@ -32,6 +34,7 @@ impl ProbeError {
             ProbeError::Refused(_) => "refused",
             ProbeError::Timeout { .. } => "timeout",
             ProbeError::Tls(_) => "tls_failed",
+            ProbeError::HttpStatus(_) => "http_status",
         }
     }
 }
@@ -39,10 +42,39 @@ impl ProbeError {
 pub type ProbeFuture<'a> =
     Pin<Box<dyn Future<Output = Result<ProbeOutcome, ProbeError>> + Send + 'a>>;
 
-pub type ProbeOutcome = (u32, u32, u32);
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProbeOutcome {
+    pub latency_ms: u32,
+    pub sent: u32,
+    pub received: u32,
+    pub colo: Option<String>,
+}
+
+impl ProbeOutcome {
+    pub fn plain(latency_ms: u32) -> Self {
+        Self {
+            latency_ms,
+            sent: 1,
+            received: 1,
+            colo: None,
+        }
+    }
+}
 
 pub trait Transport: Send + Sync {
     fn probe(&self, ip: IpAddr, port: u16, timeout_ms: u64, idle_hold_ms: u64) -> ProbeFuture<'_>;
+}
+
+pub fn transport_for(
+    mode: crate::api::types::ProbeMode,
+    accepted_codes: &[u16],
+) -> Arc<dyn Transport> {
+    use crate::api::types::ProbeMode;
+    match mode {
+        ProbeMode::Tcp => Arc::new(TcpTransport),
+        ProbeMode::Tls => Arc::new(TlsTransport::new()),
+        ProbeMode::Http => Arc::new(HttpTransport::new(accepted_codes.to_vec())),
+    }
 }
 
 pub struct TlsTransport {
@@ -113,13 +145,162 @@ impl Transport for TlsTransport {
                             _ => {}
                         }
                     }
-                    Ok((latency, 1, 1))
+                    Ok(ProbeOutcome::plain(latency))
                 }
                 Ok(Err(e)) => Err(e),
                 Err(_) => Err(ProbeError::Timeout { timeout_ms }),
             }
         })
     }
+}
+
+pub struct TcpTransport;
+
+impl Transport for TcpTransport {
+    fn probe(&self, ip: IpAddr, port: u16, timeout_ms: u64, idle_hold_ms: u64) -> ProbeFuture<'_> {
+        let start = Instant::now();
+        Box::pin(async move {
+            let fut = async {
+                let stream = TcpStream::connect((ip, port)).await.map_err(|e| {
+                    tracing::debug!(error = %e, "probe connect failed");
+                    ProbeError::Refused("connection refused/closed")
+                })?;
+                let _ = stream.set_nodelay(true);
+                Ok(stream)
+            };
+            match timeout(Duration::from_millis(timeout_ms), fut).await {
+                Ok(Ok(mut stream)) => {
+                    if idle_hold_ms > 0 {
+                        tokio::time::sleep(Duration::from_millis(idle_hold_ms)).await;
+                        let mut byte = [0u8; 1];
+                        let held =
+                            timeout(Duration::from_millis(timeout_ms), stream.read(&mut byte))
+                                .await;
+                        match held {
+                            Ok(Ok(0)) | Ok(Err(_)) => {
+                                tracing::debug!("idle-hold probe closed by peer");
+                                return Err(ProbeError::Refused("idle-hold RST"));
+                            }
+                            _ => {}
+                        }
+                    }
+                    Ok(ProbeOutcome::plain(start.elapsed().as_millis() as u32))
+                }
+                Ok(Err(e)) => Err(e),
+                Err(_) => Err(ProbeError::Timeout { timeout_ms }),
+            }
+        })
+    }
+}
+
+pub struct HttpTransport {
+    connector: TlsConnector,
+    server_name: ServerName<'static>,
+    accepted_codes: Vec<u16>,
+}
+
+impl HttpTransport {
+    pub fn new(accepted_codes: Vec<u16>) -> Self {
+        Self {
+            connector: TlsConnector::from(Arc::new(no_verify_client_config())),
+            server_name: ServerName::try_from(PROBE_SNI.to_owned())
+                .expect("static SNI is a valid hostname"),
+            accepted_codes,
+        }
+    }
+}
+
+impl Transport for HttpTransport {
+    fn probe(&self, ip: IpAddr, port: u16, timeout_ms: u64, idle_hold_ms: u64) -> ProbeFuture<'_> {
+        let start = Instant::now();
+        let server_name = self.server_name.clone();
+        let connector = self.connector.clone();
+        let accepted = self.accepted_codes.clone();
+        Box::pin(async move {
+            let fut = async {
+                let stream = TcpStream::connect((ip, port)).await.map_err(|e| {
+                    tracing::debug!(error = %e, "probe connect failed");
+                    ProbeError::Refused("connection refused/closed")
+                })?;
+                let _ = stream.set_nodelay(true);
+                let mut tls = connector.connect(server_name, stream).await.map_err(|e| {
+                    tracing::debug!(error = %e, "probe tls handshake failed");
+                    ProbeError::Tls("handshake failed")
+                })?;
+                tls.write_all(b"GET /cdn-cgi/trace HTTP/1.1\r\nHost: cloudflare.com\r\nUser-Agent: curl/8\r\nConnection: close\r\n\r\n")
+                    .await
+                    .map_err(|_| ProbeError::Refused("request write failed"))?;
+                let mut buf = Vec::with_capacity(2048);
+                let mut chunk = [0u8; 4096];
+                loop {
+                    let n = tls.read(&mut chunk).await.map_err(|e| {
+                        tracing::debug!(error = %e, "probe response read failed");
+                        ProbeError::Refused("response read failed")
+                    })?;
+                    if n == 0 {
+                        break;
+                    }
+                    buf.extend_from_slice(&chunk[..n]);
+                    if buf.len() > 64 * 1024 {
+                        return Err(ProbeError::Refused("trace response too large"));
+                    }
+                }
+                let latency = start.elapsed().as_millis() as u32;
+                Ok((tls, latency, buf))
+            };
+            match timeout(Duration::from_millis(timeout_ms), fut).await {
+                Ok(Ok((mut tls, latency, buf))) => {
+                    if idle_hold_ms > 0 {
+                        tokio::time::sleep(Duration::from_millis(idle_hold_ms)).await;
+                        let mut byte = [0u8; 1];
+                        let held =
+                            timeout(Duration::from_millis(timeout_ms), tls.read(&mut byte)).await;
+                        match held {
+                            Ok(Ok(0)) | Ok(Err(_)) => {
+                                tracing::debug!("idle-hold probe closed by peer");
+                                return Err(ProbeError::Refused("idle-hold RST"));
+                            }
+                            _ => {}
+                        }
+                    }
+                    let end_of_headers = find_subsequence(&buf, b"\r\n\r\n")
+                        .ok_or(ProbeError::Refused("malformed http response"))?;
+                    let head = &buf[..end_of_headers];
+                    let body = &buf[end_of_headers + 4..];
+                    let status = parse_status_line(head)
+                        .ok_or(ProbeError::Refused("malformed status line"))?;
+                    if !accepted.contains(&status) {
+                        return Err(ProbeError::HttpStatus(status));
+                    }
+                    let colo = crate::geo::parse_colo(body);
+                    Ok(ProbeOutcome {
+                        latency_ms: latency,
+                        sent: 1,
+                        received: 1,
+                        colo,
+                    })
+                }
+                Ok(Err(e)) => Err(e),
+                Err(_) => Err(ProbeError::Timeout { timeout_ms }),
+            }
+        })
+    }
+}
+
+fn find_subsequence(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    haystack
+        .windows(needle.len())
+        .position(|window| window == needle)
+}
+
+fn parse_status_line(head: &[u8]) -> Option<u16> {
+    let head = std::str::from_utf8(head).ok()?;
+    let mut parts = head.split_whitespace();
+    let version = parts.next()?;
+    if !version.starts_with("HTTP/") {
+        return None;
+    }
+    parts.next()?.parse().ok()
 }
 
 #[derive(Debug)]
@@ -165,10 +346,10 @@ impl ServerCertVerifier for NoVerify {
 #[cfg(any(test, feature = "test-helpers"))]
 #[derive(Clone)]
 struct Scripted {
-    outcome: Result<(u32, u32, u32), ProbeError>,
+    outcome: Result<ProbeOutcome, ProbeError>,
     delay_ms: u64,
     idle_rst_ms: Option<u64>,
-    sequence: std::collections::VecDeque<Result<(u32, u32, u32), ProbeError>>,
+    sequence: std::collections::VecDeque<Result<ProbeOutcome, ProbeError>>,
 }
 
 #[cfg(any(test, feature = "test-helpers"))]
@@ -199,7 +380,30 @@ impl FakeTransport {
     }
 
     pub fn ok_loss(self, ip: IpAddr, port: u16, latency_ms: u32, sent: u32, received: u32) -> Self {
-        self.insert_full(ip, port, Ok((latency_ms, sent, received)));
+        self.insert_full(
+            ip,
+            port,
+            Ok(ProbeOutcome {
+                latency_ms,
+                sent,
+                received,
+                colo: None,
+            }),
+        );
+        self
+    }
+
+    pub fn ok_colo(self, ip: IpAddr, port: u16, latency_ms: u32, colo: &str) -> Self {
+        self.insert_full(
+            ip,
+            port,
+            Ok(ProbeOutcome {
+                latency_ms,
+                sent: 1,
+                received: 1,
+                colo: Some(colo.to_owned()),
+            }),
+        );
         self
     }
 
@@ -226,10 +430,10 @@ impl FakeTransport {
     }
 
     pub fn insert(&self, ip: IpAddr, port: u16, outcome: Result<u32, ProbeError>) {
-        self.insert_full(ip, port, outcome.map(|latency| (latency, 1, 1)));
+        self.insert_full(ip, port, outcome.map(ProbeOutcome::plain));
     }
 
-    pub fn insert_full(&self, ip: IpAddr, port: u16, outcome: Result<(u32, u32, u32), ProbeError>) {
+    pub fn insert_full(&self, ip: IpAddr, port: u16, outcome: Result<ProbeOutcome, ProbeError>) {
         self.script.lock().unwrap().insert(
             (ip, port),
             Scripted {
@@ -242,7 +446,7 @@ impl FakeTransport {
     }
 
     pub fn seq(self, ip: IpAddr, port: u16, outcomes: Vec<Result<u32, ProbeError>>) -> Self {
-        let expand = |outcome: Result<u32, ProbeError>| outcome.map(|latency| (latency, 1, 1));
+        let expand = |outcome: Result<u32, ProbeError>| outcome.map(ProbeOutcome::plain);
         self.script.lock().unwrap().insert(
             (ip, port),
             Scripted {
@@ -338,7 +542,7 @@ mod tests {
         let t = FakeTransport::new().ok("1.2.3.4".parse().unwrap(), 443, 42);
         assert_eq!(
             t.probe("1.2.3.4".parse().unwrap(), 443, 3000, 0).await,
-            Ok((42, 1, 1))
+            Ok(ProbeOutcome::plain(42))
         );
         assert_eq!(
             t.probe("5.6.7.8".parse().unwrap(), 443, 3000, 0).await,
@@ -364,7 +568,7 @@ mod tests {
         );
         assert_eq!(
             t.probe("1.2.3.4".parse().unwrap(), 443, 3000, 0).await,
-            Ok((9, 1, 1))
+            Ok(ProbeOutcome::plain(9))
         );
     }
 
@@ -373,7 +577,12 @@ mod tests {
         let t = FakeTransport::new().ok_loss("1.2.3.4".parse().unwrap(), 443, 7, 4, 3);
         assert_eq!(
             t.probe("1.2.3.4".parse().unwrap(), 443, 3000, 0).await,
-            Ok((7, 4, 3))
+            Ok(ProbeOutcome {
+                latency_ms: 7,
+                sent: 4,
+                received: 3,
+                colo: None,
+            })
         );
     }
 
@@ -382,6 +591,7 @@ mod tests {
         assert_eq!(ProbeError::Refused("x").reason(), "refused");
         assert_eq!(ProbeError::Timeout { timeout_ms: 1 }.reason(), "timeout");
         assert_eq!(ProbeError::Tls("x").reason(), "tls_failed");
+        assert_eq!(ProbeError::HttpStatus(503).reason(), "http_status");
     }
 
     #[tokio::test]
@@ -391,11 +601,11 @@ mod tests {
             .ok("1.2.3.4".parse().unwrap(), 443, 9);
         assert_eq!(
             t.probe("2606:4700::1".parse().unwrap(), 443, 1000, 0).await,
-            Ok((7, 1, 1))
+            Ok(ProbeOutcome::plain(7))
         );
         assert_eq!(
             t.probe("1.2.3.4".parse().unwrap(), 443, 1000, 0).await,
-            Ok((9, 1, 1))
+            Ok(ProbeOutcome::plain(9))
         );
     }
 
@@ -408,7 +618,7 @@ mod tests {
         );
         assert_eq!(
             t.probe("1.2.3.4".parse().unwrap(), 443, 1, 0).await,
-            Ok((5, 1, 1))
+            Ok(ProbeOutcome::plain(5))
         );
         assert_eq!(
             t.probe("1.2.3.4".parse().unwrap(), 443, 1, 0).await,
@@ -418,5 +628,54 @@ mod tests {
             t.probe("1.2.3.4".parse().unwrap(), 443, 1, 0).await,
             Err(ProbeError::Timeout { timeout_ms: 1 })
         );
+    }
+
+    #[tokio::test]
+    async fn fake_colo_scripting_carries_the_trace_code() {
+        let t = FakeTransport::new().ok_colo("1.2.3.4".parse().unwrap(), 443, 12, "LHR");
+        assert_eq!(
+            t.probe("1.2.3.4".parse().unwrap(), 443, 3000, 0).await,
+            Ok(ProbeOutcome {
+                latency_ms: 12,
+                sent: 1,
+                received: 1,
+                colo: Some("LHR".to_owned()),
+            })
+        );
+    }
+
+    #[test]
+    fn tcp_and_http_transports_build_without_network() {
+        let _ = TcpTransport;
+        let _ = HttpTransport::new(vec![200, 301, 302]);
+        let _ = transport_for(crate::api::types::ProbeMode::Http, &[200]);
+    }
+
+    #[test]
+    fn status_line_parse_accepts_standard_responses() {
+        assert_eq!(parse_status_line(b"HTTP/1.1 200 OK"), Some(200));
+        assert_eq!(
+            parse_status_line(b"HTTP/1.1 301 Moved Permanently"),
+            Some(301)
+        );
+        assert_eq!(parse_status_line(b"HTTP/1.0 302 Found"), Some(302));
+    }
+
+    #[test]
+    fn status_line_parse_rejects_garbage() {
+        assert_eq!(parse_status_line(b""), None);
+        assert_eq!(parse_status_line(b"garbage"), None);
+        assert_eq!(parse_status_line(b"HTTP/1.1 OK"), None);
+        assert_eq!(parse_status_line(b"HTTP/1.1 200x"), None);
+        assert_eq!(parse_status_line(b"HTTP/1.1 99999"), None);
+    }
+
+    #[test]
+    fn find_subsequence_locates_the_header_body_boundary() {
+        assert_eq!(
+            find_subsequence(b"HTTP/1.1 200 OK\r\n\r\nbody", b"\r\n\r\n"),
+            Some(15)
+        );
+        assert_eq!(find_subsequence(b"no terminator", b"\r\n\r\n"), None);
     }
 }

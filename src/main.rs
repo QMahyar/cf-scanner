@@ -6,7 +6,8 @@ use std::sync::Arc;
 use anyhow::{Result, anyhow, bail};
 use cf_scanner::api;
 use cf_scanner::api::types::{
-    CdnPreset, DEFAULT_CONCURRENCY, Mode, Port, ScanConfig, ScanEvent, ScanTarget, StopCondition,
+    CdnPreset, DEFAULT_CONCURRENCY, Mode, Port, ProbeMode, ScanConfig, ScanEvent, ScanTarget,
+    StopCondition,
 };
 use cf_scanner::{cli_wizard, engine, paths, probe, ranges, warpgen};
 use clap::{Parser, Subcommand, ValueEnum};
@@ -165,6 +166,25 @@ struct ScanArgs {
     )]
     idle_hold_ms: u64,
 
+    #[arg(
+        long,
+        value_enum,
+        default_value_t = ProbeArg::Tls,
+        value_name = "MODE",
+        help_heading = "Tuning",
+        long_help = "Phase-1 probe protocol: tcp (connect only), tls (handshake, default), http (GET /cdn-cgi/trace over TLS)"
+    )]
+    probe: ProbeArg,
+
+    #[arg(
+        long,
+        value_name = "CODES",
+        value_delimiter = ',',
+        help_heading = "Tuning",
+        long_help = "HTTP probe mode: status codes that count as working (100-599); default 200,301,302"
+    )]
+    http_status_code: Option<Vec<u16>>,
+
     #[arg(long, value_delimiter = ',', help_heading = "Candidate selection")]
     exclude: Vec<String>,
 
@@ -280,6 +300,23 @@ enum ModeArg {
     Warp,
 }
 
+#[derive(Copy, Clone, PartialEq, Eq, Debug, ValueEnum)]
+enum ProbeArg {
+    Tcp,
+    Tls,
+    Http,
+}
+
+impl From<ProbeArg> for api::types::ProbeMode {
+    fn from(p: ProbeArg) -> Self {
+        match p {
+            ProbeArg::Tcp => api::types::ProbeMode::Tcp,
+            ProbeArg::Tls => api::types::ProbeMode::Tls,
+            ProbeArg::Http => api::types::ProbeMode::Http,
+        }
+    }
+}
+
 #[derive(Copy, Clone, ValueEnum)]
 enum FragmentArg {
     Off,
@@ -349,9 +386,29 @@ fn build_scan_config(args: &ScanArgs) -> Result<ScanConfig> {
     if args.idle_hold_ms > api::types::MAX_IDLE_HOLD_MS {
         bail!("--idle-hold-ms must be 0-{}", api::types::MAX_IDLE_HOLD_MS);
     }
+    for code in args.http_status_code.iter().flatten() {
+        if !(100..=599).contains(code) {
+            bail!("--http-status-code entries must be 100-599, got {code}");
+        }
+    }
+    if args
+        .http_status_code
+        .as_ref()
+        .is_some_and(|codes| codes.is_empty())
+    {
+        bail!("--http-status-code needs at least one status code");
+    }
     let mode = Mode::from(args.mode);
     if mode == Mode::Warp && args.preset.is_some() {
         return Err(anyhow!("--preset is CDN-only; WARP uses --count"));
+    }
+    if mode == Mode::Warp && args.probe != ProbeArg::Tls {
+        return Err(anyhow!(
+            "--probe is CDN-only; WARP uses WireGuard handshake probes"
+        ));
+    }
+    if mode == Mode::Cdn && args.http_status_code.is_some() && args.probe != ProbeArg::Http {
+        return Err(anyhow!("--http-status-code requires --probe http"));
     }
     if mode == Mode::Cdn && !args.warp_endpoints.is_empty() {
         return Err(anyhow!("--warp-endpoints require --mode warp"));
@@ -466,6 +523,11 @@ fn build_scan_config(args: &ScanArgs) -> Result<ScanConfig> {
         min_latency_ms: args.min_latency,
         idle_hold_ms: args.idle_hold_ms,
         colo_filter,
+        probe_mode: ProbeMode::from(args.probe),
+        accepted_http_codes: args
+            .http_status_code
+            .clone()
+            .unwrap_or_else(api::types::default_accepted_http_codes),
     };
     cfg.validate()
         .map_err(|e| anyhow!("invalid scan config: {e}"))?;
@@ -658,9 +720,8 @@ async fn run(cli: Cli) -> Result<()> {
 
 async fn run_scan(args: ScanArgs) -> Result<()> {
     let cfg = build_scan_config(&args)?;
-    let controller = Arc::new(engine::ScanController::new(Arc::new(
-        probe::TlsTransport::new(),
-    )));
+    let transport = probe::transport_for(cfg.probe_mode, &cfg.accepted_http_codes);
+    let controller = Arc::new(engine::ScanController::new(transport));
     let cancel_on_ctrl_c = {
         let controller = controller.clone();
         tokio::spawn(async move {
@@ -847,6 +908,8 @@ mod tests {
             loss_threshold: None,
             min_latency: None,
             idle_hold_ms: 0,
+            probe: ProbeArg::Tls,
+            http_status_code: None,
         }
     }
 
@@ -1039,6 +1102,100 @@ mod tests {
         a.min_latency = Some(api::types::MAX_MIN_LATENCY_MS + 1);
         let err = build_scan_config(&a).unwrap_err();
         assert!(err.to_string().contains("--min-latency"), "{err:#}");
+    }
+
+    #[test]
+    fn probe_defaults_to_tls_and_parses_all_modes() {
+        let cfg = build_scan_config(&args()).unwrap();
+        assert_eq!(cfg.probe_mode, ProbeMode::Tls);
+        assert_eq!(
+            cfg.accepted_http_codes,
+            api::types::DEFAULT_ACCEPTED_HTTP_CODES.to_vec()
+        );
+        let argv = ["cf-scanner", "scan", "--probe", "tcp"];
+        let a = match Cli::try_parse_from(argv).unwrap().command {
+            Command::Scan { args } => *args,
+            _ => unreachable!(),
+        };
+        assert_eq!(build_scan_config(&a).unwrap().probe_mode, ProbeMode::Tcp);
+        let argv = ["cf-scanner", "scan", "--probe", "tls"];
+        let a = match Cli::try_parse_from(argv).unwrap().command {
+            Command::Scan { args } => *args,
+            _ => unreachable!(),
+        };
+        assert_eq!(build_scan_config(&a).unwrap().probe_mode, ProbeMode::Tls);
+        let argv = ["cf-scanner", "scan", "--probe", "http"];
+        let a = match Cli::try_parse_from(argv).unwrap().command {
+            Command::Scan { args } => *args,
+            _ => unreachable!(),
+        };
+        assert_eq!(build_scan_config(&a).unwrap().probe_mode, ProbeMode::Http);
+    }
+
+    #[test]
+    fn http_status_code_requires_probe_http() {
+        let mut a = args();
+        a.http_status_code = Some(vec![200]);
+        let err = build_scan_config(&a).unwrap_err();
+        assert!(err.to_string().contains("--http-status-code"), "{err:#}");
+        a.probe = ProbeArg::Http;
+        let cfg = build_scan_config(&a).unwrap();
+        assert_eq!(cfg.accepted_http_codes, vec![200]);
+        assert_eq!(cfg.probe_mode, ProbeMode::Http);
+    }
+
+    #[test]
+    fn http_status_code_parses_comma_delimited_and_validates_range() {
+        let argv = [
+            "cf-scanner",
+            "scan",
+            "--probe",
+            "http",
+            "--http-status-code",
+            "200,204",
+        ];
+        let a = match Cli::try_parse_from(argv).unwrap().command {
+            Command::Scan { args } => *args,
+            _ => unreachable!(),
+        };
+        let cfg = build_scan_config(&a).unwrap();
+        assert_eq!(cfg.accepted_http_codes, vec![200, 204]);
+        let argv = [
+            "cf-scanner",
+            "scan",
+            "--probe",
+            "http",
+            "--http-status-code",
+            "99",
+        ];
+        let a = match Cli::try_parse_from(argv).unwrap().command {
+            Command::Scan { args } => *args,
+            _ => unreachable!(),
+        };
+        let err = build_scan_config(&a).unwrap_err();
+        assert!(err.to_string().contains("--http-status-code"), "{err:#}");
+        let argv = [
+            "cf-scanner",
+            "scan",
+            "--probe",
+            "http",
+            "--http-status-code",
+            "600",
+        ];
+        let a = match Cli::try_parse_from(argv).unwrap().command {
+            Command::Scan { args } => *args,
+            _ => unreachable!(),
+        };
+        assert!(build_scan_config(&a).is_err());
+    }
+
+    #[test]
+    fn probe_flag_is_cdn_only() {
+        let mut a = args();
+        a.mode = ModeArg::Warp;
+        a.probe = ProbeArg::Http;
+        let err = build_scan_config(&a).unwrap_err();
+        assert!(err.to_string().contains("--probe"), "{err:#}");
     }
 
     #[test]
