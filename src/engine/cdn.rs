@@ -1,7 +1,9 @@
-use std::net::IpAddr;
+use std::collections::HashSet;
+use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use anyhow::{Result, anyhow};
 use tokio::sync::mpsc;
@@ -20,6 +22,82 @@ use crate::ranges;
 struct ProbeTask {
     ip: IpAddr,
     port: u16,
+}
+
+const NEIGHBOR_CHANNEL_CAP: usize = 256;
+const NEIGHBOR_IDLE_POLL_MS: u64 = 1;
+
+struct NeighborHub {
+    seen: Mutex<HashSet<IpAddr>>,
+    tx: mpsc::Sender<ProbeTask>,
+    limit: u32,
+}
+
+impl NeighborHub {
+    fn enqueue(&self, hit: IpAddr, port: u16, ctx: &ProbeContext) {
+        let mut seen = self.seen.lock().unwrap_or_else(|e| e.into_inner());
+        seen.insert(hit);
+        for ip in neighbor_candidates(hit, self.limit) {
+            if ctx.should_stop() {
+                break;
+            }
+            if seen.insert(ip) && self.tx.try_send(ProbeTask { ip, port }).is_err() {
+                seen.remove(&ip);
+            }
+        }
+    }
+}
+
+fn neighbor_candidates(hit: IpAddr, limit: u32) -> Vec<IpAddr> {
+    let IpAddr::V4(v4) = hit else {
+        return Vec::new();
+    };
+    let [a, b, c, d] = v4.octets();
+    let last = i64::from(d);
+    let mut out = Vec::new();
+    for dist in 1..=254i64 {
+        if out.len() >= limit as usize {
+            break;
+        }
+        for offset in [last - dist, last + dist] {
+            if out.len() >= limit as usize {
+                break;
+            }
+            if (1..=254).contains(&offset) {
+                out.push(IpAddr::V4(Ipv4Addr::new(a, b, c, offset as u8)));
+            }
+        }
+    }
+    out
+}
+
+async fn forward_to_worker(
+    task: ProbeTask,
+    worker_txs: &[mpsc::Sender<ProbeTask>],
+    idx: &mut usize,
+    concurrency: usize,
+    inflight: &AtomicU64,
+    ctx: &ProbeContext,
+) -> bool {
+    if ctx.should_stop() {
+        return false;
+    }
+    let w = *idx % concurrency;
+    *idx = idx.wrapping_add(1);
+    inflight.fetch_add(1, Ordering::AcqRel);
+    tokio::select! {
+        r = worker_txs[w].send(task) => {
+            if r.is_err() {
+                inflight.fetch_sub(1, Ordering::AcqRel);
+                return false;
+            }
+            true
+        }
+        _ = ctx.cancelled() => {
+            inflight.fetch_sub(1, Ordering::AcqRel);
+            false
+        }
+    }
 }
 
 impl ScanController {
@@ -92,10 +170,26 @@ impl ScanController {
             worker_rxs.push(rx);
         }
 
+        let (hub, mut side_rx) = if cfg.neighbor_count > 0 {
+            let (tx, rx) = mpsc::channel::<ProbeTask>(NEIGHBOR_CHANNEL_CAP);
+            (
+                Some(Arc::new(NeighborHub {
+                    seen: Mutex::new(HashSet::new()),
+                    tx,
+                    limit: cfg.neighbor_count,
+                })),
+                Some(rx),
+            )
+        } else {
+            (None, None)
+        };
+        let inflight = Arc::new(AtomicU64::new(0));
+
         let producer = {
             let ctx = Arc::clone(&ctx);
             let cfg = cfg.clone();
             let plan = plan.clone();
+            let inflight = Arc::clone(&inflight);
             tokio::spawn(async move {
                 let mut rngs: Vec<SplitMix64> = cfg
                     .ports
@@ -107,23 +201,66 @@ impl ScanController {
                     for (port_idx, port) in cfg.ports.iter().enumerate() {
                         let rng = &mut rngs[port_idx];
                         for host in plan_hosts_iter(item, rng) {
+                            if let Some(rx) = side_rx.as_mut() {
+                                while let Ok(task) = rx.try_recv() {
+                                    if !forward_to_worker(
+                                        task,
+                                        &worker_txs,
+                                        &mut idx,
+                                        concurrency,
+                                        &inflight,
+                                        &ctx,
+                                    )
+                                    .await
+                                    {
+                                        break 'outer;
+                                    }
+                                }
+                            }
                             let task = ProbeTask {
                                 ip: host,
                                 port: port.get(),
                             };
-                            let w = idx % concurrency;
-                            idx = idx.wrapping_add(1);
-                            if ctx.should_stop() {
+                            if !forward_to_worker(
+                                task,
+                                &worker_txs,
+                                &mut idx,
+                                concurrency,
+                                &inflight,
+                                &ctx,
+                            )
+                            .await
+                            {
                                 break 'outer;
                             }
-                            tokio::select! {
-                                r = worker_txs[w].send(task) => {
-                                    if r.is_err() {
-                                        break 'outer;
-                                    }
+                        }
+                    }
+                }
+                if let Some(rx) = side_rx.as_mut() {
+                    while !ctx.should_stop() {
+                        match rx.try_recv() {
+                            Ok(task) => {
+                                if !forward_to_worker(
+                                    task,
+                                    &worker_txs,
+                                    &mut idx,
+                                    concurrency,
+                                    &inflight,
+                                    &ctx,
+                                )
+                                .await
+                                {
+                                    break;
                                 }
-                                _ = ctx.cancelled() => break 'outer,
                             }
+                            Err(mpsc::error::TryRecvError::Empty) => {
+                                if inflight.load(Ordering::Acquire) == 0 {
+                                    break;
+                                }
+                                tokio::time::sleep(Duration::from_millis(NEIGHBOR_IDLE_POLL_MS))
+                                    .await;
+                            }
+                            Err(mpsc::error::TryRecvError::Disconnected) => break,
                         }
                     }
                 }
@@ -138,6 +275,8 @@ impl ScanController {
             let idle_hold_ms = cfg.idle_hold_ms;
             let loss_threshold = cfg.loss_threshold;
             let min_latency_ms = cfg.min_latency_ms;
+            let inflight = Arc::clone(&inflight);
+            let hub = hub.clone();
             workers.spawn(async move {
                 let mut batch: Vec<Verdict> = Vec::new();
                 loop {
@@ -156,6 +295,7 @@ impl ScanController {
                         _ = ctx.cancelled() => None,
                     };
                     let Some(outcome) = outcome else {
+                        inflight.fetch_sub(1, Ordering::AcqRel);
                         break;
                     };
                     ctx.scanned.fetch_add(1, Ordering::Relaxed);
@@ -177,6 +317,9 @@ impl ScanController {
                             if !acceptable {
                                 None
                             } else {
+                                if let Some(hub) = &hub {
+                                    hub.enqueue(task.ip, task.port, &ctx);
+                                }
                                 Some(Verdict {
                                     ip: task.ip,
                                     port: task.port,
@@ -205,6 +348,9 @@ impl ScanController {
                         }),
                     };
                     let verdict = verdict.filter(|v| ctx.colo_allowed(v.colo.as_deref()));
+                    // decrement after the verdict so a hit's enqueue lands in
+                    // the neighbor queue before the producer can see inflight==0
+                    inflight.fetch_sub(1, Ordering::AcqRel);
                     if let Some(verdict) = verdict {
                         if verdict.latency_ms.is_some() {
                             ctx.found.fetch_add(1, Ordering::Relaxed);
@@ -782,5 +928,189 @@ mod tests {
         let mut cfg = ok_cfg(1, None);
         cfg.ports = vec![Port::new(0)];
         assert!(run_local(&c, cfg, 1).await.is_err());
+    }
+
+    fn neighbor_transport() -> FakeTransport {
+        let t = FakeTransport::new();
+        t.insert("203.0.113.10".parse().unwrap(), 443, Ok(5));
+        for o in [8u8, 9, 11, 12, 13] {
+            t.insert(
+                format!("203.0.113.{o}").parse().unwrap(),
+                443,
+                Ok(u32::from(o)),
+            );
+        }
+        t
+    }
+
+    fn neighbor_cfg(neighbors: u32, cap: Option<u32>) -> ScanConfig {
+        let mut cfg = ok_cfg(100, cap);
+        cfg.neighbor_count = neighbors;
+        cfg
+    }
+
+    #[tokio::test]
+    async fn neighbors_are_probed_and_stored_after_a_hit() {
+        let (c, _) = controller(Arc::new(neighbor_transport()));
+        let pool = ranges::CidrPool::parse("203.0.113.10/32").unwrap();
+        let summary = c
+            .run_seeded_with_pool(neighbor_cfg(4, None), 1, pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            summary.scanned, 10,
+            "the .10 hit plus its deduped neighbor cascade"
+        );
+        assert_eq!(
+            summary.found, 6,
+            ".10 plus neighbors .9/.11/.8/.12 and cascaded .13"
+        );
+        let ips: HashSet<IpAddr> = c.results().iter().map(|v| v.ip).collect();
+        assert!(
+            ips.contains(&"203.0.113.8".parse::<IpAddr>().unwrap()),
+            "the out-of-pool neighbor must be probed and stored: {ips:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn neighbor_hits_cascade_within_the_dedup_bound() {
+        let (c, _) = controller(Arc::new(neighbor_transport()));
+        let pool = ranges::CidrPool::parse("203.0.113.10/32").unwrap();
+        let _summary = c
+            .run_seeded_with_pool(neighbor_cfg(4, None), 1, pool)
+            .await
+            .unwrap();
+        let results = c.results();
+        let ips: HashSet<IpAddr> = results.iter().map(|v| v.ip).collect();
+        assert!(
+            ips.contains(&"203.0.113.13".parse::<IpAddr>().unwrap()),
+            "the neighbor of the .11 hit must be enqueued once .11 lands: {ips:?}"
+        );
+        let extra: Vec<_> = results
+            .iter()
+            .filter(|v| v.ip == "203.0.113.8".parse::<IpAddr>().unwrap())
+            .collect();
+        assert_eq!(
+            extra.len(),
+            1,
+            "each neighbor must be enqueued at most once despite the cascade"
+        );
+    }
+
+    #[tokio::test]
+    async fn neighbor_scan_defaults_off_and_zero_means_no_extra_probes() {
+        let (c, _) = controller(Arc::new(neighbor_transport()));
+        let cfg = ok_cfg(100, None);
+        assert_eq!(cfg.neighbor_count, 0, "neighbor scanning must default off");
+        let pool = ranges::CidrPool::parse("203.0.113.10/32").unwrap();
+        let summary = c.run_seeded_with_pool(cfg, 1, pool).await.unwrap();
+        assert_eq!(summary.scanned, 1, "only the plan host is probed");
+        let ips: HashSet<IpAddr> = c.results().iter().map(|v| v.ip).collect();
+        assert!(!ips.contains(&"203.0.113.8".parse::<IpAddr>().unwrap()));
+    }
+
+    #[tokio::test]
+    async fn neighbor_scan_respects_cap() {
+        let (c, _) = controller(Arc::new(neighbor_transport()));
+        let pool = ranges::CidrPool::parse("203.0.113.10/32").unwrap();
+        let summary = c
+            .run_seeded_with_pool(neighbor_cfg(4, Some(1)), 1, pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            summary.scanned, 1,
+            "cap 1 must stop all neighbor probing after the first completion"
+        );
+        assert_eq!(summary.found, 1);
+    }
+
+    #[tokio::test]
+    async fn neighbor_scan_skips_ipv6_hits() {
+        let t = FakeTransport::new()
+            .ok("2606:4700::1".parse().unwrap(), 443, 20)
+            .ok("2606:4700::2".parse().unwrap(), 443, 30)
+            .ok("2606:4700::3".parse().unwrap(), 443, 10);
+        let (c, _) = controller(Arc::new(t));
+        let mut cfg = ok_cfg(100, None);
+        cfg.neighbor_count = 8;
+        let pool = ranges::CidrPool::parse("2606:4700::/126").unwrap();
+        let summary = c.run_seeded_with_pool(cfg, 1, pool).await.unwrap();
+        assert_eq!(summary.scanned, 4, "v6 hits must not spawn neighbor probes");
+    }
+
+    #[test]
+    fn neighbor_candidates_walk_outward_and_respect_bounds() {
+        let hit: IpAddr = "203.0.113.10".parse().unwrap();
+        assert_eq!(
+            neighbor_candidates(hit, 1),
+            vec!["203.0.113.9".parse::<IpAddr>().unwrap(),],
+            "limit counts candidates, not distances"
+        );
+        assert_eq!(
+            neighbor_candidates(hit, 2),
+            vec![
+                "203.0.113.9".parse::<IpAddr>().unwrap(),
+                "203.0.113.11".parse::<IpAddr>().unwrap(),
+            ]
+        );
+        assert_eq!(
+            neighbor_candidates(hit, 3),
+            vec![
+                "203.0.113.9".parse::<IpAddr>().unwrap(),
+                "203.0.113.11".parse::<IpAddr>().unwrap(),
+                "203.0.113.8".parse::<IpAddr>().unwrap(),
+            ]
+        );
+        let edge: IpAddr = "203.0.113.1".parse().unwrap();
+        assert_eq!(
+            neighbor_candidates(edge, 2),
+            vec![
+                "203.0.113.2".parse::<IpAddr>().unwrap(),
+                "203.0.113.3".parse::<IpAddr>().unwrap(),
+            ],
+            "0 is skipped, outward walk continues with +dist"
+        );
+        let top: IpAddr = "203.0.113.254".parse().unwrap();
+        assert_eq!(
+            neighbor_candidates(top, 2),
+            vec![
+                "203.0.113.253".parse::<IpAddr>().unwrap(),
+                "203.0.113.252".parse::<IpAddr>().unwrap(),
+            ],
+            "255 is skipped"
+        );
+        assert!(neighbor_candidates(hit, 0).is_empty());
+        assert!(
+            neighbor_candidates("2606:4700::1".parse().unwrap(), 8).is_empty(),
+            "only IPv4 hits produce neighbors"
+        );
+        let all = neighbor_candidates(hit, 64);
+        assert_eq!(
+            all.len(),
+            64,
+            "the candidate list is capped at the limit, not the distance"
+        );
+        assert_eq!(
+            all.iter().collect::<HashSet<_>>().len(),
+            64,
+            "candidates must be unique"
+        );
+        assert!(
+            all.iter()
+                .all(|ip| !ip.to_string().ends_with(".0") && !ip.to_string().ends_with(".255")),
+            "network and broadcast must never appear"
+        );
+        let full = neighbor_candidates(hit, 300);
+        assert_eq!(
+            full.len(),
+            253,
+            "a mid-range /24 has 254 usable hosts minus the hit itself"
+        );
+        let limited = neighbor_candidates(top, 300);
+        assert_eq!(
+            limited.iter().collect::<HashSet<_>>().len(),
+            limited.len(),
+            "even at the /24 edge the walk must not repeat or overflow"
+        );
     }
 }

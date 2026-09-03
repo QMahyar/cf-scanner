@@ -222,6 +222,8 @@ pub struct ScanConfig {
     pub speed_test: bool,
     #[serde(default)]
     pub min_speed_mbps: Option<f32>,
+    #[serde(default)]
+    pub neighbor_count: u32,
 }
 
 impl Default for ScanConfig {
@@ -247,6 +249,7 @@ impl Default for ScanConfig {
             accepted_http_codes: default_accepted_http_codes(),
             speed_test: false,
             min_speed_mbps: None,
+            neighbor_count: 0,
         }
     }
 }
@@ -465,6 +468,9 @@ impl ScanConfig {
                 if !min.is_finite() || min <= 0.0 {
                     return Err(ConfigError::InvalidMinSpeed);
                 }
+            }
+            if self.neighbor_count > MAX_NEIGHBORS {
+                return Err(ConfigError::InvalidNeighbor(self.neighbor_count));
             }
             for cidr in self.exclude.iter().chain(self.custom_cidrs.iter()) {
                 parse_cidr(cidr)?;

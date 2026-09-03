@@ -1,5 +1,6 @@
 use super::limits::{
     DEFAULT_PORT, MAX_COLO_CODES, MAX_ENDPOINTS, MAX_IDLE_HOLD_MS, MAX_MIN_LATENCY_MS,
+    MAX_NEIGHBORS,
 };
 
 #[derive(Debug, PartialEq, Eq, thiserror::Error)]
@@ -104,6 +105,8 @@ pub enum ConfigError {
     MinSpeedNeedsSpeedTest,
     #[error("--min-speed must be a finite number greater than 0")]
     InvalidMinSpeed,
+    #[error("neighbor_count {0} out of range 0-{MAX_NEIGHBORS}")]
+    InvalidNeighbor(u32),
     #[error(
         "warp scans need explicit UDP ports; the CDN default {DEFAULT_PORT} is not valid (pass e.g. 2408,500)"
     )]

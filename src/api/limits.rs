@@ -37,6 +37,7 @@ pub const MAX_EXPORT_CONFIG_BYTES: usize = 64 * 1024;
 pub const MAX_STOP_VALUE: u32 = 100_000_000;
 pub const MAX_IDLE_HOLD_MS: u64 = 60_000;
 pub const MAX_MIN_LATENCY_MS: u32 = 30_000;
+pub const MAX_NEIGHBORS: u32 = 64;
 pub const MAX_SNI_LABEL_CHARS: usize = 63;
 pub const MAX_SNI_HOSTNAME_CHARS: usize = 253;
 pub const MAX_ENDPOINTS: usize = 2048;

@@ -185,6 +185,15 @@ struct ScanArgs {
     )]
     http_status_code: Option<Vec<u16>>,
 
+    #[arg(
+        long,
+        value_name = "N",
+        default_value_t = 0,
+        help_heading = "Tuning",
+        long_help = "After a hit, probe up to N neighboring IPs in the same /24 through the same workers (0 = off, max 64, CDN-only)"
+    )]
+    neighbor_scan: u32,
+
     #[arg(long, value_delimiter = ',', help_heading = "Candidate selection")]
     exclude: Vec<String>,
 
@@ -417,6 +426,9 @@ fn build_scan_config(args: &ScanArgs) -> Result<ScanConfig> {
     {
         bail!("--http-status-code needs at least one status code");
     }
+    if args.neighbor_scan > api::types::MAX_NEIGHBORS {
+        bail!("--neighbor-scan must be 0-{}", api::types::MAX_NEIGHBORS);
+    }
     let mode = Mode::from(args.mode);
     if mode == Mode::Warp && args.preset.is_some() {
         return Err(anyhow!("--preset is CDN-only; WARP uses --count"));
@@ -443,6 +455,11 @@ fn build_scan_config(args: &ScanArgs) -> Result<ScanConfig> {
     }
     if mode == Mode::Warp && args.ipv6 {
         return Err(anyhow!("--ipv6 is CDN-only; WARP pools are IPv4"));
+    }
+    if mode == Mode::Warp && args.neighbor_scan > 0 {
+        return Err(anyhow!(
+            "--neighbor-scan is CDN-only; neighbor probing does not apply to WARP"
+        ));
     }
     if mode == Mode::Warp && !args.custom_cidrs.is_empty() {
         return Err(anyhow!(
@@ -555,6 +572,7 @@ fn build_scan_config(args: &ScanArgs) -> Result<ScanConfig> {
             .unwrap_or_else(api::types::default_accepted_http_codes),
         speed_test: args.speed_test,
         min_speed_mbps: args.min_speed,
+        neighbor_count: args.neighbor_scan,
     };
     cfg.validate()
         .map_err(|e| anyhow!("invalid scan config: {e}"))?;
@@ -939,6 +957,7 @@ mod tests {
             http_status_code: None,
             speed_test: false,
             min_speed: None,
+            neighbor_scan: 0,
         }
     }
 
@@ -1131,6 +1150,37 @@ mod tests {
         a.min_latency = Some(api::types::MAX_MIN_LATENCY_MS + 1);
         let err = build_scan_config(&a).unwrap_err();
         assert!(err.to_string().contains("--min-latency"), "{err:#}");
+    }
+
+    #[test]
+    fn neighbor_scan_flag_builds_and_validates() {
+        let argv = ["cf-scanner", "scan", "--neighbor-scan", "4"];
+        let a = match Cli::try_parse_from(argv).unwrap().command {
+            Command::Scan { args } => *args,
+            _ => unreachable!(),
+        };
+        let cfg = build_scan_config(&a).unwrap();
+        assert_eq!(cfg.neighbor_count, 4);
+        assert_eq!(build_scan_config(&args()).unwrap().neighbor_count, 0);
+        let mut a = args();
+        a.neighbor_scan = api::types::MAX_NEIGHBORS + 1;
+        let err = build_scan_config(&a).unwrap_err();
+        assert!(err.to_string().contains("--neighbor-scan"), "{err:#}");
+    }
+
+    #[test]
+    fn warp_mode_rejects_neighbor_scan_with_a_flag_named_error() {
+        let mut a = args();
+        a.mode = ModeArg::Warp;
+        a.neighbor_scan = 4;
+        let err = build_scan_config(&a).unwrap_err();
+        assert!(err.to_string().contains("--neighbor-scan"), "{err:#}");
+        let mut a = args();
+        a.mode = ModeArg::Warp;
+        assert!(
+            build_scan_config(&a).is_ok(),
+            "neighbor_scan=0 must stay legal in WARP mode"
+        );
     }
 
     #[test]
