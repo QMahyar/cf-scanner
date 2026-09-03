@@ -254,6 +254,7 @@ enum ExportFormatArg {
     Raw,
     Singbox,
     Clash,
+    Sharelinks,
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, Debug, ValueEnum)]
@@ -704,6 +705,7 @@ fn export_format_name(format: ExportFormatArg) -> &'static str {
         ExportFormatArg::Raw => "raw",
         ExportFormatArg::Singbox => "singbox",
         ExportFormatArg::Clash => "clash",
+        ExportFormatArg::Sharelinks => "sharelinks",
     }
 }
 
@@ -721,7 +723,8 @@ fn write_export(
         ExportFormatArg::Base64
         | ExportFormatArg::Raw
         | ExportFormatArg::Singbox
-        | ExportFormatArg::Clash => {
+        | ExportFormatArg::Clash
+        | ExportFormatArg::Sharelinks => {
             let configs = controller.phase2_configs();
             cf_scanner::export::render_bundle(format_name, &results, &configs)
         }
