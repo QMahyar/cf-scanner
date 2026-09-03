@@ -136,7 +136,9 @@ impl ScanController {
                         _ = ctx.cancelled() => break,
                     };
                     let mut latency_ms: Option<u32> = None;
-                    let mut failed = 0u64;
+                    let mut sent: u32 = 0;
+                    let mut received: u32 = 0;
+                    let mut failed: u32 = 0;
                     let mut cancelled = false;
                     for _ in 0..probes_per_endpoint {
                         if ctx.should_stop() {
@@ -144,7 +146,7 @@ impl ScanController {
                             break;
                         }
                         let outcome = tokio::select! {
-                            outcome = transport.probe(task.ip, task.port, timeout_ms) => Some(outcome),
+                            outcome = transport.probe(task.ip, task.port, timeout_ms, 0) => Some(outcome),
                             _ = ctx.cancelled() => None,
                         };
                         let Some(outcome) = outcome else {
@@ -152,10 +154,15 @@ impl ScanController {
                             break;
                         };
                         match outcome {
-                            Ok(latency) => {
+                            Ok((latency, probe_sent, probe_received)) => {
                                 latency_ms = Some(latency_ms.map_or(latency, |m| m.min(latency)));
+                                sent += probe_sent;
+                                received += probe_received;
                             }
-                            Err(_) => failed += 1,
+                            Err(_) => {
+                                sent += 1;
+                                failed += 1;
+                            }
                         }
                     }
                     if cancelled {
@@ -171,6 +178,10 @@ impl ScanController {
                             country: ctx.geo.country(task.ip),
                             colo: None,
                             phase2: None,
+                            sent,
+                            received,
+                            loss_pct: Some(0),
+                            fail_reason: None,
                         });
                         let _ = ctx.events.send(ScanEvent::Result(verdict.clone()));
                         batch.push(*verdict);

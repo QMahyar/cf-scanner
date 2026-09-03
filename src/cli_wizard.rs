@@ -4,10 +4,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use crate::api::types::{
     self, CdnPreset, CustomFragment, DEFAULT_CONCURRENCY, DEFAULT_PORT, DEFAULT_PROBE_URL,
     DEFAULT_TIMEOUT_MS, DEFAULT_WARP_PORTS, FragmentPreset, MAX_CIDRS, MAX_CONFIG_ENTRY_BYTES,
-    MAX_ENDPOINTS, MAX_PHASE2_ENTRIES, MAX_PROBE_URL_BYTES, MAX_SCAN_COUNT, MAX_SNI_BYTES,
-    MAX_STOP_VALUE, MAX_WGCONF_BYTES, Mode, Phase2Config, Port, ScanConfig, ScanEvent, ScanSummary,
-    ScanTarget, StopCondition, WarpConfig, parse_cidr, parse_endpoint, validate_fragment,
-    validate_sni,
+    MAX_ENDPOINTS, MAX_IDLE_HOLD_MS, MAX_PHASE2_ENTRIES, MAX_PROBE_URL_BYTES, MAX_SCAN_COUNT,
+    MAX_SNI_BYTES, MAX_STOP_VALUE, MAX_WGCONF_BYTES, Mode, Phase2Config, Port, ScanConfig,
+    ScanEvent, ScanSummary, ScanTarget, StopCondition, WarpConfig, parse_cidr, parse_endpoint,
+    validate_fragment, validate_sni,
 };
 use crate::engine::ScanController;
 use crate::warp;
@@ -233,13 +233,11 @@ async fn run_scan(controller: &Arc<ScanController>, cfg: &ScanConfig) -> Result<
                 };
                 use std::io::Write as _;
                 let mut err = std::io::stderr().lock();
-                let _ = writeln!(
-                    err,
-                    "\r\x1b[K{}\t{}ms{}",
-                    v.ip,
-                    v.latency_ms.unwrap_or(0),
-                    phase2
-                );
+                let status = match (&v.fail_reason, v.latency_ms) {
+                    (Some(reason), _) => format!("failed ({reason})"),
+                    (None, latency) => format!("{}ms", latency.unwrap_or(0)),
+                };
+                let _ = writeln!(err, "\r\x1b[K{}\t{status}{phase2}", v.ip);
             }
             ScanEvent::Finished(_) => eprint!("\r\x1b[K"),
             ScanEvent::Phase2Progress(p) => {
@@ -412,6 +410,19 @@ fn prompt_config() -> Result<ScanConfig> {
         .default(DEFAULT_TIMEOUT_MS)
         .interact()?;
 
+    let loss_threshold_raw: String = Input::new()
+        .with_prompt("Loss-rate threshold (0-100, empty = keep everything)")
+        .allow_empty(true)
+        .validate_with(|s: &String| parse_loss_threshold(s).map(|_| ()))
+        .interact()?;
+    let loss_threshold = parse_loss_threshold(&loss_threshold_raw).map_err(|e| anyhow!("{e}"))?;
+    let idle_hold_raw: String = Input::new()
+        .with_prompt("Idle-hold stability probe in ms (0-60000, empty = off)")
+        .allow_empty(true)
+        .validate_with(|s: &String| parse_idle_hold(s).map(|_| ()))
+        .interact()?;
+    let idle_hold_ms = parse_idle_hold(&idle_hold_raw).map_err(|e| anyhow!("{e}"))?;
+
     let custom_cidrs = parse_cidr_list(
         "Custom CIDRs (comma-separated, replaces bundled ranges; empty = bundled)",
     )?;
@@ -459,6 +470,8 @@ fn prompt_config() -> Result<ScanConfig> {
         custom_cidrs,
         concurrency,
         timeout_ms,
+        loss_threshold,
+        idle_hold_ms,
         phase2,
         ..ScanConfig::default()
     };
@@ -576,6 +589,20 @@ fn config_recap(cfg: &ScanConfig) -> Vec<String> {
                 cfg.concurrency, cfg.timeout_ms
             ),
         ),
+        recap_line(
+            "loss filter",
+            match cfg.loss_threshold {
+                Some(t) => format!("drop results above {t}% loss"),
+                None => "off".to_owned(),
+            },
+        ),
+        recap_line(
+            "idle hold",
+            match cfg.idle_hold_ms {
+                0 => "off".to_owned(),
+                ms => format!("{ms} ms stability probe"),
+            },
+        ),
     ];
     if !cfg.custom_cidrs.is_empty() {
         lines.push(recap_line(
@@ -637,6 +664,34 @@ fn validate_stop_value(n: &u32) -> Result<(), String> {
         .contains(n)
         .then_some(())
         .ok_or_else(|| format!("must be 1-{MAX_STOP_VALUE}"))
+}
+
+fn parse_loss_threshold(raw: &str) -> Result<Option<u32>, String> {
+    let value = raw.trim();
+    if value.is_empty() {
+        return Ok(None);
+    }
+    let t: u32 = value
+        .parse()
+        .map_err(|_| "loss threshold must be a number".to_owned())?;
+    if t > 100 {
+        return Err("loss threshold must be 0-100".to_owned());
+    }
+    Ok(Some(t))
+}
+
+fn parse_idle_hold(raw: &str) -> Result<u64, String> {
+    let value = raw.trim();
+    if value.is_empty() {
+        return Ok(0);
+    }
+    let ms: u64 = value
+        .parse()
+        .map_err(|_| "idle hold must be a number".to_owned())?;
+    if ms > MAX_IDLE_HOLD_MS {
+        return Err(format!("idle hold must be 0-{MAX_IDLE_HOLD_MS}"));
+    }
+    Ok(ms)
 }
 
 fn parse_cap(raw: &str) -> Result<Option<u32>, String> {
@@ -793,6 +848,29 @@ mod tests {
         assert!(parse_cap("0").is_err());
         assert!(parse_cap("abc").is_err());
         assert!(parse_cap(&(u64::from(MAX_STOP_VALUE) + 1).to_string()).is_err());
+    }
+
+    #[test]
+    fn loss_threshold_parses_empty_and_bounded_numbers() {
+        assert_eq!(parse_loss_threshold("").unwrap(), None);
+        assert_eq!(parse_loss_threshold(" 40 ").unwrap(), Some(40));
+        assert_eq!(parse_loss_threshold("0").unwrap(), Some(0));
+        assert_eq!(parse_loss_threshold("100").unwrap(), Some(100));
+        assert!(parse_loss_threshold("101").is_err());
+        assert!(parse_loss_threshold("abc").is_err());
+    }
+
+    #[test]
+    fn idle_hold_parses_empty_and_bounded_numbers() {
+        assert_eq!(parse_idle_hold("").unwrap(), 0);
+        assert_eq!(parse_idle_hold(" 1500 ").unwrap(), 1500);
+        assert_eq!(parse_idle_hold("0").unwrap(), 0);
+        assert_eq!(
+            parse_idle_hold(&MAX_IDLE_HOLD_MS.to_string()).unwrap(),
+            MAX_IDLE_HOLD_MS
+        );
+        assert!(parse_idle_hold(&(MAX_IDLE_HOLD_MS + 1).to_string()).is_err());
+        assert!(parse_idle_hold("abc").is_err());
     }
 
     #[test]

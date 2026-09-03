@@ -187,6 +187,10 @@ pub struct ScanConfig {
     pub phase2: Option<Phase2Config>,
     #[serde(default)]
     pub warp: Option<WarpConfig>,
+    #[serde(default)]
+    pub loss_threshold: Option<u32>,
+    #[serde(default)]
+    pub idle_hold_ms: u64,
 }
 
 impl Default for ScanConfig {
@@ -204,6 +208,8 @@ impl Default for ScanConfig {
             phase2_only: false,
             phase2: None,
             warp: None,
+            loss_threshold: None,
+            idle_hold_ms: 0,
         }
     }
 }
@@ -216,6 +222,14 @@ pub struct Verdict {
     pub country: Option<String>,
     pub colo: Option<String>,
     pub phase2: Option<Phase2Verdict>,
+    #[serde(default)]
+    pub sent: u32,
+    #[serde(default)]
+    pub received: u32,
+    #[serde(default)]
+    pub loss_pct: Option<u32>,
+    #[serde(default)]
+    pub fail_reason: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -373,6 +387,14 @@ impl ScanConfig {
             }
             if !(100..=30_000).contains(&self.timeout_ms) {
                 return Err(ConfigError::InvalidTimeout(self.timeout_ms));
+            }
+            if let Some(t) = self.loss_threshold
+                && t > 100
+            {
+                return Err(ConfigError::InvalidLossThreshold(t));
+            }
+            if self.idle_hold_ms > MAX_IDLE_HOLD_MS {
+                return Err(ConfigError::InvalidIdleHold(self.idle_hold_ms));
             }
             for cidr in self.exclude.iter().chain(self.custom_cidrs.iter()) {
                 parse_cidr(cidr)?;

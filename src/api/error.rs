@@ -1,4 +1,4 @@
-use super::limits::{DEFAULT_PORT, MAX_ENDPOINTS};
+use super::limits::{DEFAULT_PORT, MAX_ENDPOINTS, MAX_IDLE_HOLD_MS};
 
 #[derive(Debug, PartialEq, Eq, thiserror::Error)]
 pub enum ConfigError {
@@ -82,6 +82,10 @@ pub enum ConfigError {
         "custom endpoint {0:?} is not routable (loopback, link-local, unspecified, private/RFC1918, or ULA)"
     )]
     NonRoutableEndpoint(String),
+    #[error("loss_threshold {0} out of range 0-100")]
+    InvalidLossThreshold(u32),
+    #[error("idle_hold_ms {0} out of range 0-{MAX_IDLE_HOLD_MS}")]
+    InvalidIdleHold(u64),
     #[error(
         "warp scans need explicit UDP ports; the CDN default {DEFAULT_PORT} is not valid (pass e.g. 2408,500)"
     )]

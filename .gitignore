@@ -10,3 +10,9 @@ cargo-dist/
 .pi/
 
 .ruff_cache/
+
+# stale artifacts from the removed UI era (pure-CLI since 2026-09-02)
+/ui/
+/.playwright-mcp/
+*.log
+mig-*.png

@@ -140,6 +140,23 @@ struct ScanArgs {
     #[arg(long, default_value_t = 3000, help_heading = "Tuning")]
     timeout_ms: u64,
 
+    #[arg(
+        long,
+        value_name = "PCT",
+        help_heading = "Tuning",
+        long_help = "Filter results whose packet-loss rate exceeds PCT (0-100); default keeps everything"
+    )]
+    loss_threshold: Option<u32>,
+
+    #[arg(
+        long,
+        value_name = "MS",
+        default_value_t = 0,
+        help_heading = "Tuning",
+        long_help = "After the TLS handshake, hold the connection idle for MS and fail the probe if it is reset (0 = off)"
+    )]
+    idle_hold_ms: u64,
+
     #[arg(long, value_delimiter = ',', help_heading = "Candidate selection")]
     exclude: Vec<String>,
 
@@ -302,6 +319,12 @@ fn build_scan_config(args: &ScanArgs) -> Result<ScanConfig> {
     if args.cap.is_some_and(|cap| cap == 0) {
         bail!("--cap must be at least 1");
     }
+    if args.loss_threshold.is_some_and(|t| t > 100) {
+        bail!("--loss-threshold must be 0-100");
+    }
+    if args.idle_hold_ms > api::types::MAX_IDLE_HOLD_MS {
+        bail!("--idle-hold-ms must be 0-{}", api::types::MAX_IDLE_HOLD_MS);
+    }
     let mode = Mode::from(args.mode);
     if mode == Mode::Warp && args.preset.is_some() {
         return Err(anyhow!("--preset is CDN-only; WARP uses --count"));
@@ -404,6 +427,8 @@ fn build_scan_config(args: &ScanArgs) -> Result<ScanConfig> {
         phase2,
         phase2_only: args.phase2_only,
         warp,
+        loss_threshold: args.loss_threshold,
+        idle_hold_ms: args.idle_hold_ms,
     };
     cfg.validate()
         .map_err(|e| anyhow!("invalid scan config: {e}"))?;
@@ -779,6 +804,8 @@ mod tests {
             seed: None,
             export: None,
             export_format: ExportFormatArg::Csv,
+            loss_threshold: None,
+            idle_hold_ms: 0,
         }
     }
 
@@ -841,6 +868,43 @@ mod tests {
         a.cap = Some(0);
         let err = build_scan_config(&a).unwrap_err();
         assert!(err.to_string().contains("--cap"), "{err:#}");
+    }
+
+    #[test]
+    fn loss_threshold_and_idle_hold_build_scan_config() {
+        let argv = [
+            "cf-scanner",
+            "scan",
+            "--loss-threshold",
+            "30",
+            "--idle-hold-ms",
+            "1500",
+        ];
+        let a = match Cli::try_parse_from(argv).unwrap().command {
+            Command::Scan { args } => *args,
+            _ => unreachable!(),
+        };
+        let cfg = build_scan_config(&a).unwrap();
+        assert_eq!(cfg.loss_threshold, Some(30));
+        assert_eq!(cfg.idle_hold_ms, 1500);
+        assert_eq!(
+            build_scan_config(&args()).unwrap().loss_threshold,
+            None,
+            "the loss threshold must default to off"
+        );
+        assert_eq!(build_scan_config(&args()).unwrap().idle_hold_ms, 0);
+    }
+
+    #[test]
+    fn loss_threshold_and_idle_hold_out_of_range_are_rejected() {
+        let mut a = args();
+        a.loss_threshold = Some(101);
+        let err = build_scan_config(&a).unwrap_err();
+        assert!(err.to_string().contains("--loss-threshold"), "{err:#}");
+        let mut a = args();
+        a.idle_hold_ms = api::types::MAX_IDLE_HOLD_MS + 1;
+        let err = build_scan_config(&a).unwrap_err();
+        assert!(err.to_string().contains("--idle-hold-ms"), "{err:#}");
     }
 
     #[test]
@@ -1368,6 +1432,10 @@ mod tests {
             country: None,
             colo: None,
             phase2: None,
+            sent: 1,
+            received: 1,
+            loss_pct: Some(0),
+            fail_reason: None,
         };
         let line = serialize_event(&verdict).unwrap();
         assert!(line.contains("\"ip\":\"1.2.3.4\""), "{line}");

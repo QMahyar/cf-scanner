@@ -37,6 +37,7 @@ impl ScanController {
         let candidates = self.store.lock().unwrap_or_else(|e| e.into_inner()).clone();
         let v4_candidates: Vec<(Ipv4Addr, u16)> = candidates
             .iter()
+            .filter(|v| v.latency_ms.is_some())
             .filter_map(|v| match v.ip {
                 IpAddr::V4(ip) => Some((ip, v.port)),
                 IpAddr::V6(_) => None,
@@ -569,7 +570,14 @@ mod tests {
         let results = c.results();
         let v4 = results.iter().find(|v| !v.ip.is_ipv6()).unwrap();
         assert!(v4.phase2.as_ref().unwrap().passed);
-        assert_eq!(results.iter().filter(|v| v.ip.is_ipv6()).count(), 2);
+        assert_eq!(
+            results
+                .iter()
+                .filter(|v| v.ip.is_ipv6())
+                .filter(|v| v.latency_ms.is_some())
+                .count(),
+            2
+        );
         assert!(
             results
                 .iter()
@@ -593,8 +601,10 @@ mod tests {
         run_local(&c, cfg, 1).await.unwrap();
 
         let results = c.results();
-        assert_eq!(results.len(), 2);
-        for v in &results {
+        assert_eq!(results.len(), 3, "two successes plus the failure row");
+        let succeeded = results.iter().filter(|v| v.latency_ms.is_some()).count();
+        assert_eq!(succeeded, 2);
+        for v in results.iter().filter(|v| v.latency_ms.is_some()) {
             let p2 = v.phase2.as_ref().expect("phase-2 verdict attached");
             assert!(p2.passed, "{v:?}");
             assert_eq!(p2.fragment, FragmentPreset::Off);
@@ -691,7 +701,7 @@ mod tests {
         let lists = probe.url_lists.lock().unwrap_or_else(|e| e.into_inner());
         assert_eq!(lists.len(), 2);
         assert!(lists.iter().all(|l| l == &want), "{lists:?}");
-        for v in c.results() {
+        for v in c.results().iter().filter(|v| v.latency_ms.is_some()) {
             assert_eq!(v.phase2.as_ref().unwrap().config_index, Some(0));
         }
     }
@@ -797,6 +807,10 @@ mod tests {
                 config_index: Some(0),
                 verifier: Some(Verifier::Xray),
             }),
+            sent: 1,
+            received: 1,
+            loss_pct: Some(0),
+            fail_reason: None,
         }]));
         let failed = Phase2Verdict {
             passed: false,

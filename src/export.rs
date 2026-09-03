@@ -270,8 +270,9 @@ fn result_dump(format: &str, verdicts: &[Verdict]) -> String {
     match format {
         "json" => serde_json::json!({ "results": verdicts, "count": verdicts.len() }).to_string(),
         _ => {
-            let mut out =
-                String::from("ip,port,latency_ms,country,colo,phase2_passed,phase2_latency_ms\n");
+            let mut out = String::from(
+                "ip,port,latency_ms,country,colo,phase2_passed,phase2_latency_ms,sent,received,loss_pct,fail_reason\n",
+            );
             for v in verdicts {
                 let p2 = v.phase2.as_ref();
                 let fields = [
@@ -286,6 +287,10 @@ fn result_dump(format: &str, verdicts: &[Verdict]) -> String {
                     p2.and_then(|p| p.latency_ms)
                         .map(|x| x.to_string())
                         .unwrap_or_default(),
+                    v.sent.to_string(),
+                    v.received.to_string(),
+                    v.loss_pct.map(|x| x.to_string()).unwrap_or_default(),
+                    v.fail_reason.clone().unwrap_or_default(),
                 ];
                 let quoted: Vec<String> = fields.iter().map(|f| csv_field(f)).collect();
                 out.push_str(&quoted.join(","));
@@ -321,6 +326,10 @@ mod tests {
                 config_index: cfg,
                 verifier: None,
             }),
+            sent: 1,
+            received: 1,
+            loss_pct: Some(0),
+            fail_reason: None,
         }
     }
 
@@ -366,10 +375,35 @@ mod tests {
 
     #[test]
     fn render_results_csv_empty_and_unknown() {
-        let header = "ip,port,latency_ms,country,colo,phase2_passed,phase2_latency_ms\n";
+        let header = "ip,port,latency_ms,country,colo,phase2_passed,phase2_latency_ms,sent,received,loss_pct,fail_reason\n";
         assert_eq!(render_results("csv", &[]).unwrap(), header);
         let err = render_results("xml", &[]).unwrap_err();
         assert!(err.contains("csv|json"), "{err}");
+    }
+
+    #[test]
+    fn render_results_csv_includes_loss_and_fail_reason_columns() {
+        let mut failed = passing("9.9.9.9", 443, None);
+        failed.phase2 = None;
+        failed.latency_ms = None;
+        failed.sent = 1;
+        failed.received = 0;
+        failed.loss_pct = Some(100);
+        failed.fail_reason = Some("refused".to_owned());
+        let out = render_results("csv", &[passing("1.2.3.4", 443, None), failed]).unwrap();
+        let rows: Vec<&str> = out.lines().collect();
+        assert_eq!(rows.len(), 3);
+        let good: Vec<&str> = rows[1].split(',').collect();
+        assert_eq!(good[7], "1", "sent");
+        assert_eq!(good[8], "1", "received");
+        assert_eq!(good[9], "0", "loss_pct");
+        assert_eq!(good[10], "", "no fail reason");
+        let bad: Vec<&str> = rows[2].split(',').collect();
+        assert_eq!(bad[2], "", "failed verdict has no latency");
+        assert_eq!(bad[7], "1");
+        assert_eq!(bad[8], "0");
+        assert_eq!(bad[9], "100");
+        assert_eq!(bad[10], "refused");
     }
 
     #[test]

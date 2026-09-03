@@ -154,7 +154,9 @@ impl ScanController {
         if self.store_dirty.swap(false, Ordering::AcqRel) {
             guard.sort_unstable_by(|a, b| {
                 a.latency_ms
-                    .cmp(&b.latency_ms)
+                    .is_none()
+                    .cmp(&b.latency_ms.is_none())
+                    .then_with(|| a.latency_ms.cmp(&b.latency_ms))
                     .then_with(|| a.ip.cmp(&b.ip))
                     .then_with(|| a.port.cmp(&b.port))
             });
@@ -176,6 +178,7 @@ impl ScanController {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .iter()
+            .filter(|v| v.latency_ms.is_some())
             .filter(|v| v.phase2.as_ref().is_none_or(|p| p.passed))
             .count() as u64
     }
@@ -652,8 +655,8 @@ mod tests {
             .filter(|e| matches!(e, ScanEvent::Result(_)))
             .count();
         assert_eq!(
-            results, 2,
-            "every verdict must arrive exactly once: {events:?}"
+            results, 3,
+            "two successes plus the re-emitted failure verdict must arrive exactly once: {events:?}"
         );
     }
 
@@ -826,7 +829,8 @@ mod tests {
         let (c, mut rx) = controller(Arc::new(t));
         let summary = run_local(&c, ok_cfg(3, None), 1).await.unwrap();
         let results = c.results();
-        assert_eq!(summary.found as usize, results.len());
+        let successes = results.iter().filter(|v| v.latency_ms.is_some()).count();
+        assert_eq!(summary.found as usize, successes);
         let mut events = vec![];
         while let Ok(e) = rx.try_recv() {
             events.push(e);
@@ -942,6 +946,10 @@ mod tests {
             country: None,
             colo: None,
             phase2: None,
+            sent: 1,
+            received: 1,
+            loss_pct: Some(0),
+            fail_reason: None,
         };
         let v2 = Verdict {
             ip: "203.0.113.1".parse().unwrap(),
@@ -950,6 +958,10 @@ mod tests {
             country: None,
             colo: None,
             phase2: None,
+            sent: 1,
+            received: 1,
+            loss_pct: Some(0),
+            fail_reason: None,
         };
         let v3 = Verdict {
             ip: "203.0.113.2".parse().unwrap(),
@@ -958,6 +970,10 @@ mod tests {
             country: None,
             colo: None,
             phase2: None,
+            sent: 1,
+            received: 1,
+            loss_pct: Some(0),
+            fail_reason: None,
         };
         merge_sorted(
             &c.store,
@@ -978,12 +994,64 @@ mod tests {
             country: None,
             colo: None,
             phase2: None,
+            sent: 1,
+            received: 1,
+            loss_pct: Some(0),
+            fail_reason: None,
         };
         merge_sorted(&c.store, &c.store_dirty, vec![v4.clone()]);
         let results2 = c.results();
         assert_eq!(results2.len(), 4);
         assert_eq!(results2[0].latency_ms, Some(5));
         assert_eq!(results2[0].ip, "203.0.113.4".parse::<IpAddr>().unwrap());
+    }
+
+    #[test]
+    fn failed_verdicts_sort_after_all_measured_ones() {
+        let c = Arc::new(ScanController::new(Arc::new(FakeTransport::new())));
+        let slow = Verdict {
+            ip: "203.0.113.1".parse().unwrap(),
+            port: 443,
+            latency_ms: Some(90),
+            country: None,
+            colo: None,
+            phase2: None,
+            sent: 1,
+            received: 1,
+            loss_pct: Some(0),
+            fail_reason: None,
+        };
+        let dead_a = Verdict {
+            ip: "203.0.113.2".parse().unwrap(),
+            port: 443,
+            latency_ms: None,
+            country: None,
+            colo: None,
+            phase2: None,
+            sent: 1,
+            received: 0,
+            loss_pct: Some(100),
+            fail_reason: Some("refused".to_owned()),
+        };
+        let dead_b = Verdict {
+            ip: "203.0.113.3".parse().unwrap(),
+            port: 443,
+            latency_ms: None,
+            country: None,
+            colo: None,
+            phase2: None,
+            sent: 1,
+            received: 0,
+            loss_pct: Some(100),
+            fail_reason: Some("timeout".to_owned()),
+        };
+        merge_sorted(&c.store, &c.store_dirty, vec![dead_b, slow.clone(), dead_a]);
+        let results = c.results();
+        assert_eq!(results.len(), 3);
+        assert_eq!(results[0].latency_ms, Some(90));
+        assert_eq!(results[1].fail_reason.as_deref(), Some("refused"));
+        assert_eq!(results[2].fail_reason.as_deref(), Some("timeout"));
+        assert_eq!(results[2].latency_ms, None);
     }
 
     #[test]
@@ -998,6 +1066,10 @@ mod tests {
             country: None,
             colo: None,
             phase2: None,
+            sent: 1,
+            received: 1,
+            loss_pct: Some(0),
+            fail_reason: None,
         };
         let v2 = Verdict {
             ip: "203.0.113.1".parse().unwrap(),
@@ -1006,6 +1078,10 @@ mod tests {
             country: None,
             colo: None,
             phase2: None,
+            sent: 1,
+            received: 1,
+            loss_pct: Some(0),
+            fail_reason: None,
         };
         let v3 = Verdict {
             ip: "203.0.113.2".parse().unwrap(),
@@ -1014,6 +1090,10 @@ mod tests {
             country: None,
             colo: None,
             phase2: None,
+            sent: 1,
+            received: 1,
+            loss_pct: Some(0),
+            fail_reason: None,
         };
         merge_sorted(
             &c.store,

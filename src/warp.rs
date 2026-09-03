@@ -165,8 +165,8 @@ impl Transport for WgVerifyTransport {
         ip: IpAddr,
         port: u16,
         timeout_ms: u64,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<u32, ProbeError>> + Send + '_>>
-    {
+        _idle_hold_ms: u64,
+    ) -> crate::probe::ProbeFuture<'_> {
         let IpAddr::V4(ip) = ip else {
             return Box::pin(
                 async move { Err(ProbeError::Refused("WARP endpoints are IPv4-only")) },
@@ -174,15 +174,19 @@ impl Transport for WgVerifyTransport {
         };
         let static_secret = StaticSecret::from(self.static_secret.to_bytes());
         let peer_public = self.peer_public;
-        Box::pin(probe_once(
-            &self.sockets,
-            static_secret,
-            peer_public,
-            ip,
-            port,
-            timeout_ms,
-            ProbeDepth::FullSession,
-        ))
+        Box::pin(async move {
+            probe_once(
+                &self.sockets,
+                static_secret,
+                peer_public,
+                ip,
+                port,
+                timeout_ms,
+                ProbeDepth::FullSession,
+            )
+            .await
+            .map(|latency| (latency, 1, 1))
+        })
     }
 }
 
@@ -192,8 +196,8 @@ impl Transport for WarpTransport {
         ip: IpAddr,
         port: u16,
         timeout_ms: u64,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<u32, ProbeError>> + Send + '_>>
-    {
+        _idle_hold_ms: u64,
+    ) -> crate::probe::ProbeFuture<'_> {
         let IpAddr::V4(ip) = ip else {
             return Box::pin(
                 async move { Err(ProbeError::Refused("WARP endpoints are IPv4-only")) },
@@ -212,6 +216,7 @@ impl Transport for WarpTransport {
                 ProbeDepth::ShapeOnly,
             )
             .await
+            .map(|latency| (latency, 1, 1))
         })
     }
 }
@@ -534,9 +539,10 @@ mod tests {
         });
         let lat = WarpTransport::new()
             .unwrap()
-            .probe(Ipv4Addr::LOCALHOST.into(), addr.port(), 2000)
+            .probe(Ipv4Addr::LOCALHOST.into(), addr.port(), 2000, 0)
             .await
-            .unwrap();
+            .unwrap()
+            .0;
         assert!(lat < 2000);
         server_task.await.unwrap();
     }
@@ -547,7 +553,7 @@ mod tests {
         let addr = silent.local_addr().unwrap();
         let err = WarpTransport::new()
             .unwrap()
-            .probe(Ipv4Addr::LOCALHOST.into(), addr.port(), 200)
+            .probe(Ipv4Addr::LOCALHOST.into(), addr.port(), 200, 0)
             .await
             .unwrap_err();
         assert!(matches!(err, ProbeError::Timeout { .. }), "{err:?}");
@@ -622,9 +628,10 @@ mod tests {
         });
 
         let lat = transport
-            .probe(Ipv4Addr::LOCALHOST.into(), addr.port(), 2000)
+            .probe(Ipv4Addr::LOCALHOST.into(), addr.port(), 2000, 0)
             .await
-            .unwrap();
+            .unwrap()
+            .0;
         assert!(lat < 2000);
         responder.abort();
     }
@@ -680,7 +687,7 @@ mod tests {
         });
 
         let err = transport
-            .probe(Ipv4Addr::LOCALHOST.into(), addr.port(), 400)
+            .probe(Ipv4Addr::LOCALHOST.into(), addr.port(), 400, 0)
             .await
             .unwrap_err();
         assert!(

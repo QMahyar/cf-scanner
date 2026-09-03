@@ -9,7 +9,7 @@ use rustls::crypto::ring;
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use rustls::{ClientConfig, DigitallySignedStruct, SignatureScheme};
 use thiserror::Error;
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::time::timeout;
 use tokio_rustls::TlsConnector;
@@ -26,13 +26,23 @@ pub enum ProbeError {
     Tls(&'static str),
 }
 
+impl ProbeError {
+    pub fn reason(&self) -> &'static str {
+        match self {
+            ProbeError::Refused(_) => "refused",
+            ProbeError::Timeout { .. } => "timeout",
+            ProbeError::Tls(_) => "tls_failed",
+        }
+    }
+}
+
+pub type ProbeFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<ProbeOutcome, ProbeError>> + Send + 'a>>;
+
+pub type ProbeOutcome = (u32, u32, u32);
+
 pub trait Transport: Send + Sync {
-    fn probe(
-        &self,
-        ip: IpAddr,
-        port: u16,
-        timeout_ms: u64,
-    ) -> Pin<Box<dyn Future<Output = Result<u32, ProbeError>> + Send + '_>>;
+    fn probe(&self, ip: IpAddr, port: u16, timeout_ms: u64, idle_hold_ms: u64) -> ProbeFuture<'_>;
 }
 
 pub struct TlsTransport {
@@ -66,12 +76,7 @@ impl Default for TlsTransport {
 }
 
 impl Transport for TlsTransport {
-    fn probe(
-        &self,
-        ip: IpAddr,
-        port: u16,
-        timeout_ms: u64,
-    ) -> Pin<Box<dyn Future<Output = Result<u32, ProbeError>> + Send + '_>> {
+    fn probe(&self, ip: IpAddr, port: u16, timeout_ms: u64, idle_hold_ms: u64) -> ProbeFuture<'_> {
         let start = Instant::now();
         let server_name = self.server_name.clone();
         Box::pin(async move {
@@ -90,10 +95,26 @@ impl Transport for TlsTransport {
                         ProbeError::Tls("handshake failed")
                     })?;
                 let _ = tls.shutdown().await;
-                Ok(())
+                let latency = start.elapsed().as_millis() as u32;
+                Ok((tls, latency))
             };
             match timeout(Duration::from_millis(timeout_ms), fut).await {
-                Ok(Ok(())) => Ok(start.elapsed().as_millis() as u32),
+                Ok(Ok((mut tls, latency))) => {
+                    if idle_hold_ms > 0 {
+                        tokio::time::sleep(Duration::from_millis(idle_hold_ms)).await;
+                        let mut byte = [0u8; 1];
+                        let held =
+                            timeout(Duration::from_millis(timeout_ms), tls.read(&mut byte)).await;
+                        match held {
+                            Ok(Ok(0)) | Ok(Err(_)) => {
+                                tracing::debug!("idle-hold probe closed by peer");
+                                return Err(ProbeError::Refused("idle-hold RST"));
+                            }
+                            _ => {}
+                        }
+                    }
+                    Ok((latency, 1, 1))
+                }
                 Ok(Err(e)) => Err(e),
                 Err(_) => Err(ProbeError::Timeout { timeout_ms }),
             }
@@ -144,9 +165,10 @@ impl ServerCertVerifier for NoVerify {
 #[cfg(any(test, feature = "test-helpers"))]
 #[derive(Clone)]
 struct Scripted {
-    outcome: Result<u32, ProbeError>,
+    outcome: Result<(u32, u32, u32), ProbeError>,
     delay_ms: u64,
-    sequence: std::collections::VecDeque<Result<u32, ProbeError>>,
+    idle_rst_ms: Option<u64>,
+    sequence: std::collections::VecDeque<Result<(u32, u32, u32), ProbeError>>,
 }
 
 #[cfg(any(test, feature = "test-helpers"))]
@@ -176,6 +198,11 @@ impl FakeTransport {
         self
     }
 
+    pub fn ok_loss(self, ip: IpAddr, port: u16, latency_ms: u32, sent: u32, received: u32) -> Self {
+        self.insert_full(ip, port, Ok((latency_ms, sent, received)));
+        self
+    }
+
     pub fn ok_slow(self, ip: IpAddr, port: u16, latency_ms: u32, delay_ms: u64) -> Self {
         self.insert(ip, port, Ok(latency_ms));
         self.script
@@ -187,27 +214,46 @@ impl FakeTransport {
         self
     }
 
+    pub fn idle_rst(self, ip: IpAddr, port: u16, latency_ms: u32, rst_after_ms: u64) -> Self {
+        self.insert(ip, port, Ok(latency_ms));
+        self.script
+            .lock()
+            .unwrap()
+            .get_mut(&(ip, port))
+            .unwrap()
+            .idle_rst_ms = Some(rst_after_ms);
+        self
+    }
+
     pub fn insert(&self, ip: IpAddr, port: u16, outcome: Result<u32, ProbeError>) {
+        self.insert_full(ip, port, outcome.map(|latency| (latency, 1, 1)));
+    }
+
+    pub fn insert_full(&self, ip: IpAddr, port: u16, outcome: Result<(u32, u32, u32), ProbeError>) {
         self.script.lock().unwrap().insert(
             (ip, port),
             Scripted {
                 outcome,
                 delay_ms: 0,
+                idle_rst_ms: None,
                 sequence: std::collections::VecDeque::new(),
             },
         );
     }
 
     pub fn seq(self, ip: IpAddr, port: u16, outcomes: Vec<Result<u32, ProbeError>>) -> Self {
+        let expand = |outcome: Result<u32, ProbeError>| outcome.map(|latency| (latency, 1, 1));
         self.script.lock().unwrap().insert(
             (ip, port),
             Scripted {
                 outcome: outcomes
                     .last()
                     .cloned()
+                    .map(expand)
                     .unwrap_or(Err(ProbeError::Refused("empty sequence"))),
                 delay_ms: 0,
-                sequence: outcomes.into(),
+                idle_rst_ms: None,
+                sequence: outcomes.into_iter().map(expand).collect(),
             },
         );
         self
@@ -218,19 +264,14 @@ impl FakeTransport {
     }
 
     pub fn fail(self, ip: IpAddr, port: u16, err: ProbeError) -> Self {
-        self.insert(ip, port, Err(err));
+        self.insert_full(ip, port, Err(err));
         self
     }
 }
 
 #[cfg(any(test, feature = "test-helpers"))]
 impl Transport for FakeTransport {
-    fn probe(
-        &self,
-        ip: IpAddr,
-        port: u16,
-        _timeout_ms: u64,
-    ) -> Pin<Box<dyn Future<Output = Result<u32, ProbeError>> + Send + '_>> {
+    fn probe(&self, ip: IpAddr, port: u16, _timeout_ms: u64, idle_hold_ms: u64) -> ProbeFuture<'_> {
         let scripted = {
             let mut map = self.script.lock().unwrap();
             match map.get_mut(&(ip, port)) {
@@ -243,6 +284,7 @@ impl Transport for FakeTransport {
                 None => Scripted {
                     outcome: Err(ProbeError::Refused("not scripted")),
                     delay_ms: 0,
+                    idle_rst_ms: None,
                     sequence: std::collections::VecDeque::new(),
                 },
             }
@@ -254,6 +296,12 @@ impl Transport for FakeTransport {
             }
             if scripted.delay_ms > 0 {
                 tokio::time::sleep(Duration::from_millis(scripted.delay_ms)).await;
+            }
+            if idle_hold_ms > 0
+                && let Some(rst_after_ms) = scripted.idle_rst_ms
+            {
+                tokio::time::sleep(Duration::from_millis(rst_after_ms)).await;
+                return Err(ProbeError::Refused("idle-hold RST"));
             }
             scripted.outcome
         })
@@ -288,9 +336,12 @@ mod tests {
     #[tokio::test]
     async fn fake_returns_scripted_outcomes() {
         let t = FakeTransport::new().ok("1.2.3.4".parse().unwrap(), 443, 42);
-        assert_eq!(t.probe("1.2.3.4".parse().unwrap(), 443, 3000).await, Ok(42));
         assert_eq!(
-            t.probe("5.6.7.8".parse().unwrap(), 443, 3000).await,
+            t.probe("1.2.3.4".parse().unwrap(), 443, 3000, 0).await,
+            Ok((42, 1, 1))
+        );
+        assert_eq!(
+            t.probe("5.6.7.8".parse().unwrap(), 443, 3000, 0).await,
             Err(ProbeError::Refused("not scripted"))
         );
         let t = FakeTransport::new().fail(
@@ -299,9 +350,38 @@ mod tests {
             ProbeError::Timeout { timeout_ms: 3000 },
         );
         assert_eq!(
-            t.probe("9.9.9.9".parse().unwrap(), 443, 3000).await,
+            t.probe("9.9.9.9".parse().unwrap(), 443, 3000, 0).await,
             Err(ProbeError::Timeout { timeout_ms: 3000 })
         );
+    }
+
+    #[tokio::test]
+    async fn fake_idle_rst_fails_only_when_idle_hold_is_on() {
+        let t = FakeTransport::new().idle_rst("1.2.3.4".parse().unwrap(), 443, 9, 5);
+        assert_eq!(
+            t.probe("1.2.3.4".parse().unwrap(), 443, 3000, 20).await,
+            Err(ProbeError::Refused("idle-hold RST"))
+        );
+        assert_eq!(
+            t.probe("1.2.3.4".parse().unwrap(), 443, 3000, 0).await,
+            Ok((9, 1, 1))
+        );
+    }
+
+    #[tokio::test]
+    async fn fake_loss_scripting_reports_sent_received() {
+        let t = FakeTransport::new().ok_loss("1.2.3.4".parse().unwrap(), 443, 7, 4, 3);
+        assert_eq!(
+            t.probe("1.2.3.4".parse().unwrap(), 443, 3000, 0).await,
+            Ok((7, 4, 3))
+        );
+    }
+
+    #[test]
+    fn probe_error_reasons_are_stable() {
+        assert_eq!(ProbeError::Refused("x").reason(), "refused");
+        assert_eq!(ProbeError::Timeout { timeout_ms: 1 }.reason(), "timeout");
+        assert_eq!(ProbeError::Tls("x").reason(), "tls_failed");
     }
 
     #[tokio::test]
@@ -310,10 +390,13 @@ mod tests {
             .ok("2606:4700::1".parse().unwrap(), 443, 7)
             .ok("1.2.3.4".parse().unwrap(), 443, 9);
         assert_eq!(
-            t.probe("2606:4700::1".parse().unwrap(), 443, 1000).await,
-            Ok(7)
+            t.probe("2606:4700::1".parse().unwrap(), 443, 1000, 0).await,
+            Ok((7, 1, 1))
         );
-        assert_eq!(t.probe("1.2.3.4".parse().unwrap(), 443, 1000).await, Ok(9));
+        assert_eq!(
+            t.probe("1.2.3.4".parse().unwrap(), 443, 1000, 0).await,
+            Ok((9, 1, 1))
+        );
     }
 
     #[tokio::test]
@@ -323,13 +406,16 @@ mod tests {
             443,
             vec![Ok(5), Err(ProbeError::Timeout { timeout_ms: 1 })],
         );
-        assert_eq!(t.probe("1.2.3.4".parse().unwrap(), 443, 1).await, Ok(5));
         assert_eq!(
-            t.probe("1.2.3.4".parse().unwrap(), 443, 1).await,
+            t.probe("1.2.3.4".parse().unwrap(), 443, 1, 0).await,
+            Ok((5, 1, 1))
+        );
+        assert_eq!(
+            t.probe("1.2.3.4".parse().unwrap(), 443, 1, 0).await,
             Err(ProbeError::Timeout { timeout_ms: 1 })
         );
         assert_eq!(
-            t.probe("1.2.3.4".parse().unwrap(), 443, 1).await,
+            t.probe("1.2.3.4".parse().unwrap(), 443, 1, 0).await,
             Err(ProbeError::Timeout { timeout_ms: 1 })
         );
     }

@@ -132,6 +132,8 @@ impl ScanController {
             let ctx = Arc::clone(&ctx);
             let transport = self.transport.clone();
             let timeout_ms = cfg.timeout_ms;
+            let idle_hold_ms = cfg.idle_hold_ms;
+            let loss_threshold = cfg.loss_threshold;
             workers.spawn(async move {
                 let mut batch: Vec<Verdict> = Vec::new();
                 loop {
@@ -146,25 +148,57 @@ impl ScanController {
                         _ = ctx.cancelled() => break,
                     };
                     let outcome = tokio::select! {
-                        outcome = transport.probe(task.ip, task.port, timeout_ms) => Some(outcome),
+                        outcome = transport.probe(task.ip, task.port, timeout_ms, idle_hold_ms) => Some(outcome),
                         _ = ctx.cancelled() => None,
                     };
                     let Some(outcome) = outcome else {
                         break;
                     };
                     ctx.scanned.fetch_add(1, Ordering::Relaxed);
-                    if let Ok(latency_ms) = outcome {
-                        ctx.found.fetch_add(1, Ordering::Relaxed);
-                        let verdict = Box::new(Verdict {
+                    let verdict = match outcome {
+                        Ok((latency_ms, sent, received)) => {
+                            let loss_pct = sent
+                                .saturating_sub(received)
+                                .saturating_mul(100)
+                                .checked_div(sent)
+                                .unwrap_or(100);
+                            let acceptable = loss_threshold.is_none_or(|t| loss_pct <= t);
+                            if !acceptable {
+                                None
+                            } else {
+                                ctx.found.fetch_add(1, Ordering::Relaxed);
+                                let verdict = Verdict {
+                                    ip: task.ip,
+                                    port: task.port,
+                                    latency_ms: Some(latency_ms),
+                                    country: ctx.geo.country(task.ip),
+                                    colo: None,
+                                    phase2: None,
+                                    sent,
+                                    received,
+                                    loss_pct: Some(loss_pct),
+                                    fail_reason: None,
+                                };
+                                let _ =
+                                    ctx.events.send(ScanEvent::Result(Box::new(verdict.clone())));
+                                Some(verdict)
+                            }
+                        }
+                        Err(err) => Some(Verdict {
                             ip: task.ip,
                             port: task.port,
-                            latency_ms: Some(latency_ms),
+                            latency_ms: None,
                             country: ctx.geo.country(task.ip),
                             colo: None,
                             phase2: None,
-                        });
-                        let _ = ctx.events.send(ScanEvent::Result(verdict.clone()));
-                        batch.push(*verdict);
+                            sent: 1,
+                            received: 0,
+                            loss_pct: Some(100),
+                            fail_reason: Some(err.reason().to_owned()),
+                        }),
+                    };
+                    if let Some(verdict) = verdict {
+                        batch.push(verdict);
                         if batch.len() >= BATCH_FLUSH {
                             merge_sorted(&ctx.store, &ctx.dirty, std::mem::take(&mut batch));
                         }
@@ -208,9 +242,7 @@ mod tests {
     use crate::api::types::{Port, ScanTarget};
     use crate::engine::tests::{controller, ok_cfg, run_local};
     use crate::probe::{FakeTransport, ProbeError, Transport};
-    use std::future::Future;
     use std::net::{IpAddr, Ipv4Addr};
-    use std::pin::Pin;
     use std::time::Duration;
 
     #[tokio::test]
@@ -224,9 +256,15 @@ mod tests {
         assert_eq!(summary.found, 2);
         assert_eq!(summary.scanned, 3);
         let results = c.results();
-        assert_eq!(results.len(), 2);
+        assert_eq!(
+            results.len(),
+            3,
+            "two successes plus the unscripted failure row"
+        );
         assert_eq!(results[0].ip, "203.0.113.2".parse::<Ipv4Addr>().unwrap());
         assert_eq!(results[1].ip, "203.0.113.1".parse::<Ipv4Addr>().unwrap());
+        assert_eq!(results[2].latency_ms, None);
+        assert_eq!(results[2].fail_reason.as_deref(), Some("refused"));
         let mut events = vec![];
         while let Ok(e) = rx.try_recv() {
             events.push(e);
@@ -446,7 +484,8 @@ mod tests {
                 _ip: IpAddr,
                 _port: u16,
                 _timeout_ms: u64,
-            ) -> Pin<Box<dyn Future<Output = Result<u32, ProbeError>> + Send + '_>> {
+                _idle_hold_ms: u64,
+            ) -> crate::probe::ProbeFuture<'_> {
                 Box::pin(async { panic!("probe blew up") })
             }
         }
@@ -497,11 +536,127 @@ mod tests {
     async fn new_run_replaces_previous_results() {
         let t = Arc::new(FakeTransport::new().ok("203.0.113.1".parse().unwrap(), 443, 5));
         let (c, _) = controller(t.clone());
-        let _ = run_local(&c, ok_cfg(1, None), 1).await.unwrap();
+        let pool = ranges::CidrPool::parse("203.0.113.1/32").unwrap();
+        let _ = c
+            .run_seeded_with_pool(ok_cfg(1, None), 1, pool.clone())
+            .await
+            .unwrap();
         assert_eq!(c.results().len(), 1);
+        assert_eq!(c.results()[0].latency_ms, Some(5));
         t.clear();
-        let _ = run_local(&c, ok_cfg(1, None), 1).await.unwrap();
-        assert!(c.results().is_empty());
+        let _ = c
+            .run_seeded_with_pool(ok_cfg(1, None), 1, pool)
+            .await
+            .unwrap();
+        assert_eq!(c.results().len(), 1);
+        assert_eq!(c.results()[0].latency_ms, None);
+        assert_eq!(
+            c.results()[0].fail_reason.as_deref(),
+            Some("refused"),
+            "the new run's failure verdict must replace the old success"
+        );
+    }
+
+    #[tokio::test]
+    async fn failure_reasons_map_probe_errors() {
+        let t = FakeTransport::new()
+            .fail(
+                "203.0.113.0".parse().unwrap(),
+                443,
+                ProbeError::Timeout { timeout_ms: 3000 },
+            )
+            .fail("203.0.113.1".parse().unwrap(), 443, ProbeError::Tls("bad"));
+        let (c, _) = controller(Arc::new(t));
+        let pool = ranges::CidrPool::parse("203.0.113.0/31").unwrap();
+        let _ = c
+            .run_seeded_with_pool(ok_cfg(2, None), 1, pool)
+            .await
+            .unwrap();
+        let results = c.results();
+        let reasons: Vec<&str> = results
+            .iter()
+            .filter_map(|v| v.fail_reason.as_deref())
+            .collect();
+        assert!(reasons.contains(&"timeout"), "{reasons:?}");
+        assert!(reasons.contains(&"tls_failed"), "{reasons:?}");
+    }
+
+    #[tokio::test]
+    async fn loss_threshold_filters_lossy_results_from_the_store() {
+        let t = FakeTransport::new()
+            .ok_loss("203.0.113.0".parse().unwrap(), 443, 10, 10, 10)
+            .ok_loss("203.0.113.1".parse().unwrap(), 443, 10, 10, 4);
+        let (c, _) = controller(Arc::new(t));
+        let mut cfg = ok_cfg(2, None);
+        cfg.loss_threshold = Some(40);
+        let pool = ranges::CidrPool::parse("203.0.113.0/31").unwrap();
+        let summary = c.run_seeded_with_pool(cfg, 1, pool).await.unwrap();
+        assert_eq!(summary.scanned, 2);
+        assert_eq!(
+            summary.found, 1,
+            "an endpoint above the loss threshold must not count as found"
+        );
+        let results = c.results();
+        assert_eq!(
+            results.len(),
+            1,
+            "a result above the loss threshold must be dropped entirely"
+        );
+        assert_eq!(results[0].ip, "203.0.113.0".parse::<IpAddr>().unwrap());
+        assert_eq!(results[0].loss_pct, Some(0));
+    }
+
+    #[tokio::test]
+    async fn without_threshold_lossy_results_are_kept_with_their_loss() {
+        let t = FakeTransport::new().ok_loss("203.0.113.1".parse().unwrap(), 443, 10, 10, 4);
+        let (c, _) = controller(Arc::new(t));
+        let pool = ranges::CidrPool::parse("203.0.113.1/32").unwrap();
+        let summary = c
+            .run_seeded_with_pool(ok_cfg(1, None), 1, pool)
+            .await
+            .unwrap();
+        assert_eq!(summary.found, 1);
+        let results = c.results();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].sent, 10);
+        assert_eq!(results[0].received, 4);
+        assert_eq!(results[0].loss_pct, Some(60));
+    }
+
+    #[tokio::test]
+    async fn idle_hold_rst_surfaces_as_a_refused_failure() {
+        let (c, _) = controller(Arc::new(FakeTransport::new().idle_rst(
+            "203.0.113.1".parse().unwrap(),
+            443,
+            5,
+            10,
+        )));
+        let mut cfg = ok_cfg(1, None);
+        cfg.idle_hold_ms = 40;
+        let pool = ranges::CidrPool::parse("203.0.113.1/32").unwrap();
+        let summary = c.run_seeded_with_pool(cfg, 1, pool).await.unwrap();
+        assert_eq!(summary.found, 0);
+        let results = c.results();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].latency_ms, None);
+        assert_eq!(results[0].fail_reason.as_deref(), Some("refused"));
+        let (c2, _) = controller(Arc::new(FakeTransport::new().ok(
+            "203.0.113.1".parse().unwrap(),
+            443,
+            5,
+        )));
+        let summary = c2
+            .run_seeded_with_pool(
+                ok_cfg(1, None),
+                1,
+                ranges::CidrPool::parse("203.0.113.1/32").unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            summary.found, 1,
+            "with the idle hold off the same endpoint must pass"
+        );
     }
 
     #[tokio::test]

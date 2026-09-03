@@ -490,6 +490,10 @@ fn serde_round_trip_scan_event() {
             country: Some("IR".to_owned()),
             colo: None,
             phase2: None,
+            sent: 1,
+            received: 1,
+            loss_pct: Some(0),
+            fail_reason: None,
         })),
         ScanEvent::Finished(ScanSummary {
             scanned: 10,
@@ -502,6 +506,40 @@ fn serde_round_trip_scan_event() {
         let back: ScanEvent = serde_json::from_str(&json).unwrap();
         assert_eq!(event, back, "round-trip failed for {json}");
     }
+}
+
+#[test]
+fn verdict_new_fields_default_when_absent() {
+    let legacy = r#"{"ip":"1.2.3.4","port":443,"latency_ms":42}"#;
+    let v: Verdict = serde_json::from_str(legacy).unwrap();
+    assert_eq!(v.sent, 0);
+    assert_eq!(v.received, 0);
+    assert_eq!(v.loss_pct, None);
+    assert_eq!(
+        v.fail_reason, None,
+        "omitted fields must deserialize as defaults"
+    );
+}
+
+#[test]
+fn loss_threshold_and_idle_hold_validate_and_round_trip() {
+    let mut c = valid_config();
+    assert_eq!(c.loss_threshold, None);
+    assert_eq!(c.idle_hold_ms, 0);
+    c.loss_threshold = Some(101);
+    assert_eq!(c.validate(), Err(ConfigError::InvalidLossThreshold(101)));
+    c.loss_threshold = Some(100);
+    assert_eq!(c.validate(), Ok(()));
+    c.idle_hold_ms = MAX_IDLE_HOLD_MS + 1;
+    assert_eq!(
+        c.validate(),
+        Err(ConfigError::InvalidIdleHold(MAX_IDLE_HOLD_MS + 1))
+    );
+    c.idle_hold_ms = 5_000;
+    assert_eq!(c.validate(), Ok(()));
+    let json = serde_json::to_string(&c).unwrap();
+    let back: ScanConfig = serde_json::from_str(&json).unwrap();
+    assert_eq!(c, back);
 }
 
 #[test]
