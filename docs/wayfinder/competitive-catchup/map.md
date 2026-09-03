@@ -32,6 +32,18 @@ upload speed tests as a default path. Each feature lands green
 
 <!-- one line per closed ticket -->
 
+- [01: Packet-loss rate](tickets/01-loss-rate.md): Verdict carries sent/received/loss_pct; `--loss-threshold` drops lossy results; above-threshold dropped not stored. Shipped with 03+08 in one branch.
+- [02: Colo filter at scan time](tickets/02-colo-filter.md): `--colo IATA,...`; unknown-colo passes with one-time warning; exclusion enforced in phase2 where colo becomes known.
+- [03: Per-IP phase-1 failure reason](tickets/03-failure-reason.md): `fail_reason` stored as `refused|timeout|tls_failed`; failures stored, `None` latency sorts last, never counted as found.
+- [04: Richer CSV columns](tickets/04-csv-columns.md): header is now 11 cols + `speed_test_mbps` at index 7 (F10 ordering); schema test pins the exact string.
+- [05: HTTPing probe mode](tickets/05-http-probe.md): `--probe tcp|tls|http` + `--http-status-code`; HttpTransport GETs /cdn-cgi/trace, captures phase-1 colo; CDN-only.
+- [06: Share-link rewriting export](tickets/06-sharelinks-export.md): `--export-format sharelinks` reuses rewrite_uris; own format group.
+- [07: Latency lower bound](tickets/07-min-latency.md): `--min-latency` drops below-bound verdicts entirely; CLI-only, wizard untouched.
+- [08: Idle-hold stability probe](tickets/08-idle-hold.md): `--idle-hold-ms` (0=off); handshake-only latency; RST-after-idle → `Refused("idle-hold RST")`.
+- [09: gRPC / XHTTP transport verification](tickets/09-grpc-xhttp.md): parse + xray + sing-box/clash for grpc/xhttp-splithttp; vmess/vless/sip002 + xray-JSON round-trips. HTTPUpgrade deferred (parse-only, no verify).
+- [10: Post-stop shortlist speed test](tickets/10-speed-test.md): opt-in `--speed-test` + `--min-speed`; 8 MiB cap via xray tunnel; `speed_test_mbps` on Phase2Verdict + CSV col 7. Intent ban on default speed testing stands.
+- [11: Neighbor scanning](tickets/11-neighbor-scan.md): opt-in `--neighbor-scan 0-64`; NeighborHub side channel + inflight counter; neighbors obey cap/target/cancel.
+
 ## Not yet specified
 
 - Post-merge integration review of the whole branch set on `main`.
