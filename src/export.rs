@@ -4,6 +4,7 @@ use crate::api::types::Verdict;
 use crate::configs;
 
 pub const BUNDLE_FORMATS: [&str; 4] = ["base64", "raw", "singbox", "clash"];
+pub const SHARELINK_FORMATS: [&str; 1] = ["sharelinks"];
 pub const RESULT_FORMATS: [&str; 2] = ["csv", "json"];
 
 pub fn render_bundle(
@@ -11,8 +12,10 @@ pub fn render_bundle(
     verdicts: &[Verdict],
     configs: &[String],
 ) -> Result<String, String> {
-    resolve_format(format, &BUNDLE_FORMATS)
-        .ok_or_else(|| unknown_format(format, &BUNDLE_FORMATS))
+    let mut allowed: Vec<&str> = BUNDLE_FORMATS.to_vec();
+    allowed.extend_from_slice(&SHARELINK_FORMATS);
+    resolve_format(format, &allowed)
+        .ok_or_else(|| unknown_format(format, &allowed))
         .and_then(|fmt| bundle_body(fmt, verdicts, configs))
 }
 
@@ -106,7 +109,7 @@ fn bundle_body(
     }
     let joined = uris.join("\n");
     Ok(match format {
-        "raw" => joined,
+        "raw" | "sharelinks" => joined,
         "singbox" => singbox_body(&uris),
         "clash" => clash_body(&uris),
         _ => base64::Engine::encode(
@@ -425,6 +428,7 @@ mod tests {
     fn render_bundle_empty_inputs_are_valid() {
         assert_eq!(render_bundle("raw", &[], &[]).unwrap(), "");
         assert_eq!(render_bundle("base64", &[], &[]).unwrap(), "");
+        assert_eq!(render_bundle("sharelinks", &[], &[]).unwrap(), "");
         let sb: serde_json::Value =
             serde_json::from_str(&render_bundle("singbox", &[], &[]).unwrap()).unwrap();
         assert_eq!(sb["outbounds"].as_array().unwrap().len(), 0);
@@ -437,7 +441,7 @@ mod tests {
     fn render_bundle_errors_when_only_ipv6_passed() {
         let v6 = passing("2001:db8::1", 443, Some(0));
         let configs = [VLESS.to_owned()];
-        for fmt in BUNDLE_FORMATS {
+        for fmt in BUNDLE_FORMATS.into_iter().chain(SHARELINK_FORMATS) {
             let err = render_bundle(fmt, std::slice::from_ref(&v6), &configs).unwrap_err();
             assert!(err.contains("IPv6"), "{fmt}: {err}");
         }
@@ -483,6 +487,23 @@ mod tests {
         assert!(raw.contains("sni=cdn.example.com"), "{raw}");
         assert!(raw.contains("#CF-LAX-40ms"), "{raw}");
         assert!(!raw.contains("origin.example.com"), "{raw}");
+    }
+
+    #[test]
+    fn render_bundle_sharelinks_rewrites_uri_onto_endpoint() {
+        let out = render_bundle(
+            "sharelinks",
+            &[passing("1.2.3.4", 2053, Some(0))],
+            &[VLESS.to_owned()],
+        )
+        .unwrap();
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].starts_with("vless://"), "{out}");
+        assert!(out.contains("@1.2.3.4:2053"), "{out}");
+        assert!(out.contains("sni=cdn.example.com"), "{out}");
+        assert!(out.contains("#CF-LAX-40ms"), "{out}");
+        assert!(!out.contains("origin.example.com"), "{out}");
     }
 
     #[test]
