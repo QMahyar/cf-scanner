@@ -313,7 +313,7 @@ fn result_dump(format: &str, verdicts: &[Verdict]) -> String {
         "json" => serde_json::json!({ "results": verdicts, "count": verdicts.len() }).to_string(),
         _ => {
             let mut out = String::from(
-                "ip,port,latency_ms,country,colo,phase2_passed,phase2_latency_ms,sent,received,loss_pct,fail_reason\n",
+                "ip,port,latency_ms,country,colo,phase2_passed,phase2_latency_ms,speed_test_mbps,sent,received,loss_pct,fail_reason\n",
             );
             for v in verdicts {
                 let p2 = v.phase2.as_ref();
@@ -327,6 +327,9 @@ fn result_dump(format: &str, verdicts: &[Verdict]) -> String {
                         .unwrap_or("")
                         .to_owned(),
                     p2.and_then(|p| p.latency_ms)
+                        .map(|x| x.to_string())
+                        .unwrap_or_default(),
+                    p2.and_then(|p| p.speed_test_mbps)
                         .map(|x| x.to_string())
                         .unwrap_or_default(),
                     v.sent.to_string(),
@@ -367,6 +370,7 @@ mod tests {
                 error: None,
                 config_index: cfg,
                 verifier: None,
+                speed_test_mbps: None,
             }),
             sent: 1,
             received: 1,
@@ -417,7 +421,7 @@ mod tests {
 
     #[test]
     fn render_results_csv_empty_and_unknown() {
-        let header = "ip,port,latency_ms,country,colo,phase2_passed,phase2_latency_ms,sent,received,loss_pct,fail_reason\n";
+        let header = "ip,port,latency_ms,country,colo,phase2_passed,phase2_latency_ms,speed_test_mbps,sent,received,loss_pct,fail_reason\n";
         assert_eq!(render_results("csv", &[]).unwrap(), header);
         let err = render_results("xml", &[]).unwrap_err();
         assert!(err.contains("csv|json"), "{err}");
@@ -425,7 +429,7 @@ mod tests {
 
     #[test]
     fn render_results_csv_header_schema() {
-        const EXPECTED: &str = "ip,port,latency_ms,country,colo,phase2_passed,phase2_latency_ms,sent,received,loss_pct,fail_reason";
+        const EXPECTED: &str = "ip,port,latency_ms,country,colo,phase2_passed,phase2_latency_ms,speed_test_mbps,sent,received,loss_pct,fail_reason";
         let out = render_results("csv", &[passing("1.2.3.4", 443, None)]).unwrap();
         let mut lines = out.lines();
         assert_eq!(lines.next(), Some(EXPECTED));
@@ -436,6 +440,19 @@ mod tests {
                 "row/header column mismatch: {row}"
             );
         }
+    }
+
+    #[test]
+    fn render_results_csv_includes_speed_test_column_when_measured() {
+        let mut measured = passing("1.2.3.4", 443, None);
+        measured.phase2.as_mut().unwrap().speed_test_mbps = Some(3.5);
+        let out = render_results("csv", &[measured]).unwrap();
+        let row: Vec<&str> = out.lines().nth(1).unwrap().split(',').collect();
+        assert_eq!(row[7], "3.5", "speed_test_mbps column carries the measurement: {out}");
+        let plain = passing("5.6.7.8", 443, None);
+        let out = render_results("csv", &[plain]).unwrap();
+        let row: Vec<&str> = out.lines().nth(1).unwrap().split(',').collect();
+        assert_eq!(row[7], "", "unmeasured endpoints leave the column empty: {out}");
     }
 
     #[test]
@@ -451,16 +468,16 @@ mod tests {
         let rows: Vec<&str> = out.lines().collect();
         assert_eq!(rows.len(), 3);
         let good: Vec<&str> = rows[1].split(',').collect();
-        assert_eq!(good[7], "1", "sent");
-        assert_eq!(good[8], "1", "received");
-        assert_eq!(good[9], "0", "loss_pct");
-        assert_eq!(good[10], "", "no fail reason");
+        assert_eq!(good[8], "1", "sent");
+        assert_eq!(good[9], "1", "received");
+        assert_eq!(good[10], "0", "loss_pct");
+        assert_eq!(good[11], "", "no fail reason");
         let bad: Vec<&str> = rows[2].split(',').collect();
         assert_eq!(bad[2], "", "failed verdict has no latency");
-        assert_eq!(bad[7], "1");
-        assert_eq!(bad[8], "0");
-        assert_eq!(bad[9], "100");
-        assert_eq!(bad[10], "refused");
+        assert_eq!(bad[8], "1");
+        assert_eq!(bad[9], "0");
+        assert_eq!(bad[10], "100");
+        assert_eq!(bad[11], "refused");
     }
 
     #[test]

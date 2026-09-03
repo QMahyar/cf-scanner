@@ -467,9 +467,91 @@ fn phase2_verdict_config_index_defaults_to_none() {
         error: None,
         config_index: Some(2),
         verifier: Some(Verifier::Inline),
+        speed_test_mbps: None,
     })
     .unwrap();
     assert!(json.contains("\"config_index\":2"), "{json}");
+}
+
+#[test]
+fn phase2_verdict_speed_defaults_to_none_and_round_trips() {
+    let legacy = r#"{"passed":true,"fragment":"light","sni":"","latency_ms":42}"#;
+    let v: Phase2Verdict = serde_json::from_str(legacy).unwrap();
+    assert_eq!(v.speed_test_mbps, None);
+    let measured = Phase2Verdict {
+        passed: true,
+        fragment: FragmentPreset::Light,
+        sni: "a.me".to_owned(),
+        latency_ms: Some(7),
+        error: None,
+        config_index: Some(0),
+        verifier: None,
+        speed_test_mbps: Some(12.5),
+    };
+    let json = serde_json::to_string(&measured).unwrap();
+    assert!(json.contains("\"speed_test_mbps\":12.5"), "{json}");
+    let back: Phase2Verdict = serde_json::from_str(&json).unwrap();
+    assert_eq!(measured, back);
+}
+
+#[test]
+fn speed_test_fields_validate_and_round_trip() {
+    let mut c = valid_config();
+    assert!(!c.speed_test);
+    assert_eq!(c.min_speed_mbps, None);
+    c.speed_test = true;
+    assert_eq!(
+        c.validate(),
+        Err(ConfigError::SpeedTestNeedsConfigs),
+        "the speed test samples through phase-2 tunnels, so configs are mandatory"
+    );
+    c.phase2 = Some(Phase2Config {
+        configs: vec!["vless://uuid@example.com:443".to_owned()],
+        ..Default::default()
+    });
+    assert_eq!(c.validate(), Ok(()));
+    c.min_speed_mbps = Some(0.0);
+    assert_eq!(c.validate(), Err(ConfigError::InvalidMinSpeed));
+    c.min_speed_mbps = Some(f32::NAN);
+    assert_eq!(c.validate(), Err(ConfigError::InvalidMinSpeed));
+    c.min_speed_mbps = Some(-1.0);
+    assert_eq!(c.validate(), Err(ConfigError::InvalidMinSpeed));
+    c.min_speed_mbps = Some(3.5);
+    assert_eq!(c.validate(), Ok(()));
+    let json = serde_json::to_string(&c).unwrap();
+    let back: ScanConfig = serde_json::from_str(&json).unwrap();
+    assert_eq!(c, back);
+}
+
+#[test]
+fn speed_test_fields_default_when_absent() {
+    let legacy = r#"{"mode":"Cdn","target":{"Count":350},"ports":[443],"stop":{"found":20,"cap":null},"exclude":[],"custom_cidrs":[],"concurrency":64,"timeout_ms":3000}"#;
+    let c: ScanConfig = serde_json::from_str(legacy).unwrap();
+    assert!(!c.speed_test, "the speed test is strictly opt-in");
+    assert_eq!(c.min_speed_mbps, None);
+}
+
+#[test]
+fn min_speed_requires_speed_test() {
+    let mut c = valid_config();
+    c.min_speed_mbps = Some(5.0);
+    assert_eq!(c.validate(), Err(ConfigError::MinSpeedNeedsSpeedTest));
+    c.speed_test = true;
+    c.phase2 = Some(Phase2Config {
+        configs: vec!["vless://uuid@example.com:443".to_owned()],
+        ..Default::default()
+    });
+    assert_eq!(c.validate(), Ok(()));
+}
+
+#[test]
+fn rejects_speed_test_in_warp_mode() {
+    let mut c = valid_config();
+    c.mode = Mode::Warp;
+    c.ports = vec![Port::new(2408)];
+    c.warp = Some(WarpConfig::default());
+    c.speed_test = true;
+    assert_eq!(c.validate(), Err(ConfigError::SpeedTestWrongMode));
 }
 
 #[test]

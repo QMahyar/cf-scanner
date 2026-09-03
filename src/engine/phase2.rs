@@ -152,6 +152,7 @@ impl ScanController {
                                 error: None,
                                 config_index: Some(*config_idx),
                                 verifier: result.verifier.and_then(parse_verifier),
+                                speed_test_mbps: None,
                             };
                             if result.passed && colo_kept {
                                 passed
@@ -196,6 +197,7 @@ impl ScanController {
                                 error: Some(msg),
                                 config_index: Some(*config_idx),
                                 verifier: None,
+                                speed_test_mbps: None,
                             };
                             if passed.lock().unwrap_or_else(|e| e.into_inner()).len() >= stop_found
                             {
@@ -253,6 +255,7 @@ impl ScanController {
                 }
             }
         }
+        self.speed_test_phase(cfg, p2, &specs).await?;
         Ok(())
     }
 
@@ -880,6 +883,7 @@ mod tests {
                 error: None,
                 config_index: Some(0),
                 verifier: Some(Verifier::Xray),
+                speed_test_mbps: None,
             }),
             sent: 1,
             received: 1,
@@ -894,6 +898,7 @@ mod tests {
             error: Some("spawn failed".to_owned()),
             config_index: None,
             verifier: None,
+            speed_test_mbps: None,
         };
         let index: PosIndex = PosIndex::new(Mutex::new(Arc::new(HashMap::from([(
             ("203.0.113.1".parse().unwrap(), 443),

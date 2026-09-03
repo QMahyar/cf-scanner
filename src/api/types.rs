@@ -218,6 +218,10 @@ pub struct ScanConfig {
     pub probe_mode: ProbeMode,
     #[serde(default = "default_accepted_http_codes")]
     pub accepted_http_codes: Vec<u16>,
+    #[serde(default)]
+    pub speed_test: bool,
+    #[serde(default)]
+    pub min_speed_mbps: Option<f32>,
 }
 
 impl Default for ScanConfig {
@@ -241,6 +245,8 @@ impl Default for ScanConfig {
             colo_filter: Vec::new(),
             probe_mode: ProbeMode::Tls,
             accepted_http_codes: default_accepted_http_codes(),
+            speed_test: false,
+            min_speed_mbps: None,
         }
     }
 }
@@ -275,6 +281,8 @@ pub struct Phase2Verdict {
     pub config_index: Option<u32>,
     #[serde(default)]
     pub verifier: Option<Verifier>,
+    #[serde(default)]
+    pub speed_test_mbps: Option<f32>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -450,6 +458,14 @@ impl ScanConfig {
             if self.probe_mode == ProbeMode::Http && self.accepted_http_codes.is_empty() {
                 return Err(ConfigError::EmptyHttpCodes);
             }
+            if let Some(min) = self.min_speed_mbps {
+                if !self.speed_test {
+                    return Err(ConfigError::MinSpeedNeedsSpeedTest);
+                }
+                if !min.is_finite() || min <= 0.0 {
+                    return Err(ConfigError::InvalidMinSpeed);
+                }
+            }
             for cidr in self.exclude.iter().chain(self.custom_cidrs.iter()) {
                 parse_cidr(cidr)?;
             }
@@ -460,6 +476,9 @@ impl ScanConfig {
                     }
                     if self.phase2_only && self.phase2.is_none() {
                         return Err(ConfigError::Phase2OnlyNeedsConfigs);
+                    }
+                    if self.speed_test && self.phase2.is_none() {
+                        return Err(ConfigError::SpeedTestNeedsConfigs);
                     }
                     if let Some(p2) = &self.phase2 {
                         validate_phase2(p2)?;
@@ -477,6 +496,9 @@ impl ScanConfig {
                     }
                     if !self.colo_filter.is_empty() {
                         return Err(ConfigError::ColoWrongMode);
+                    }
+                    if self.speed_test {
+                        return Err(ConfigError::SpeedTestWrongMode);
                     }
                     if let ScanTarget::Preset(_) = self.target {
                         return Err(ConfigError::WarpPresetNotAllowed);
