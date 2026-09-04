@@ -332,16 +332,11 @@ mod tests {
             assert_eq!(picked, 8, "seed {seed} must still yield eight hosts");
         }
     }
-}
 
     #[test]
     fn count_one_on_a_single_host_pool_probes_exactly_it() {
         let pool = CidrPool::parse("203.0.113.7/32").unwrap();
-        let p = plan(
-            &pool,
-            &ScanTarget::Count(1),
-            &mut SplitMix64::new(3),
-        );
+        let p = plan(&pool, &ScanTarget::Count(1), &mut SplitMix64::new(3));
         let mut rng4 = SplitMix64::new(4);
         let mut hosts: Vec<IpAddr> = Vec::new();
         for item in &p {
@@ -383,4 +378,4 @@ mod tests {
             );
         }
     }
-
+}
