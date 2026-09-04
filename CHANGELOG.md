@@ -3,7 +3,7 @@
 All notable changes to CF-Scanner are documented here, grouped by
 Added / Changed / Fixed / Deprecated / Removed / Security, newest on top.
 
-## [Unreleased]
+## [0.13.0] - 2026-09-04
 
 ### Added
 - **Quality-gated stop condition.** With `--speed-test --min-speed MB/s`, the
@@ -858,6 +858,7 @@ Changes merged by the `review/*` branches land here.
 - `custom_cidrs` now REPLACE the bundled ranges (was: merged in addition);
   exclusions still apply to custom ranges.
 
+[0.13.0]: https://github.com/QMahyar/cf-scanner/releases/tag/v0.13.0
 [0.12.2]: https://github.com/QMahyar/cf-scanner/releases/tag/v0.12.2
 [0.12.1]: https://github.com/QMahyar/cf-scanner/releases/tag/v0.12.1
 [0.12.0]: https://github.com/QMahyar/cf-scanner/releases/tag/v0.12.0
