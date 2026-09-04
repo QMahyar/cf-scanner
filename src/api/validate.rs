@@ -125,23 +125,13 @@ pub(crate) fn validate_phase2(p2: &super::types::Phase2Config) -> Result<(), Con
         validate_sni(sni)?;
     }
     if p2.probe_urls.is_empty() {
-        if p2.probe_url.len() > MAX_PROBE_URL_BYTES {
-            return Err(ConfigError::ProbeUrlTooLong(MAX_PROBE_URL_BYTES));
-        }
-        if !(p2.probe_url.starts_with("https://")) {
-            return Err(ConfigError::InvalidProbeUrl);
-        }
+        validate_probe_url(&p2.probe_url)?;
     } else {
         if p2.probe_urls.len() > MAX_PHASE2_ENTRIES {
             return Err(ConfigError::TooManyProbeUrls(p2.probe_urls.len()));
         }
         for url in &p2.probe_urls {
-            if url.len() > MAX_PROBE_URL_BYTES {
-                return Err(ConfigError::ProbeUrlTooLong(MAX_PROBE_URL_BYTES));
-            }
-            if !(url.starts_with("https://")) {
-                return Err(ConfigError::InvalidProbeUrl);
-            }
+            validate_probe_url(url)?;
         }
     }
     if p2.fragment == super::types::FragmentPreset::Custom && p2.custom_fragment.is_none() {
@@ -152,6 +142,20 @@ pub(crate) fn validate_phase2(p2: &super::types::Phase2Config) -> Result<(), Con
     }
     if p2.concurrency == 0 || p2.concurrency > 8 {
         return Err(ConfigError::InvalidPhase2Concurrency(p2.concurrency));
+    }
+    Ok(())
+}
+
+fn validate_probe_url(url: &str) -> Result<(), ConfigError> {
+    if url.len() > MAX_PROBE_URL_BYTES {
+        return Err(ConfigError::ProbeUrlTooLong(MAX_PROBE_URL_BYTES));
+    }
+    if !(url.starts_with("https://")) {
+        return Err(ConfigError::InvalidProbeUrl);
+    }
+    if crate::ranges::validate_fetch_url(url).is_err() {
+        // Map to the payload-free variant on purpose: probe URLs must never surface in errors or logs.
+        return Err(ConfigError::InvalidProbeUrl);
     }
     Ok(())
 }

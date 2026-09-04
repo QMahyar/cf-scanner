@@ -238,6 +238,12 @@ fn fresh_trial_dir(work_dir: &Path) -> PathBuf {
         std::process::id()
     ));
     let _ = std::fs::create_dir_all(&dir);
+    #[cfg(unix)]
+    {
+        // Trial dirs hold xray config.json with proxy credentials: owner-only listing.
+        use std::os::unix::fs::PermissionsExt as _;
+        let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
+    }
     dir
 }
 
@@ -493,6 +499,20 @@ mod tests {
         let a = fresh_trial_dir(&dir);
         let b = fresh_trial_dir(&dir);
         assert_ne!(a, b, "concurrent trials must never share a config dir");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn trial_dirs_are_owner_only() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir =
+            std::env::temp_dir().join(format!("cf-scanner-verify-perms-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let trial = fresh_trial_dir(&dir);
+        let mode = std::fs::metadata(&trial).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o700, "trial dir must be owner-only");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

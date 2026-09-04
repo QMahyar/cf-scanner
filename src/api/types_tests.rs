@@ -389,6 +389,41 @@ fn rejects_too_many_or_oversized_probe_urls() {
     assert_eq!(valid_config_with(at_cap), Ok(()), "8 URLs must be accepted");
 }
 
+#[test]
+fn rejects_non_routable_probe_urls() {
+    for bad in [
+        "https://127.0.0.1/x",
+        "https://[::1]/x",
+        "https://localhost/x",
+        "https://169.254.0.1/x",
+        "https://0.0.0.0/x",
+    ] {
+        let listed = Phase2Config {
+            probe_urls: vec![bad.to_owned()],
+            ..Phase2Config::default()
+        };
+        assert_eq!(
+            valid_config_with(listed),
+            Err(ConfigError::InvalidProbeUrl),
+            "{bad} must be rejected"
+        );
+        let legacy = Phase2Config {
+            probe_url: bad.to_owned(),
+            ..Phase2Config::default()
+        };
+        assert_eq!(
+            valid_config_with(legacy),
+            Err(ConfigError::InvalidProbeUrl),
+            "{bad} must be rejected"
+        );
+    }
+    let public = Phase2Config {
+        probe_urls: vec!["https://cp.cloudflare.com/".to_owned()],
+        ..Phase2Config::default()
+    };
+    assert_eq!(valid_config_with(public), Ok(()));
+}
+
 fn valid_config_with(p2: Phase2Config) -> Result<(), ConfigError> {
     let mut p2 = p2;
     p2.configs = vec!["vless://uuid@example.com:443".to_owned()];
