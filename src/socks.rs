@@ -310,7 +310,10 @@ async fn timed_download_via_socks_inner(
     Ok((total, elapsed))
 }
 
-async fn count_download<S: AsyncRead + Unpin + ?Sized>(rd: &mut S, max_bytes: usize) -> Result<u64> {
+async fn count_download<S: AsyncRead + Unpin + ?Sized>(
+    rd: &mut S,
+    max_bytes: usize,
+) -> Result<u64> {
     let mut head = Vec::new();
     let mut byte = [0u8; 1];
     while !head.ends_with(b"\r\n\r\n") {

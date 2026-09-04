@@ -1,15 +1,18 @@
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::api::types::{
-    self, CdnPreset, CustomFragment, DEFAULT_CONCURRENCY, DEFAULT_PORT, DEFAULT_PROBE_URL,
-    DEFAULT_TIMEOUT_MS, DEFAULT_WARP_PORTS, FragmentPreset, MAX_CIDRS, MAX_CONFIG_ENTRY_BYTES,
-    MAX_ENDPOINTS, MAX_IDLE_HOLD_MS, MAX_PHASE2_ENTRIES, MAX_PROBE_URL_BYTES, MAX_SCAN_COUNT,
-    MAX_SNI_BYTES, MAX_STOP_VALUE, MAX_WGCONF_BYTES, Mode, Phase2Config, Port, ScanConfig,
-    ScanEvent, ScanSummary, ScanTarget, StopCondition, WarpConfig, parse_cidr, parse_endpoint,
-    validate_fragment, validate_sni,
+    self, CdnPreset, CustomFragment, DEFAULT_ACCEPTED_HTTP_CODES, DEFAULT_CONCURRENCY,
+    DEFAULT_PORT, DEFAULT_PROBE_URL, DEFAULT_TIMEOUT_MS, DEFAULT_WARP_PORTS, FragmentPreset,
+    MAX_CIDRS, MAX_COLO_CODES, MAX_CONFIG_ENTRY_BYTES, MAX_ENDPOINTS, MAX_IDLE_HOLD_MS,
+    MAX_MIN_LATENCY_MS, MAX_NEIGHBORS, MAX_PHASE2_ENTRIES, MAX_PROBE_URL_BYTES, MAX_SCAN_COUNT,
+    MAX_SNI_BYTES, MAX_STOP_VALUE, MAX_WGCONF_BYTES, Mode, Phase2Config, Port, ProbeMode,
+    ScanConfig, ScanEvent, ScanSummary, ScanTarget, StopCondition, WarpConfig, parse_cidr,
+    parse_endpoint, validate_fragment, validate_sni,
 };
 use crate::engine::ScanController;
+use crate::probe;
 use crate::warp;
 use crate::warpgen;
 use anyhow::{Context as _, Result, anyhow, bail};
@@ -127,10 +130,11 @@ fn prompt_warp() -> Result<ScanConfig> {
 #[error("interrupted")]
 pub struct WizardInterrupted;
 
-pub async fn run(controller: Arc<ScanController>) -> Result<()> {
+pub async fn run() -> Result<()> {
     let interrupted = Arc::new(AtomicBool::new(false));
-    let ctrl_c = spawn_ctrl_c_listener(&controller, &interrupted);
-    let result = run_wizard(controller, &interrupted).await;
+    let current: Arc<Mutex<Option<Arc<ScanController>>>> = Arc::new(Mutex::new(None));
+    let ctrl_c = spawn_ctrl_c_listener(&current, &interrupted);
+    let result = run_wizard(&current, &interrupted).await;
     ctrl_c.abort();
     match result {
         Err(err) if is_user_exit(&err) => {
@@ -144,23 +148,29 @@ pub async fn run(controller: Arc<ScanController>) -> Result<()> {
 }
 
 fn spawn_ctrl_c_listener(
-    controller: &Arc<ScanController>,
+    current: &Arc<Mutex<Option<Arc<ScanController>>>>,
     interrupted: &Arc<AtomicBool>,
 ) -> tokio::task::JoinHandle<()> {
-    let controller = controller.clone();
-    let interrupted = interrupted.clone();
+    let current = Arc::clone(current);
+    let interrupted = Arc::clone(interrupted);
     tokio::spawn(async move {
         match tokio::signal::ctrl_c().await {
             Ok(()) => {
                 interrupted.store(true, Ordering::Relaxed);
-                controller.cancel();
+                if let Some(controller) = current.lock().unwrap_or_else(|e| e.into_inner()).as_ref()
+                {
+                    controller.cancel();
+                }
             }
             Err(err) => tracing::error!("could not listen for Ctrl+C: {err}"),
         }
     })
 }
 
-async fn run_wizard(controller: Arc<ScanController>, interrupted: &AtomicBool) -> Result<()> {
+async fn run_wizard(
+    current: &Arc<Mutex<Option<Arc<ScanController>>>>,
+    interrupted: &AtomicBool,
+) -> Result<()> {
     eprintln!("CF-Scanner wizard — CDN/proxy scan with optional xray phase-2 verification");
     loop {
         let cfg = tokio::task::spawn_blocking(prompt_config)
@@ -188,7 +198,13 @@ async fn run_wizard(controller: Arc<ScanController>, interrupted: &AtomicBool) -
             eprintln!("aborted");
             return Ok(());
         }
+        let controller = Arc::new(ScanController::new(probe::transport_for(
+            cfg.probe_mode,
+            &cfg.accepted_http_codes,
+        )));
+        *current.lock().unwrap_or_else(|e| e.into_inner()) = Some(Arc::clone(&controller));
         let summary = run_scan(&controller, &cfg).await?;
+        *current.lock().unwrap_or_else(|e| e.into_inner()) = None;
         eprintln!(
             "done — scanned {}, found {} working in {} ms",
             summary.scanned, summary.found, summary.duration_ms
@@ -423,6 +439,56 @@ fn prompt_config() -> Result<ScanConfig> {
         .interact()?;
     let idle_hold_ms = parse_idle_hold(&idle_hold_raw).map_err(|e| anyhow!("{e}"))?;
 
+    let probe_mode = match Select::new()
+        .with_prompt("Phase-1 probe protocol")
+        .item("TLS handshake (default)")
+        .item("TCP connect only")
+        .item("HTTP trace (GET /cdn-cgi/trace, captures colo)")
+        .default(0)
+        .interact()?
+    {
+        1 => ProbeMode::Tcp,
+        2 => ProbeMode::Http,
+        _ => ProbeMode::Tls,
+    };
+    let accepted_http_codes = if probe_mode == ProbeMode::Http {
+        let raw: String = Input::new()
+            .with_prompt("HTTP status codes that count as working (comma-separated)")
+            .default(
+                DEFAULT_ACCEPTED_HTTP_CODES
+                    .iter()
+                    .map(|c| c.to_string())
+                    .collect::<Vec<_>>()
+                    .join(","),
+            )
+            .validate_with(|s: &String| parse_http_codes(s).map(|_| ()))
+            .interact()?;
+        parse_http_codes(&raw).map_err(|e| anyhow!("{e}"))?
+    } else {
+        crate::api::types::default_accepted_http_codes()
+    };
+
+    let min_latency_raw: String = Input::new()
+        .with_prompt("Minimum latency in ms (drop faster results, empty = off)")
+        .allow_empty(true)
+        .validate_with(|s: &String| parse_min_latency(s).map(|_| ()))
+        .interact()?;
+    let min_latency_ms = parse_min_latency(&min_latency_raw).map_err(|e| anyhow!("{e}"))?;
+
+    let colo_raw: String = Input::new()
+        .with_prompt("Keep only these colo codes, e.g. HKG,NRT (empty = all regions)")
+        .allow_empty(true)
+        .validate_with(|s: &String| parse_colo_filter(s).map(|_| ()))
+        .interact()?;
+    let colo_filter = parse_colo_filter(&colo_raw).map_err(|e| anyhow!("{e}"))?;
+
+    let neighbor_raw: String = Input::new()
+        .with_prompt("Neighbor scan breadth 0-64 (0 = off)")
+        .allow_empty(true)
+        .validate_with(|s: &String| parse_neighbor_scan(s).map(|_| ()))
+        .interact()?;
+    let neighbor_count = parse_neighbor_scan(&neighbor_raw).map_err(|e| anyhow!("{e}"))?;
+
     let custom_cidrs = parse_cidr_list(
         "Custom CIDRs (comma-separated, replaces bundled ranges; empty = bundled)",
     )?;
@@ -460,6 +526,23 @@ fn prompt_config() -> Result<ScanConfig> {
             "note: xray binary not found yet - it will be downloaded (checksum-verified) when phase 2 starts"
         );
     }
+    let (speed_test, min_speed_mbps) = if phase2.is_some()
+        && Confirm::new()
+            .with_prompt(
+                "Throughput-test the passing endpoints after the scan (8 MiB sample each)?",
+            )
+            .default(false)
+            .interact()?
+    {
+        let min_raw: String = Input::new()
+            .with_prompt("Minimum speed in MB/s (empty = keep everything)")
+            .allow_empty(true)
+            .validate_with(|s: &String| parse_min_speed(s).map(|_| ()))
+            .interact()?;
+        (true, parse_min_speed(&min_raw).map_err(|e| anyhow!("{e}"))?)
+    } else {
+        (false, None)
+    };
 
     let cfg = ScanConfig {
         mode: Mode::Cdn,
@@ -472,6 +555,13 @@ fn prompt_config() -> Result<ScanConfig> {
         timeout_ms,
         loss_threshold,
         idle_hold_ms,
+        min_latency_ms,
+        colo_filter,
+        probe_mode,
+        accepted_http_codes,
+        speed_test,
+        min_speed_mbps,
+        neighbor_count,
         phase2,
         ..ScanConfig::default()
     };
@@ -603,6 +693,43 @@ fn config_recap(cfg: &ScanConfig) -> Vec<String> {
                 ms => format!("{ms} ms stability probe"),
             },
         ),
+        recap_line(
+            "probe",
+            match cfg.probe_mode {
+                ProbeMode::Tcp => "tcp connect".to_owned(),
+                ProbeMode::Tls => "tls handshake".to_owned(),
+                ProbeMode::Http => format!(
+                    "http trace (accepts {})",
+                    cfg.accepted_http_codes
+                        .iter()
+                        .map(|c| c.to_string())
+                        .collect::<Vec<_>>()
+                        .join(",")
+                ),
+            },
+        ),
+        recap_line(
+            "min latency",
+            match cfg.min_latency_ms {
+                Some(t) => format!("drop results below {t} ms"),
+                None => "off".to_owned(),
+            },
+        ),
+        recap_line(
+            "colo",
+            if cfg.colo_filter.is_empty() {
+                "all regions".to_owned()
+            } else {
+                format!("only {}", cfg.colo_filter.join(","))
+            },
+        ),
+        recap_line(
+            "neighbors",
+            match cfg.neighbor_count {
+                0 => "off".to_owned(),
+                n => format!("{n} per hit"),
+            },
+        ),
     ];
     if !cfg.custom_cidrs.is_empty() {
         lines.push(recap_line(
@@ -626,6 +753,15 @@ fn config_recap(cfg: &ScanConfig) -> Vec<String> {
                 p2.snis.len(),
                 p2.concurrency
             ),
+        ));
+    }
+    if cfg.speed_test {
+        lines.push(recap_line(
+            "speed test",
+            match cfg.min_speed_mbps {
+                Some(min) => format!("8 MiB sample, keep {min} MB/s and up"),
+                None => "8 MiB sample, no minimum".to_owned(),
+            },
         ));
     }
     if let Some(warp) = &cfg.warp {
@@ -692,6 +828,88 @@ fn parse_idle_hold(raw: &str) -> Result<u64, String> {
         return Err(format!("idle hold must be 0-{MAX_IDLE_HOLD_MS}"));
     }
     Ok(ms)
+}
+
+fn parse_min_latency(raw: &str) -> Result<Option<u32>, String> {
+    let value = raw.trim();
+    if value.is_empty() {
+        return Ok(None);
+    }
+    let ms: u32 = value
+        .parse()
+        .map_err(|_| "minimum latency must be a number".to_owned())?;
+    if ms == 0 || ms > MAX_MIN_LATENCY_MS {
+        return Err(format!("minimum latency must be 1-{MAX_MIN_LATENCY_MS}"));
+    }
+    Ok(Some(ms))
+}
+
+fn parse_colo_filter(raw: &str) -> Result<Vec<String>, String> {
+    let mut codes: Vec<String> = Vec::new();
+    for part in raw.split(',') {
+        let code = part.trim().to_uppercase();
+        if code.is_empty() {
+            continue;
+        }
+        let valid = (3..=5).contains(&code.len()) && code.bytes().all(|b| b.is_ascii_alphabetic());
+        if !valid {
+            return Err(format!("invalid colo code {part:?}: expected 3-5 letters"));
+        }
+        codes.push(code);
+    }
+    if codes.len() > MAX_COLO_CODES {
+        return Err(format!("at most {MAX_COLO_CODES} colo codes"));
+    }
+    Ok(codes)
+}
+
+fn parse_neighbor_scan(raw: &str) -> Result<u32, String> {
+    let value = raw.trim();
+    if value.is_empty() {
+        return Ok(0);
+    }
+    let n: u32 = value
+        .parse()
+        .map_err(|_| "neighbor scan must be a number".to_owned())?;
+    if n > MAX_NEIGHBORS {
+        return Err(format!("neighbor scan must be 0-{MAX_NEIGHBORS}"));
+    }
+    Ok(n)
+}
+
+fn parse_http_codes(raw: &str) -> Result<Vec<u16>, String> {
+    let mut codes: Vec<u16> = Vec::new();
+    for part in raw.split(',') {
+        let part = part.trim();
+        if part.is_empty() {
+            continue;
+        }
+        let code: u16 = part
+            .parse()
+            .map_err(|_| format!("invalid status code {part:?}"))?;
+        if !(100..=599).contains(&code) {
+            return Err(format!("status code {code} must be 100-599"));
+        }
+        codes.push(code);
+    }
+    if codes.is_empty() {
+        return Err("at least one status code required".to_owned());
+    }
+    Ok(codes)
+}
+
+fn parse_min_speed(raw: &str) -> Result<Option<f32>, String> {
+    let value = raw.trim();
+    if value.is_empty() {
+        return Ok(None);
+    }
+    let speed: f32 = value
+        .parse()
+        .map_err(|_| "minimum speed must be a number".to_owned())?;
+    if !speed.is_finite() || speed <= 0.0 {
+        return Err("minimum speed must be greater than 0".to_owned());
+    }
+    Ok(Some(speed))
 }
 
 fn parse_cap(raw: &str) -> Result<Option<u32>, String> {
@@ -874,6 +1092,66 @@ mod tests {
     }
 
     #[test]
+    fn min_latency_parses_empty_and_bounded_numbers() {
+        assert_eq!(parse_min_latency("").unwrap(), None);
+        assert_eq!(parse_min_latency(" 250 ").unwrap(), Some(250));
+        assert_eq!(
+            parse_min_latency(&MAX_MIN_LATENCY_MS.to_string()).unwrap(),
+            Some(MAX_MIN_LATENCY_MS)
+        );
+        assert!(parse_min_latency("0").is_err());
+        assert!(parse_min_latency(&(MAX_MIN_LATENCY_MS + 1).to_string()).is_err());
+        assert!(parse_min_latency("abc").is_err());
+    }
+
+    #[test]
+    fn colo_filter_parses_and_normalizes_codes() {
+        assert!(parse_colo_filter("").unwrap().is_empty());
+        assert_eq!(
+            parse_colo_filter(" hkg ,Nrt ").unwrap(),
+            vec!["HKG".to_owned(), "NRT".to_owned()]
+        );
+        assert!(parse_colo_filter("HK").is_err());
+        assert!(parse_colo_filter("HKGNRT").is_err());
+        assert!(parse_colo_filter("H1G").is_err());
+        assert!(parse_colo_filter("hk-g").is_err());
+    }
+
+    #[test]
+    fn neighbor_scan_parses_empty_and_bounded_numbers() {
+        assert_eq!(parse_neighbor_scan("").unwrap(), 0);
+        assert_eq!(parse_neighbor_scan(" 4 ").unwrap(), 4);
+        assert_eq!(
+            parse_neighbor_scan(&MAX_NEIGHBORS.to_string()).unwrap(),
+            MAX_NEIGHBORS
+        );
+        assert!(parse_neighbor_scan(&(MAX_NEIGHBORS + 1).to_string()).is_err());
+        assert!(parse_neighbor_scan("abc").is_err());
+    }
+
+    #[test]
+    fn http_codes_parse_comma_lists_and_validate_range() {
+        assert_eq!(
+            parse_http_codes("200,301,302").unwrap(),
+            vec![200, 301, 302]
+        );
+        assert_eq!(parse_http_codes(" 200 ").unwrap(), vec![200]);
+        assert!(parse_http_codes("").is_err());
+        assert!(parse_http_codes("99").is_err());
+        assert!(parse_http_codes("600").is_err());
+        assert!(parse_http_codes("abc").is_err());
+    }
+
+    #[test]
+    fn min_speed_parses_empty_and_positive_numbers() {
+        assert_eq!(parse_min_speed("").unwrap(), None);
+        assert_eq!(parse_min_speed(" 2.5 ").unwrap(), Some(2.5));
+        assert!(parse_min_speed("0").is_err());
+        assert!(parse_min_speed("-1").is_err());
+        assert!(parse_min_speed("abc").is_err());
+    }
+
+    #[test]
     fn endpoint_entries_match_engine_rules() {
         assert!(check_endpoint("203.0.113.1:2408").is_ok());
         assert!(check_endpoint("203.0.113.1").is_ok());
@@ -933,6 +1211,10 @@ mod tests {
         assert!(recap.contains("target      preset Quick"));
         assert!(recap.contains("ports       443"));
         assert!(recap.contains("stop        found=20, cap=none"));
+        assert!(recap.contains("probe       tls handshake"));
+        assert!(recap.contains("min latency off"));
+        assert!(recap.contains("colo        all regions"));
+        assert!(recap.contains("neighbors   off"));
         assert!(recap.contains("phase 2     1 config(s), fragment light"));
         assert!(!recap.contains("vless://"));
         assert!(!recap.contains("example.com"));
@@ -957,5 +1239,33 @@ mod tests {
         warp_cfg.warp = None;
         let recap = config_recap(&warp_cfg).join("\n");
         assert!(!recap.contains("probe(s)/endpoint"));
+
+        let tuned = ScanConfig {
+            mode: Mode::Cdn,
+            target: ScanTarget::Count(10),
+            probe_mode: ProbeMode::Http,
+            accepted_http_codes: vec![200, 204],
+            min_latency_ms: Some(50),
+            colo_filter: vec!["HKG".to_owned()],
+            neighbor_count: 4,
+            speed_test: true,
+            min_speed_mbps: Some(2.5),
+            phase2: Some(Phase2Config {
+                configs: vec!["vless://uuid@host:443".to_owned()],
+                fragment: FragmentPreset::Off,
+                custom_fragment: None,
+                snis: Vec::new(),
+                probe_url: DEFAULT_PROBE_URL.to_owned(),
+                probe_urls: Vec::new(),
+                concurrency: 1,
+            }),
+            ..ScanConfig::default()
+        };
+        let recap = config_recap(&tuned).join("\n");
+        assert!(recap.contains("probe       http trace (accepts 200,204)"));
+        assert!(recap.contains("min latency drop results below 50 ms"));
+        assert!(recap.contains("colo        only HKG"));
+        assert!(recap.contains("neighbors   4 per hit"));
+        assert!(recap.contains("speed test  8 MiB sample, keep 2.5 MB/s and up"));
     }
 }

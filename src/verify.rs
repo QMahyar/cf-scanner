@@ -79,9 +79,9 @@ impl XrayTunnelProbe {
         let trial_dir = make_trial_dir(&work_dir).await?;
 
         let fetch = xray::RealFetch;
-        let xray_bin = xray::ensure_binary(&fetch).await.with_context(|| {
-            "no verified xray binary (cached copy failed its checksum or the download failed)"
-        })?;
+        let xray_bin = xray::ensure_binary(&fetch).await.with_context(
+            || "no verified xray binary (cached copy failed its checksum or the download failed)",
+        )?;
         let proc = spawn_with_retry(dial_ip, |socks_port| {
             let spec = spec.clone();
             let preset = preset.clone();

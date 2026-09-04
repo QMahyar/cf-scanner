@@ -488,7 +488,9 @@ fn build_scan_config(args: &ScanArgs) -> Result<ScanConfig> {
         ));
     }
     if args.speed_test && mode == Mode::Warp {
-        return Err(anyhow!("--speed-test is CDN-only; it requires --phase2-configs"));
+        return Err(anyhow!(
+            "--speed-test is CDN-only; it requires --phase2-configs"
+        ));
     }
     if args.min_speed.is_some() && !args.speed_test {
         return Err(anyhow!("--min-speed requires --speed-test"));
@@ -697,16 +699,11 @@ fn clear_ticker_line() {
 async fn run(cli: Cli) -> Result<()> {
     match cli.command {
         Command::Scan { args } => run_scan(*args).await,
-        Command::Wizard => {
-            let controller = Arc::new(engine::ScanController::new(Arc::new(
-                probe::TlsTransport::new(),
-            )));
-            match cli_wizard::run(controller).await {
-                Ok(()) => Ok(()),
-                Err(err) if err.is::<cli_wizard::WizardInterrupted>() => Ok(()),
-                Err(err) => Err(err),
-            }
-        }
+        Command::Wizard => match cli_wizard::run().await {
+            Ok(()) => Ok(()),
+            Err(err) if err.is::<cli_wizard::WizardInterrupted>() => Ok(()),
+            Err(err) => Err(err),
+        },
         Command::Ranges { action } => match action {
             RangesAction::Refresh { ipv6 } => {
                 let (n, v6_path) = if ipv6 {

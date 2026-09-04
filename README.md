@@ -51,7 +51,9 @@ cf-scanner scan --mode warp --count 512
 
 Results print as newline-delimited JSON on stdout; progress goes to stderr.
 Pipe to `jq` for processing, or write an export file with `--export`
-(`csv`, `json`, `base64`, `raw`, `singbox`, `clash`; `-` writes to stdout).
+(`csv`, `json`, `base64`, `raw`, `singbox`, `clash`, `sharelinks`;
+`-` writes to stdout). `sharelinks` rewrites your phase-2 config links onto
+every passing endpoint, one URI per line.
 
 ### Build from source
 
@@ -74,8 +76,9 @@ With an installed binary, use `cf-scanner`. From source, replace
 |---------|-------------|
 | `cf-scanner scan --mode cdn --preset quick --target 20` | One-shot CDN scan; JSON lines print on stdout (`--target` alias `--stop-after`, `--cap` alias `--max-probes`) |
 | `cf-scanner scan --mode warp --ports 2408,500` | One-shot WARP scan |
-| `cf-scanner scan … --export out.csv --export-format csv` | Write results as `csv`, `json`, `base64`, `raw`, `singbox`, or `clash` (`-` = stdout) |
+| `cf-scanner scan … --export out.csv --export-format csv` | Write results as `csv`, `json`, `base64`, `raw`, `singbox`, `clash`, or `sharelinks` (`-` = stdout) |
 | `cf-scanner scan … --json-errors` | Print `{"error": …}` on stdout when the scan fails |
+| `cf-scanner scan --mode cdn --probe http --colo HKG,NRT` | HTTP-trace probing (`tcp`/`tls`/`http`) keeping only listed colos; also `--loss-threshold`, `--min-latency`, `--idle-hold-ms`, `--neighbor-scan`, and opt-in `--speed-test`/`--min-speed` |
 | `cf-scanner wizard` | Interactive wizard over the same engine |
 | `cf-scanner warp-config generate` | Opt-in WARP registration through the v0a884 API, then wgconf build |
 | `cf-scanner warp-config export` | Export the registered WARP config as text or a .conf file |

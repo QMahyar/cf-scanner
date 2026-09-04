@@ -5,6 +5,33 @@ Added / Changed / Fixed / Deprecated / Removed / Security, newest on top.
 
 ## [Unreleased]
 
+### Added
+- **Phase-1 reliability signals.** Each verdict now carries `sent`,
+  `received`, `loss_pct`, and `fail_reason` (`refused`/`timeout`/`tls_failed`
+ /`http_status`); failures are stored with `latency_ms: null` and sort after
+  measured rows. New opt-in filters: `--loss-threshold PCT`,
+  `--min-latency MS`, `--idle-hold-ms MS` (post-handshake RST detection),
+  `--colo HKG,NRT` (unknown-colo passes with a one-time warning),
+  `--neighbor-scan N` (0-64, same-/24 widening after a hit). CSV gains
+  `speed_test_mbps,sent,received,loss_pct,fail_reason` columns.
+- **HTTPing probe mode.** `--probe tcp|tls|http` (default `tls`) plus
+  `--http-status-code` (default 200,301,302). HTTP mode GETs
+  `/cdn-cgi/trace` and captures the colo during phase 1. CDN-only.
+- **Share-link batch export.** `--export-format sharelinks` rewrites your
+  phase-2 config links onto every passing endpoint, one URI per line (the
+  batch form of `export-config`).
+- **gRPC / XHTTP transport verification.** Phase-2 parsing, xray config
+  generation, and sing-box/clash export now cover `type=grpc` and
+  `type=xhttp`/`splithttp` alongside ws.
+- **Opt-in post-stop speed test.** `--speed-test` pulls a capped 8 MiB sample
+  through each phase-2-passing endpoint and records `speed_test_mbps`;
+  `--min-speed MB/s` drops slower endpoints. Off by default; requires
+  `--phase2-configs`. The intent ban on default speed testing stands.
+- **Wizard covers the new tuning.** Probe protocol, HTTP codes, min latency,
+  colo filter, neighbor breadth, and the opt-in speed test are all prompted
+  with recap lines; each scan builds its own engine so the chosen probe
+  protocol actually runs.
+
 ### Removed
 - **HTTP server, browser UI, and system tray (ADR-013).** CF-Scanner is now a
   pure CLI. The `serve` command, `--tray`, `--autostart`, the Svelte 5

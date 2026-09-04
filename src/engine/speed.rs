@@ -31,8 +31,7 @@ pub(crate) struct PassingSpec {
 }
 
 /// Seam for the timed download so tests never touch the network.
-pub type SpeedDownload<'a> =
-    Pin<Box<dyn Future<Output = Result<(u64, f64)>> + Send + 'a>>;
+pub type SpeedDownload<'a> = Pin<Box<dyn Future<Output = Result<(u64, f64)>> + Send + 'a>>;
 
 pub trait SpeedTester: Send + Sync {
     fn download<'a>(
@@ -135,10 +134,7 @@ pub(crate) fn apply_speed_result(
     Some(results[pos].clone())
 }
 
-async fn measure_endpoint(
-    tester: &dyn SpeedTester,
-    socks: SocketAddr,
-) -> Result<f32> {
+async fn measure_endpoint(tester: &dyn SpeedTester, socks: SocketAddr) -> Result<f32> {
     let (bytes, seconds) = tester
         .download(SPEED_TEST_URL, socks, SPEED_TEST_BYTES, SPEED_TEST_TIMEOUT)
         .await?;
@@ -196,8 +192,7 @@ impl ScanController {
                         _ = cancelled_signal(cancel.clone()) => return,
                     };
                     measured.fetch_add(1, Ordering::Relaxed);
-                    if let Some(updated) =
-                        apply_speed_result(&store, ip, port, &outcome, min_speed)
+                    if let Some(updated) = apply_speed_result(&store, ip, port, &outcome, min_speed)
                     {
                         let _ = events.send(ScanEvent::Result(Box::new(updated)));
                     }
@@ -365,7 +360,9 @@ mod tests {
             0,
         )]));
         let ip = "203.0.113.1".parse().unwrap();
-        let outcome: Result<f32> = Err(anyhow::anyhow!("dial vless://SecretUser:SecretPass123@1.2.3.4:443: refused"));
+        let outcome: Result<f32> = Err(anyhow::anyhow!(
+            "dial vless://SecretUser:SecretPass123@1.2.3.4:443: refused"
+        ));
         let updated = apply_speed_result(&store, ip, 443, &outcome, None).unwrap();
         let p2 = updated.phase2.as_ref().unwrap();
         assert_eq!(p2.speed_test_mbps, None);
@@ -380,19 +377,16 @@ mod tests {
             443,
             0,
         )]));
-        let missing = apply_speed_result(
-            &store,
-            "203.0.113.9".parse().unwrap(),
-            443,
-            &Ok(1.0),
-            None,
-        );
+        let missing =
+            apply_speed_result(&store, "203.0.113.9".parse().unwrap(), 443, &Ok(1.0), None);
         assert!(missing.is_none());
     }
 
     #[tokio::test]
     async fn speed_test_phase_is_a_noop_when_not_enabled() {
-        let c = Arc::new(ScanController::new(Arc::new(crate::probe::FakeTransport::new())));
+        let c = Arc::new(ScanController::new(Arc::new(
+            crate::probe::FakeTransport::new(),
+        )));
         let cfg = ScanConfig::default();
         let p2 = Phase2Config::default();
         c.speed_test_phase(&cfg, &p2, &[]).await.unwrap();

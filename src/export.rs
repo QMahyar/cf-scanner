@@ -448,11 +448,17 @@ mod tests {
         measured.phase2.as_mut().unwrap().speed_test_mbps = Some(3.5);
         let out = render_results("csv", &[measured]).unwrap();
         let row: Vec<&str> = out.lines().nth(1).unwrap().split(',').collect();
-        assert_eq!(row[7], "3.5", "speed_test_mbps column carries the measurement: {out}");
+        assert_eq!(
+            row[7], "3.5",
+            "speed_test_mbps column carries the measurement: {out}"
+        );
         let plain = passing("5.6.7.8", 443, None);
         let out = render_results("csv", &[plain]).unwrap();
         let row: Vec<&str> = out.lines().nth(1).unwrap().split(',').collect();
-        assert_eq!(row[7], "", "unmeasured endpoints leave the column empty: {out}");
+        assert_eq!(
+            row[7], "",
+            "unmeasured endpoints leave the column empty: {out}"
+        );
     }
 
     #[test]
