@@ -186,6 +186,8 @@ impl ScanController {
                             received,
                             loss_pct: Some(0),
                             fail_reason: None,
+                            asn: None,
+                            isp: None,
                         });
                         let _ = ctx.events.send(ScanEvent::Result(verdict.clone()));
                         batch.push(*verdict);

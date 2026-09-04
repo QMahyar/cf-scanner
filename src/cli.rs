@@ -280,6 +280,13 @@ pub(crate) struct ScanArgs {
     )]
     pub(crate) min_speed: Option<f32>,
 
+    #[arg(
+        long,
+        help_heading = "Tuning",
+        long_help = "After the scan, look up ASN/ISP for each working endpoint via ipwho.is and annotate exported results (best-effort, never fails the scan)"
+    )]
+    pub(crate) enrich_asn: bool,
+
     #[arg(long, help_heading = "WARP")]
     pub(crate) warp_probes: Option<u8>,
 

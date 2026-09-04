@@ -694,6 +694,8 @@ fn serde_round_trip_scan_event() {
             received: 1,
             loss_pct: Some(0),
             fail_reason: None,
+            asn: None,
+            isp: None,
         })),
         ScanEvent::Finished(ScanSummary {
             scanned: 10,

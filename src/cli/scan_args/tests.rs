@@ -43,6 +43,7 @@ fn args() -> ScanArgs {
         speed_test: false,
         min_speed: None,
         neighbor_scan: 0,
+        enrich_asn: false,
     }
 }
 

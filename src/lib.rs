@@ -5,6 +5,7 @@ pub mod cli_wizard;
 pub mod configs;
 pub mod dgst;
 pub mod engine;
+pub mod enrich;
 pub mod export;
 pub mod paths;
 pub mod probe;

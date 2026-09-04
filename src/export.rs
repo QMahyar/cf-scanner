@@ -37,6 +37,12 @@ pub fn diagnostic_line(v: &Verdict) -> String {
         (None, Some(colo)) => parts.push(format!("colo {colo}")),
         (None, None) => {}
     }
+    if let Some(asn) = v.asn {
+        match &v.isp {
+            Some(isp) if !isp.is_empty() => parts.push(format!("AS{asn} {isp}")),
+            _ => parts.push(format!("AS{asn}")),
+        }
+    }
     if let Some(p) = &v.phase2 {
         if p.passed {
             let via = match p.verifier {
@@ -368,7 +374,7 @@ fn result_dump(format: &str, verdicts: &[Verdict]) -> String {
         "json" => serde_json::json!({ "results": verdicts, "count": verdicts.len() }).to_string(),
         _ => {
             let mut out = String::from(
-                "ip,port,latency_ms,country,colo,phase2_passed,phase2_latency_ms,speed_test_mbps,sent,received,loss_pct,fail_reason\n",
+                "ip,port,latency_ms,country,colo,phase2_passed,phase2_latency_ms,speed_test_mbps,sent,received,loss_pct,fail_reason,asn,isp\n",
             );
             for v in verdicts {
                 let p2 = v.phase2.as_ref();
@@ -391,6 +397,8 @@ fn result_dump(format: &str, verdicts: &[Verdict]) -> String {
                     v.received.to_string(),
                     v.loss_pct.map(|x| x.to_string()).unwrap_or_default(),
                     v.fail_reason.clone().unwrap_or_default(),
+                    v.asn.map(|x| x.to_string()).unwrap_or_default(),
+                    v.isp.clone().unwrap_or_default(),
                 ];
                 let quoted: Vec<String> = fields.iter().map(|f| csv_field(f)).collect();
                 out.push_str(&quoted.join(","));
@@ -513,6 +521,8 @@ mod tests {
             received: 1,
             loss_pct: Some(0),
             fail_reason: None,
+            asn: None,
+            isp: None,
         }
     }
 
@@ -558,7 +568,7 @@ mod tests {
 
     #[test]
     fn render_results_csv_empty_and_unknown() {
-        let header = "ip,port,latency_ms,country,colo,phase2_passed,phase2_latency_ms,speed_test_mbps,sent,received,loss_pct,fail_reason\n";
+        let header = "ip,port,latency_ms,country,colo,phase2_passed,phase2_latency_ms,speed_test_mbps,sent,received,loss_pct,fail_reason,asn,isp\n";
         assert_eq!(render_results("csv", &[]).unwrap(), header);
         let err = render_results("xml", &[]).unwrap_err();
         assert!(err.contains("csv|json"), "{err}");
@@ -566,7 +576,7 @@ mod tests {
 
     #[test]
     fn render_results_csv_header_schema() {
-        const EXPECTED: &str = "ip,port,latency_ms,country,colo,phase2_passed,phase2_latency_ms,speed_test_mbps,sent,received,loss_pct,fail_reason";
+        const EXPECTED: &str = "ip,port,latency_ms,country,colo,phase2_passed,phase2_latency_ms,speed_test_mbps,sent,received,loss_pct,fail_reason,asn,isp";
         let out = render_results("csv", &[passing("1.2.3.4", 443, None)]).unwrap();
         let mut lines = out.lines();
         assert_eq!(lines.next(), Some(EXPECTED));
@@ -825,6 +835,8 @@ mod tests {
             received: 0,
             loss_pct: Some(100),
             fail_reason: Some(reason.to_owned()),
+            asn: None,
+            isp: None,
         }
     }
 
@@ -866,6 +878,33 @@ mod tests {
         v6.colo = None;
         v6.loss_pct = None;
         assert_eq!(diagnostic_line(&v6), "[2606:4700::1]:443 — ok, 12ms");
+    }
+
+    #[test]
+    fn render_results_csv_carries_asn_isp_columns() {
+        let mut v = passing("1.2.3.4", 443, None);
+        v.asn = Some(13335);
+        v.isp = Some("CLOUDFLARENET".to_owned());
+        let out = render_results("csv", &[v]).unwrap();
+        let row: Vec<&str> = out.lines().nth(1).unwrap().split(',').collect();
+        assert_eq!(row[12], "13335", "asn column: {out}");
+        assert_eq!(row[13], "CLOUDFLARENET", "isp column: {out}");
+        let plain = passing("5.6.7.8", 443, None);
+        let out = render_results("csv", &[plain]).unwrap();
+        let row: Vec<&str> = out.lines().nth(1).unwrap().split(',').collect();
+        assert_eq!(row[12], "", "unenriched endpoints leave asn empty: {out}");
+        assert_eq!(row[13], "", "unenriched endpoints leave isp empty: {out}");
+    }
+
+    #[test]
+    fn diagnostic_line_shows_asn_when_enriched() {
+        let mut v = passing("1.2.3.4", 443, None);
+        v.asn = Some(13335);
+        v.isp = Some("CLOUDFLARENET".to_owned());
+        assert_eq!(
+            diagnostic_line(&v),
+            "1.2.3.4:443 — ok, 12ms — US/LAX — AS13335 CLOUDFLARENET — tunnel ok (40ms)"
+        );
     }
 
     #[test]

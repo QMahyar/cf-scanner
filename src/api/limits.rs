@@ -44,3 +44,4 @@ pub const MAX_ENDPOINTS: usize = 2048;
 pub const MAX_SUBSCRIPTION_SPECS: usize = 2048;
 pub const MAX_PHASE2_TOTAL_SPECS: usize = 4096;
 pub const MAX_COLO_CODES: usize = 16;
+pub const MAX_ISP_CHARS: usize = 128;

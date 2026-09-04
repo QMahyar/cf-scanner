@@ -378,6 +378,10 @@ impl ScanController {
         lock(&self.last_phase2_configs).clone()
     }
 
+    pub fn set_asn(&self, ip: IpAddr, port: u16, asn: u32, isp: &str) -> bool {
+        store::set_asn(&self.store, ip, port, asn, isp)
+    }
+
     fn finish(&self, started: Instant, scanned: u64, found: u64) -> ScanSummary {
         let cancelled = lock(&self.cancel_tx)
             .as_ref()
@@ -905,6 +909,8 @@ mod tests {
             received: 1,
             loss_pct: Some(0),
             fail_reason: None,
+            asn: None,
+            isp: None,
         };
         let v2 = Verdict {
             ip: "203.0.113.1".parse().unwrap(),
@@ -917,6 +923,8 @@ mod tests {
             received: 1,
             loss_pct: Some(0),
             fail_reason: None,
+            asn: None,
+            isp: None,
         };
         let v3 = Verdict {
             ip: "203.0.113.2".parse().unwrap(),
@@ -929,6 +937,8 @@ mod tests {
             received: 1,
             loss_pct: Some(0),
             fail_reason: None,
+            asn: None,
+            isp: None,
         };
         merge_sorted(
             &c.store,
@@ -953,6 +963,8 @@ mod tests {
             received: 1,
             loss_pct: Some(0),
             fail_reason: None,
+            asn: None,
+            isp: None,
         };
         merge_sorted(&c.store, &c.store_dirty, vec![v4.clone()]);
         let results2 = c.results();
@@ -975,6 +987,8 @@ mod tests {
             received: 1,
             loss_pct: Some(0),
             fail_reason: None,
+            asn: None,
+            isp: None,
         };
         let dead_a = Verdict {
             ip: "203.0.113.2".parse().unwrap(),
@@ -987,6 +1001,8 @@ mod tests {
             received: 0,
             loss_pct: Some(100),
             fail_reason: Some("refused".to_owned()),
+            asn: None,
+            isp: None,
         };
         let dead_b = Verdict {
             ip: "203.0.113.3".parse().unwrap(),
@@ -999,6 +1015,8 @@ mod tests {
             received: 0,
             loss_pct: Some(100),
             fail_reason: Some("timeout".to_owned()),
+            asn: None,
+            isp: None,
         };
         merge_sorted(&c.store, &c.store_dirty, vec![dead_b, slow.clone(), dead_a]);
         let results = c.results();
@@ -1025,6 +1043,8 @@ mod tests {
             received: 1,
             loss_pct: Some(0),
             fail_reason: None,
+            asn: None,
+            isp: None,
         };
         let v2 = Verdict {
             ip: "203.0.113.1".parse().unwrap(),
@@ -1037,6 +1057,8 @@ mod tests {
             received: 1,
             loss_pct: Some(0),
             fail_reason: None,
+            asn: None,
+            isp: None,
         };
         let v3 = Verdict {
             ip: "203.0.113.2".parse().unwrap(),
@@ -1049,6 +1071,8 @@ mod tests {
             received: 1,
             loss_pct: Some(0),
             fail_reason: None,
+            asn: None,
+            isp: None,
         };
         merge_sorted(
             &c.store,

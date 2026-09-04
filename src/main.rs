@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use anyhow::{Result, anyhow};
 use cf_scanner::api::types::ScanEvent;
-use cf_scanner::{cli_wizard, engine, export, paths, probe, ranges, warpgen};
+use cf_scanner::{cli_wizard, engine, enrich, export, paths, probe, ranges, warpgen};
 use clap::Parser;
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::filter::LevelFilter;
@@ -210,6 +210,10 @@ async fn run_scan(args: ScanArgs, verbose: bool) -> Result<()> {
             summary.found
         );
     }
+    if args.enrich_asn {
+        let enriched = enrich::enrich_working(&controller).await;
+        eprintln!("asn enrichment: {enriched} endpoint annotations");
+    }
     if let Some(path) = args.export.as_deref() {
         export::write_export(&controller, path, args.export_format)?;
     }
@@ -342,6 +346,8 @@ mod tests {
             received: 1,
             loss_pct: Some(0),
             fail_reason: None,
+            asn: None,
+            isp: None,
         };
         let line = serialize_event(&verdict).unwrap();
         assert!(line.contains("\"ip\":\"1.2.3.4\""), "{line}");

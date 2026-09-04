@@ -257,6 +257,8 @@ mod tests {
             received: 1,
             loss_pct: Some(0),
             fail_reason: None,
+            asn: None,
+            isp: None,
         }
     }
 

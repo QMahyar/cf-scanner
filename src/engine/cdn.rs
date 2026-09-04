@@ -265,6 +265,8 @@ impl ScanController {
                                     received,
                                     loss_pct: Some(loss_pct),
                                     fail_reason: None,
+                                    asn: None,
+                                    isp: None,
                                 })
                             }
                         }
@@ -279,6 +281,8 @@ impl ScanController {
                             received: 0,
                             loss_pct: Some(100),
                             fail_reason: Some(err.reason().to_owned()),
+                            asn: None,
+                            isp: None,
                         }),
                     };
                     let verdict = verdict.filter(|v| ctx.colo_allowed(v.colo.as_deref()));

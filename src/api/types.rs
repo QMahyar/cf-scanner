@@ -270,6 +270,10 @@ pub struct Verdict {
     pub loss_pct: Option<u32>,
     #[serde(default)]
     pub fail_reason: Option<String>,
+    #[serde(default)]
+    pub asn: Option<u32>,
+    #[serde(default)]
+    pub isp: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

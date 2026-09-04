@@ -31,6 +31,9 @@ release is tagged.
 - [01: Docs ADR-013 sweep](tickets/01-docs-adr013-sweep.md): purged 15+ stale server/UI/tray refs from spec/intent/CONTEXT; fixed ADR number; added missing CHANGELOG links. Merged as `fb7c8b0`.
 - [02: Security quick wins](tickets/02-security-quick-wins.md): probe URLs now gated by `validate_fetch_url` (loopback/link-local rejected, error is payload-free); trial dirs 0o700 on Unix. Landed src-only as `0bf5aeb` (branch had stale docs, excluded).
 - [03: Split main.rs](tickets/03-main-split.md): `src/cli.rs` + `src/cli/scan_args.rs` (+ tests) + export helpers → `src/export.rs`; `main.rs` 1866→341 lines; `scan --help` byte-identical; 49 binary CLI tests green. Landed as `03b2e57`.
+- [05: HTTP timeouts + atomic export](tickets/05-http-timeouts-atomic-export.md): `step_budgets` splits the HTTP probe timeout 30/30/40 across connect/TLS/read (stalls fail fast, same `Timeout` error); export files use tmp+rename atomic writes. 3 new tests. Landed as `a066c1b`.
+- [04: Engine extract](tickets/04-engine-extract.md): new `store.rs` (Store/lock/merge_sorted/PosIndex/update/remove), `neighbor.rs` (ProbeTask/Hub/candidates+test), `test_helpers.rs` (shared FakeSub); `plan_hosts_iter`/`plan_probe_count` → `plan.rs`; 43 lock sites use `lock()`. Net -279 lines. Landed as `e863280`.
+- [06: Verbose debug mode](tickets/06-verbose-debug-mode.md): shared `export::diagnostic_line` (human reasons, loss, country/colo, tunnel detail, IPv6 bracketing); CLI `run_scan` threads global `--verbose` to per-Result stderr lines; wizard prompts verbose + uses it; README documents with examples. 2 format tests. Landed as `d355bd1`.
 
 ## Not yet specified
 
