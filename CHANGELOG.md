@@ -6,6 +6,28 @@ Added / Changed / Fixed / Deprecated / Removed / Security, newest on top.
 ## [Unreleased]
 
 ### Added
+- **Quality-gated stop condition.** With `--speed-test --min-speed MB/s`, the
+  scan no longer stops at the first N passing endpoints — it keeps scanning
+  (up to 5 top-up rounds with fresh candidate seeds and a shrinking probe cap)
+  until N endpoints clear the speed gate. `--loss-threshold` and
+  `--min-latency` already gated the working set. Round 2+ verifies only
+  candidates that have not already passed phase 2.
+- **Retry last scan.** Every successful scan saves its configuration to the
+  data dir (phase-2 configs and WARP keys are never saved).
+  `scan --retry-last` replays it; `--phase2-configs` can be re-supplied on
+  top; the wizard offers "Repeat last scan?" on startup.
+- **Opt-in ASN/ISP enrichment.** `scan --enrich-asn` looks up ASN and ISP for
+  each working endpoint via ipwho.is (8 concurrent, best-effort, never fails
+  a scan) and annotates the verdict store. CSV export gains `asn`,`isp`
+  columns; verbose diagnostics show `AS13335 CLOUDFLARENET` style labels.
+- **Verbose per-IP diagnostics.** `--verbose` (global) prints one stderr line
+  per probe result — `203.0.113.5:443 — connection refused — loss 100%`,
+  `203.0.113.1:443 — ok, 12ms — US/LAX — tunnel ok (40ms)` — so scan tuning
+  no longer requires guesswork. The wizard asks and honors it.
+- **E2E CLI tests.** Integration tests now run the real binary end-to-end
+  (TEST-NET scan → NDJSON schema assertions → CSV/JSON export file checks
+  including the atomic-write no-tmp guarantee) and cover the `--retry-last`
+  error path. Plan edge tests pin /32 count=1 and count>pool→Every.
 - **Phase-1 reliability signals.** Each verdict now carries `sent`,
   `received`, `loss_pct`, and `fail_reason` (`refused`/`timeout`/`tls_failed`
  /`http_status`); failures are stored with `latency_ms: null` and sort after
@@ -44,11 +66,37 @@ Added / Changed / Fixed / Deprecated / Removed / Security, newest on top.
   `winreg`.
 
 ### Changed
+- **Coverage gate raised to 80% lines** (was 70) in CI, measured locally.
+- **Faster HTTP probing under stalls.** The HTTP probe now splits its timeout
+  budget per step (30% connect / 30% TLS / 40% read+write); a server that
+  accepts TLS then stalls can no longer hold a worker for the full timeout.
+- **Atomic export files.** `--export` writes via tmp+rename so a crash can
+  never leave a truncated results file.
+- **main.rs split.** The 1,866-line entry module is now a thin (~340-line)
+  runner: clap types live in `src/cli.rs`, scan-config building in
+  `src/cli/scan_args.rs`; `write_export` moved into `src/export.rs`. Behavior
+  and `--help` output are byte-identical.
+- **Engine module hygiene.** Verdict-store operations moved to
+  `engine/store.rs`, neighbor scanning to `engine/neighbor.rs`, shared test
+  fakes to `engine/test_helpers.rs`; plan helpers moved to `engine/plan.rs`;
+  43 lock sites now use one poison-tolerant `lock()` helper.
+- **Injectable speed-test plumbing.** `ScanController::set_speed_tester` and
+  `set_tunnel_opener` (new `TunnelOpener` trait) let tests run the full speed
+  test path without spawning xray or touching the network.
 - **Export moved from HTTP to CLI.** `scan --export FILE --export-format
   csv|json|base64|raw|singbox|clash` writes results/bundles to a file (`-`
   = stdout) via the new `src/export.rs`, replacing the removed
   `/api/bundle` and `/api/results/export` endpoints.
 - CI drops the `ui` and `ui-a11y` jobs; all Rust gates are unchanged.
+
+### Security
+- **Probe-URL SSRF hardening.** `--phase2-probe-urls` now run through the same
+  SSRF gate as subscription fetches: loopback, link-local, and unspecified
+  targets are rejected before any connection is attempted (the error text
+  stays payload-free).
+- **Trial directories are owner-only.** xray trial config directories are
+  created 0o700 on Unix, so credential-bearing config.json files are no longer
+  reachable through a world-readable directory listing.
 
 ### Fixed
 - **`spawn_with_retry` could reuse the same ephemeral port across retries.**
