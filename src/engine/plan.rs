@@ -333,3 +333,54 @@ mod tests {
         }
     }
 }
+
+    #[test]
+    fn count_one_on_a_single_host_pool_probes_exactly_it() {
+        let pool = CidrPool::parse("203.0.113.7/32").unwrap();
+        let p = plan(
+            &pool,
+            &ScanTarget::Count(1),
+            &mut SplitMix64::new(3),
+        );
+        let mut rng4 = SplitMix64::new(4);
+        let mut hosts: Vec<IpAddr> = Vec::new();
+        for item in &p {
+            hosts.extend(plan_hosts_iter(item, &mut rng4));
+        }
+        assert_eq!(hosts, vec!["203.0.113.7".parse::<IpAddr>().unwrap()]);
+    }
+
+    #[test]
+    fn count_above_the_pool_degrades_to_every_host() {
+        let pool = CidrPool::parse("203.0.113.0/30").unwrap();
+        for requested in [1000u32, u32::MAX] {
+            let p = plan(
+                &pool,
+                &ScanTarget::Count(requested),
+                &mut SplitMix64::new(5),
+            );
+            let mut rng6 = SplitMix64::new(6);
+            let mut hosts: Vec<IpAddr> = Vec::new();
+            for item in &p {
+                hosts.extend(plan_hosts_iter(item, &mut rng6));
+            }
+            assert_eq!(
+                hosts.len(),
+                4,
+                "Every mode probes all /30 addresses (requested {requested})"
+            );
+            let mut sorted = hosts;
+            sorted.sort();
+            assert_eq!(
+                sorted,
+                vec![
+                    "203.0.113.0".parse::<IpAddr>().unwrap(),
+                    "203.0.113.1".parse::<IpAddr>().unwrap(),
+                    "203.0.113.2".parse::<IpAddr>().unwrap(),
+                    "203.0.113.3".parse::<IpAddr>().unwrap(),
+                ],
+                "Every mode probes all /30 addresses in order"
+            );
+        }
+    }
+
