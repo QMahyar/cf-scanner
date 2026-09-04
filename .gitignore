@@ -16,3 +16,5 @@ cargo-dist/
 /.playwright-mcp/
 *.log
 mig-*.png
+# local geoip cache backup (survives cargo clean)
+.geoip-cache/
