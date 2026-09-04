@@ -1,7 +1,56 @@
 use std::net::{IpAddr, Ipv4Addr};
 
-use crate::api::types::{CdnPreset, ScanTarget};
+use crate::api::types::{CdnPreset, Port, ScanTarget};
 use crate::ranges::{Cidr, CidrPool};
+
+pub(super) fn plan_hosts_iter<'a>(
+    item: &'a PlanItem,
+    rng: &'a mut SplitMix64,
+) -> Box<dyn Iterator<Item = IpAddr> + Send + 'a> {
+    match item {
+        PlanItem::Every { cidr } => Box::new((0..cidr.host_count()).map(move |i| cidr.host(i))),
+        PlanItem::Sample { cidr, count } => {
+            let count = (*count as u128).min(cidr.host_count());
+            let (draw_max, skip_net_bcast) = if cidr.addr.is_ipv4() && cidr.prefix >= 24 {
+                (cidr.host_count().saturating_sub(2), true)
+            } else {
+                (cidr.host_count(), false)
+            };
+            let mut seen = std::collections::HashSet::new();
+            let mut emitted = 0u128;
+            Box::new(std::iter::from_fn(move || {
+                if emitted >= count || seen.len() as u128 >= draw_max {
+                    return None;
+                }
+                loop {
+                    let idx = if skip_net_bcast {
+                        (rng.below(draw_max.max(1) as u64) + 1) as u128
+                    } else {
+                        rng.below_u128(cidr.host_count())
+                    };
+                    if seen.insert(idx) {
+                        emitted += 1;
+                        return Some(cidr.host(idx));
+                    }
+                }
+            }))
+        }
+        PlanItem::Hosts { cidr, offsets } => Box::new(offsets.iter().map(move |&o| cidr.host(o))),
+    }
+}
+
+pub(super) fn plan_probe_count(plan: &[PlanItem], ports: &[Port]) -> u64 {
+    let hosts: u128 = plan
+        .iter()
+        .map(|i| match i {
+            PlanItem::Every { cidr } => cidr.host_count(),
+            PlanItem::Sample { cidr, count } => (*count as u128).min(cidr.host_count()),
+            PlanItem::Hosts { offsets, .. } => offsets.len() as u128,
+        })
+        .sum();
+    let probes = hosts.saturating_mul(ports.len() as u128);
+    probes.min(u64::MAX as u128) as u64
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PlanItem {
@@ -166,8 +215,7 @@ mod tests {
                 }],
                 "{preset:?} must walk a /32 host-by-host"
             );
-            let hosts: Vec<IpAddr> =
-                super::super::plan_hosts_iter(&plan[0], &mut SplitMix64::new(1)).collect();
+            let hosts: Vec<IpAddr> = plan_hosts_iter(&plan[0], &mut SplitMix64::new(1)).collect();
             assert_eq!(hosts, vec![IpAddr::V4("203.0.113.5".parse().unwrap())]);
         }
     }
@@ -223,7 +271,7 @@ mod tests {
         let mut rng = SplitMix64::new(9);
         let mut hosts: std::collections::HashSet<IpAddr> = std::collections::HashSet::new();
         for item in &quick {
-            hosts.extend(super::super::plan_hosts_iter(item, &mut rng));
+            hosts.extend(plan_hosts_iter(item, &mut rng));
         }
         assert!(!hosts.is_empty());
         assert!(
@@ -252,7 +300,7 @@ mod tests {
         let mut rng = SplitMix64::new(1234);
         let mut hosts: Vec<IpAddr> = Vec::new();
         for item in &a {
-            hosts.extend(super::super::plan_hosts_iter(item, &mut rng));
+            hosts.extend(plan_hosts_iter(item, &mut rng));
         }
         assert_eq!(hosts.len(), 64);
         assert!(hosts.iter().all(|ip| ip.is_ipv4()));

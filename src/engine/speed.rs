@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use anyhow::Result;
 
-use super::{ScanController, Store, cancelled_signal};
+use super::{ScanController, Store, cancelled_signal, lock};
 use crate::api::types::{FragmentPreset, Phase2Config, ScanConfig, ScanEvent, Verdict};
 use crate::configs::OutboundSpec;
 
@@ -112,7 +112,7 @@ pub(crate) fn apply_speed_result(
     outcome: &Result<f32>,
     min_speed: Option<f32>,
 ) -> Option<Verdict> {
-    let mut results = store.lock().unwrap_or_else(|e| e.into_inner());
+    let mut results = lock(store);
     let pos = results
         .iter()
         .position(|v| v.ip == IpAddr::V4(ip) && v.port == port)?;
@@ -154,7 +154,7 @@ impl ScanController {
             return Ok(());
         }
         let min_speed = cfg.min_speed_mbps;
-        let candidates = self.store.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        let candidates = lock(&self.store).clone();
         let index = build_passing_index(&candidates, specs);
         if index.is_empty() {
             tracing::info!("speed test: no phase-2 passing endpoints to measure");
@@ -455,16 +455,7 @@ mod tests {
         }
     }
 
-    struct FakeSub(&'static str);
-
-    impl crate::configs::SubFetch for FakeSub {
-        fn fetch(
-            &self,
-            _url: &str,
-        ) -> std::pin::Pin<Box<dyn Future<Output = anyhow::Result<String>> + Send + '_>> {
-            Box::pin(async move { Ok(self.0.to_owned()) })
-        }
-    }
+    use crate::engine::test_helpers::FakeSub;
 
     #[tokio::test]
     async fn scan_with_speed_test_records_mbps_on_passing_verdicts() {

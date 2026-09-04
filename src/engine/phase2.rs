@@ -7,16 +7,15 @@ use anyhow::{Context as _, Result, anyhow, bail};
 use tokio::sync::watch;
 use tokio::task::JoinSet;
 
-use super::{ScanController, Store, cancelled_signal, claim_milestone, colo_rejected};
+use super::store::{PosIndex, remove_verdict, update_verdict_phase2};
+use super::{ScanController, cancelled_signal, claim_milestone, colo_rejected, lock};
 use crate::api::types::{
-    Phase2Config, Phase2Progress, Phase2Verdict, ScanConfig, ScanEvent, Verdict, Verifier,
+    Phase2Config, Phase2Progress, Phase2Verdict, ScanConfig, ScanEvent, Verifier,
 };
 use crate::configs::{OutboundSpec, parse_subscription, parse_uri, parse_xray_json};
 use crate::verify::ProbeRequest;
 
 const PROGRESS_EVERY_P2: u64 = 32;
-
-type PosIndex = Arc<Mutex<Arc<HashMap<(Ipv4Addr, u16), usize>>>>;
 
 impl ScanController {
     pub(super) async fn verify_phase(&self, cfg: &ScanConfig, p2: &Phase2Config) -> Result<()> {
@@ -34,7 +33,7 @@ impl ScanController {
             p2.snis.iter().map(|s| Some(s.clone())).collect()
         };
         let probe_urls = p2.effective_probe_urls();
-        let candidates = self.store.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        let candidates = lock(&self.store).clone();
         let v4_candidates: Vec<(Ipv4Addr, u16)> = candidates
             .iter()
             .filter(|v| v.latency_ms.is_some())
@@ -100,7 +99,7 @@ impl ScanController {
                 loop {
                     if *cancel.borrow()
                         || cap.is_some_and(|c| attempts.load(Ordering::Relaxed) >= u64::from(c))
-                        || passed.lock().unwrap_or_else(|e| e.into_inner()).len() >= stop_found
+                        || lock(&passed).len() >= stop_found
                     {
                         break;
                     }
@@ -113,14 +112,10 @@ impl ScanController {
                     let (ip, port) = candidates[ci as usize];
                     let (spec, config_idx) = &specs[si as usize];
                     let sni = &snis[ni as usize];
-                    if passed
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .contains(&(ip, port))
-                    {
+                    if lock(&passed).contains(&(ip, port)) {
                         continue;
                     }
-                    if passed.lock().unwrap_or_else(|e| e.into_inner()).len() >= stop_found {
+                    if lock(&passed).len() >= stop_found {
                         break;
                     }
                     attempts.fetch_add(1, Ordering::Relaxed);
@@ -155,18 +150,12 @@ impl ScanController {
                                 speed_test_mbps: None,
                             };
                             if result.passed && colo_kept {
-                                passed
-                                    .lock()
-                                    .unwrap_or_else(|e| e.into_inner())
-                                    .insert((ip, port));
+                                lock(&passed).insert((ip, port));
                             }
-                            if passed.lock().unwrap_or_else(|e| e.into_inner()).len() >= stop_found
-                                && !result.passed
-                            {
+                            if lock(&passed).len() >= stop_found && !result.passed {
                                 break;
                             }
-                            let overshoot =
-                                passed.lock().unwrap_or_else(|e| e.into_inner()).len() > stop_found;
+                            let overshoot = lock(&passed).len() > stop_found;
                             if !colo_kept {
                                 remove_verdict(&store, ip, port, &pos_index);
                             } else if let Some(updated) =
@@ -179,13 +168,12 @@ impl ScanController {
                             }
                         }
                         Err(err) => {
-                            if passed.lock().unwrap_or_else(|e| e.into_inner()).len() >= stop_found
-                            {
+                            if lock(&passed).len() >= stop_found {
                                 break;
                             }
                             errored.fetch_add(1, Ordering::Relaxed);
                             let msg = crate::configs::sanitize_error_text(&format!("{err:#}"));
-                            let mut slot = first_error.lock().unwrap_or_else(|e| e.into_inner());
+                            let mut slot = lock(&first_error);
                             if slot.is_none() {
                                 *slot = Some(msg.clone());
                             }
@@ -199,8 +187,7 @@ impl ScanController {
                                 verifier: None,
                                 speed_test_mbps: None,
                             };
-                            if passed.lock().unwrap_or_else(|e| e.into_inner()).len() >= stop_found
-                            {
+                            if lock(&passed).len() >= stop_found {
                                 break;
                             }
                             if let Some(updated) =
@@ -240,10 +227,7 @@ impl ScanController {
         let attempts_val = attempts.load(Ordering::Relaxed);
         let completed_val = completed.load(Ordering::Relaxed);
         if attempts_val > 0 && completed_val == 0 {
-            let reason_opt = first_error
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .clone();
+            let reason_opt = lock(&first_error).clone();
             match reason_opt {
                 Some(reason) => {
                     bail!("phase 2: every attempt failed before a probe ran: {reason}")
@@ -342,61 +326,6 @@ impl ScanController {
     }
 }
 
-fn update_verdict_phase2(
-    store: &Store,
-    ip: Ipv4Addr,
-    port: u16,
-    p2v: Phase2Verdict,
-    colo: Option<String>,
-    pos_index: &PosIndex,
-) -> Option<Verdict> {
-    let mut results = store.lock().unwrap_or_else(|e| e.into_inner());
-    let indexed = {
-        let index = pos_index.lock().unwrap_or_else(|e| e.into_inner()).clone();
-        index.get(&(ip, port)).copied().filter(|&pos| {
-            results
-                .get(pos)
-                .is_some_and(|v| v.ip == IpAddr::V4(ip) && v.port == port)
-        })
-    };
-    let pos = match indexed {
-        Some(pos) => pos,
-        None => {
-            let found = results
-                .iter()
-                .position(|v| v.ip == IpAddr::V4(ip) && v.port == port)?;
-            let mut fresh: HashMap<(Ipv4Addr, u16), usize> = HashMap::with_capacity(results.len());
-            for (i, v) in results.iter().enumerate() {
-                if let IpAddr::V4(ip4) = v.ip {
-                    fresh.entry((ip4, v.port)).or_insert(i);
-                }
-            }
-            *pos_index.lock().unwrap_or_else(|e| e.into_inner()) = Arc::new(fresh);
-            found
-        }
-    };
-    if results[pos].phase2.as_ref().is_some_and(|p| p.passed) {
-        return None;
-    }
-    results[pos].phase2 = Some(p2v);
-    if colo.is_some() {
-        results[pos].colo = colo;
-    }
-    Some(results[pos].clone())
-}
-
-/// Drops a stored verdict and invalidates the cached position index.
-fn remove_verdict(store: &Store, ip: Ipv4Addr, port: u16, pos_index: &PosIndex) {
-    let mut results = store.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some(pos) = results
-        .iter()
-        .position(|v| v.ip == IpAddr::V4(ip) && v.port == port)
-    {
-        results.remove(pos);
-        *pos_index.lock().unwrap_or_else(|e| e.into_inner()) = Arc::new(HashMap::new());
-    }
-}
-
 fn parse_verifier(tag: &str) -> Option<Verifier> {
     match tag {
         "inline" => Some(Verifier::Inline),
@@ -442,8 +371,9 @@ fn redact_entry(entry: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::api::types::{FragmentPreset, Phase2Config};
+    use crate::api::types::{FragmentPreset, Phase2Config, Verdict};
     use crate::configs::SubFetch;
+    use crate::engine::store::Store;
     use crate::engine::tests::{ok_cfg, run_local};
     use crate::probe::FakeTransport;
     use crate::ranges;
@@ -462,13 +392,7 @@ mod tests {
         }
     }
 
-    struct FakeSub(&'static str);
-
-    impl SubFetch for FakeSub {
-        fn fetch(&self, _url: &str) -> Pin<Box<dyn Future<Output = Result<String>> + Send + '_>> {
-            Box::pin(async move { Ok(self.0.to_owned()) })
-        }
-    }
+    use crate::engine::test_helpers::FakeSub;
 
     #[derive(Clone)]
     struct FakeTunnelProbe {
@@ -504,10 +428,7 @@ mod tests {
         }
 
         fn pass(self, ip: Ipv4Addr) -> Self {
-            self.passed
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .insert(ip);
+            lock(&self.passed).insert(ip);
             self
         }
     }
@@ -526,10 +447,7 @@ mod tests {
                     barrier.wait().await;
                 }
                 this.attempts.fetch_add(1, Ordering::Relaxed);
-                this.url_lists
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .push(urls);
+                lock(&this.url_lists).push(urls);
                 if this.always_err.load(Ordering::Relaxed) {
                     return Err(anyhow!("simulated spawn failure"));
                 }
@@ -546,11 +464,7 @@ mod tests {
                         verifier: None,
                     });
                 }
-                let passed = this
-                    .passed
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .contains(&dial_ip);
+                let passed = lock(&this.passed).contains(&dial_ip);
                 Ok(TunnelResult {
                     passed,
                     latency_ms: passed.then_some(7),
@@ -775,7 +689,7 @@ mod tests {
             "https://cp.cloudflare.com/".to_owned(),
             "https://www.cloudflare.com/".to_owned(),
         ];
-        let lists = probe.url_lists.lock().unwrap_or_else(|e| e.into_inner());
+        let lists = lock(&probe.url_lists);
         assert_eq!(lists.len(), 2);
         assert!(lists.iter().all(|l| l == &want), "{lists:?}");
         for v in c.results().iter().filter(|v| v.latency_ms.is_some()) {
@@ -914,7 +828,7 @@ mod tests {
         );
         assert!(updated.is_none(), "a pass must never be downgraded");
         {
-            let row = &store.lock().unwrap_or_else(|e| e.into_inner())[0];
+            let row = &lock(&store)[0];
             assert!(row.phase2.as_ref().unwrap().passed);
             assert_eq!(row.colo.as_deref(), Some("FRA"));
         }
@@ -935,7 +849,7 @@ mod tests {
             via_fallback.is_none(),
             "fallback must find the row and honor the pass guard"
         );
-        let rebuilt = stale_index.lock().unwrap_or_else(|e| e.into_inner());
+        let rebuilt = lock(&stale_index);
         assert_eq!(
             rebuilt.get(&("203.0.113.1".parse::<Ipv4Addr>().unwrap(), 443)),
             Some(&0),

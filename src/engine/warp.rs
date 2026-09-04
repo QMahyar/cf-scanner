@@ -8,9 +8,8 @@ use anyhow::{Context as _, Result, anyhow, bail};
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 
-use super::{
-    BATCH_FLUSH, ProbeContext, ScanController, merge_sorted, plan_hosts_iter, progress_cadence,
-};
+use super::plan::plan_hosts_iter;
+use super::{BATCH_FLUSH, ProbeContext, ScanController, merge_sorted, progress_cadence};
 use crate::api::types::{
     ScanConfig, ScanEvent, ScanProgress, ScanSummary, ScanTarget, Verdict, WarpConfig,
 };

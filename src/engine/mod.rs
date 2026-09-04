@@ -1,10 +1,17 @@
 mod cdn;
+mod neighbor;
 mod phase2;
 mod plan;
 mod speed;
+mod store;
+#[cfg(test)]
+mod test_helpers;
 mod warp;
 
+#[cfg(test)]
+use plan::plan_hosts_iter;
 pub use plan::{PlanItem, SplitMix64, plan};
+use store::{Store, lock, merge_sorted};
 
 use std::collections::HashSet;
 use std::net::IpAddr;
@@ -38,8 +45,6 @@ fn progress_cadence(total: u64) -> u64 {
     }
 }
 
-type Store = Arc<Mutex<Vec<Verdict>>>;
-
 #[derive(Debug, thiserror::Error)]
 #[error("a scan is already running")]
 pub struct AlreadyRunning;
@@ -51,11 +56,8 @@ struct ResetGuard<'a> {
 
 impl Drop for ResetGuard<'_> {
     fn drop(&mut self) {
-        self.cancel_tx
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .take();
-        *self.running.lock().unwrap_or_else(|e| e.into_inner()) = false;
+        lock(self.cancel_tx).take();
+        *lock(self.running) = false;
     }
 }
 
@@ -125,10 +127,7 @@ impl ScanController {
     }
 
     pub fn summary(&self) -> Option<ScanSummary> {
-        self.summary
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone()
+        lock(&self.summary).clone()
     }
 
     pub fn results(&self) -> Vec<Verdict> {
@@ -136,11 +135,7 @@ impl ScanController {
     }
 
     pub fn has_results(&self) -> bool {
-        !self
-            .store
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .is_empty()
+        !lock(&self.store).is_empty()
     }
 
     pub fn for_each_result(&self, mut f: impl FnMut(&Verdict)) {
@@ -151,7 +146,7 @@ impl ScanController {
     }
 
     fn snapshot_sorted(&self) -> Vec<Verdict> {
-        let mut guard = self.store.lock().unwrap_or_else(|e| e.into_inner());
+        let mut guard = lock(&self.store);
         if self.store_dirty.swap(false, Ordering::AcqRel) {
             guard.sort_unstable_by(|a, b| {
                 a.latency_ms
@@ -166,18 +161,14 @@ impl ScanController {
     }
 
     fn phase2_passed(&self) -> u64 {
-        self.store
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
+        lock(&self.store)
             .iter()
             .filter(|v| v.phase2.as_ref().is_some_and(|p| p.passed))
             .count() as u64
     }
 
     fn working_found(&self) -> u64 {
-        self.store
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
+        lock(&self.store)
             .iter()
             .filter(|v| v.latency_ms.is_some())
             .filter(|v| v.phase2.as_ref().is_none_or(|p| p.passed))
@@ -185,11 +176,11 @@ impl ScanController {
     }
 
     pub fn is_running(&self) -> bool {
-        *self.running.lock().unwrap_or_else(|e| e.into_inner())
+        *lock(&self.running)
     }
 
     pub fn reset(&self) {
-        let running = self.running.lock().unwrap_or_else(|e| e.into_inner());
+        let running = lock(&self.running);
         if *running {
             return;
         }
@@ -198,27 +189,19 @@ impl ScanController {
     }
 
     fn clear_store(&self) {
-        self.store.lock().unwrap_or_else(|e| e.into_inner()).clear();
+        lock(&self.store).clear();
         self.store_dirty.store(false, Ordering::Relaxed);
-        self.summary
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .take();
+        lock(&self.summary).take();
     }
 
     pub fn cancel(&self) {
-        if let Some(tx) = self
-            .cancel_tx
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .as_ref()
-        {
+        if let Some(tx) = lock(&self.cancel_tx).as_ref() {
             let _ = tx.send(true);
         }
     }
 
     fn cancel_signal(&self) -> watch::Receiver<bool> {
-        let mut slot = self.cancel_tx.lock().unwrap_or_else(|e| e.into_inner());
+        let mut slot = lock(&self.cancel_tx);
         if let Some(tx) = slot.as_ref() {
             return tx.subscribe();
         }
@@ -326,7 +309,7 @@ impl ScanController {
     }
 
     pub fn reserve(&self) -> Result<(), AlreadyRunning> {
-        let mut running = self.running.lock().unwrap_or_else(|e| e.into_inner());
+        let mut running = lock(&self.running);
         if *running {
             return Err(AlreadyRunning);
         }
@@ -388,24 +371,15 @@ impl ScanController {
             .as_ref()
             .map(|p| p.configs.clone())
             .unwrap_or_default();
-        *self
-            .last_phase2_configs
-            .lock()
-            .unwrap_or_else(|e| e.into_inner()) = configs;
+        *lock(&self.last_phase2_configs) = configs;
     }
 
     pub fn phase2_configs(&self) -> Vec<String> {
-        self.last_phase2_configs
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone()
+        lock(&self.last_phase2_configs).clone()
     }
 
     fn finish(&self, started: Instant, scanned: u64, found: u64) -> ScanSummary {
-        let cancelled = self
-            .cancel_tx
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
+        let cancelled = lock(&self.cancel_tx)
             .as_ref()
             .map(|tx| *tx.subscribe().borrow())
             .unwrap_or(false);
@@ -415,7 +389,7 @@ impl ScanController {
             duration_ms: started.elapsed().as_millis() as u64,
             cancelled,
         };
-        *self.summary.lock().unwrap_or_else(|e| e.into_inner()) = Some(summary.clone());
+        *lock(&self.summary) = Some(summary.clone());
         self.emit(ScanEvent::Finished(summary.clone()));
         summary
     }
@@ -423,55 +397,6 @@ impl ScanController {
     fn emit(&self, event: ScanEvent) {
         let _ = self.events.send(event);
     }
-}
-
-fn plan_hosts_iter<'a>(
-    item: &'a PlanItem,
-    rng: &'a mut SplitMix64,
-) -> Box<dyn Iterator<Item = IpAddr> + Send + 'a> {
-    match item {
-        PlanItem::Every { cidr } => Box::new((0..cidr.host_count()).map(move |i| cidr.host(i))),
-        PlanItem::Sample { cidr, count } => {
-            let count = (*count as u128).min(cidr.host_count());
-            let (draw_max, skip_net_bcast) = if cidr.addr.is_ipv4() && cidr.prefix >= 24 {
-                (cidr.host_count().saturating_sub(2), true)
-            } else {
-                (cidr.host_count(), false)
-            };
-            let mut seen = std::collections::HashSet::new();
-            let mut emitted = 0u128;
-            Box::new(std::iter::from_fn(move || {
-                if emitted >= count || seen.len() as u128 >= draw_max {
-                    return None;
-                }
-                loop {
-                    let idx = if skip_net_bcast {
-                        (rng.below(draw_max.max(1) as u64) + 1) as u128
-                    } else {
-                        rng.below_u128(cidr.host_count())
-                    };
-                    if seen.insert(idx) {
-                        emitted += 1;
-                        return Some(cidr.host(idx));
-                    }
-                }
-            }))
-        }
-        PlanItem::Hosts { cidr, offsets } => Box::new(offsets.iter().map(move |&o| cidr.host(o))),
-    }
-}
-
-fn plan_probe_count(plan: &[PlanItem], ports: &[super::api::types::Port]) -> u64 {
-    let hosts: u128 = plan
-        .iter()
-        .map(|i| match i {
-            PlanItem::Every { cidr } => cidr.host_count(),
-            PlanItem::Sample { cidr, count } => (*count as u128).min(cidr.host_count()),
-            PlanItem::Hosts { offsets, .. } => offsets.len() as u128,
-        })
-        .sum();
-    let probes = hosts.saturating_mul(ports.len() as u128);
-    probes.min(u64::MAX as u128) as u64
 }
 
 const BATCH_FLUSH: usize = 256;
@@ -560,15 +485,6 @@ impl ProbeContext {
     }
 }
 
-fn merge_sorted(store: &Store, dirty: &AtomicBool, batch: Vec<Verdict>) {
-    if batch.is_empty() {
-        return;
-    }
-    let mut results = store.lock().unwrap_or_else(|e| e.into_inner());
-    results.extend(batch);
-    dirty.store(true, Ordering::Release);
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -629,16 +545,13 @@ mod tests {
                     for _ in 0..2000 {
                         let observed = counter.fetch_add(1, Ordering::Relaxed) + 1;
                         if claim_milestone(last, observed, 100) {
-                            winners
-                                .lock()
-                                .unwrap_or_else(|e| e.into_inner())
-                                .push(observed);
+                            lock(winners).push(observed);
                         }
                     }
                 });
             }
         });
-        let claimed = winners.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        let claimed = lock(&winners).clone();
         let mut seen = claimed.clone();
         seen.sort_unstable();
         seen.dedup();
@@ -819,10 +732,7 @@ mod tests {
         assert_eq!(summary.found, 1);
         assert!(!c.is_running(), "guard must reset the busy flag");
         assert!(
-            c.cancel_tx
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .is_none(),
+            lock(&c.cancel_tx).is_none(),
             "guard must clear the cancel slot"
         );
     }
@@ -948,10 +858,10 @@ mod tests {
                     .run_streaming(cfg, move |e| {
                         if !parked {
                             parked = true;
-                            let rx = park_rx.lock().unwrap_or_else(|e| e.into_inner());
+                            let rx = lock(&park_rx);
                             let _ = rx.recv();
                         }
-                        events_c.lock().unwrap_or_else(|e| e.into_inner()).push(e);
+                        lock(&events_c).push(e);
                     })
                     .await
                     .unwrap();
