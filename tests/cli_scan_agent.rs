@@ -223,8 +223,8 @@ fn e2e_scan_writes_export_files_and_ndjson_stdout() {
     let mut saw_result = false;
     let mut saw_summary = false;
     for line in &lines {
-        let v: serde_json::Value = serde_json::from_str(line)
-            .unwrap_or_else(|e| panic!("non-NDJSON line {line:?}: {e}"));
+        let v: serde_json::Value =
+            serde_json::from_str(line).unwrap_or_else(|e| panic!("non-NDJSON line {line:?}: {e}"));
         let o = v.as_object().expect("stdout lines must be JSON objects");
         if o.contains_key("scanned") {
             saw_summary = true;
@@ -287,10 +287,7 @@ fn e2e_scan_writes_export_files_and_ndjson_stdout() {
 
 #[test]
 fn retry_last_without_a_saved_config_names_the_fix() {
-    let dir = std::env::temp_dir().join(format!(
-        "cf-scanner-e2e-retry-{}",
-        std::process::id()
-    ));
+    let dir = std::env::temp_dir().join(format!("cf-scanner-e2e-retry-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let out = Command::new(bin())
         .args(["scan", "--retry-last"])
