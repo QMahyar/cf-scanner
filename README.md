@@ -78,6 +78,7 @@ With an installed binary, use `cf-scanner`. From source, replace
 | `cf-scanner scan --mode warp --ports 2408,500` | One-shot WARP scan |
 | `cf-scanner scan … --export out.csv --export-format csv` | Write results as `csv`, `json`, `base64`, `raw`, `singbox`, `clash`, or `sharelinks` (`-` = stdout) |
 | `cf-scanner scan … --json-errors` | Print `{"error": …}` on stdout when the scan fails |
+| `cf-scanner scan … --verbose` | Per-IP diagnostics on stderr (`203.0.113.5:443 — connection refused — loss 100%`, `203.0.113.1:443 — ok, 12ms — US/LAX`) plus info logs |
 | `cf-scanner scan --mode cdn --probe http --colo HKG,NRT` | HTTP-trace probing (`tcp`/`tls`/`http`) keeping only listed colos; also `--loss-threshold`, `--min-latency`, `--idle-hold-ms`, `--neighbor-scan`, and opt-in `--speed-test`/`--min-speed` |
 | `cf-scanner wizard` | Interactive wizard over the same engine |
 | `cf-scanner warp-config generate` | Opt-in WARP registration through the v0a884 API, then wgconf build |

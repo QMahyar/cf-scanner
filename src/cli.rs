@@ -16,7 +16,11 @@ pub mod scan_args;
     after_help = EXAMPLES
 )]
 pub(crate) struct Cli {
-    #[arg(long, global = true)]
+    #[arg(
+        long,
+        global = true,
+        help = "Verbose output: per-IP diagnostics on stderr + info logs"
+    )]
     pub(crate) verbose: bool,
 
     #[arg(long, global = true)]

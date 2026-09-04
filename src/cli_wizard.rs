@@ -183,6 +183,17 @@ async fn run_wizard(
         for line in config_recap(&cfg) {
             eprintln!("{line}");
         }
+        let verbose = tokio::task::spawn_blocking(|| {
+            Confirm::new()
+                .with_prompt("Show per-IP diagnostics (verbose)?")
+                .default(false)
+                .interact()
+        })
+        .await
+        .map_err(|e| anyhow!("wizard task failed: {e}"))??;
+        if interrupted.load(Ordering::Relaxed) {
+            return Err(WizardInterrupted.into());
+        }
         let confirmed = tokio::task::spawn_blocking(|| {
             Confirm::new()
                 .with_prompt("Start scan now?")
@@ -203,7 +214,7 @@ async fn run_wizard(
             &cfg.accepted_http_codes,
         )));
         *current.lock().unwrap_or_else(|e| e.into_inner()) = Some(Arc::clone(&controller));
-        let summary = run_scan(&controller, &cfg).await?;
+        let summary = run_scan(&controller, &cfg, verbose).await?;
         *current.lock().unwrap_or_else(|e| e.into_inner()) = None;
         eprintln!(
             "done — scanned {}, found {} working in {} ms",
@@ -233,7 +244,11 @@ async fn run_wizard(
     }
 }
 
-async fn run_scan(controller: &Arc<ScanController>, cfg: &ScanConfig) -> Result<ScanSummary> {
+async fn run_scan(
+    controller: &Arc<ScanController>,
+    cfg: &ScanConfig,
+    verbose: bool,
+) -> Result<ScanSummary> {
     controller
         .run_streaming(cfg.clone(), |e| match e {
             ScanEvent::Progress(p) => {
@@ -242,13 +257,17 @@ async fn run_scan(controller: &Arc<ScanController>, cfg: &ScanConfig) -> Result<
                 eprint!("\r\x1b[Kchecked {scanned}{total} — {found} working");
             }
             ScanEvent::Result(v) => {
+                use std::io::Write as _;
+                let mut err = std::io::stderr().lock();
+                if verbose {
+                    let _ = writeln!(err, "\r\x1b[K{}", crate::export::diagnostic_line(&v));
+                    return;
+                }
                 let phase2 = match &v.phase2 {
                     Some(p) if p.passed => format!("\t[phase2 ✓ {} {}]", p.fragment, p.sni),
                     Some(_) => "\t[phase2 ✗]".to_owned(),
                     None => String::new(),
                 };
-                use std::io::Write as _;
-                let mut err = std::io::stderr().lock();
                 let status = match (&v.fail_reason, v.latency_ms) {
                     (Some(reason), _) => format!("failed ({reason})"),
                     (None, latency) => format!("{}ms", latency.unwrap_or(0)),

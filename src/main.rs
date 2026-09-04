@@ -69,7 +69,7 @@ fn clear_ticker_line() {
 
 async fn run(cli: Cli) -> Result<()> {
     match cli.command {
-        Command::Scan { args } => run_scan(*args).await,
+        Command::Scan { args } => run_scan(*args, cli.verbose).await,
         Command::Wizard => match cli_wizard::run().await {
             Ok(()) => Ok(()),
             Err(err) if err.is::<cli_wizard::WizardInterrupted>() => Ok(()),
@@ -131,7 +131,7 @@ async fn run(cli: Cli) -> Result<()> {
     }
 }
 
-async fn run_scan(args: ScanArgs) -> Result<()> {
+async fn run_scan(args: ScanArgs, verbose: bool) -> Result<()> {
     let cfg = build_scan_config(&args)?;
     let transport = probe::transport_for(cfg.probe_mode, &cfg.accepted_http_codes);
     let controller = Arc::new(engine::ScanController::new(transport));
@@ -153,7 +153,16 @@ async fn run_scan(args: ScanArgs) -> Result<()> {
     };
     let stderr_is_tty = std::io::stderr().is_terminal();
     let streaming = |e: ScanEvent| match &e {
-        ScanEvent::Result(_) | ScanEvent::Finished(_) | ScanEvent::Failed(_) => {
+        ScanEvent::Result(v) => {
+            if verbose {
+                clear_ticker_line();
+                eprintln!("{}", export::diagnostic_line(v));
+            }
+            if let Some(line) = serialize_event(&e) {
+                write_line(&line);
+            }
+        }
+        ScanEvent::Finished(_) | ScanEvent::Failed(_) => {
             if let Some(line) = serialize_event(&e) {
                 write_line(&line);
             }

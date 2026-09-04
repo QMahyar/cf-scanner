@@ -3,9 +3,60 @@ use std::sync::Arc;
 
 use clap::ValueEnum;
 
-use crate::api::types::Verdict;
+use crate::api::types::{Verdict, Verifier};
 use crate::configs;
 use crate::engine::ScanController;
+
+fn human_reason(reason: &str) -> &str {
+    match reason {
+        "refused" => "connection refused",
+        "timeout" => "timed out",
+        "tls_failed" => "TLS handshake failed",
+        "http_status" => "unexpected HTTP status",
+        other => other,
+    }
+}
+
+pub fn diagnostic_line(v: &Verdict) -> String {
+    let endpoint = match v.ip {
+        IpAddr::V6(_) => format!("[{}]:{}", v.ip, v.port),
+        _ => format!("{}:{}", v.ip, v.port),
+    };
+    let mut parts = vec![endpoint];
+    match (&v.fail_reason, v.latency_ms) {
+        (Some(reason), _) => parts.push(human_reason(reason).to_owned()),
+        (None, Some(ms)) => parts.push(format!("ok, {ms}ms")),
+        (None, None) => parts.push("no result".to_owned()),
+    }
+    if v.loss_pct.unwrap_or(0) > 0 {
+        parts.push(format!("loss {}%", v.loss_pct.unwrap_or(0)));
+    }
+    match (&v.country, &v.colo) {
+        (Some(country), Some(colo)) => parts.push(format!("{country}/{colo}")),
+        (Some(country), None) => parts.push(country.clone()),
+        (None, Some(colo)) => parts.push(format!("colo {colo}")),
+        (None, None) => {}
+    }
+    if let Some(p) = &v.phase2 {
+        if p.passed {
+            let via = match p.verifier {
+                Some(Verifier::Inline) => "via inline ",
+                Some(Verifier::Xray) => "via xray ",
+                None => "",
+            };
+            match p.latency_ms {
+                Some(ms) => parts.push(format!("tunnel {via}ok ({ms}ms)")),
+                None => parts.push(format!("tunnel {via}ok")),
+            }
+        } else {
+            match &p.error {
+                Some(err) => parts.push(format!("tunnel failed ({err})")),
+                None => parts.push("tunnel failed".to_owned()),
+            }
+        }
+    }
+    parts.join(" — ")
+}
 
 pub const BUNDLE_FORMATS: [&str; 4] = ["base64", "raw", "singbox", "clash"];
 pub const SHARELINK_FORMATS: [&str; 1] = ["sharelinks"];
@@ -760,6 +811,61 @@ mod tests {
         assert_eq!(p["xhttp-opts"]["path"], "/xh");
         assert_eq!(p["xhttp-opts"]["host"], "cdn.example.com");
         assert_eq!(p["xhttp-opts"]["mode"], "stream");
+    }
+
+    fn failed(ip: &str, port: u16, reason: &str) -> Verdict {
+        Verdict {
+            ip: ip.parse().unwrap(),
+            port,
+            latency_ms: None,
+            country: None,
+            colo: None,
+            phase2: None,
+            sent: 1,
+            received: 0,
+            loss_pct: Some(100),
+            fail_reason: Some(reason.to_owned()),
+        }
+    }
+
+    #[test]
+    fn diagnostic_lines_cover_failure_modes() {
+        assert_eq!(
+            diagnostic_line(&failed("203.0.113.5", 443, "refused")),
+            "203.0.113.5:443 — connection refused — loss 100%"
+        );
+        assert_eq!(
+            diagnostic_line(&failed("203.0.113.6", 443, "timeout")),
+            "203.0.113.6:443 — timed out — loss 100%"
+        );
+        assert_eq!(
+            diagnostic_line(&failed("203.0.113.7", 443, "tls_failed")),
+            "203.0.113.7:443 — TLS handshake failed — loss 100%"
+        );
+        assert_eq!(
+            diagnostic_line(&failed("203.0.113.8", 8443, "http_status")),
+            "203.0.113.8:8443 — unexpected HTTP status — loss 100%"
+        );
+    }
+
+    #[test]
+    fn diagnostic_lines_cover_passing_rows() {
+        assert_eq!(
+            diagnostic_line(&passing("203.0.113.1", 443, None)),
+            "203.0.113.1:443 — ok, 12ms — US/LAX — tunnel ok (40ms)"
+        );
+        let mut clean = passing("203.0.113.2", 443, None);
+        clean.loss_pct = Some(0);
+        clean.country = None;
+        clean.colo = None;
+        clean.phase2 = None;
+        assert_eq!(diagnostic_line(&clean), "203.0.113.2:443 — ok, 12ms");
+        let mut v6 = passing("2606:4700::1", 443, None);
+        v6.phase2 = None;
+        v6.country = None;
+        v6.colo = None;
+        v6.loss_pct = None;
+        assert_eq!(diagnostic_line(&v6), "[2606:4700::1]:443 — ok, 12ms");
     }
 
     #[test]
