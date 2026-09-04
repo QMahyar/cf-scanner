@@ -17,13 +17,21 @@ A single cross-platform Rust binary that finds working Cloudflare IPs/endpoints
 on ISP-restricted networks. Two modes:
 
 - **CDN/proxy mode** — phase 1: TCP+TLS handshake scan of Cloudflare IPv4
-  ranges; phase 2 (optional): hybrid verification of candidate IPs against a
-  real proxy config — plain VLESS/Trojan (no fragmentation, no `ws`) verifies
-  in-process (`inline_verify.rs`, no subprocess); every other combo (VMess/SS,
-  `ws` transports, any DPI fragmentation preset) verifies through the embedded
-  Xray subprocess, with DPI-bypass fragmentation + SNI variants. Each
-  `Phase2Verdict.verifier` reports `inline` vs `xray` so the UI can surface the
-  path.
+  ranges, with selectable probe protocol (`--probe tcp|tls|http`; HTTP mode
+  GETs `/cdn-cgi/trace` and captures the colo during phase 1). Every verdict
+  carries reliability signals (`sent`/`received`/`loss_pct`, `fail_reason`)
+  and failures are stored, never silently dropped. Opt-in scan-time filters:
+  `--loss-threshold`, `--min-latency`, `--idle-hold-ms` (post-handshake RST
+  detection), `--colo` (kept codes), `--neighbor-scan` (same-/24 widening
+  after a hit). Phase 2 (optional): hybrid verification of candidate IPs
+  against a real proxy config — plain VLESS/Trojan (no fragmentation, no
+  `ws`) verifies in-process (`inline_verify.rs`, no subprocess); every other
+  combo (VMess/SS, `ws`/`grpc`/`xhttp` transports, any DPI fragmentation
+  preset) verifies through the embedded Xray subprocess, with DPI-bypass
+  fragmentation + SNI variants. Each `Phase2Verdict.verifier` reports
+  `inline` vs `xray` so the UI can surface the path. Opt-in `--speed-test`
+  pulls a capped 8 MiB sample through each passing endpoint and records
+  `speed_test_mbps` (`--min-speed` gates the working set).
 - **WARP mode** — UDP endpoint discovery over known Cloudflare WARP pools using
   a real WireGuard handshake probe; optional verification with the user's own
   WireGuard/AmneziaWG config; opt-in full config generation via Cloudflare's
@@ -69,7 +77,11 @@ copy/save working IPs one-per-line — all in one binary, no external services.
   max 64 distinct; concurrency 1-1000 (default 64); timeout 100-30000 ms
   (default 3000); scan count ≤100_000; `stop.found`/`cap` ≤100_000_000;
   warp endpoints ≤2048, `probes_per_endpoint` 1-10; phase2 entries ≤8, each
-   ≤8 KiB, SNIs ≤256 B, probe URLs ≤2 KiB, `wgconf` ≤64 KiB (2 MiB body cap).
+  ≤8 KiB, SNIs ≤256 B, probe URLs ≤2 KiB, `wgconf` ≤64 KiB (2 MiB body cap).
+  Competitive catch-up caps (§10): loss threshold 0-100; min latency
+  1-30000 ms; idle hold 0-60000 ms; colo codes ≤16 (3-5 ASCII letters each);
+  HTTP status codes 100-599 (default 200,301,302); neighbor breadth 0-64;
+  speed sample 8 MiB per endpoint, 30 s timeout.
 - Configuration: hand-rolled JSON in the platform data dir (`identity.json`
   for WARP keys with 0600 on Unix, `refreshed-ranges.json` +
   `refreshed-ranges-v6.json`);
@@ -127,9 +139,16 @@ src/
   wgconf.rs          WireGuard/AmneziaWG config parse + render
   dgst.rs            strict .dgst SHA2-256 parser (shared with build.rs)
   paths.rs           platform data-dir paths (0600 secrets, write gate)
-  probe.rs           TLS handshake probe + scoring (latency)
+  probe.rs           probe transports (tcp connect, TLS handshake, HTTP trace)
+                      + scoring (latency, loss, colo) via the injectable
+                      `Transport` trait
   geo.rs             mmdb lookup (country), /cdn-cgi/trace colo parse
-  cli_wizard.rs      interactive prompts over the same API
+  cli_wizard.rs      interactive prompts over the same API (builds one engine
+                      per scan so the chosen probe protocol runs)
+  export.rs          result/bundle rendering (csv, json, base64, raw, singbox,
+                      clash, sharelinks)
+  engine/speed.rs    opt-in post-stop throughput test (capped sample per
+                      phase-2-passing endpoint)
   api/{types,limits,validate,error}.rs  request/response contract + caps
 ui/src               Svelte 5 (runes-only) + Tailwind 4 + Vite SPA
 ui/dist              committed build output embedded via rust-embed
@@ -178,13 +197,22 @@ pub struct ScanConfig {
     pub stop: StopCondition,        // after N found | N + cap | run-until
     pub ports: Vec<u16>,            // default [443]
     pub exclude: Vec<IpNet>,        // dirty ranges
+    pub probe_mode: ProbeMode,      // Tcp | Tls (default) | Http
+    pub loss_threshold: Option<u32>,
+    pub min_latency_ms: Option<u32>,
+    pub idle_hold_ms: u64,          // 0 = off
+    pub colo_filter: Vec<String>,   // empty = all regions
+    pub neighbor_count: u32,        // 0 = off
+    pub speed_test: bool,           // opt-in, needs phase2
+    pub min_speed_mbps: Option<f32>,
 }
 
 pub struct Verdict {
     pub ip: Ipv4Addr,
     pub port: u16,
-    pub latency_ms: Option<u16>,
-    pub loss_pct: Option<f32>,      // WARP + phase 2 only
+    pub latency_ms: Option<u32>,    // None = failed probe, see fail_reason
+    pub loss_pct: Option<u32>,      // from sent/received probe counts
+    pub fail_reason: Option<String>,// refused | timeout | tls_failed | http_status
     pub phase2: Option<Phase2Verdict>,
 }
 ```
@@ -247,7 +275,7 @@ pub struct Verdict {
 - [ ] Results: last-scan-only + reset; sort by latency/country/datacenter/loss;
       copy with ports / raw IPs (one per line, no trailing whitespace); save
 - [ ] GeoIP: country via embedded mmdb offline; datacenter colo via
-      /cdn-cgi/trace in phase 2
+  /cdn-cgi/trace in phase 2 (or phase 1 with `--probe http`)
 - [ ] Frontend: Svelte 5 SPA in `ui/` → committed `ui/dist` via rust-embed,
       `npm run check && npm run build` before commit; `ui/dist` drift fails CI
 - [ ] `dist plan` passes for the 3-target matrix (linux x86_64/aarch64 +
@@ -282,3 +310,38 @@ and `CHANGELOG.md`.
 - [ADR-005 — single binary, contract first](decisions/ADR-005-single-binary-contract-first.md)
 - [ADR-006 — no history, no telemetry](decisions/ADR-006-no-history-no-telemetry.md)
 - [ADR-007 — central versioning and publishing](decisions/ADR-007-central-versioning-and-publishing.md)
+
+## 10. Amendment (2026-09-04): competitive catch-up
+
+Eleven CDN-mode gaps found in the 2026-09-03 competitor audit
+(`docs/research/competitor-cf-scanners-2026-09-03.md`,
+`docs/research/2026-09-03-competitor-cf-scanners.md`;
+SenPaiScanner, XIU2 cfst, Morteza CFScanner, CrimsonCF, Waldon) shipped as
+opt-in additions; default scan behavior is unchanged. Work tracked in
+`docs/wayfinder/competitive-catchup/` (map + 11 tickets, all closed).
+
+1. **Packet-loss rate** — `Verdict.sent/received/loss_pct`; `--loss-threshold`
+   drops lossy results (above-threshold dropped, not stored).
+2. **Colo filter** — `--colo HKG,NRT`; unknown-colo passes with a one-time
+   warning; enforced where colo becomes known (phase 2, or phase 1 http).
+3. **Phase-1 failure reasons** — `Verdict.fail_reason`; failures stored with
+   `latency_ms: null`, sorted last, never counted as found.
+4. **Richer CSV** — `...,phase2_latency_ms,speed_test_mbps,sent,received,
+   loss_pct,fail_reason` (appended; old columns keep order).
+5. **HTTPing probe mode** — `--probe tcp|tls|http`, `--http-status-code`;
+   phase-1 colo capture.
+6. **Share-link export** — `--export-format sharelinks`, batch form of
+   `export-config`.
+7. **Latency lower bound** — `--min-latency` drops below-bound verdicts.
+8. **Idle-hold stability probe** — `--idle-hold-ms`; handshake-only latency;
+   RST-after-idle fails the probe.
+9. **gRPC/XHTTP verification** — parsed, verified through xray, exported to
+   sing-box/clash. HTTPUpgrade stays parse-only (deferred).
+10. **Opt-in speed test** — `--speed-test` + `--min-speed`; capped 8 MiB
+    sample per phase-2-passing endpoint. The intent ban on *default* speed
+    testing (`docs/intent/cf-scanner.md`) stands.
+11. **Neighbor scan** — `--neighbor-scan 0-64`; same-/24 widening through the
+    worker channels, obeying cap/target/cancel.
+
+Non-goals confirmed during the audit and left out: default speed tests,
+scan history, GUI/Android/Docker, WARP-mode changes.
