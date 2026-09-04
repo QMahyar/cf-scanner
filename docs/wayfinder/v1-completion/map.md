@@ -28,7 +28,9 @@ release is tagged.
 
 <!-- one line per closed ticket, links to ticket bodies -->
 
-_(no tickets resolved yet)_
+- [01: Docs ADR-013 sweep](tickets/01-docs-adr013-sweep.md): purged 15+ stale server/UI/tray refs from spec/intent/CONTEXT; fixed ADR number; added missing CHANGELOG links. Merged as `fb7c8b0`.
+- [02: Security quick wins](tickets/02-security-quick-wins.md): probe URLs now gated by `validate_fetch_url` (loopback/link-local rejected, error is payload-free); trial dirs 0o700 on Unix. Landed src-only as `0bf5aeb` (branch had stale docs, excluded).
+- [03: Split main.rs](tickets/03-main-split.md): `src/cli.rs` + `src/cli/scan_args.rs` (+ tests) + export helpers → `src/export.rs`; `main.rs` 1866→341 lines; `scan --help` byte-identical; 49 binary CLI tests green. Landed as `03b2e57`.
 
 ## Not yet specified
 
