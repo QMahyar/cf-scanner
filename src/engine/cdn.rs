@@ -14,6 +14,10 @@ use crate::engine::plan::{SplitMix64, plan};
 use crate::probe::ProbeOutcome;
 use crate::ranges;
 
+const MAX_TOPUP_ROUNDS: usize = 5;
+
+type ProbedSet = Arc<std::collections::HashSet<std::net::IpAddr>>;
+
 async fn forward_to_worker(
     task: ProbeTask,
     worker_txs: &[mpsc::Sender<ProbeTask>],
@@ -21,7 +25,11 @@ async fn forward_to_worker(
     concurrency: usize,
     inflight: &AtomicU64,
     ctx: &ProbeContext,
+    skip: &ProbedSet,
 ) -> bool {
+    if skip.contains(&task.ip) {
+        return true;
+    }
     if ctx.should_stop() {
         return false;
     }
@@ -46,14 +54,64 @@ async fn forward_to_worker(
 impl ScanController {
     pub(super) async fn run_cdn(
         &self,
-        mut cfg: ScanConfig,
+        cfg: ScanConfig,
         seed: u64,
         pool: ranges::CidrPool,
     ) -> Result<ScanSummary> {
+        let started = Instant::now();
+        let quality_gate = cfg.speed_test && cfg.min_speed_mbps.is_some() && cfg.phase2.is_some();
+        let (mut summary, mut scanned_total) = {
+            let s = self.run_cdn_pass(&cfg, seed, &pool, true, started).await?;
+            (s.clone(), s.scanned)
+        };
+        if quality_gate {
+            for _ in 0..MAX_TOPUP_ROUNDS {
+                if summary.cancelled || self.working_found() >= u64::from(cfg.stop.found) {
+                    break;
+                }
+                let mut next = cfg.clone();
+                if let Some(cap) = next.stop.cap {
+                    let remaining_cap =
+                        cap.saturating_sub(u32::try_from(scanned_total).unwrap_or(u32::MAX));
+                    if remaining_cap == 0 {
+                        break;
+                    }
+                    next.stop.cap = Some(remaining_cap);
+                }
+                let next_seed = {
+                    use rand_core::RngCore as _;
+                    rand_core::OsRng.next_u64()
+                };
+                let s = self
+                    .run_cdn_pass(&next, next_seed, &pool, false, started)
+                    .await?;
+                scanned_total += s.scanned;
+                summary = s;
+            }
+        }
+        summary.scanned = scanned_total;
+        *lock(&self.summary) = Some(summary.clone());
+        self.emit(ScanEvent::Finished(summary.clone()));
+        Ok(summary)
+    }
+
+    pub(super) async fn run_cdn_pass(
+        &self,
+        cfg: &ScanConfig,
+        seed: u64,
+        pool: &ranges::CidrPool,
+        clear: bool,
+        started: Instant,
+    ) -> Result<ScanSummary> {
+        let skip: ProbedSet = if clear {
+            Arc::new(std::collections::HashSet::new())
+        } else {
+            Arc::new(lock(&self.store).iter().map(|v| v.ip).collect())
+        };
+        let mut cfg = cfg.clone();
         let phase2 = cfg.phase2.take();
         let phase2_configured = phase2.is_some();
 
-        let started = Instant::now();
         if cfg.phase2_only {
             let Some(p2) = phase2 else {
                 return Err(anyhow!("phase2_only requires phase2 configs"));
@@ -66,8 +124,10 @@ impl ScanController {
             self.verify_phase(&cfg, &p2).await?;
             return Ok(self.finish(started, 0, self.phase2_passed()));
         }
-        self.clear_store();
-        let plan = plan(&pool, &cfg.target, &mut SplitMix64::new(seed));
+        if clear {
+            self.clear_store();
+        }
+        let plan = plan(pool, &cfg.target, &mut SplitMix64::new(seed));
         let total = plan_probe_count(&plan, &cfg.ports);
         let cadence = progress_cadence(total);
         self.emit(ScanEvent::Progress(ScanProgress {
@@ -144,6 +204,7 @@ impl ScanController {
                                         concurrency,
                                         &inflight,
                                         &ctx,
+                                        &skip,
                                     )
                                     .await
                                     {
@@ -162,6 +223,7 @@ impl ScanController {
                                 concurrency,
                                 &inflight,
                                 &ctx,
+                                &skip,
                             )
                             .await
                             {
@@ -181,6 +243,7 @@ impl ScanController {
                                     concurrency,
                                     &inflight,
                                     &ctx,
+                                    &skip,
                                 )
                                 .await
                                 {
@@ -329,7 +392,7 @@ impl ScanController {
         } else {
             ctx.found.load(Ordering::Relaxed)
         };
-        Ok(self.finish(started, ctx.scanned.load(Ordering::Relaxed), found))
+        Ok(self.finish_quiet(started, ctx.scanned.load(Ordering::Relaxed), found))
     }
 }
 

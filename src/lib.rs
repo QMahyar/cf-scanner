@@ -10,6 +10,7 @@ pub mod export;
 pub mod paths;
 pub mod probe;
 pub mod ranges;
+pub mod retry;
 pub mod verify;
 pub mod warp;
 pub mod warpgen;

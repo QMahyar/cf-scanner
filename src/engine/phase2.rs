@@ -37,6 +37,7 @@ impl ScanController {
         let v4_candidates: Vec<(Ipv4Addr, u16)> = candidates
             .iter()
             .filter(|v| v.latency_ms.is_some())
+            .filter(|v| !v.phase2.as_ref().is_some_and(|p| p.passed))
             .filter_map(|v| match v.ip {
                 IpAddr::V4(ip) => Some((ip, v.port)),
                 IpAddr::V6(_) => None,

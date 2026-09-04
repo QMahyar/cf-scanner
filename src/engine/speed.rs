@@ -11,6 +11,7 @@ use anyhow::Result;
 use super::{ScanController, Store, cancelled_signal, lock};
 use crate::api::types::{FragmentPreset, Phase2Config, ScanConfig, ScanEvent, Verdict};
 use crate::configs::OutboundSpec;
+use crate::verify::TunnelOpener;
 
 /// 8 MiB download cap per endpoint.
 pub const SPEED_TEST_BYTES: usize = 8 * 1024 * 1024;
@@ -160,6 +161,8 @@ impl ScanController {
             tracing::info!("speed test: no phase-2 passing endpoints to measure");
             return Ok(());
         }
+        let tester: Arc<dyn SpeedTester> = lock(&self.speed_tester).clone();
+        let opener: Arc<dyn TunnelOpener> = lock(&self.session_opener).clone();
         let cancel_rx = self.cancel_signal();
         tracing::info!(
             count = index.len(),
@@ -167,7 +170,6 @@ impl ScanController {
             "speed test: measuring phase-2 passing endpoints"
         );
 
-        let tester: Arc<dyn SpeedTester> = Arc::new(RealSpeedTester);
         let measured = Arc::new(AtomicU64::new(0));
         let mut entries: Vec<((Ipv4Addr, u16), PassingSpec)> = index.into_iter().collect();
         entries.sort_by_key(|a| a.0);
@@ -175,6 +177,7 @@ impl ScanController {
             let mut tasks = tokio::task::JoinSet::new();
             for ((ip, port), entry) in chunk {
                 let tester = tester.clone();
+                let opener = opener.clone();
                 let store = self.store.clone();
                 let events = self.events.clone();
                 let cancel = cancel_rx.clone();
@@ -188,7 +191,7 @@ impl ScanController {
                         return;
                     }
                     let outcome = tokio::select! {
-                        r = measure_through_tunnel(&tester, &entry, custom.as_ref(), ip) => r,
+                        r = measure_through_tunnel(&opener, &tester, &entry, custom.as_ref(), ip) => r,
                         _ = cancelled_signal(cancel.clone()) => return,
                     };
                     measured.fetch_add(1, Ordering::Relaxed);
@@ -213,21 +216,23 @@ impl ScanController {
 }
 
 async fn measure_through_tunnel(
+    opener: &Arc<dyn TunnelOpener>,
     tester: &Arc<dyn SpeedTester>,
     entry: &PassingSpec,
     custom: Option<&crate::api::types::CustomFragment>,
     ip: Ipv4Addr,
 ) -> Result<f32> {
-    let session = crate::verify::XrayTunnelProbe::open_tunnel_session(
-        &entry.spec,
-        &entry.fragment,
-        custom,
-        entry.sni.as_deref(),
-        ip,
-    )
-    .await?;
-    let result = measure_endpoint(tester.as_ref(), session.proc.socks_addr).await;
-    session.cleanup().await;
+    let tunnel = opener
+        .open(
+            &entry.spec,
+            &entry.fragment,
+            custom,
+            entry.sni.as_deref(),
+            ip,
+        )
+        .await?;
+    let result = measure_endpoint(tester.as_ref(), tunnel.socks_addr).await;
+    tunnel.cleanup().await;
     result
 }
 
@@ -419,6 +424,27 @@ mod tests {
         }
     }
 
+    struct FakeOpener;
+
+    impl crate::verify::TunnelOpener for FakeOpener {
+        fn open(
+            &self,
+            _spec: &OutboundSpec,
+            _preset: &FragmentPreset,
+            _custom: Option<&crate::api::types::CustomFragment>,
+            _sni: Option<&str>,
+            _dial_ip: Ipv4Addr,
+        ) -> Pin<Box<dyn Future<Output = Result<crate::verify::OpenedTunnel>> + Send + '_>>
+        {
+            Box::pin(async {
+                Ok(crate::verify::OpenedTunnel::new(
+                    SocketAddr::new(std::net::Ipv4Addr::LOCALHOST.into(), 1),
+                    Box::pin(async {}),
+                ))
+            })
+        }
+    }
+
     #[tokio::test]
     async fn measure_endpoint_computes_mbps_from_the_sample() {
         let tester = FakeTester {
@@ -472,6 +498,12 @@ mod tests {
             Arc::new(FakeSub("")),
             Arc::new(PassAllProbe),
         ));
+        c.set_tunnel_opener(Arc::new(FakeOpener));
+        c.set_speed_tester(Arc::new(FakeTester {
+            bytes: 8 * 1024 * 1024,
+            seconds: 4.0,
+            fail: false,
+        }));
         let mut cfg = ok_cfg(1, None);
         cfg.phase2 = Some(Phase2Config {
             configs: vec!["vless://aaaaaaaa-bbbb-cccc-dddd-eeeeffff0000@1.2.3.4:443".to_owned()],
@@ -483,12 +515,48 @@ mod tests {
         let p2 = results[0].phase2.as_ref().unwrap();
         assert!(p2.passed);
         assert!(
-            p2.speed_test_mbps.is_none(),
-            "the engine uses the real tester which fails without a live xray: {p2:?}"
+            (p2.speed_test_mbps.unwrap() - 2.0).abs() < 1e-4,
+            "the injected FakeTester measures 2 MB/s: {p2:?}"
         );
         assert!(
-            p2.error.as_deref().is_some(),
-            "the download failure must be recorded, not silently dropped"
+            p2.error.as_deref().is_none(),
+            "a passing sample records no error"
+        );
+    }
+
+    #[tokio::test]
+    async fn injected_slow_tester_flips_the_verdict_below_min_speed() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        use crate::api::types::Phase2Config;
+        use crate::engine::tests::{ok_cfg, run_local};
+        use crate::probe::FakeTransport;
+
+        let t = FakeTransport::new().ok("203.0.113.1".parse().unwrap(), 443, 20);
+        let c = Arc::new(ScanController::with_probes(
+            Arc::new(t),
+            Arc::new(FakeSub("")),
+            Arc::new(PassAllProbe),
+        ));
+        c.set_tunnel_opener(Arc::new(FakeOpener));
+        c.set_speed_tester(Arc::new(FakeTester {
+            bytes: 1024 * 1024,
+            seconds: 8.0,
+            fail: false,
+        }));
+        let mut cfg = ok_cfg(1, None);
+        cfg.phase2 = Some(Phase2Config {
+            configs: vec!["vless://aaaaaaaa-bbbb-cccc-dddd-eeeeffff0000@1.2.3.4:443".to_owned()],
+            ..Default::default()
+        });
+        cfg.speed_test = true;
+        cfg.min_speed_mbps = Some(2.0);
+        run_local(&c, cfg, 1).await.unwrap();
+        let results = c.results();
+        let p2 = results[0].phase2.as_ref().unwrap();
+        assert!(!p2.passed, "0.125 MB/s must fail a 2.0 MB/s gate: {p2:?}");
+        assert!(
+            p2.error.as_deref().unwrap().contains("min-speed"),
+            "the error names the gate: {p2:?}"
         );
     }
 
@@ -511,5 +579,50 @@ mod tests {
         cfg.speed_test = true;
         run_local(&c, cfg, 1).await.unwrap();
         assert!(c.results()[0].phase2.as_ref().unwrap().passed);
+    }
+
+    #[tokio::test]
+    async fn quality_gated_stop_tops_up_until_min_speed_is_met() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        use crate::api::types::Phase2Config;
+        use crate::engine::tests::{ok_cfg, run_local};
+        use crate::probe::FakeTransport;
+
+        // One OK endpoint per seed. Each top-up round probes a fresh sample,
+        // so the scan needs multiple rounds to bank 2 fast endpoints.
+        let t = FakeTransport::new().ok("203.0.113.1".parse().unwrap(), 443, 20);
+        let c = Arc::new(ScanController::with_probes(
+            Arc::new(t),
+            Arc::new(FakeSub("")),
+            Arc::new(PassAllProbe),
+        ));
+        c.set_tunnel_opener(Arc::new(FakeOpener));
+        c.set_speed_tester(Arc::new(FakeTester {
+            bytes: 16 * 1024 * 1024,
+            seconds: 1.0,
+            fail: false,
+        }));
+        let mut cfg = ok_cfg(2, Some(12));
+        cfg.phase2 = Some(Phase2Config {
+            configs: vec!["vless://aaaaaaaa-bbbb-cccc-dddd-eeeeffff0000@1.2.3.4:443".to_owned()],
+            ..Default::default()
+        });
+        cfg.speed_test = true;
+        cfg.min_speed_mbps = Some(4.0);
+        let summary = run_local(&c, cfg, 7).await.unwrap();
+        let fast = c
+            .results()
+            .iter()
+            .filter(|v| v.phase2.as_ref().is_some_and(|p| p.passed))
+            .count();
+        assert_eq!(
+            summary.found as usize, fast,
+            "summary.found counts only quality-passing endpoints"
+        );
+        assert!(
+            summary.scanned >= 2,
+            "top-up rounds must have run: {summary:?}"
+        );
+        assert!(fast >= 1, "at least one fast endpoint was banked");
     }
 }

@@ -10,6 +10,17 @@ use super::{ModeArg, ProbeArg, ScanArgs};
 mod tests;
 
 pub(crate) fn build_scan_config(args: &ScanArgs) -> Result<ScanConfig> {
+    if args.retry_last {
+        let mut cfg = cf_scanner::retry::load_config()?;
+        if !args.phase2_configs.is_empty() {
+            let mut phase2 = cfg.phase2.take().unwrap_or_default();
+            phase2.configs = args.phase2_configs.clone();
+            cfg.phase2 = Some(phase2);
+        }
+        cfg.validate()
+            .map_err(|e| anyhow!("saved scan config is no longer valid: {e}"))?;
+        return Ok(cfg);
+    }
     validate_basic_flags(args)?;
     let mode = Mode::from(args.mode);
     validate_mode_flags(args)?;

@@ -187,8 +187,12 @@ async fn run_scan(args: ScanArgs, verbose: bool) -> Result<()> {
         }
     };
     let result = match args.seed {
-        Some(seed) => controller.run_streaming_seeded(cfg, seed, streaming).await,
-        None => controller.run_streaming(cfg, streaming).await,
+        Some(seed) => {
+            controller
+                .run_streaming_seeded(cfg.clone(), seed, streaming)
+                .await
+        }
+        None => controller.run_streaming(cfg.clone(), streaming).await,
     }
     .map_err(|e| anyhow!("scan failed: {e:#}"));
     cancel_on_ctrl_c.abort();
@@ -209,6 +213,9 @@ async fn run_scan(args: ScanArgs, verbose: bool) -> Result<()> {
             "scan cancelled — {} working endpoints retained",
             summary.found
         );
+    }
+    if let Err(err) = cf_scanner::retry::save_config(&cfg) {
+        tracing::debug!("could not save last-scan config: {err:#}");
     }
     if args.enrich_asn {
         let enriched = enrich::enrich_working(&controller).await;

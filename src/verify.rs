@@ -123,6 +123,69 @@ impl TunnelSession {
     }
 }
 
+/// A tunnel session reduced to what the speed test needs: a socks address
+/// plus a deferred teardown. Injectable so tests never spawn xray.
+pub struct OpenedTunnel {
+    pub socks_addr: SocketAddr,
+    cleanup: Pin<Box<dyn Future<Output = ()> + Send>>,
+}
+
+impl OpenedTunnel {
+    pub fn new(socks_addr: SocketAddr, cleanup: Pin<Box<dyn Future<Output = ()> + Send>>) -> Self {
+        Self {
+            socks_addr,
+            cleanup,
+        }
+    }
+
+    pub async fn cleanup(self) {
+        (self.cleanup).await;
+    }
+}
+
+pub trait TunnelOpener: Send + Sync {
+    fn open(
+        &self,
+        spec: &OutboundSpec,
+        preset: &FragmentPreset,
+        custom: Option<&CustomFragment>,
+        sni: Option<&str>,
+        dial_ip: Ipv4Addr,
+    ) -> Pin<Box<dyn Future<Output = Result<OpenedTunnel>> + Send + '_>>;
+}
+
+pub struct RealTunnelOpener;
+
+impl TunnelOpener for RealTunnelOpener {
+    fn open(
+        &self,
+        spec: &OutboundSpec,
+        preset: &FragmentPreset,
+        custom: Option<&CustomFragment>,
+        sni: Option<&str>,
+        dial_ip: Ipv4Addr,
+    ) -> Pin<Box<dyn Future<Output = Result<OpenedTunnel>> + Send + '_>> {
+        let spec = spec.clone();
+        let preset = preset.clone();
+        let custom = custom.cloned();
+        let sni = sni.map(str::to_owned);
+        Box::pin(async move {
+            let session = XrayTunnelProbe::open_tunnel_session(
+                &spec,
+                &preset,
+                custom.as_ref(),
+                sni.as_deref(),
+                dial_ip,
+            )
+            .await?;
+            Ok(OpenedTunnel {
+                socks_addr: session.proc.socks_addr,
+                cleanup: Box::pin(session.cleanup()),
+            })
+        })
+    }
+}
+
 impl TunnelProbe for XrayTunnelProbe {
     fn probe(
         &self,

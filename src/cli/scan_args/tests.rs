@@ -44,6 +44,7 @@ fn args() -> ScanArgs {
         min_speed: None,
         neighbor_scan: 0,
         enrich_asn: false,
+        retry_last: false,
     }
 }
 

@@ -80,6 +80,7 @@ With an installed binary, use `cf-scanner`. From source, replace
 | `cf-scanner scan … --json-errors` | Print `{"error": …}` on stdout when the scan fails |
 | `cf-scanner scan … --verbose` | Per-IP diagnostics on stderr (`203.0.113.5:443 — connection refused — loss 100%`, `203.0.113.1:443 — ok, 12ms — US/LAX`) plus info logs |
 | `cf-scanner scan … --enrich-asn` | Look up ASN/ISP per working endpoint (ipwho.is, best-effort) and annotate exported results with `asn`/`isp` columns |
+| `cf-scanner scan --retry-last` | Replay the last scan's saved configuration (phase-2 configs/WARP keys are never saved — re-supply those) |
 | `cf-scanner scan --mode cdn --probe http --colo HKG,NRT` | HTTP-trace probing (`tcp`/`tls`/`http`) keeping only listed colos; also `--loss-threshold`, `--min-latency`, `--idle-hold-ms`, `--neighbor-scan`, and opt-in `--speed-test`/`--min-speed` |
 | `cf-scanner wizard` | Interactive wizard over the same engine |
 | `cf-scanner warp-config generate` | Opt-in WARP registration through the v0a884 API, then wgconf build |

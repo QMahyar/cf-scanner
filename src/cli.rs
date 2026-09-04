@@ -302,6 +302,14 @@ pub(crate) struct ScanArgs {
     #[arg(long, help_heading = "Tuning")]
     pub(crate) seed: Option<u64>,
 
+    #[arg(
+        long,
+        help_heading = "Candidate selection",
+        long_help = "Replay the last scan's configuration (saved automatically after each scan). \
+                     Phase-2 configs and WARP keys are never saved; re-supply them with --phase2-configs / --warp-wgconf-file."
+    )]
+    pub(crate) retry_last: bool,
+
     #[arg(long, help_heading = "Export")]
     pub(crate) export: Option<PathBuf>,
 

@@ -173,9 +173,31 @@ async fn run_wizard(
 ) -> Result<()> {
     eprintln!("CF-Scanner wizard — CDN/proxy scan with optional xray phase-2 verification");
     loop {
-        let cfg = tokio::task::spawn_blocking(prompt_config)
+        let saved = crate::retry::load_config().ok();
+        let cfg = if let Some(saved) = saved {
+            let repeat = tokio::task::spawn_blocking(move || {
+                Confirm::new()
+                    .with_prompt("Repeat last scan (from saved config)?")
+                    .default(true)
+                    .interact()
+            })
             .await
             .map_err(|e| anyhow!("wizard task failed: {e}"))??;
+            if interrupted.load(Ordering::Relaxed) {
+                return Err(WizardInterrupted.into());
+            }
+            if repeat {
+                saved
+            } else {
+                tokio::task::spawn_blocking(prompt_config)
+                    .await
+                    .map_err(|e| anyhow!("wizard task failed: {e}"))??
+            }
+        } else {
+            tokio::task::spawn_blocking(prompt_config)
+                .await
+                .map_err(|e| anyhow!("wizard task failed: {e}"))??
+        };
         if interrupted.load(Ordering::Relaxed) {
             return Err(WizardInterrupted.into());
         }

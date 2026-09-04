@@ -28,10 +28,13 @@ use crate::api::types::{
     Mode, ScanConfig, ScanEvent, ScanProgress, ScanSummary, StopCondition, Verdict,
 };
 use crate::configs::{RealSubFetch, SubFetch};
+use crate::engine::speed::{RealSpeedTester, SpeedTester};
 use crate::geo::Geo;
 use crate::probe::Transport;
 use crate::ranges;
-use crate::verify::{HybridTunnelProbe, TunnelProbe, XrayTunnelProbe};
+use crate::verify::{
+    HybridTunnelProbe, RealTunnelOpener, TunnelOpener, TunnelProbe, XrayTunnelProbe,
+};
 
 const PROGRESS_EVERY: u64 = 50;
 const PROGRESS_EVERY_COARSE: u64 = 500;
@@ -67,6 +70,8 @@ pub struct ScanController {
     warp_cache: Option<Arc<crate::warp::SocketCache>>,
     sub_fetch: Arc<dyn SubFetch>,
     tunnel_probe: Arc<dyn TunnelProbe>,
+    speed_tester: Mutex<Arc<dyn SpeedTester>>,
+    session_opener: Mutex<Arc<dyn TunnelOpener>>,
     geo: Arc<Geo>,
     events: broadcast::Sender<ScanEvent>,
     store: Store,
@@ -100,6 +105,8 @@ impl ScanController {
             warp_cache: None,
             sub_fetch: Arc::new(RealSubFetch),
             tunnel_probe: Arc::new(HybridTunnelProbe::new(Arc::new(XrayTunnelProbe))),
+            speed_tester: Mutex::new(Arc::new(RealSpeedTester)),
+            session_opener: Mutex::new(Arc::new(RealTunnelOpener)),
             geo: Arc::new(Geo::embedded()),
             events,
             store: Arc::new(Mutex::new(Vec::new())),
@@ -120,6 +127,14 @@ impl ScanController {
         controller.sub_fetch = sub_fetch;
         controller.tunnel_probe = tunnel_probe;
         controller
+    }
+
+    pub fn set_speed_tester(&self, tester: Arc<dyn SpeedTester>) {
+        *lock(&self.speed_tester) = tester;
+    }
+
+    pub fn set_tunnel_opener(&self, opener: Arc<dyn TunnelOpener>) {
+        *lock(&self.session_opener) = opener;
     }
 
     pub fn subscribe(&self) -> broadcast::Receiver<ScanEvent> {
@@ -383,18 +398,27 @@ impl ScanController {
     }
 
     fn finish(&self, started: Instant, scanned: u64, found: u64) -> ScanSummary {
+        let summary = self.finish_quiet(started, scanned, found);
+        self.emit(ScanEvent::Finished(summary.clone()));
+        summary
+    }
+
+    /// Records the summary without emitting Finished — used by multi-pass
+    /// runs where only the last pass is terminal.
+    fn finish_quiet(&self, started: Instant, scanned: u64, found: u64) -> ScanSummary {
         let cancelled = lock(&self.cancel_tx)
             .as_ref()
             .map(|tx| *tx.subscribe().borrow())
             .unwrap_or(false);
+        let mut last = lock(&self.summary);
         let summary = ScanSummary {
             scanned,
             found,
             duration_ms: started.elapsed().as_millis() as u64,
             cancelled,
         };
-        *lock(&self.summary) = Some(summary.clone());
-        self.emit(ScanEvent::Finished(summary.clone()));
+        *last = Some(summary.clone());
+        drop(last);
         summary
     }
 
