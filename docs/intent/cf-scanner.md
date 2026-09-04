@@ -18,8 +18,8 @@ Status: Confirmed by user (interview-me skill)
 ## Summary
 
 One cross-platform Rust binary that finds working Cloudflare IPs/endpoints for
-restricted networks. Two modes (CDN/proxy and WARP), one local API, an embedded
-browser frontend, and an agent-friendly CLI — all driving the same engine.
+restricted networks. Two modes (CDN/proxy and WARP) behind an agent-friendly
+CLI — all driving the same in-process engine.
 
 ## The Five Lines
 
@@ -27,26 +27,26 @@ browser frontend, and an agent-friendly CLI — all driving the same engine.
   handshake; phase 2: real-config verification via xray subprocess — crates.io
   xray-core is NOT an embedder, see correction #1) and WARP UDP endpoints,
   reporting country/datacenter/latency/packet-loss per result.
-- **User:** Two audiences — CLI agents (JSON API + flags/wizard) and normal
-  users (browser frontend with a clean, fast, sortable results list).
+- **User:** Two audiences — agents (NDJSON on stdout + flags/wizard) and
+  operators (CLI + interactive wizard with live results and file export).
 - **Why now:** The user's ISP blocks/throttles Cloudflare IPs selectively;
   finding working IPs by hand is slow and time-sensitive.
-- **Success:** User picks mode/phase, IP count, stop condition via wizard, flags,
-  or browser; results appear live; copy/save/reset supported; agents can script
-  the entire flow over the local API.
+- **Success:** User picks mode/phase, IP count, stop condition via wizard or
+  flags; results stream live; export/reset supported; agents can script
+  the entire flow over stdout JSON + `--export`.
 - **Constraint:** Single binary, IPv4 by default (opt-in IPv6 since v0.2.0),
-  localhost only, no history (last scan + reset), configs never leave the
+  no history (last scan + reset), configs never leave the
   machine, no telemetry, no speed tests.
 
 ## Detailed Intent (verbatim decisions)
 
 ### Runtime
-- Single binary. Starts local HTTP server on `127.0.0.1` (localhost only).
-- REST + live-events (SSE) API + embedded web frontend.
-- Always offers to open the browser; prints URL/port.
-- CLI flags/subcommands + interactive wizard drive the same in-process API as
-  the browser UI.
-- No history: last scan only; reset button clears memory. No telemetry.
+- Single binary. Pure CLI (ADR-013 removed the HTTP server, browser
+  frontend, and tray): subcommands + interactive wizard drive the same
+  in-process engine.
+- Results stream as NDJSON on stdout with a final summary; human-only
+  progress on stderr (TTY-gated); `--export` writes result/bundle files.
+- No history: last scan only; reset clears memory. No telemetry.
 
 ### CDN/proxy mode
 - Phase 1: TCP+TLS handshake scan over bundled official Cloudflare ranges
@@ -94,21 +94,21 @@ browser frontend, and an agent-friendly CLI — all driving the same engine.
   whitespace; newline-separated. Save (file download). Reset.
 
 ### Stack (confirmed)
-- Rust 2024, tokio, clap, serde, axum, tokio-rustls, reqwest,
+- Rust 2024, tokio, clap, serde, tokio-rustls, reqwest,
   x25519-dalek + chacha20poly1305 + blake2 (WireGuard handshake),
   maxminddb (IP2Location LITE mmdb), tracing, xray as a spawned subprocess
   (see correction #1).
-- Frontend: one embedded HTML file, vanilla JS + native EventSource + custom
-  design system (v0.3.0), zero build step.
-  - Shipped reality (v0.7+): Svelte 5 SPA in `ui/` compiled to committed `ui/dist`, embedded via `rust-embed` (`src/server.rs`), bilingual EN/FA — see `docs/spec.md` §2.
+- Output: NDJSON results on stdout + final summary (`--json-errors` for
+  scripted failures); `--export` renders csv/json/base64/raw/singbox/clash
+  bundles via `src/export.rs`.
 
 ### Release pipeline (confirmed)
 - Public GitHub repo, MIT license. Name: CF-Scanner / cf-scanner.
 - GitHub Actions + cargo-dist. PR checks (test/clippy/fmt).
 - Tag → matrix build → GitHub Release with checksums + installers
   (MSI for Windows, brew for macOS, shell for Linux).
-- Target matrix (5): windows-x86_64, linux-x86_64 (Debian/Fedora/Arch),
-  linux-aarch64 (Termux, static musl), macos-x86_64, macos-aarch64.
+- Target matrix (3): linux-x86_64, linux-aarch64 (Termux, static musl),
+  windows-x86_64 (macOS dropped, ADR-009).
 - Caveat: xray-core has no official windows-arm64 build (not in matrix anyway).
   Termux: xray bundling uses linux-arm64 glibc binary (needs Termux glibc pkg).
 - Unsigned binaries → Windows SmartScreen warning (accepted, ecosystem norm).
@@ -172,7 +172,7 @@ decision required where marked **[DECISION]**.
    Embed via `include_bytes!` + `Reader::from_source`. Attribution link in UI.
    Sources: https://db-ip.com/db/lite.php, https://docs.rs/maxminddb
 
-6. **Release tooling: dist (formerly cargo-dist) v0.31.** `dist init
+6. **Release tooling: dist (formerly cargo-dist) v0.32.** `dist init
    --ci=github` writes `[workspace.metadata.dist]` (targets, installers,
    cargo-dist-version), generates release.yml (plan/build/host/publish).
    Installers: shell + powershell (global), msi (local). `ExtraArtifact`
@@ -186,6 +186,8 @@ decision required where marked **[DECISION]**.
    zero deps, vendorable. `/cdn-cgi/trace` is unofficial but live-verified:
    plain `key=value` lines with `colo` (3-letter datacenter code).
    Sources: https://htmx.org/extensions/sse/, https://picocss.com
-   (Superseded by implementation: the shipped UI is a Svelte 5 SPA in
+   (Superseded by implementation: the shipped UI was a Svelte 5 SPA in
    `ui/src` compiled to committed `ui/dist`, embedded via rust-embed —
-   see docs/spec.md §2 shipped-reality note and CHANGELOG.)
+   see docs/spec.md §2 shipped-reality note and CHANGELOG. Removed in
+   full by ADR-013: the product is a pure CLI, `ui/` and the HTTP
+   server are gone.)

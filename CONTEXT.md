@@ -10,9 +10,9 @@ One cross-platform Rust CLI (`cf-scanner`) finds working Cloudflare IPs
 and endpoints on ISP-restricted networks. It scans in two modes. CDN/proxy
 mode runs a TCP/TLS phase-1 scan plus an optional xray-backed phase 2 with
 DPI fragmentation. WARP mode sends UDP WireGuard handshake probes, verifies
-optionally with your wgconf, and can register a config if you opt in. One
-in-process engine (`ScanController`) serves the CLI and the wizard as thin
-clients. Results are last-scan-only, with no history and no telemetry.
+optionally with your wgconf, and can register a config if you opt in. The CLI
+and the wizard are thin clients of one in-process engine (`ScanController`).
+Results are last-scan-only, with no history and no telemetry.
 
 Read next (pick by task, not wholesale):
 - Changing behavior or the API: `docs/spec.md`, plus ADR-011 before touching
@@ -26,15 +26,16 @@ Read next (pick by task, not wholesale):
 | Module | Files | Owns | Read next |
 |---|---|---|---|
 | API contract | `src/api/types.rs` | ScanConfig/Verdict/StopCondition/events, validation caps (`MAX_*`), `deny_unknown_fields` payloads | ADR-005, ADR-011 |
-| Engine | `src/engine/{mod,cdn,warp,phase2,plan}.rs` | Orchestration, stop conditions, per-worker queues, cancellation (`select!` over probes), verdict store (push + lazy `sort_if_dirty`), event broadcast (4096) | spec 6 tests |
+| Engine | `src/engine/{mod,cdn,warp,phase2,plan,speed}.rs` | Orchestration, stop conditions, per-worker queues, cancellation (`select!` over probes), verdict store (push + lazy `sort_if_dirty`), event broadcast (4096) | spec 6 tests |
 | Export | `src/export.rs` | Results/bundle rendering for `--export`: csv/json dumps, base64/raw/singbox/clash bundles | (none) |
 | Probe (phase 1) | `src/probe.rs` | TLS handshake probe + latency; injectable `Transport`; `no_verify_client_config` (probe/tunnel use ONLY) | intent correction #3 |
 | Phase-2 verify | `src/verify.rs`, `src/inline_verify.rs`, `src/xray.rs`, `src/socks.rs` | Inline VLESS/Trojan wire protocol vs xray subprocess paths; trial-dir hygiene; xray binary lifecycle (`.dgst` verify, zip caps, memo re-stat); fragment/SNI config builder | ADR-001, ADR-004 |
 | WARP probe | `src/warp.rs` | Pools, boringtun Init probe, shape-only open classification, full-session wgconf verification, per-controller `SocketCache` | ADR-002 |
 | WARP identity | `src/warpgen.rs`, `src/wgconf.rs` | v0a884 registration client (typed `WarpRegisterError`), identity persistence, WireGuard/AmneziaWG parse/render | intent WARP section |
-| Ranges & fetch | `src/ranges.rs` | CF pools (bundled + refreshed), CIDR grammar/sampling, shared `HTTP_CLIENT` (per-hop SSRF guard, NO global timeout) | ADR-003 |
+| Ranges & fetch | `src/ranges/{mod,pool,official,http}.rs` | CF pools (bundled + refreshed), CIDR grammar/sampling, shared `HTTP_CLIENT` (per-hop SSRF guard, NO global timeout) | ADR-003 |
 | GeoIP | `src/geo.rs` | Offline country via embedded mmdb; colo via /cdn-cgi/trace | ADR-003 |
 | Config parsing | `src/configs.rs` | vless/trojan/vmess/ss URI, subscription, and xray JSON ingestion; secret sanitization | (none) |
+| Util | `src/util.rs` | Shared small helpers (`percent_decode` for configs, ranges, wgconf) | (none) |
 | CLI surface | `src/main.rs`, `src/cli_wizard.rs` | clap subcommands (scan/wizard/ranges/warp-config/export-config), NDJSON stdout, TTY-gated stderr ticker, `--export`, wizard | spec §3 |
 | Packaging | `build.rs`, `dist-workspace.toml`, `wix/`, `.github/workflows/`, `npm/cf-scanner/` | GeoIP/xray build-time bundling (checksummed), dist matrix (linux x86_64/aarch64 + windows), npm wrapper (sha256-verified installs), CI gates + version-parity job | ADR-007..010 |
 
