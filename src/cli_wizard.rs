@@ -820,7 +820,7 @@ fn config_recap(cfg: &ScanConfig) -> Vec<String> {
 }
 
 fn recap_line(label: &str, value: String) -> String {
-    format!("{:<12}{value}", label)
+    format!("{label:<12}{value}")
 }
 
 fn parse_custom_fragment(values: &str) -> Result<CustomFragment> {
