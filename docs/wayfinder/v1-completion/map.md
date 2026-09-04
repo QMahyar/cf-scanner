@@ -35,6 +35,7 @@ release is tagged.
 - [04: Engine extract](tickets/04-engine-extract.md): new `store.rs` (Store/lock/merge_sorted/PosIndex/update/remove), `neighbor.rs` (ProbeTask/Hub/candidates+test), `test_helpers.rs` (shared FakeSub); `plan_hosts_iter`/`plan_probe_count` → `plan.rs`; 43 lock sites use `lock()`. Net -279 lines. Landed as `e863280`.
 - [06: Verbose debug mode](tickets/06-verbose-debug-mode.md): shared `export::diagnostic_line` (human reasons, loss, country/colo, tunnel detail, IPv6 bracketing); CLI `run_scan` threads global `--verbose` to per-Result stderr lines; wizard prompts verbose + uses it; README documents with examples. 2 format tests. Landed as `d355bd1`.
 - [07: ASN enrichment](tickets/07-asn-enrichment.md): chose keyless ipwho.is (no new deps, public HTTPS, per-hop SSRF-guarded client); `--enrich-asn` opt-in post-scan pass (8 concurrent, 8s timeout, best-effort); Verdict+CSV gain asn/isp; parse/truncate/set_asn unit tests. Landed as `af52a35`.
+- [08: Quality stop + retry-last](tickets/08-quality-stop-retry-last.md): loss/min-latency ALREADY gated found (pre-count filter); added top-up loop — `--speed-test --min-speed` now keeps scanning (max 5 rounds, skip-set, cap budget) until N fast endpoints; `scan --retry-last` + wizard repeat prompt with phase2 redaction; TunnelOpener trait makes speed tests xray-free in tests (fixes flake). Landed as `1017b86`.
 
 ## Not yet specified
 
