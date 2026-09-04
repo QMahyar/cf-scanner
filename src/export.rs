@@ -395,11 +395,41 @@ pub fn write_export(
     if path.as_os_str() == "-" {
         println!("{body}");
     } else {
-        std::fs::write(path, body)
+        atomic_write_file(path, body.as_bytes())
             .map_err(|e| anyhow::anyhow!("could not write {}: {e}", path.display()))?;
         eprintln!("results exported to {}", path.display());
     }
     Ok(())
+}
+
+static EXPORT_TMP_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn atomic_write_file(dest: &std::path::Path, body: &[u8]) -> std::io::Result<()> {
+    use std::io::Write as _;
+    let name = dest
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "out".to_owned());
+    let uniq = EXPORT_TMP_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let tmp = dest.with_file_name(format!("{name}.tmp-{}-{uniq}", std::process::id()));
+    let result = (|| {
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&tmp)?;
+        f.write_all(body)?;
+        f.sync_all()?;
+        #[cfg(windows)]
+        {
+            let _ = std::fs::remove_file(dest);
+        }
+        std::fs::rename(&tmp, dest)
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    result
 }
 
 #[cfg(test)]
@@ -730,5 +760,30 @@ mod tests {
         assert_eq!(p["xhttp-opts"]["path"], "/xh");
         assert_eq!(p["xhttp-opts"]["host"], "cdn.example.com");
         assert_eq!(p["xhttp-opts"]["mode"], "stream");
+    }
+
+    #[test]
+    fn atomic_write_round_trips_and_leaves_no_tmp() {
+        let dir = std::env::temp_dir().join(format!(
+            "cf-scanner-export-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let dest = dir.join("results.csv");
+        atomic_write_file(&dest, b"a,b\n1,2\n").unwrap();
+        assert_eq!(std::fs::read(&dest).unwrap(), b"a,b\n1,2\n");
+        atomic_write_file(&dest, b"overwrite\n").unwrap();
+        assert_eq!(std::fs::read(&dest).unwrap(), b"overwrite\n");
+        let leftovers: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().contains(".tmp-"))
+            .collect();
+        assert!(leftovers.is_empty(), "no tmp files must remain");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

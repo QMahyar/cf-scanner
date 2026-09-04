@@ -210,41 +210,66 @@ impl HttpTransport {
     }
 }
 
+fn step_budgets(timeout_ms: u64) -> (u64, u64, u64) {
+    let connect_ms = (timeout_ms * 30 / 100).max(1);
+    let tls_ms = (timeout_ms * 30 / 100).max(1);
+    let rw_ms = timeout_ms.saturating_sub(connect_ms + tls_ms).max(1);
+    (connect_ms, tls_ms, rw_ms)
+}
+
 impl Transport for HttpTransport {
     fn probe(&self, ip: IpAddr, port: u16, timeout_ms: u64, idle_hold_ms: u64) -> ProbeFuture<'_> {
         let start = Instant::now();
         let server_name = self.server_name.clone();
         let connector = self.connector.clone();
         let accepted = self.accepted_codes.clone();
+        let (connect_ms, tls_ms, rw_ms) = step_budgets(timeout_ms);
         Box::pin(async move {
             let fut = async {
-                let stream = TcpStream::connect((ip, port)).await.map_err(|e| {
+                let stream = timeout(
+                    Duration::from_millis(connect_ms),
+                    TcpStream::connect((ip, port)),
+                )
+                .await
+                .map_err(|_| ProbeError::Timeout { timeout_ms })?
+                .map_err(|e| {
                     tracing::debug!(error = %e, "probe connect failed");
                     ProbeError::Refused("connection refused/closed")
                 })?;
                 let _ = stream.set_nodelay(true);
-                let mut tls = connector.connect(server_name, stream).await.map_err(|e| {
+                let mut tls = timeout(
+                    Duration::from_millis(tls_ms),
+                    connector.connect(server_name, stream),
+                )
+                .await
+                .map_err(|_| ProbeError::Timeout { timeout_ms })?
+                .map_err(|e| {
                     tracing::debug!(error = %e, "probe tls handshake failed");
                     ProbeError::Tls("handshake failed")
                 })?;
-                tls.write_all(b"GET /cdn-cgi/trace HTTP/1.1\r\nHost: cloudflare.com\r\nUser-Agent: curl/8\r\nConnection: close\r\n\r\n")
-                    .await
-                    .map_err(|_| ProbeError::Refused("request write failed"))?;
-                let mut buf = Vec::with_capacity(2048);
-                let mut chunk = [0u8; 4096];
-                loop {
-                    let n = tls.read(&mut chunk).await.map_err(|e| {
-                        tracing::debug!(error = %e, "probe response read failed");
-                        ProbeError::Refused("response read failed")
-                    })?;
-                    if n == 0 {
-                        break;
+                let buf = timeout(Duration::from_millis(rw_ms), async {
+                    tls.write_all(b"GET /cdn-cgi/trace HTTP/1.1\r\nHost: cloudflare.com\r\nUser-Agent: curl/8\r\nConnection: close\r\n\r\n")
+                        .await
+                        .map_err(|_| ProbeError::Refused("request write failed"))?;
+                    let mut buf = Vec::with_capacity(2048);
+                    let mut chunk = [0u8; 4096];
+                    loop {
+                        let n = tls.read(&mut chunk).await.map_err(|e| {
+                            tracing::debug!(error = %e, "probe response read failed");
+                            ProbeError::Refused("response read failed")
+                        })?;
+                        if n == 0 {
+                            break;
+                        }
+                        buf.extend_from_slice(&chunk[..n]);
+                        if buf.len() > 64 * 1024 {
+                            return Err(ProbeError::Refused("trace response too large"));
+                        }
                     }
-                    buf.extend_from_slice(&chunk[..n]);
-                    if buf.len() > 64 * 1024 {
-                        return Err(ProbeError::Refused("trace response too large"));
-                    }
-                }
+                    Ok(buf)
+                })
+                .await
+                .map_err(|_| ProbeError::Timeout { timeout_ms })??;
                 let latency = start.elapsed().as_millis() as u32;
                 Ok((tls, latency, buf))
             };
@@ -668,6 +693,54 @@ mod tests {
         assert_eq!(parse_status_line(b"HTTP/1.1 OK"), None);
         assert_eq!(parse_status_line(b"HTTP/1.1 200x"), None);
         assert_eq!(parse_status_line(b"HTTP/1.1 99999"), None);
+    }
+
+    #[test]
+    fn step_budgets_split_30_30_remainder() {
+        assert_eq!(step_budgets(3000), (900, 900, 1200));
+        assert_eq!(step_budgets(100), (30, 30, 40));
+        let (c, t, r) = step_budgets(1000);
+        assert_eq!(c + t + r, 1000);
+        let (c, t, r) = step_budgets(1);
+        assert!(c >= 1 && t >= 1 && r >= 1);
+    }
+
+    #[tokio::test]
+    async fn stalled_tls_handshake_fails_fast() {
+        let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            loop {
+                let Ok((stream, _)) = listener.accept().await else {
+                    break;
+                };
+                tokio::spawn(async move {
+                    tokio::time::sleep(Duration::from_secs(30)).await;
+                    drop(stream);
+                });
+            }
+        });
+        let transport = HttpTransport::new(vec![200, 301, 302]);
+        let start = Instant::now();
+        let err = transport
+            .probe(
+                std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+                port,
+                3000,
+                0,
+            )
+            .await
+            .expect_err("black-hole TLS handshake must fail");
+        assert!(
+            matches!(err, crate::probe::ProbeError::Timeout { .. }),
+            "stalled handshake must surface as Timeout, got {err:?}"
+        );
+        assert!(
+            start.elapsed() < Duration::from_millis(2500),
+            "per-step TLS budget must fire well before the full timeout"
+        );
     }
 
     #[test]
