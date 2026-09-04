@@ -40,7 +40,7 @@ Titles below match the files exactly.
 
 ## Tracking
 
-- [tasks/wayfinder-map.md](../tasks/wayfinder-map.md): the phase-separation decision ledger (active effort map)
+- [wayfinder/](wayfinder/): effort maps and completion tickets (competitive-catchup, v1-completion)
 - [CHANGELOG.md](../CHANGELOG.md): the change log, newest on top
 
 ## Quality

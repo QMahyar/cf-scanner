@@ -1,7 +1,7 @@
 # Spec: CF-Scanner
 
 > **SUPERSEDED 2026-09-02:** the product is now a pure CLI — the HTTP
-> server, browser UI, and tray described below were removed (ADR-012).
+> server, browser UI, and tray described below were removed (ADR-013).
 > Commands and architecture live in `README.md` and `AGENTS.md`. The
 > engine/scan-model sections remain accurate; every `serve`/`ui/`/tray
 > reference is historical.
@@ -37,21 +37,22 @@ on ISP-restricted networks. Two modes:
   WireGuard/AmneziaWG config; opt-in full config generation via Cloudflare's
   client registration API.
 
-The binary serves a localhost-only HTTP API with an embedded browser frontend
-("clean fast list": sortable IP:port / country / datacenter / latency / loss,
-copy / save / reset). CLI flags, an interactive wizard, and the frontend all
-drive the same in-process engine.
+Results stream as newline-delimited JSON on stdout with a final summary;
+`--export` writes csv/json/base64/raw/singbox/clash bundles to a file.
+CLI flags and an interactive wizard drive the same in-process engine.
 
-Users: normal users via browser UI; agents via CLI/JSON API.
+Users: operators via the CLI and wizard; agents via NDJSON stdout + `--export`.
 
 Success: a user (or agent) can configure a scan (mode, phase, IP target count,
-stop condition, configs) from CLI or browser, watch results arrive live, and
-copy/save working IPs one-per-line — all in one binary, no external services.
+stop condition, configs) from CLI flags or the wizard, watch results arrive
+live, and export working IPs one-per-line — all in one binary, no external
+services.
 
 ## 2. Tech Stack (versions pinned to researched sources)
 
 - Rust edition 2024; `tokio` (async runtime), `clap` 4 (CLI)
-- `axum` (HTTP API), `rust-embed` (embedded UI assets), SSE via axum streams
+- Events: the engine broadcast channel streams results live; the CLI renders
+  NDJSON on stdout plus a TTY-gated progress ticker on stderr
 - TLS probing: `tokio-rustls` + `rustls` (no OpenSSL)
 - `serde` / `serde_json` (API + configs)
 - Xray phase 2: spawn official `xray` binary subprocess, local socks
@@ -64,15 +65,6 @@ copy/save working IPs one-per-line — all in one binary, no external services.
 - GeoIP: `maxminddb` 0.30 (built-in `geoip2` types), db-ip.com Lite MMDB
   embedded via `include_bytes!`
 - Logging: `tracing` + `tracing-subscriber`; `anyhow` (errors)
-- Frontend: Svelte 5 (runes-only) + Tailwind 4 + Vite 7 in `ui/` compiled to
-  committed `ui/dist`, embedded via `rust-embed` (`src/server/mod.rs`),
-  bilingual EN/FA, single origin, no external assets. See
-  `docs/review/product-review-2026-08-13.md`. Dev: `cd ui && npm ci && npm run check && npm run build`; commit `ui/src` with `ui/dist`.
-- Tray (Windows-only): `tray-icon` 0.24 (default-features off) + `winreg` 0.56
-  behind `serve --tray`; `--autostart` registers `serve --tray` at
-  `HKCU\Software\Microsoft\Windows\CurrentVersion\Run\CF-Scanner` (requires
-  `--tray`; `remove` works without). Non-Windows stub logs and serves without
-  tray.
 - Caps (enforced in `src/api/limits.rs` + `src/api/validate.rs`): ports 1-65535,
   max 64 distinct; concurrency 1-1000 (default 64); timeout 100-30000 ms
   (default 3000); scan count ≤100_000; `stop.found`/`cap` ≤100_000_000;
@@ -85,22 +77,19 @@ copy/save working IPs one-per-line — all in one binary, no external services.
 - Configuration: hand-rolled JSON in the platform data dir (`identity.json`
   for WARP keys with 0600 on Unix, `refreshed-ranges.json` +
   `refreshed-ranges-v6.json`);
-  no config crate, no TOML. CLI `--phase2-configs` accepts local file paths;
-  the HTTP API accepts URLs/URIs only (file paths are CLI-only, validated at
-  `server/mod.rs::start_scan`).
+  no config crate, no TOML. CLI `--phase2-configs` accepts local file paths,
+  config URIs, and subscription URLs (parsed in `src/configs.rs`).
 
 ## 3. Commands
 
 ```
 Build:            cargo build --release
-Dev run:          cargo run -- serve --open     # start API + UI on 127.0.0.1:8765
+Dev run:          cargo run -- scan --preset quick --target 20 --cap 5000
 Test:             cargo test
 Lint:             cargo clippy --all-targets -- -D warnings
 Fmt check:        cargo fmt --check
-Scan (one-shot):  cargo run -- scan --preset quick --target 20 --cap 5000
-                  cargo run -- scan --mode warp --count 512 --ports 2408,500
+Scan (warp):      cargo run -- scan --mode warp --count 512 --ports 2408,500
                   cargo run -- scan --phase2-configs vless://... --phase2-fragment medium
-Serve (tray):     cargo run -- serve --tray --autostart   # Windows: tray + HKCU autostart
 Wizard:           cargo run -- wizard
 Ranges:           cargo run -- ranges refresh [--ipv6]
 Warp gen:         cargo run -- warp-config generate [--out wg.conf] [--license KEY]
@@ -115,9 +104,8 @@ Release:          dist build --output-format=json "--artifacts=global" ... (CI o
 
 ```
 src/
-  main.rs            CLI entry (clap): serve | scan | ranges | wizard |
+  main.rs            CLI entry (clap): scan | wizard | ranges |
                      warp-config | export-config
-  server/{mod,state,error,guard,sse}.rs  axum app: API routes, SSE, static frontend via rust-embed
   engine/            ScanController: orchestration, stop conditions, progress
     mod.rs           controller, event stream re-sync, pool planning/sampling
     cdn.rs           CDN phase-1 probe loop + phase-2 handoff
@@ -130,7 +118,6 @@ src/
   verify.rs          HybridTunnelProbe (inline vs xray) + per-attempt trial dirs, socks probe
   inline_verify.rs   in-process vless/trojan verifier (no xray spawn)
   socks.rs           SOCKS5 GET through the tunnel
-  tray.rs            Windows tray-icon + HKCU autostart (stub elsewhere)
   configs.rs         parse vless:// trojan:// vmess:// ss:// URIs, sub URLs,
                      Xray JSON → normalized outbound spec
   warp.rs            WARP pools, UDP probe (boringtun), loss/latency, SocketCache
@@ -147,11 +134,11 @@ src/
                       per scan so the chosen probe protocol runs)
   export.rs          result/bundle rendering (csv, json, base64, raw, singbox,
                       clash, sharelinks)
+  util.rs            shared small helpers (`percent_decode` for configs,
+                      ranges, wgconf)
   engine/speed.rs    opt-in post-stop throughput test (capped sample per
                       phase-2-passing endpoint)
   api/{types,limits,validate,error}.rs  request/response contract + caps
-ui/src               Svelte 5 (runes-only) + Tailwind 4 + Vite SPA
-ui/dist              committed build output embedded via rust-embed
 data/
   cf-ranges.txt      official IPv4 CIDRs
   cf-ranges-v6.txt   official IPv6 CIDRs (opt-in since v0.2.0)
@@ -161,9 +148,8 @@ data/
 build.rs             xray download + .dgst verify for release bundles; geoip
                      mmdb (db-ip.com Lite Country-only, CC BY 4.0) download →
                      OUT_DIR embed
-tests/               integration tests (engine + API)
+tests/               integration tests (engine + CLI)
 docs/                intent, spec, ADRs, review, README
-tasks/               wayfinder-map.md (effort tracker)
 Cargo.toml           app manifest
 dist-workspace.toml  dist (cargo-dist) workspace config
 wix/                 MSI installer source
@@ -174,8 +160,9 @@ wix/                 MSI installer source
 
 - Idiomatic 2024 Rust: `Result<T, anyhow::Error>` at boundaries, typed errors
   internally; `async` only where I/O is real.
-- Public API types in `src/api/`; engine returns domain types; server maps
-  domain → API (no serialization in engine).
+- Contract first: `src/api/` defines ScanConfig/Verdict/StopCondition/events;
+  the engine consumes `api::types` directly (ADR-011); the CLI serializes
+  events to NDJSON on stdout.
 - Every public async function that touches the network takes a timeout;
   no unbounded loops — all scan loops check stop conditions every iteration.
 - Caps are single-sourced in `src/api/limits.rs`; `ScanConfig::validate()`
@@ -220,12 +207,12 @@ pub struct Verdict {
 ## 6. Testing Strategy
 
 - Framework: built-in `#[test]` + `tokio::test`; integration tests hit the
-  engine and the axum API directly (no network — mock/inject transports).
+  engine directly (no network — mock/inject transports).
 - Unit: CIDR expansion, exclusion matching, URI parsers (vless/trojan/vmess/
   ss/subscription), wgconf parser, fragment preset → Xray config JSON builder,
   mmdb lookup, stop-condition state machine.
 - Integration: simulated candidate stream (stubbed probe results) driving
-  ScanController; API contract tests (start scan, SSE stream, results, reset).
+  ScanController; contract tests (scan start, event stream, results, reset).
 - WARP probe: golden-packet tests — hand-crafted 148B Init / 92B Response /
   64B Cookie vectors; boringtun round-trip test with a local test keypair
   (parse our own Init in a peer Tunn).
@@ -234,8 +221,7 @@ pub struct Verdict {
   live subscription URL); never run by default in CI.
 - Coverage bar: whole-project lines >= 70% enforced in CI
   (`cargo llvm-cov --all-targets --fail-under-lines 70`); core engine modules
-  targeted at >= 85% and spot-checked during review (not CI-enforced), UI
-  served smoke test (frontend loads, SSE connects).
+  targeted at >= 85% and spot-checked during review (not CI-enforced).
 - All network tests use injected mock transports; never hit real
   Cloudflare/WARP endpoints in tests.
 
@@ -243,12 +229,9 @@ pub struct Verdict {
 
 - **Always:** run `cargo test` + `cargo clippy -D warnings` + `cargo fmt
   --check` before committing; validate every user input (ports 1-65535, valid
-  CIDRs, URI schemes, caps from §2) and reject over-cap requests (413 for
-  profiles, 422 `invalid_config` for scan caps); check `.dgst` checksums for
-  downloaded xray binaries; bind 127.0.0.1 only unless an explicit flag changes
-  it; keep challenge content (configs, generated keys) out of logs; require
-  `X-Requested-With: cf-scanner` on all state-changing API requests (CSRF
-  hardening — the server guard rejects mutating methods without it).
+  CIDRs, URI schemes, caps from §2) and reject over-cap scan configs (422 `invalid_config`); check `.dgst` checksums for
+  downloaded xray binaries; keep challenge content (configs, generated keys)
+  out of logs.
 - **Ask first:** adding dependencies; changing the API contract
   (`src/api/`); modifying dist/release config; bundling a new binary or data
   file; changing the default scan behavior.
@@ -259,9 +242,10 @@ pub struct Verdict {
 
 ## 8. Success Criteria
 
-- [ ] `cargo run` starts the server on 127.0.0.1, prints URL, offers browser
+- [ ] `scan` prints NDJSON verdicts on stdout + a final summary; human-only
+      progress goes to stderr (TTY-gated)
 - [ ] CDN phase-1 scan runs with presets + custom count, ports, exclusions,
-      stop-after-N + cap; results live in frontend and API; caps enforced
+      stop-after-N + cap; results stream live on stdout; caps enforced
       (ports ≤64, count ≤100k, stop ≤100M)
 - [ ] Phase 2 hybrid verification: plain vless/trojan verifies in-process,
       everything else through embedded Xray with the user's config; verdict
@@ -276,12 +260,11 @@ pub struct Verdict {
       copy with ports / raw IPs (one per line, no trailing whitespace); save
 - [ ] GeoIP: country via embedded mmdb offline; datacenter colo via
   /cdn-cgi/trace in phase 2 (or phase 1 with `--probe http`)
-- [ ] Frontend: Svelte 5 SPA in `ui/` → committed `ui/dist` via rust-embed,
-      `npm run check && npm run build` before commit; `ui/dist` drift fails CI
+- [ ] Export: `scan --export FILE --export-format csv|json|base64|raw|singbox|
+      clash` writes results/bundles to a file (`-` = stdout) via `src/export.rs`
 - [ ] `dist plan` passes for the 3-target matrix (linux x86_64/aarch64 +
-      windows x86_64); PR CI runs test+clippy+fmt+coverage+ui:a11y+version-parity
+      windows x86_64); PR CI runs test+clippy+fmt+coverage+version-parity
 - [ ] README documents Termux musl caveat + xray glibc note + SmartScreen note
-- [ ] Tray: `serve --tray` + `--autostart` (Windows) covered in README + QA runbook
 
 ## 9. Decisions (confirmed 2026-08-12)
 

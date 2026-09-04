@@ -185,7 +185,8 @@ Known npm quirks:
    succeeds. The `host` job attests every published artifact.
 5. Check npm: `npm view @qmahyar/cf-scanner version` shows the bumped
    version, and `npm i -g @qmahyar/cf-scanner` on at least one platform
-   downloads and runs. `cf-scanner serve` starts the API on 127.0.0.1:8765.
+   downloads and runs. `cf-scanner scan --preset quick --target 20` runs a
+   quick scan and prints NDJSON results.
 
 ## Fixing a broken release
 

@@ -3,7 +3,10 @@
 ## Status
 Accepted. Amended by
 [ADR-011](ADR-011-contract-boundary.md) — the contract boundary stands as
-decided; ADR-011 pins down what "domain types" means.
+decided; ADR-011 pins down what "domain types" means. The embedded-UI
+aspect is superseded by [ADR-013](ADR-013-pure-cli.md) (pure CLI — HTTP
+server, browser UI, and tray removed); the one-binary, one-contract
+principle stands for the CLI + wizard clients.
 
 ## Date
 2026-08-13
