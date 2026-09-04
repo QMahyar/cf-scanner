@@ -1,7 +1,11 @@
 use std::net::IpAddr;
+use std::sync::Arc;
+
+use clap::ValueEnum;
 
 use crate::api::types::Verdict;
 use crate::configs;
+use crate::engine::ScanController;
 
 pub const BUNDLE_FORMATS: [&str; 4] = ["base64", "raw", "singbox", "clash"];
 pub const SHARELINK_FORMATS: [&str; 1] = ["sharelinks"];
@@ -344,6 +348,58 @@ fn result_dump(format: &str, verdicts: &[Verdict]) -> String {
             out
         }
     }
+}
+
+#[derive(Copy, Clone, PartialEq, Eq, Debug, ValueEnum)]
+pub enum ExportFormatArg {
+    Csv,
+    Json,
+    Base64,
+    Raw,
+    Singbox,
+    Clash,
+    Sharelinks,
+}
+
+fn export_format_name(format: ExportFormatArg) -> &'static str {
+    match format {
+        ExportFormatArg::Csv => "csv",
+        ExportFormatArg::Json => "json",
+        ExportFormatArg::Base64 => "base64",
+        ExportFormatArg::Raw => "raw",
+        ExportFormatArg::Singbox => "singbox",
+        ExportFormatArg::Clash => "clash",
+        ExportFormatArg::Sharelinks => "sharelinks",
+    }
+}
+
+pub fn write_export(
+    controller: &Arc<ScanController>,
+    path: &std::path::Path,
+    format: ExportFormatArg,
+) -> anyhow::Result<()> {
+    let format_name = export_format_name(format);
+    let results = controller.results();
+    let body = match format {
+        ExportFormatArg::Csv | ExportFormatArg::Json => render_results(format_name, &results),
+        ExportFormatArg::Base64
+        | ExportFormatArg::Raw
+        | ExportFormatArg::Singbox
+        | ExportFormatArg::Clash
+        | ExportFormatArg::Sharelinks => {
+            let configs = controller.phase2_configs();
+            render_bundle(format_name, &results, &configs)
+        }
+    }
+    .map_err(|e| anyhow::anyhow!("export failed: {e}"))?;
+    if path.as_os_str() == "-" {
+        println!("{body}");
+    } else {
+        std::fs::write(path, body)
+            .map_err(|e| anyhow::anyhow!("could not write {}: {e}", path.display()))?;
+        eprintln!("results exported to {}", path.display());
+    }
+    Ok(())
 }
 
 #[cfg(test)]
