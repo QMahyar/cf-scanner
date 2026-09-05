@@ -174,14 +174,20 @@ impl ScanController {
                             }
                         }
                         Err(err) => {
-                            if lock(&passed).len() >= stop_found {
-                                break;
-                            }
+                            // Record the failure before any stop check: a probe that
+                            // errored after the stop budget filled must still count
+                            // toward `errored` and `first_error` (the terminal
+                            // `done == total` accounting depends on it). Only the
+                            // verdict store/emit is skipped once stopped, matching
+                            // the ok-but-failed path above.
                             errored.fetch_add(1, Ordering::Relaxed);
                             let msg = crate::configs::sanitize_error_text(&format!("{err:#}"));
                             let mut slot = lock(&first_error);
                             if slot.is_none() {
                                 *slot = Some(msg.clone());
+                            }
+                            if lock(&passed).len() >= stop_found {
+                                break;
                             }
                             let verdict = Phase2Verdict {
                                 passed: false,
@@ -407,6 +413,8 @@ mod tests {
         sni_pass: Option<&'static str>,
         always_err: std::sync::Arc<AtomicBool>,
         err_text: Option<&'static str>,
+        err_ips: std::sync::Arc<std::sync::Mutex<HashSet<Ipv4Addr>>>,
+        err_gate: Option<Arc<tokio::sync::Notify>>,
         rendezvous: Option<Arc<tokio::sync::Barrier>>,
         url_lists: std::sync::Arc<std::sync::Mutex<Vec<Vec<String>>>>,
         colo_for_all: Option<String>,
@@ -423,6 +431,8 @@ mod tests {
                 sni_pass: None,
                 always_err: std::sync::Arc::new(AtomicBool::new(false)),
                 err_text: None,
+                err_ips: std::sync::Arc::new(std::sync::Mutex::new(HashSet::new())),
+                err_gate: None,
                 rendezvous: None,
                 url_lists: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
                 colo_for_all: None,
@@ -441,6 +451,11 @@ mod tests {
 
         fn pass(self, ip: Ipv4Addr) -> Self {
             lock(&self.passed).insert(ip);
+            self
+        }
+
+        fn err_ip(self, ip: Ipv4Addr) -> Self {
+            lock(&self.err_ips).insert(ip);
             self
         }
     }
@@ -471,6 +486,12 @@ mod tests {
                 }
                 if let Some(text) = this.err_text {
                     return Err(anyhow!("{text}"));
+                }
+                if lock(&this.err_ips).contains(&dial_ip) {
+                    if let Some(gate) = &this.err_gate {
+                        gate.notified().await;
+                    }
+                    return Err(anyhow!("simulated probe failure"));
                 }
                 if let Some(want) = this.sni_pass
                     && sni.as_deref() != Some(want)
@@ -689,6 +710,70 @@ mod tests {
         assert_eq!(
             summary.found, 0,
             "the invisible pass must not consume the stop budget"
+        );
+    }
+
+    /// F-03 regression: a probe that errors after the stop budget filled must
+    /// still count toward `errored` (terminal done == total accounting).
+    /// Deterministic under any candidate order: phase-1 workers rendezvous so
+    /// both rows are stored; phase-2 workers rendezvous past the take/dedup
+    /// checks; the error probe then pends on a Notify until the pass is
+    /// observed in the event stream, so the error always lands post-stop.
+    #[tokio::test]
+    async fn phase2_error_after_stop_still_counts_into_progress_done() {
+        let mut t = FakeTransport::new()
+            .ok("203.0.113.1".parse().unwrap(), 443, 50)
+            .ok("203.0.113.2".parse().unwrap(), 443, 10);
+        t.rendezvous = Some(Arc::new(tokio::sync::Barrier::new(2)));
+        let gate = Arc::new(tokio::sync::Notify::new());
+        let phase2_rendezvous = Arc::new(tokio::sync::Barrier::new(2));
+        let mut probe = FakeTunnelProbe::new()
+            .pass("203.0.113.1".parse().unwrap())
+            .err_ip("203.0.113.2".parse().unwrap());
+        probe.rendezvous = Some(phase2_rendezvous);
+        probe.err_gate = Some(gate.clone());
+        let c = p2_controller(t, FakeSub(""), probe);
+        let mut rx = c.subscribe();
+        let mut cfg = ok_cfg(1, None);
+        cfg.concurrency = 2;
+        cfg.phase2 = Some(Phase2Config {
+            configs: vec![VLESS.to_owned()],
+            concurrency: 2,
+            ..Default::default()
+        });
+        let pool = ranges::CidrPool::parse("203.0.113.1/32\n203.0.113.2/32").unwrap();
+        let handle = tokio::spawn({
+            let c = c.clone();
+            async move { c.run_seeded_with_pool(cfg, 1, pool).await }
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            loop {
+                match rx.recv().await {
+                    Ok(ScanEvent::Result(v)) if v.phase2.as_ref().is_some_and(|p| p.passed) => {
+                        break;
+                    }
+                    Ok(_) => continue,
+                    Err(_) => panic!("event stream closed before the pass landed"),
+                }
+            }
+        })
+        .await
+        .expect("the passing verdict must be stored and emitted");
+        gate.notify_one();
+        handle
+            .await
+            .expect("scan task panicked")
+            .expect("scan failed");
+        let mut max_done = 0u64;
+        while let Ok(ev) = rx.try_recv() {
+            if let ScanEvent::Phase2Progress(p) = ev {
+                max_done = max_done.max(p.done);
+            }
+        }
+        // completed(.1 pass) = 1 + errored(.2) = 1 → done must reach total (2).
+        assert_eq!(
+            max_done, 2,
+            "post-stop errors must count toward progress done"
         );
     }
 
