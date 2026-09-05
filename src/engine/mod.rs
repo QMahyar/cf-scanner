@@ -175,13 +175,6 @@ impl ScanController {
         guard.clone()
     }
 
-    fn phase2_passed(&self) -> u64 {
-        lock(&self.store)
-            .iter()
-            .filter(|v| v.phase2.as_ref().is_some_and(|p| p.passed))
-            .count() as u64
-    }
-
     fn working_found(&self) -> u64 {
         lock(&self.store)
             .iter()

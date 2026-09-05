@@ -55,10 +55,6 @@ pub enum ConfigError {
     ProbeUrlTooLong(usize),
     #[error("wgconf exceeds {0} bytes")]
     WgconfTooLong(usize),
-    #[error("phase2_only requires phase2 configs")]
-    Phase2OnlyNeedsConfigs,
-    #[error("phase2_only is only valid in Cdn mode")]
-    Phase2OnlyWrongMode,
     #[error("preset targets are CDN-only; WARP scans take a count of endpoints")]
     WarpPresetNotAllowed,
     #[error("custom_cidrs is CDN-only; WARP takes custom_endpoints")]

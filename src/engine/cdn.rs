@@ -112,18 +112,6 @@ impl ScanController {
         let phase2 = cfg.phase2.take();
         let phase2_configured = phase2.is_some();
 
-        if cfg.phase2_only {
-            let Some(p2) = phase2 else {
-                return Err(anyhow!("phase2_only requires phase2 configs"));
-            };
-            if lock(&self.store).is_empty() {
-                return Err(anyhow!(
-                    "phase2_only: no candidates to verify (run a full scan first)"
-                ));
-            }
-            self.verify_phase(&cfg, &p2).await?;
-            return Ok(self.finish(started, 0, self.phase2_passed()));
-        }
         if clear {
             self.clear_store();
         }

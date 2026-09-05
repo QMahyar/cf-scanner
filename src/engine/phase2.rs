@@ -1319,28 +1319,4 @@ mod tests {
         assert!(!err.contains("SecretPass123"), "{err}");
         assert!(err.contains("***@1.2.3.4:443"), "{err}");
     }
-
-    #[tokio::test]
-    async fn phase2_only_summary_counts_verified_endpoints_only() {
-        let t = FakeTransport::new()
-            .ok("203.0.113.1".parse().unwrap(), 443, 50)
-            .ok("203.0.113.2".parse().unwrap(), 443, 10);
-        let probe = FakeTunnelProbe::new();
-        let c = p2_controller(t, FakeSub(""), probe.clone());
-        let mut cfg = ok_cfg(2, None);
-        run_local(&c, cfg.clone(), 1).await.unwrap();
-        assert_eq!(probe.attempts.load(Ordering::Relaxed), 0);
-        cfg.phase2 = Some(p2_cfg(&[VLESS], &[]));
-        cfg.phase2_only = true;
-        let summary = run_local(&c, cfg, 1).await.unwrap();
-        assert_eq!(
-            summary.found, 0,
-            "failed verification must not count as found"
-        );
-        assert_eq!(
-            summary.scanned, 0,
-            "phase2_only runs add no phase-1 probe counts"
-        );
-        assert_eq!(probe.attempts.load(Ordering::Relaxed), 2);
-    }
 }

@@ -218,13 +218,6 @@ pub(crate) struct ScanArgs {
 
     #[arg(
         long,
-        requires = "phase2_configs",
-        help_heading = "Phase 2 (xray verification)"
-    )]
-    pub(crate) phase2_only: bool,
-
-    #[arg(
-        long,
         value_enum,
         requires = "phase2_configs",
         help_heading = "Phase 2 (xray verification)"

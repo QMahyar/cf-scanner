@@ -209,8 +209,6 @@ pub struct ScanConfig {
     pub concurrency: u16,
     pub timeout_ms: u64,
     #[serde(default)]
-    pub phase2_only: bool,
-    #[serde(default)]
     pub phase2: Option<Phase2Config>,
     #[serde(default)]
     pub warp: Option<WarpConfig>,
@@ -246,7 +244,6 @@ impl Default for ScanConfig {
             include_v6: false,
             concurrency: DEFAULT_CONCURRENCY,
             timeout_ms: DEFAULT_TIMEOUT_MS,
-            phase2_only: false,
             phase2: None,
             warp: None,
             loss_threshold: None,
@@ -492,9 +489,6 @@ impl ScanConfig {
                     if self.warp.is_some() {
                         return Err(ConfigError::WarpWrongMode);
                     }
-                    if self.phase2_only && self.phase2.is_none() {
-                        return Err(ConfigError::Phase2OnlyNeedsConfigs);
-                    }
                     if self.speed_test && self.phase2.is_none() {
                         return Err(ConfigError::SpeedTestNeedsConfigs);
                     }
@@ -505,9 +499,6 @@ impl ScanConfig {
                 Mode::Warp => {
                     if self.probe_mode != ProbeMode::Tls {
                         return Err(ConfigError::ProbeWrongMode);
-                    }
-                    if self.phase2_only {
-                        return Err(ConfigError::Phase2OnlyWrongMode);
                     }
                     if self.phase2.is_some() {
                         return Err(ConfigError::Phase2WrongMode);
