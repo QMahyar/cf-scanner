@@ -12,10 +12,16 @@ fn last_scan_path() -> Result<PathBuf> {
 }
 
 /// Persist a scan config for `--retry-last`. Phase-2 configs carry proxy
-/// credentials, so the whole phase2 block is dropped before writing.
+/// credentials and `warp.wgconf` carries the WireGuard private key, so both
+/// are dropped before writing (a retry with verify-on but no key would fail
+/// validation; re-supply keys via flags).
 pub fn save_config(cfg: &ScanConfig) -> Result<()> {
     let mut sanitized = cfg.clone();
     sanitized.phase2 = None;
+    if let Some(warp) = sanitized.warp.as_mut() {
+        warp.wgconf = None;
+        warp.verify_with_wgconf = false;
+    }
     let json = serde_json::to_string_pretty(&sanitized)?;
     let _guard = paths::data_write_guard();
     paths::write_secret(&last_scan_path()?, json.as_bytes())?;
@@ -34,7 +40,7 @@ pub fn load_config() -> Result<ScanConfig> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::api::types::{Phase2Config, ScanTarget};
+    use crate::api::types::{Phase2Config, ScanTarget, WarpConfig};
     use crate::paths::test_env::{DATA_DIR_LOCK, IsolatedDataDir};
 
     fn sample() -> ScanConfig {
@@ -62,6 +68,33 @@ mod tests {
         assert!(
             !on_disk.contains("secret"),
             "credentials must never hit disk"
+        );
+    }
+
+    #[test]
+    fn save_strips_warp_private_key() {
+        let _guard = DATA_DIR_LOCK.blocking_lock();
+        let _isolated = IsolatedDataDir::new();
+        let mut cfg = sample();
+        cfg.warp = Some(WarpConfig {
+            wgconf: Some(
+                "[Interface]\nPrivateKey = SUPERSECRETACTUALKEY1234567890=\n".to_owned(),
+            ),
+            verify_with_wgconf: true,
+            ..Default::default()
+        });
+        save_config(&cfg).unwrap();
+        let loaded = load_config().unwrap();
+        let warp = loaded.warp.expect("warp block itself must persist");
+        assert!(warp.wgconf.is_none(), "WARP keys must never be saved");
+        assert!(
+            !warp.verify_with_wgconf,
+            "verify flag must reset when the key is stripped"
+        );
+        let on_disk = std::fs::read_to_string(last_scan_path().unwrap()).unwrap();
+        assert!(
+            !on_disk.contains("SUPERSECRETACTUALKEY"),
+            "private key must never hit disk"
         );
     }
 
