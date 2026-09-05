@@ -292,7 +292,7 @@ impl TunnelProbe for XrayTunnelProbe {
     }
 }
 
-fn fresh_trial_dir(work_dir: &Path) -> PathBuf {
+fn fresh_trial_dir(work_dir: &Path) -> std::io::Result<PathBuf> {
     use rand_core::RngCore;
     let salt = rand_core::OsRng.next_u32();
     let dir = work_dir.join(format!(
@@ -300,21 +300,32 @@ fn fresh_trial_dir(work_dir: &Path) -> PathBuf {
         next_trial_id(),
         std::process::id()
     ));
-    let _ = std::fs::create_dir_all(&dir);
+    std::fs::create_dir_all(&dir)?;
     #[cfg(unix)]
     {
-        // Trial dirs hold xray config.json with proxy credentials: owner-only listing.
+        // Trial dirs hold xray config.json with proxy credentials: fail closed
+        // when owner-only listing cannot be applied.
         use std::os::unix::fs::PermissionsExt as _;
-        let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))?;
     }
-    dir
+    Ok(dir)
 }
 
 async fn make_trial_dir(work_dir: &Path) -> Result<PathBuf> {
     let work_dir = work_dir.to_path_buf();
-    let dir = tokio::task::spawn_blocking(move || -> std::io::Result<PathBuf> {
-        std::fs::create_dir_all(&work_dir)?;
-        Ok(fresh_trial_dir(&work_dir))
+    let dir = tokio::task::spawn_blocking(move || -> Result<PathBuf> {
+        std::fs::create_dir_all(&work_dir).with_context(|| {
+            format!(
+                "refusing to stage proxy credentials under {}",
+                work_dir.display()
+            )
+        })?;
+        fresh_trial_dir(&work_dir).map_err(|e| {
+            anyhow!(
+                "refusing to stage proxy credentials under {}: {e}",
+                work_dir.display()
+            )
+        })
     })
     .await
     .context("trial dir creation task failed")??;
@@ -555,12 +566,30 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn trial_dir_creation_fails_closed_when_blocked() {
+        // A regular file where the work dir should be: create_dir_all fails
+        // deterministically on every platform (no permission tricks needed).
+        let file =
+            std::env::temp_dir().join(format!("cf-scanner-verify-block-{}", std::process::id()));
+        std::fs::write(&file, b"blocker").unwrap();
+        let err = make_trial_dir(&file.join("trial-root"))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("refusing to stage proxy credentials"),
+            "must fail closed with a clear error, got: {err}"
+        );
+        let _ = std::fs::remove_file(&file);
+    }
+
     #[test]
     fn trial_dirs_are_unique() {
         let dir = std::env::temp_dir().join("cf-scanner-verify-unique-test");
         let _ = std::fs::create_dir_all(&dir);
-        let a = fresh_trial_dir(&dir);
-        let b = fresh_trial_dir(&dir);
+        let a = fresh_trial_dir(&dir).unwrap();
+        let b = fresh_trial_dir(&dir).unwrap();
         assert_ne!(a, b, "concurrent trials must never share a config dir");
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -573,7 +602,7 @@ mod tests {
             std::env::temp_dir().join(format!("cf-scanner-verify-perms-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        let trial = fresh_trial_dir(&dir);
+        let trial = fresh_trial_dir(&dir).unwrap();
         let mode = std::fs::metadata(&trial).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o700, "trial dir must be owner-only");
         let _ = std::fs::remove_dir_all(&dir);
