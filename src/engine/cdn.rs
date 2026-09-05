@@ -327,7 +327,10 @@ impl ScanController {
                         inflight.fetch_sub(1, Ordering::AcqRel);
                         break;
                     };
-                    ctx.scanned.fetch_add(1, Ordering::Relaxed);
+                    // Release pairs with the Acquire reads in should_stop: on
+                    // weakly-ordered targets (aarch64) a Relaxed write could
+                    // stay invisible to the producer and overshoot cap/found.
+                    ctx.scanned.fetch_add(1, Ordering::Release);
                     let verdict = match outcome {
                         Ok(probe) => {
                             let ProbeOutcome {
@@ -386,7 +389,7 @@ impl ScanController {
                     inflight.fetch_sub(1, Ordering::AcqRel);
                     if let Some(verdict) = verdict {
                         if verdict.latency_ms.is_some() {
-                            ctx.found.fetch_add(1, Ordering::Relaxed);
+                            ctx.found.fetch_add(1, Ordering::Release);
                             let _ =
                                 ctx.events.send(ScanEvent::Result(Box::new(verdict.clone())));
                         }

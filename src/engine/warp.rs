@@ -172,9 +172,10 @@ impl ScanController {
                     if cancelled {
                         break;
                     }
-                    ctx.scanned.fetch_add(1, Ordering::Relaxed);
+                    // Release pairs with the Acquire reads in should_stop (see cdn.rs).
+                    ctx.scanned.fetch_add(1, Ordering::Release);
                     if let Some(latency) = latency_ms.filter(|_| failed == 0) {
-                        ctx.found.fetch_add(1, Ordering::Relaxed);
+                        ctx.found.fetch_add(1, Ordering::Release);
                         let verdict = Box::new(Verdict {
                             ip: task.ip,
                             port: task.port,
