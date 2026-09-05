@@ -77,9 +77,7 @@ mod tests {
         let _isolated = IsolatedDataDir::new();
         let mut cfg = sample();
         cfg.warp = Some(WarpConfig {
-            wgconf: Some(
-                "[Interface]\nPrivateKey = SUPERSECRETACTUALKEY1234567890=\n".to_owned(),
-            ),
+            wgconf: Some("[Interface]\nPrivateKey = SUPERSECRETACTUALKEY1234567890=\n".to_owned()),
             verify_with_wgconf: true,
             ..Default::default()
         });

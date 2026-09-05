@@ -7,7 +7,7 @@ use anyhow::{Context as _, Result, anyhow, bail};
 use tokio::sync::watch;
 use tokio::task::JoinSet;
 
-use super::store::{PosIndex, remove_verdict, update_verdict_phase2};
+use super::store::{PosIndex, remove_verdict_unless_passed, update_verdict_phase2};
 use super::{ScanController, cancelled_signal, claim_milestone, colo_rejected, lock};
 use crate::api::types::{
     Phase2Config, Phase2Progress, Phase2Verdict, ScanConfig, ScanEvent, Verifier,
@@ -150,18 +150,23 @@ impl ScanController {
                                 verifier: result.verifier.and_then(parse_verifier),
                                 speed_test_mbps: None,
                             };
-                            if result.passed && colo_kept {
-                                lock(&passed).insert((ip, port));
-                            }
                             if lock(&passed).len() >= stop_found && !result.passed {
                                 break;
                             }
                             let overshoot = lock(&passed).len() > stop_found;
                             if !colo_kept {
-                                remove_verdict(&store, ip, port, &pos_index);
+                                remove_verdict_unless_passed(&store, ip, port, &pos_index);
                             } else if let Some(updated) =
                                 update_verdict_phase2(&store, ip, port, verdict, colo, &pos_index)
                             {
+                                if result.passed {
+                                    // A kept pass counts toward the stop budget only
+                                    // when its verdict is visible in the store: a row
+                                    // removed by a racing colo rejection yields no row
+                                    // to update, and such an invisible pass must not
+                                    // consume stop budget.
+                                    lock(&passed).insert((ip, port));
+                                }
                                 let _ = events.send(ScanEvent::Result(Box::new(updated)));
                             }
                             if overshoot {
@@ -405,6 +410,9 @@ mod tests {
         rendezvous: Option<Arc<tokio::sync::Barrier>>,
         url_lists: std::sync::Arc<std::sync::Mutex<Vec<Vec<String>>>>,
         colo_for_all: Option<String>,
+        colo_by_server: std::collections::HashMap<String, String>,
+        gated_server: Option<String>,
+        gate: Option<Arc<tokio::sync::Barrier>>,
     }
 
     impl FakeTunnelProbe {
@@ -418,6 +426,9 @@ mod tests {
                 rendezvous: None,
                 url_lists: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
                 colo_for_all: None,
+                colo_by_server: std::collections::HashMap::new(),
+                gated_server: None,
+                gate: None,
             }
         }
 
@@ -442,10 +453,16 @@ mod tests {
             let this = self.clone();
             let sni = req.sni.map(str::to_owned);
             let dial_ip = req.dial_ip;
+            let server = req.spec.server.clone();
             let urls = req.probe_urls.to_vec();
             Box::pin(async move {
                 if let Some(barrier) = &this.rendezvous {
                     barrier.wait().await;
+                }
+                if this.gated_server.as_deref() == Some(server.as_str())
+                    && let Some(gate) = &this.gate
+                {
+                    gate.wait().await;
                 }
                 this.attempts.fetch_add(1, Ordering::Relaxed);
                 lock(&this.url_lists).push(urls);
@@ -466,10 +483,15 @@ mod tests {
                     });
                 }
                 let passed = lock(&this.passed).contains(&dial_ip);
+                let colo = this
+                    .colo_by_server
+                    .get(&server)
+                    .cloned()
+                    .or_else(|| this.colo_for_all.clone());
                 Ok(TunnelResult {
                     passed,
                     latency_ms: passed.then_some(7),
-                    colo: this.colo_for_all.clone(),
+                    colo,
                     verifier: None,
                 })
             })
@@ -497,6 +519,7 @@ mod tests {
     }
 
     const VLESS: &str = "vless://aaaaaaaa-bbbb-cccc-dddd-eeeeffff0000@1.2.3.4:443";
+    const VLESS_B: &str = "vless://aaaaaaaa-bbbb-cccc-dddd-eeeeffff0001@5.6.7.8:443";
 
     #[tokio::test]
     async fn colo_filter_drops_known_foreign_colo_results_in_phase2() {
@@ -544,6 +567,129 @@ mod tests {
             .expect("the matching-colo endpoint must be kept");
         assert_eq!(kept.colo.as_deref(), Some("hkg"));
         assert!(kept.phase2.as_ref().is_some_and(|p| p.passed));
+    }
+
+    /// F-02 regression: a kept-colo pass stored by one worker must survive a
+    /// rejected-colo removal by a racing worker. Deterministic: both workers
+    /// rendezvous past the dedup check, the rejected probe is gated until the
+    /// kept pass is observed in the event stream, then released.
+    #[tokio::test]
+    async fn kept_colo_pass_survives_racing_rejected_colo_removal() {
+        let t = FakeTransport::new().ok("203.0.113.1".parse().unwrap(), 443, 50);
+        let rendezvous = Arc::new(tokio::sync::Barrier::new(2));
+        let gate = Arc::new(tokio::sync::Barrier::new(2));
+        let mut probe = FakeTunnelProbe::new().pass("203.0.113.1".parse().unwrap());
+        probe.rendezvous = Some(rendezvous);
+        probe
+            .colo_by_server
+            .insert("1.2.3.4".to_owned(), "DFW".to_owned());
+        probe
+            .colo_by_server
+            .insert("5.6.7.8".to_owned(), "FRA".to_owned());
+        probe.gated_server = Some("5.6.7.8".to_owned());
+        probe.gate = Some(gate.clone());
+        let c = p2_controller(t, FakeSub(""), probe);
+        let mut rx = c.subscribe();
+        let mut cfg = ok_cfg(8, None);
+        cfg.colo_filter = vec!["DFW".to_owned()];
+        cfg.phase2 = Some(p2_cfg(&[VLESS, VLESS_B], &[]));
+        let handle = tokio::spawn({
+            let c = c.clone();
+            async move { run_local(&c, cfg, 1).await }
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            loop {
+                match rx.recv().await {
+                    Ok(ScanEvent::Result(v)) if v.phase2.as_ref().is_some_and(|p| p.passed) => {
+                        break;
+                    }
+                    Ok(_) => continue,
+                    Err(_) => panic!("event stream closed before the kept pass landed"),
+                }
+            }
+        })
+        .await
+        .expect("kept-colo pass must be stored and emitted");
+        gate.wait().await;
+        handle
+            .await
+            .expect("scan task panicked")
+            .expect("scan failed");
+        let results = c.results();
+        let kept = results
+            .iter()
+            .find(|v| v.ip == "203.0.113.1".parse::<IpAddr>().unwrap())
+            .expect("the kept-colo verdict row must survive the racing removal");
+        assert_eq!(kept.colo.as_deref(), Some("DFW"));
+        assert!(kept.phase2.as_ref().is_some_and(|p| p.passed));
+        assert!(
+            results.iter().all(|v| v.colo.as_deref() != Some("FRA")),
+            "no rejected-colo verdict may be stored: {results:#?}"
+        );
+    }
+
+    /// Reverse order pins the decided contract: a rejected-colo removal first,
+    /// then a kept pass with no row to update, leaves no phantom row and
+    /// consumes no stop budget (the pass is neither stored nor counted).
+    #[tokio::test]
+    async fn rejected_colo_first_then_kept_pass_leaves_no_phantom_row() {
+        let t = FakeTransport::new().ok("203.0.113.1".parse().unwrap(), 443, 50);
+        let rendezvous = Arc::new(tokio::sync::Barrier::new(2));
+        let gate = Arc::new(tokio::sync::Barrier::new(2));
+        let mut probe = FakeTunnelProbe::new().pass("203.0.113.1".parse().unwrap());
+        probe.rendezvous = Some(rendezvous);
+        probe
+            .colo_by_server
+            .insert("1.2.3.4".to_owned(), "DFW".to_owned());
+        probe
+            .colo_by_server
+            .insert("5.6.7.8".to_owned(), "FRA".to_owned());
+        probe.gated_server = Some("1.2.3.4".to_owned());
+        probe.gate = Some(gate.clone());
+        let c = p2_controller(t, FakeSub(""), probe);
+        let mut cfg = ok_cfg(8, None);
+        cfg.colo_filter = vec!["DFW".to_owned()];
+        cfg.phase2 = Some(p2_cfg(&[VLESS, VLESS_B], &[]));
+        let handle = tokio::spawn({
+            let c = c.clone();
+            async move { run_local(&c, cfg, 1).await }
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            loop {
+                let gone = c
+                    .results()
+                    .iter()
+                    .all(|v| v.ip != "203.0.113.1".parse::<IpAddr>().unwrap());
+                if gone {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("rejected-colo removal must drop the phase-1 row");
+        gate.wait().await;
+        let summary = handle
+            .await
+            .expect("scan task panicked")
+            .expect("scan failed");
+        let results = c.results();
+        assert!(
+            results
+                .iter()
+                .all(|v| v.ip != "203.0.113.1".parse::<IpAddr>().unwrap()),
+            "no phantom row may appear for the removed candidate: {results:#?}"
+        );
+        assert!(
+            results
+                .iter()
+                .all(|v| !v.phase2.as_ref().is_some_and(|p| p.passed)),
+            "nothing may count as verified: {results:#?}"
+        );
+        assert_eq!(
+            summary.found, 0,
+            "the invisible pass must not consume the stop budget"
+        );
     }
 
     #[tokio::test]
