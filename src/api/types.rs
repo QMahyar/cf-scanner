@@ -143,6 +143,10 @@ pub struct Phase2Config {
 }
 
 impl Phase2Config {
+    /// Effective probe URLs: `probe_urls` wins when non-empty, otherwise the
+    /// legacy single `probe_url`, otherwise the built-in default. Both
+    /// supplied forms are validated; `probe_urls` and `probe_url` are never
+    /// merged.
     pub fn effective_probe_urls(&self) -> Vec<String> {
         if !self.probe_urls.is_empty() {
             self.probe_urls.clone()
@@ -470,6 +474,14 @@ impl ScanConfig {
             if self.probe_mode == ProbeMode::Http && self.accepted_http_codes.is_empty() {
                 return Err(ConfigError::EmptyHttpCodes);
             }
+            // Empty means unset (ignored outside Http, per pinned behavior);
+            // a customized list outside Http mode signals confused intent.
+            if self.probe_mode != ProbeMode::Http
+                && !self.accepted_http_codes.is_empty()
+                && self.accepted_http_codes != default_accepted_http_codes()
+            {
+                return Err(ConfigError::HttpCodesNeedHttpProbe);
+            }
             if let Some(min) = self.min_speed_mbps {
                 if !self.speed_test {
                     return Err(ConfigError::MinSpeedNeedsSpeedTest);
@@ -508,6 +520,9 @@ impl ScanConfig {
                     }
                     if self.speed_test {
                         return Err(ConfigError::SpeedTestWrongMode);
+                    }
+                    if self.neighbor_count > 0 {
+                        return Err(ConfigError::NeighborWrongMode);
                     }
                     if let ScanTarget::Preset(_) = self.target {
                         return Err(ConfigError::WarpPresetNotAllowed);

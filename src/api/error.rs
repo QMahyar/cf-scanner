@@ -89,6 +89,8 @@ pub enum ConfigError {
     InvalidHttpStatusCode(u16),
     #[error("http probe mode requires at least one accepted status code")]
     EmptyHttpCodes,
+    #[error("accepted_http_codes requires ProbeMode::Http")]
+    HttpCodesNeedHttpProbe,
     #[error("probe modes are CDN-only; WARP uses WireGuard handshake probes")]
     ProbeWrongMode,
     #[error("idle_hold_ms {0} out of range 0-{MAX_IDLE_HOLD_MS}")]
@@ -101,6 +103,8 @@ pub enum ConfigError {
     MinSpeedNeedsSpeedTest,
     #[error("--min-speed must be a finite number greater than 0")]
     InvalidMinSpeed,
+    #[error("neighbor-scan is only valid in Cdn mode")]
+    NeighborWrongMode,
     #[error("neighbor_count {0} out of range 0-{MAX_NEIGHBORS}")]
     InvalidNeighbor(u32),
     #[error(

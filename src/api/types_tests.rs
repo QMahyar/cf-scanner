@@ -299,6 +299,32 @@ fn http_mode_rejects_empty_accepted_codes() {
 }
 
 #[test]
+fn rejects_neighbor_scan_in_warp_mode() {
+    let mut c = valid_config();
+    c.mode = Mode::Warp;
+    c.ports = vec![Port::new(2408)];
+    c.neighbor_count = 4;
+    assert_eq!(c.validate(), Err(ConfigError::NeighborWrongMode));
+    c.neighbor_count = 0;
+    assert_eq!(c.validate(), Ok(()));
+}
+
+#[test]
+fn rejects_custom_http_codes_without_http_probe() {
+    let mut c = valid_config();
+    c.probe_mode = ProbeMode::Tcp;
+    c.accepted_http_codes = vec![200];
+    assert_eq!(c.validate(), Err(ConfigError::HttpCodesNeedHttpProbe));
+    c.probe_mode = ProbeMode::Tls;
+    assert_eq!(c.validate(), Err(ConfigError::HttpCodesNeedHttpProbe));
+    c.accepted_http_codes = default_accepted_http_codes();
+    assert_eq!(c.validate(), Ok(()), "untouched defaults stay valid");
+    c.probe_mode = ProbeMode::Http;
+    c.accepted_http_codes = vec![200];
+    assert_eq!(c.validate(), Ok(()));
+}
+
+#[test]
 fn rejects_non_tls_probe_mode_in_warp() {
     let mut c = valid_config();
     c.mode = Mode::Warp;
