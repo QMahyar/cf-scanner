@@ -29,4 +29,11 @@ P4 export/distribution → P5 architecture paydown → approved P6 capabilities.
 ## Decisions so far
 
 <!-- one line per closed ticket -->
-- (program start; none closed yet)
+
+- P0 complete (T-01..T-14, committed): wgconf stripped on retry save;
+  phase-2 colo race closed; post-stop errors counted; neighbor drain
+  double-checked; Release ordering on stop counters; retry load validates;
+  serde-compat retry format (tolerant top level); saturate-then-cap (F-08
+  verified not-a-bug, clarified); --phase2-only removed; precise SSRF
+  literal check; trial dirs fail closed; speed-cancel cleanup; loud
+  range-fallback warnings; refresh persists off async workers.
