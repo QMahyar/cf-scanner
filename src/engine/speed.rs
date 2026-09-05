@@ -6,12 +6,13 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{Result, bail};
 
 use super::{ScanController, Store, cancelled_signal, lock};
 use crate::api::types::{FragmentPreset, Phase2Config, ScanConfig, ScanEvent, Verdict};
 use crate::configs::OutboundSpec;
 use crate::verify::TunnelOpener;
+use tokio::sync::watch;
 
 /// 8 MiB download cap per endpoint.
 pub const SPEED_TEST_BYTES: usize = 8 * 1024 * 1024;
@@ -190,10 +191,20 @@ impl ScanController {
                     if *cancel.borrow() {
                         return;
                     }
-                    let outcome = tokio::select! {
-                        r = measure_through_tunnel(&opener, &tester, &entry, custom.as_ref(), ip) => r,
-                        _ = cancelled_signal(cancel.clone()) => return,
-                    };
+                    let outcome = measure_through_tunnel(
+                        &opener,
+                        &tester,
+                        &entry,
+                        custom.as_ref(),
+                        ip,
+                        &cancel,
+                    )
+                    .await;
+                    if *cancel.borrow() {
+                        // Cancelled mid-download: the tunnel was already torn
+                        // down inside; record nothing (as before).
+                        return;
+                    }
                     measured.fetch_add(1, Ordering::Relaxed);
                     if let Some(updated) = apply_speed_result(&store, ip, port, &outcome, min_speed)
                     {
@@ -221,6 +232,7 @@ async fn measure_through_tunnel(
     entry: &PassingSpec,
     custom: Option<&crate::api::types::CustomFragment>,
     ip: Ipv4Addr,
+    cancel: &watch::Receiver<bool>,
 ) -> Result<f32> {
     let tunnel = opener
         .open(
@@ -231,9 +243,22 @@ async fn measure_through_tunnel(
             ip,
         )
         .await?;
-    let result = measure_endpoint(tester.as_ref(), tunnel.socks_addr).await;
-    tunnel.cleanup().await;
-    result
+    // The select lives INSIDE so every path awaits tunnel.cleanup():
+    // dropping this future mid-download (the old caller-side select) leaked
+    // the xray child and its credential-bearing trial dir.
+    let download = measure_endpoint(tester.as_ref(), tunnel.socks_addr);
+    tokio::select! {
+        biased;
+        _ = cancelled_signal(cancel.clone()) => {
+            tunnel.cleanup().await;
+            bail!("speed test cancelled");
+        }
+        result = download => {
+            let result = result;
+            tunnel.cleanup().await;
+            result
+        }
+    }
 }
 
 #[cfg(test)]
@@ -443,6 +468,133 @@ mod tests {
                 ))
             })
         }
+    }
+
+    /// Opener that counts opens and cleanups so tests can prove teardown runs.
+    struct CountingOpener {
+        opens: Arc<AtomicU64>,
+        cleanups: Arc<AtomicU64>,
+    }
+
+    impl CountingOpener {
+        fn new() -> Self {
+            Self {
+                opens: Arc::new(AtomicU64::new(0)),
+                cleanups: Arc::new(AtomicU64::new(0)),
+            }
+        }
+    }
+
+    impl crate::verify::TunnelOpener for CountingOpener {
+        fn open(
+            &self,
+            _spec: &OutboundSpec,
+            _preset: &FragmentPreset,
+            _custom: Option<&crate::api::types::CustomFragment>,
+            _sni: Option<&str>,
+            _dial_ip: Ipv4Addr,
+        ) -> Pin<Box<dyn Future<Output = Result<crate::verify::OpenedTunnel>> + Send + '_>>
+        {
+            self.opens.fetch_add(1, Ordering::Relaxed);
+            let cleanups = self.cleanups.clone();
+            Box::pin(async move {
+                Ok(crate::verify::OpenedTunnel::new(
+                    SocketAddr::new(std::net::Ipv4Addr::LOCALHOST.into(), 1),
+                    Box::pin(async move {
+                        cleanups.fetch_add(1, Ordering::Relaxed);
+                    }),
+                ))
+            })
+        }
+    }
+
+    /// Tester whose download never resolves, so cancel always wins the race.
+    struct HangingTester;
+
+    impl SpeedTester for HangingTester {
+        fn download<'a>(
+            &'a self,
+            _url: &'a str,
+            _socks: SocketAddr,
+            _max_bytes: usize,
+            _timeout: Duration,
+        ) -> SpeedDownload<'a> {
+            Box::pin(async { std::future::pending::<Result<(u64, f64)>>().await })
+        }
+    }
+
+    #[tokio::test]
+    async fn cancelled_download_still_runs_tunnel_cleanup() {
+        let opener = Arc::new(CountingOpener::new());
+        let opener_dyn: Arc<dyn TunnelOpener> = opener.clone();
+        let tester: Arc<dyn SpeedTester> = Arc::new(HangingTester);
+        let spec =
+            crate::configs::parse_uri("vless://aaaaaaaa-bbbb-cccc-dddd-eeeeffff0000@1.2.3.4:443")
+                .unwrap();
+        let entry = PassingSpec {
+            spec,
+            fragment: FragmentPreset::Off,
+            sni: None,
+        };
+        let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
+        let ip: Ipv4Addr = "203.0.113.1".parse().unwrap();
+        let handle = tokio::spawn({
+            let opener_dyn = opener_dyn.clone();
+            let tester = tester.clone();
+            let entry = entry.clone();
+            let cancel_rx = cancel_rx.clone();
+            async move {
+                measure_through_tunnel(&opener_dyn, &tester, &entry, None, ip, &cancel_rx).await
+            }
+        });
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while opener.opens.load(Ordering::Relaxed) == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the tunnel must open before cancel fires");
+        cancel_tx.send(true).unwrap();
+        let outcome = tokio::time::timeout(Duration::from_secs(10), handle)
+            .await
+            .expect("cancelled download must resolve")
+            .expect("task panicked");
+        assert!(outcome.is_err(), "cancel must surface as an error");
+        assert_eq!(
+            opener.cleanups.load(Ordering::Relaxed),
+            1,
+            "the tunnel must be torn down even when cancel wins mid-download"
+        );
+    }
+
+    #[tokio::test]
+    async fn successful_download_runs_tunnel_cleanup_exactly_once() {
+        let opener = Arc::new(CountingOpener::new());
+        let opener_dyn: Arc<dyn TunnelOpener> = opener.clone();
+        let tester: Arc<dyn SpeedTester> = Arc::new(FakeTester {
+            bytes: 1024,
+            seconds: 1.0,
+            fail: false,
+        });
+        let spec =
+            crate::configs::parse_uri("vless://aaaaaaaa-bbbb-cccc-dddd-eeeeffff0000@1.2.3.4:443")
+                .unwrap();
+        let entry = PassingSpec {
+            spec,
+            fragment: FragmentPreset::Off,
+            sni: None,
+        };
+        let (_cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
+        let ip: Ipv4Addr = "203.0.113.1".parse().unwrap();
+        measure_through_tunnel(&opener_dyn, &tester, &entry, None, ip, &cancel_rx)
+            .await
+            .unwrap();
+        assert_eq!(opener.opens.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            opener.cleanups.load(Ordering::Relaxed),
+            1,
+            "success path must also tear down exactly once"
+        );
     }
 
     #[tokio::test]
