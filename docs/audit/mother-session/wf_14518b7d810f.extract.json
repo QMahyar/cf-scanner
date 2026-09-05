@@ -1,0 +1,452 @@
+[
+ {
+  "issues": [
+   {
+    "severity": "high",
+    "title": "Phase-2 scan flags undocumented",
+    "description": "All --phase2-* flags (--phase2-only, --phase2-fragment, --phase2-custom, --phase2-snis, --phase2-probe-urls, --phase2-concurrency) are missing from the Commands table. Users cannot discover phase-2 configuration without --help.",
+    "location": "README.md Commands table"
+   },
+   {
+    "severity": "high",
+    "title": "WARP scan flags undocumented",
+    "description": "--warp-probes, --warp-endpoints, --warp-verify, --warp-wgconf-file are completely absent from the README. WARP mode users have no documentation for scan configuration.",
+    "location": "README.md Commands table"
+   },
+   {
+    "severity": "medium",
+    "title": "export-config --sni flag missing",
+    "description": "cli.rs defines --sni on the ExportConfig subcommand but the README omits it.",
+    "location": "README.md Commands table, export-config row"
+   },
+   {
+    "severity": "medium",
+    "title": "warp-config sub-flags undocumented",
+    "description": "warp-config generate (--out, --license, --endpoint) and warp-config export (--out, --endpoint) flags are not documented.",
+    "location": "README.md Commands table, warp-config rows"
+   },
+   {
+    "severity": "medium",
+    "title": "General scan flags undocumented",
+    "description": "--concurrency, --timeout-ms, --exclude, --custom-cidrs, --seed, --http-status-code are all absent from the README.",
+    "location": "README.md Commands table"
+   },
+   {
+    "severity": "low",
+    "title": "scan --ipv6 undocumented",
+    "description": "The --ipv6 flag exists on scan (ScanArgs) but is only mentioned under ranges refresh. Users may not know they can scan IPv6 ranges directly.",
+    "location": "README.md"
+   },
+   {
+    "severity": "low",
+    "title": "No Node.js prerequisite guidance",
+    "description": "The npm install path assumes Node.js is available but provides no guidance for users who lack it.",
+    "location": "README.md Quick start > Install"
+   }
+  ],
+  "accuracy_score": 0.85
+ },
+ {
+  "todos": []
+ },
+ {
+  "issues": [
+   {
+    "severity": "medium",
+    "title": "MSRV stated as 1.85 but is actually 1.88",
+    "description": "docs/development.md says 'Cargo.toml keeps the MSRV floor at 1.85' but Cargo.toml has rust-version = \"1.88\". This is a factual error that could confuse contributors about minimum supported Rust version.",
+    "location": "docs/development.md, line ~6 (Prerequisites section)"
+   },
+   {
+    "severity": "low",
+    "title": "npm version bump described as conditional but is mandatory",
+    "description": "release-process.md step 3 says 'Bump the npm wrapper if binaries changed' but the version-parity CI job enforces Cargo.toml == package.json == RELEASE_TAG unconditionally. Should read 'Bump the npm wrapper' without the conditional.",
+    "location": "docs/release-process.md, step 3 of 'Prepare the release'"
+   },
+   {
+    "severity": "low",
+    "title": "Nightly schedule trigger not documented",
+    "description": "checks.yml has schedule cron '0 6 * * *' but neither documentation file mentions the nightly CI run. Minor omission but affects contributor understanding of CI behavior.",
+    "location": ".github/workflows/checks.yml (not documented in any docs/ file)"
+   },
+   {
+    "severity": "very-low",
+    "title": "curl-not-found error missing from troubleshooting table",
+    "description": "build.rs calls Command::new('curl') with no fallback. If curl is absent the build fails with an opaque error, but the troubleshooting table only covers download/checksum failures.",
+    "location": "docs/development.md, Troubleshooting table"
+   }
+  ],
+  "accuracy_score": 93
+ },
+ {
+  "issues": [
+   {
+    "severity": "low",
+    "title": "Undocumented sharelinks export format",
+    "description": "AGENTS.md lists --export-format as csv|json|base64|raw|singbox|clash but the actual ExportFormatArg enum in src/export.rs also supports 'sharelinks'. Users can pass --export-format sharelinks but it is not documented.",
+    "location": "AGENTS.md, Commands section, export flag description"
+   },
+   {
+    "severity": "low",
+    "title": "Orphaned server-era payload types in src/api/types.rs",
+    "description": "ResultsPayload, StatusPayload, RangesPayload, XrayStatusPayload, XrayDownloadResponse, RegisterRequest, RegisterResponse, ExportConfigRequest, ExportConfigResponse are defined but unused after the HTTP server was removed in 2026-09-02. These are dead code remnants that could confuse agents trying to understand the architecture.",
+    "location": "src/api/types.rs"
+   }
+  ],
+  "accuracy_score": 0.97
+ },
+ {
+  "issues": [
+   {
+    "severity": "medium",
+    "title": "Missing [Unreleased] section",
+    "description": "Keep-a-Changelog requires an `## [Unreleased]` section at the top even if empty. Two commits exist on main after v0.13.0 (CI fix, gitignore chore) with nowhere to track them. A prior commit (ddb63f2) added one but it was removed when 0.13.0 shipped."
+   },
+   {
+    "severity": "medium",
+    "title": "Version ordering broken: 0.12.x split by 0.11.x",
+    "description": "0.12.1 and 0.12.0 appear after 0.11.0 instead of before it. Correct order: 0.13.0 > 0.12.2 > 0.12.1 > 0.12.0 > 0.11.1 > 0.11.0 > 0.10.0. Current: 0.13.0 > 0.12.2 > 0.11.1 > 0.11.0 > 0.12.1 > 0.12.0 > 0.10.0."
+   },
+   {
+    "severity": "low",
+    "title": "Non-standard subsections",
+    "description": "Adds Performance, Reliability, UI, Docs subsections in 0.4.0 and 0.5.0. Spec defines exactly six: Added, Changed, Deprecated, Removed, Fixed, Security."
+   },
+   {
+    "severity": "none",
+    "title": "All 17 versions documented",
+    "description": "Every git tag v0.1.0-v0.13.0 has a corresponding section with matching link definition."
+   },
+   {
+    "severity": "none",
+    "title": "Entries accurate vs git history",
+    "description": "Changelog entries align with git log commits and prefixes. Post-v0.13.0 commits are minor CI/tooling only."
+   },
+   {
+    "severity": "none",
+    "title": "All 17 links valid",
+    "description": "Every bottom link points to correct GitHub release tag URL."
+   }
+  ],
+  "completeness_score": 0.92
+ },
+ {
+  "staleClaims": [
+   {
+    "claim": "Intent Results section says 'IP2Location LITE' mmdb for country lookup",
+    "reality": "Correction #5 in the same document switches to db-ip.com Lite; shipped code uses db-ip.com (ADR-003). The Results section was never updated.",
+    "impact": "Readers trust the Results section over Technical Corrections; IP2Location LITE cannot actually be used (ships CSV/BIN, not MMDB)."
+   },
+   {
+    "claim": "Intent CDN/proxy mode says 'NO download/speed tests (user explicit: data- and time-hungry)'",
+    "reality": "v0.13.0 shipped --speed-test + --min-speed (opt-in, capped 8 MiB sample). CHANGELOG notes 'The intent ban on default speed testing stands' — but the intent says no speed tests at all.",
+    "impact": "The intent document contradicts shipped behavior. The nuance (no default, opt-in OK) was never recorded here."
+   },
+   {
+    "claim": "Intent Runtime section references 'file download,' 'Save,' 'browser' as operator features",
+    "reality": "ADR-013 removed the HTTP server, Svelte UI, and tray. Product is pure CLI since v0.13.0. Export is --export flag.",
+    "impact": "Mixed signals: the header acknowledges ADR-013 but the body still describes HTTP-era UX."
+   },
+   {
+    "claim": "Intent User section describes 'operators (CLI + interactive wizard with live results and file export)'",
+    "reality": "'file export' is a browser download concept. CLI export is --export FILE.",
+    "impact": "Minor but contributes to stale framing."
+   },
+   {
+    "claim": "Intent has no mention of InlineTunnelProbe (in-process vless/trojan phase-2 verifier)",
+    "reality": "Shipped in v0.5.0: plain vless/trojan verifies in-process via rustls (no xray spawn). Phase2Verdict.verifier reports inline vs xray.",
+    "impact": "Positive deviation not recorded in intent; future readers cannot trace the decision."
+   },
+   {
+    "claim": "Intent has no mention of --probe http mode (HTTPing probe for phase-1 colo capture)",
+    "reality": "Shipped in v0.13.0 as competitive catch-up (spec §10 amendment).",
+    "impact": "Significant phase-1 capability missing from intent."
+   },
+   {
+    "claim": "Intent has no mention of any v0.13.0 competitive catch-up features",
+    "reality": "11 features shipped: --loss-threshold, --min-latency, --idle-hold-ms, --colo filter, --neighbor-scan, --probe http, --speed-test, --min-speed, sharelinks export, --enrich-asn, --verbose, --retry-last, quality-gated stop.",
+    "impact": "The intent doc is frozen at v0.3.0; 4 subsequent releases added capabilities with no intent record."
+   },
+   {
+    "claim": "Intent Results section says 'Phase 2 adds verdict + fragment/SNI combo detail'",
+    "reality": "Phase2Verdict now also carries a 'verifier' field (inline|xray) and speed_test_mbps — not mentioned in intent.",
+    "impact": "Incomplete picture of the verdict contract."
+   },
+   {
+    "claim": "Spec.md §9 Decision 1 says 'Server default port 8765, --port flag'",
+    "reality": "No server exists post-ADR-013. This decision is dead.",
+    "impact": "Spec carries acknowledged superseded banner but the decision is not explicitly marked dead."
+   },
+   {
+    "claim": "Intent Summary line conflates phase 1 and phase 2 into one clause",
+    "reality": "Technically correct but reads as though phase 2 is mandatory for every scan.",
+    "impact": "Minor clarity issue; phase 2 is optional."
+   }
+  ]
+ },
+ {
+  "issues": [
+   {
+    "severity": "high",
+    "title": "15 flags have zero help text in --help output",
+    "description": "Flags like --json-errors, --count, --cap, --exclude, --custom-cidrs, --warp-probes, --warp-endpoints, --warp-verify, --warp-wgconf-file, --seed, --export, --phase2-snis, --phase2-probe-urls, --phase2-concurrency, and --ipv6 have no help attribute in cli.rs. Running cf-scanner scan --help shows only the flag name with no description."
+   },
+   {
+    "severity": "high",
+    "title": "--min-latency help text is misleading",
+    "description": "Help says 'Drop results whose handshake latency is BELOW MS (throttled routes look fast but stall)'. Users will think this filters high-latency endpoints. The actual purpose (filtering out suspiciously-fast throttled routes) needs clearer wording."
+   },
+   {
+    "severity": "high",
+    "title": "README is missing ~20 scan flags entirely",
+    "description": "Flags undocumented in README: --concurrency, --timeout-ms, --exclude, --custom-cidrs, --ipv6 (on scan), --seed, --phase2-custom, --phase2-probe-urls, --phase2-concurrency, --phase2-snis, --phase2-only, --warp-probes, --warp-endpoints, --warp-verify, --warp-wgconf-file, and warp-config subcommand flags (--license, --endpoint, --out)."
+   },
+   {
+    "severity": "medium",
+    "title": "--target vs --cap semantics undocumented",
+    "description": "--target = stop after N working endpoints found; --cap = stop after N total probes sent. Neither help text nor README explains this critical distinction. When cap < target, a warning fires but the semantics are never clarified."
+   },
+   {
+    "severity": "medium",
+    "title": "Preset values (quick/normal/full) not described anywhere",
+    "description": "No documentation explains what each preset does (scan strategy, IP count, probe density). Users cannot choose between them."
+   },
+   {
+    "severity": "medium",
+    "title": "README has zero troubleshooting for WARP or phase-2 failures",
+    "description": "Troubleshooting table has 3 entries. Missing: phase-2 all-failures, WARP zero results, speed-test all-below-threshold, npm install ENEEDAUTH, xray download failures, --json-errors output format."
+   },
+   {
+    "severity": "medium",
+    "title": "Missing examples for key workflows",
+    "description": "No examples for: --exclude, --custom-cidrs, WARP with --warp-verify, --phase2-custom, --ipv6 scan, --seed, --export - (stdout), sharelinks format, export-config --sni, warp-config generate --license."
+   },
+   {
+    "severity": "low",
+    "title": "--neighbor-scan help text uses jargon",
+    "description": "'probe up to N neighboring IPs in the same /24 through the same workers' — 'through the same workers' is meaningless to users. Should say 'reusing the same port configuration' or similar."
+   },
+   {
+    "severity": "low",
+    "title": "CLI EXAMPLES constant has conflicting flags",
+    "description": "The third example shows '--phase2-configs vless://... --phase2-fragment medium' but EXAMPLES in cli.rs also shows 'cf-scanner scan --mode warp --count 512' as a standalone example, which is fine. However, the README examples section at top shows '--preset quick --count 512' which conflicts (preset and count are mutually exclusive)."
+   },
+   {
+    "severity": "low",
+    "title": "export-config subcommand description is vague",
+    "description": "'Render one config into a shareable URI with a verified IP:port override' doesn't explain what it does or when to use it. Needs a one-liner use case."
+   }
+  ]
+ },
+ {
+  "issues": [
+   {
+    "adr": "ADR-010",
+    "severity": "medium",
+    "title": "ADR-010 status not updated to Superseded",
+    "description": "ADR-010 (API hardening — localhost-only, register rate limit, overwrite guard) still carries `Status: Accepted` but the HTTP server, API, and tray it describes were removed in ADR-013 (2026-09-02). ADR-013's 'Supersedes' section mentions ADR-010's 'HTTP-surface guidance,' but ADR-010 itself has no superseded notice. A future agent reading ADR-010 might attempt to implement localhost binding, rate limiting, or overwrite guards that no longer exist in the product. The status line should be updated to `Superseded by ADR-013`."
+   },
+   {
+    "adr": "ADR-005",
+    "severity": "low",
+    "title": "ADR-005 body text still references deleted frontend/HTTP architecture",
+    "description": "ADR-005's status line correctly notes ADR-013 supersedes the embedded-UI aspect, but the body prose still describes 'browser UI,' 'HTTP server,' 'htmx + SSE, no build step,' and 'the frontend is one embedded HTML file' as active architecture. A reader who skips the status line gets a misleading picture. The body should be revised to describe CLI + wizard clients only, or carry an explicit deprecation paragraph near the top."
+   },
+   {
+    "adr": "ADR-008",
+    "severity": "low",
+    "title": "ADR-008 tokio feature list has minor drift (missing fs)",
+    "description": "ADR-008 lists eight explicit tokio features: rt-multi-thread, macros, time, net, io-util, sync, process, signal. Cargo.toml currently has nine: the same eight plus `fs`. Either the ADR should be updated to include `fs` in its list, or the extra feature should be verified as intentional and documented."
+   },
+   {
+    "adr": "ADR-001",
+    "severity": "none",
+    "title": "ADR-001: Xray subprocess bundling — accurate and correctly implemented",
+    "description": "build.rs bundles xray gated by dist-bundle-xray feature. Runtime fallback exists in xray.rs. data/bundled/ contains placeholders. xray-version.txt pins v26.3.27. No drift."
+   },
+   {
+    "adr": "ADR-002",
+    "severity": "none",
+    "title": "ADR-002: boringtun WARP probes — accurate and correctly implemented",
+    "description": "warp.rs uses boringtun. SocketCache is per-controller, not global. Shape-based classification confirmed. 2026-08-20 zero-probe-loss update recorded inline."
+   },
+   {
+    "adr": "ADR-003",
+    "severity": "none",
+    "title": "ADR-003: Embedded db-ip MMDB — accurate and correctly implemented",
+    "description": "geo.rs uses maxminddb::Reader::from_source with include_bytes!. Offline build fallback via CFSCANNER_OFFLINE_BUILD env var. geoip-version.txt pins version + SHA-256."
+   },
+   {
+    "adr": "ADR-004",
+    "severity": "none",
+    "title": "ADR-004: DPI-bypass fragmentation — accurate and correctly implemented",
+    "description": "xray.rs implements all four presets (Off/Light/Medium/Heavy/Custom) with correct values. Freedom outbound + sockopt.dialerProxy chaining confirmed. CustomFragment validation in api/validate.rs."
+   },
+   {
+    "adr": "ADR-006",
+    "severity": "none",
+    "title": "ADR-006: No history, no telemetry — accurate and correctly implemented",
+    "description": "Results are last-scan-only in memory. clear_store() on reset. retry::save_config saves only scan config, not results. No telemetry endpoints found."
+   },
+   {
+    "adr": "ADR-007",
+    "severity": "none",
+    "title": "ADR-007: Versioning and publishing — accurate and correctly implemented",
+    "description": "Tag is single source of truth. Cargo.toml version is 0.13.0. release.yml with cargo-dist pipeline exists. Process documented in development.md and release-process.md."
+   },
+   {
+    "adr": "ADR-009",
+    "severity": "none",
+    "title": "ADR-009: Drop macOS targets — accurate and correctly implemented",
+    "description": "dist-workspace.toml targets exactly 3 platforms (linux-aarch64, linux-x86_64, windows-x86_64). No macOS. Restore condition documented."
+   },
+   {
+    "adr": "ADR-011",
+    "severity": "none",
+    "title": "ADR-011: Contract boundary — accurate and correctly implemented",
+    "description": "src/api/types.rs is THE contract. Engine types never serialize directly. deny_unknown_fields on all major request structs confirmed."
+   },
+   {
+    "adr": "ADR-012",
+    "severity": "none",
+    "title": "ADR-012: Review scope decisions — accurate and correctly implemented",
+    "description": "Engine consumes api::types directly. No #[serde(other)] fallbacks on enums. SBOM via cargo-sbom confirmed in release.yml (lines 202-220). No cosign found."
+   },
+   {
+    "adr": "ADR-013",
+    "severity": "none",
+    "title": "ADR-013: Pure CLI — accurate and correctly implemented",
+    "description": "src/server/ deleted, src/tray.rs deleted, ui/ deleted, src/export.rs exists. serve command removed from CLI. axum kept as dev-dependency only. wix/ kept for MSI packaging."
+   }
+  ]
+ },
+ {
+  "issues": [
+   {
+    "severity": "info",
+    "title": "Package is published and live",
+    "description": "@qmahyar/cf-scanner is published on the npm registry, first published 2026-08-17, last modified 2026-09-04. Owner: qmahyar (mahyar.drama1313@gmail.com)."
+   },
+   {
+    "severity": "info",
+    "title": "14 versions published, latest is 0.13.0",
+    "description": "Versions: 0.4.0, 0.4.1, 0.4.2, 0.5.0, 0.5.1, 0.6.0, 0.7.0, 0.8.0, 0.9.0, 0.10.0, 0.11.0, 0.11.1, 0.12.1, 0.12.2, 0.13.0. No 0.12.0 exists (skipped, likely abandoned publish). 'latest' dist-tag correctly points to 0.13.0. Version parity is correct: package.json (0.13.0) == install.js RELEASE_TAG (v0.13.0) == npm latest (0.13.0)."
+   },
+   {
+    "severity": "info",
+    "title": "Description is correct",
+    "description": "npm registry description: 'Find working Cloudflare endpoints on restricted networks' -- matches local package.json exactly."
+   },
+   {
+    "severity": "info",
+    "title": "Install instructions are clear",
+    "description": "README covers global install (npm i -g), usage examples (CDN/WARP scan, export), supported platforms table, how-it-works explanation, manual install link, and CF_SCANNER_SKIP_INSTALL=1 opt-out."
+   },
+   {
+    "severity": "low",
+    "title": "README does not document minimum Node version",
+    "description": "engines field requires node >= 14.14 but the README does not mention this. Users on very old Node versions could hit unexpected failures."
+   },
+   {
+    "severity": "info",
+    "title": "No user-reported issues",
+    "description": "One open GitHub issue (#6) is an internal wayfinder/meta tracker, not a user bug report. Its child tickets (#7, #8, #9) are all closed/implemented. No community-reported issues on npm or GitHub."
+   },
+   {
+    "severity": "info",
+    "title": "Provenance attestations present from v0.11.0+",
+    "description": "Starting v0.11.0, the package includes npm provenance attestations (SLSA v1), which is good supply-chain hygiene."
+   },
+   {
+    "severity": "info",
+    "title": "install.js and bin wrapper are correct",
+    "description": "RELEASE_TAG in install.js matches package.json version. bin/cf-scanner.js is a clean Node launcher that spawns the platform binary and forwards argv + exit code."
+   }
+  ]
+ },
+ {
+  "issues": [
+   {
+    "severity": "medium",
+    "title": "Repo description mentions 'browser UI' which was removed in v0.13.0",
+    "description": "The GitHub repo description reads: 'Find working Cloudflare endpoints on ISP-restricted networks — one cross-platform Rust binary: TLS CDN scan + WARP WireGuard handshake probes, CLI/wizard/browser UI.' The browser UI was removed in v0.13.0 (ADR-013). It should say 'CLI/wizard' only."
+   },
+   {
+    "severity": "low",
+    "title": "Stale open issue #6 (UI bug-fix map) should be closed",
+    "description": "Issue #6 says 'All three closed — the map is complete. Implementation DONE.' Child issues #7, #8, #9 are all closed. The UI was also removed in v0.13.0. This issue should be closed."
+   },
+   {
+    "severity": "low",
+    "title": "No repo topics/tags set for discoverability",
+    "description": "Adding topics like rust, cloudflare, scanner, cli, warp, wireguard, cdn, proxy would improve GitHub discoverability."
+   },
+   {
+    "severity": "info",
+    "title": "Releases visible and well-maintained (10 releases, v0.6.0 to v0.13.0)",
+    "description": "Latest release v0.13.0 (Sep 4 2026) with detailed changelogs. Release artifacts correct."
+   },
+   {
+    "severity": "info",
+    "title": "README renders correctly on GitHub",
+    "description": "Local README matches GitHub rendering. Clean, no stale references to removed features."
+   },
+   {
+    "severity": "info",
+    "title": "Pull requests clean (none open)",
+    "description": "Expected for single-maintainer repo."
+   }
+  ]
+ },
+ {
+  "issues": [
+   {
+    "severity": "info",
+    "title": "MSI Installer: Complete and Well-Structured",
+    "description": "The MSI includes all three required components: LICENSE.txt, cf-scanner.exe, and xray.exe. The GeoIP mmdb is correctly embedded at compile time via include_bytes!, so it does not need to be a separate MSI file. The PATH environment variable component is properly configured with a stable GUID. The upgrade code is fixed (consistent across versions). No files are missing."
+   },
+   {
+    "severity": "info",
+    "title": "Upgrade Path: Correctly Configured",
+    "description": "MajorUpgrade with Schedule='afterInstallInitialize' removes the old version before installing the new one. DowngradeErrorMessage properly blocks downgrades. The Fixed GUID on the Path component ensures the PATH entry is correctly managed across upgrades. The product Id='*' generates a new ProductCode per build, which is correct for major upgrades."
+   },
+   {
+    "severity": "info",
+    "title": "File Permissions: Correct for Windows",
+    "description": "The MSI's InstallScope='perMachine' ensures proper ACLs. The CAB compression (EmbedCab='yes') is standard. The KeyPath attributes are correctly placed on File elements for file components and on the Environment element for the PATH-only component. The build.rs make_executable is correctly #[cfg(unix)]-gated so it does not affect Windows builds."
+   },
+   {
+    "severity": "info",
+    "title": "WixUI Customization: Properly Skips Install Location",
+    "description": "The WelcomeDlg->CustomizeDlg navigation correctly skips the install location page, which is appropriate for a tool that installs to a fixed ProgramFiles location."
+   },
+   {
+    "severity": "low",
+    "title": "read_all silently discards I/O errors",
+    "description": "In build.rs, `read_all` uses `let _ = entry.read_to_end(&mut buf);` which silently discards any I/O error during zip extraction. If the stream is truncated mid-read, the function returns partial data with no warning. While the checksum verification happens before extraction (so a corrupted zip is caught), a truncated read within the zip could still produce a truncated binary.",
+    "fix": "Replace the silent discard with an unwrap or error propagation:\n```rust\nfn read_all<R: Read>(entry: &mut R) -> Vec<u8> {\n    let mut buf = Vec::new();\n    entry.read_to_end(&mut buf).expect(\"failed to read zip entry\");\n    buf\n}\n```"
+   },
+   {
+    "severity": "low",
+    "title": "geoip-version.txt line 2 has no trailing newline",
+    "description": "The geoip-version.txt file ends with the SHA256 hash on the last line without a trailing newline. The code handles this correctly via trim_end(), but the file is fragile — appending data later would merge with the hash. The `read` tool output shows the second line lacks a newline terminator.",
+    "fix": "Ensure geoip-version.txt always ends with a trailing newline. The code already handles this, but adding the newline makes the file format more robust and editor-friendly."
+   },
+   {
+    "severity": "low",
+    "title": "Double-read of xray zip in memory",
+    "description": "In bundle_xray_if_requested, the xray zip bytes are downloaded into memory, then ZipArchive::new takes a Cursor reference (no re-download), but the checksum is computed on the raw bytes while the archive is extracted from the same buffer. This is correct and efficient — the zip is only downloaded once. (Not actually an issue, just noting for clarity.)"
+   },
+   {
+    "severity": "info",
+    "title": "dgst.rs Parser: Robust and Well-Tested",
+    "description": "The dgst_sha256_hex parser has 12 comprehensive tests covering edge cases: trailing filenames, double spaces, tabs, CRLF, leading whitespace, mixed case, 65-char hex rejection, etc. The grammar strictness matches the project's .dgst format requirements. Both build.rs and the npm install.js share this one file."
+   },
+   {
+    "severity": "info",
+    "title": "build.rs Offline Build Mode: Correct Fallback",
+    "description": "The CFSCANNER_OFFLINE_BUILD env var correctly bypasses the geoip download and embeds a placeholder. The placeholder is small and identifiable. The warning message is clear. The xray bundling is properly gated behind the dist-bundle-xray Cargo feature, so it only runs during release builds."
+   }
+  ]
+ }
+]

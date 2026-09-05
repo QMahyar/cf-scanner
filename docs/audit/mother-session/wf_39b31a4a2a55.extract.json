@@ -1,0 +1,322 @@
+[
+ {
+  "surfaces": [
+   {
+    "input": "validate_fetch_url() checks scheme (https-only), blocks loopback/multicast/broadcast/link-local/unspecified IPv4/IPv6, blocks localhost domain, blocks all-hex domain names that look like literal IPs. Also blocks 0.x.x.x and 169.254.x.x. Redirect policy enforces validate_fetch_url on every hop with max 5 redirects.",
+    "trust_boundary": "HTTP_CLIENT global static is used for Cloudflare API IPs, ipwho.is ASN lookups, xray binary downloads, and any user-supplied URL passed through fetch_tls_inner",
+    "attack_vector": "DNS rebinding / SSRF bypass: validate_fetch_url only validates the hostname at URL-parse time, NOT at connect time. If an attacker controls a DNS record, the resolved IP at connect time could differ from the IP at validate time. A domain like 'evil.com' passes validate_fetch_url, but DNS could resolve to 127.0.0.1 at connection time (DNS rebinding). The validate check is done once at the URL layer, but reqwest resolves DNS separately at connection time. This is a classic TOCTOU gap.",
+    "severity": "Low (mitigated by restricted use cases: only Cloudflare IPs, ipwho.is, and pinned GitHub releases are fetched via HTTP_CLIENT; user input is validated at api/validate.rs level)"
+   },
+   {
+    "input": "TLS certificate verification is COMPLETELY DISABLED in probe.rs (NoVerify struct implements ServerCertVerifier by returning Ok for all certs). This is used for TlsTransport and HttpTransport probes which connect to user-specified Cloudflare IPs. InlineTunnelProbe also reuses no_verify_client_config(). The socks.rs tls_connector() uses proper webpki_roots for SOCKS tunnel verification.",
+    "trust_boundary": "NoVerify allows MITM on probe connections to candidate Cloudflare IPs during scanning",
+    "attack_vector": "TLS certificate validation gap: The NoVerify verifier accepts ANY certificate chain, including self-signed, expired, or revoked certs. An active network attacker (e.g., ISP DPI) could intercept probe connections. For TCP/TLS probes this is somewhat intentional (testing if an IP responds, not verifying its identity), but for HTTP probes that parse /cdn-cgi/trace responses, a MITM could inject fake colo data or redirect responses. The SNI is hardcoded to 'cloudflare.com' which helps, but the cert itself is never checked.",
+    "severity": "Low (by design for probe-only traffic; the SNI pinning to cloudflare.com provides partial protection; ISP is the assumed adversary, not a network MITM)"
+   },
+   {
+    "input": "redirect policy in HTTP_CLIENT (ranges/http.rs) and warp registration client (warpgen.rs) validate each hop URL via validate_fetch_url. Max 5 redirects enforced.",
+    "trust_boundary": "Cloudflare API responses, ipwho.is JSON, xray binary downloads could contain redirect chains",
+    "attack_vector": "Redirect following abuse: The validate_fetch_url check on each hop prevents redirecting to private IPs or http://. However, an attacker who can poison a DNS response or compromise an intermediate server could create a redirect chain that stays on HTTPS to a non-Cloudflare endpoint. The 5-redirect limit is reasonable. The main risk is an attacker redirecting to a non-Cloudflare HTTPS endpoint to exfiltrate request data (headers, cookies if any). No sensitive data is sent in these requests (only Accept headers and User-Agent).",
+    "severity": "Low (no auth tokens in these requests; User-Agent is the only potentially identifying header)"
+   },
+   {
+    "input": "socks.rs get_via_socks() and timed_download_via_socks() do NOT call validate_fetch_url. They parse the URL to extract host/port/path and connect directly via SOCKS5 proxy. The SOCKS5 proxy handles DNS resolution server-side.",
+    "trust_boundary": "These are called only for tunnel probe verification (phase 2) against user-supplied URLs that were pre-validated by api/validate.rs",
+    "attack_vector": "SOCKS proxy SSRF: get_via_socks does not validate the target URL. If called with attacker-controlled input, it would happily connect to any host/port through the SOCKS tunnel. The validation at api/validate.rs validates probe_urls (must be https://, must pass validate_fetch_url), but timed_download_via_socks is used for speed testing and does not appear to have the same validation gate.",
+    "severity": "Low (caller must pre-validate; speed test URLs come from trusted config, not user input at runtime)"
+   },
+   {
+    "input": "WARP probe connections use raw UDP sockets (UdpSocket::bind on port 0) connecting to IPs from bundled WARP pools or user-specified CIDRs. No DNS resolution involved - pure IP/port connections.",
+    "trust_boundary": "WARP probes send WireGuard handshake packets to Cloudflare WARP endpoints",
+    "attack_vector": "UDP socket cache (SocketCache) is bounded to 1024 entries with FIFO eviction. No SSRF risk here since connections are IP-based only. However, if a user could influence the pool CIDRs, they could force the scanner to send WireGuard handshakes to arbitrary UDP endpoints. The bundled pools are hardcoded, but user-supplied CIDRs could be anything.",
+    "severity": "Minimal (UDP only, no HTTP, no data exfiltration path)"
+   },
+   {
+    "input": "InlineTunnelProbe establishes TCP connections to dial_ip (Cloudflare candidate IP) then sends protocol headers (VLESS/Trojan) followed by HTTP requests to probe_urls. The outer TLS uses NoVerify. The inner TLS (to probe_urls host) uses socks::tls_connector() which properly validates certificates.",
+    "trust_boundary": "Phase 2 verification: establishes tunneled connections through candidate Cloudflare IPs to reach probe URLs",
+    "attack_vector": "The inner TLS to the probe target IS properly verified (webpki_roots). The outer TLS to the candidate IP uses NoVerify. This means a MITM on the candidate IP could intercept the VLESS/Trojan credentials (user_id/password). However, this is phase 2 verification where the candidate IP IS the Cloudflare endpoint being tested, so this is by design.",
+    "severity": "Low (credentials are sent over the tested connection; a MITM would indicate the connection is compromised anyway)"
+   },
+   {
+    "input": "The xray binary download (xray.rs:616-618) uses HTTP_CLIENT with validate_fetch_url, 60-second timeout, and 64 MiB body cap. The URL comes from data/xray-version.txt (local file).",
+    "trust_boundary": "Downloads xray binary from GitHub releases",
+    "attack_vector": "If data/xray-version.txt is tampered, it could point to a malicious URL. The validate_fetch_url prevents non-https and private IPs, but a poisoned version file pointing to a attacker-controlled HTTPS server would pass validation. The .dgst checksum verification (mentioned in AGENTS.md) provides integrity checking on the downloaded binary.",
+    "severity": "Minimal (version file is locally stored, .dgst provides integrity)"
+   },
+   {
+    "input": "Connection pooling: HTTP_CLIENT (reqwest) uses a single global LazyLock client with default connection pooling. probe.rs creates fresh TcpStream/TlsConnector per probe (no pooling). socks.rs creates fresh connections per call. warp.rs uses SocketCache (bounded HashMap) for UDP sockets.",
+    "trust_boundary": "HTTP_CLIENT pool could theoretically share connections between different callers",
+    "attack_vector": "Connection pooling issues: reqwest's default pool keeps connections alive for a short time. If the same host:port is accessed by different logical operations, they could share a pooled connection. In this codebase, all HTTP_CLIENT users fetch from different hosts (Cloudflare API, ipwho.is, GitHub), so cross-contamination is unlikely. The SOCKS and probe paths create fresh connections each time, so no pooling concern there. The SocketCache for WARP is per-controller (not global), which is correct.",
+    "severity": "Minimal (no cross-origin pooling risk in practice)"
+   }
+  ]
+ },
+ {
+  "surfaces": [
+   {
+    "input": "--phase2-configs (Vec<String>)",
+    "trust_boundary": "External/untrusted — user may paste from forums; includes proxy URIs, subscription URLs, and xray JSON file paths",
+    "attack_vector": "Arbitrary file read via xray JSON path (e.g. /etc/shadow parsed as config); SSRF via subscription URL returning attacker-controlled proxy configs (mitigated by validate_fetch_url https-only + 5-hop redirect cap); config injection into xray outbound settings; log content leakage of config secrets before sanitization",
+    "severity": "High (file read) / Medium (SSRF, config injection)"
+   },
+   {
+    "input": "--export (PathBuf)",
+    "trust_boundary": "Local user / automation script — path resolved as-is with no restriction",
+    "attack_vector": "Arbitrary file write/overwrite via atomic_write_file (temp + rename) to any writable path; no output directory sandboxing. Only a concern if cf-scanner is invoked by a higher-privilege context.",
+    "severity": "Medium"
+   },
+   {
+    "input": "--export-config --config (String)",
+    "trust_boundary": "External/untrusted — full proxy config URI pasted from the internet",
+    "attack_vector": "URI parsing abuse via malformed URIs (causes parse errors, not code execution); secret exfiltration via error messages if config printed before sanitize_error_text; SNI injection via unencoded & or # in --sni value breaking URI structure",
+    "severity": "Low"
+   },
+   {
+    "input": "--phase2-probe-urls / --phase2-probe-url",
+    "trust_boundary": "User-controlled; wizard enforces https:// prefix and MAX_PROBE_URL_BYTES; CLI accepts any string",
+    "attack_vector": "SSRF through tunnel to cloud metadata endpoints (169.254.169.254) not blocked post-xray; data exfiltration via probe URL query string (attacker already controls config at that point)",
+    "severity": "Low"
+   },
+   {
+    "input": "--custom-cidrs (Vec<String>)",
+    "trust_boundary": "Local user — replaces bundled Cloudflare ranges with user-specified blocks",
+    "attack_vector": "Scanning non-CF arbitrary IP ranges (shifts tool from CF scanner to general port scanner); supernet explosion with /0 or /1 (bounded by --count/--cap but could scan millions of public IPs)",
+    "severity": "Medium (policy/legal) / Low (technical)"
+   },
+   {
+    "input": "--ports / --warp-endpoints (port lists / endpoint strings)",
+    "trust_boundary": "Local user",
+    "attack_vector": "Privileged port scanning (<1024) permitted by design; WARP endpoint spoofing to non-CF WireGuard servers (intentional flexibility)",
+    "severity": "Low"
+   },
+   {
+    "input": "--warp-wgconf-file (path to WireGuard config)",
+    "trust_boundary": "User-specified local file; read into String and held in process memory",
+    "attack_vector": "Arbitrary file read — any readable file read and held in memory (contents not logged but present in process); large file DoS mitigated by MAX_WGCONF_BYTES cap via .take()",
+    "severity": "Medium (file read)"
+   },
+   {
+    "input": "--exclude (Vec<String>) / wizard excluded CIDRs",
+    "trust_boundary": "Local user",
+    "attack_vector": "Exclusion overlap logic manipulation (negligible — no code execution risk, only affects scan target set)",
+    "severity": "Negligible"
+   },
+   {
+    "input": "--phase2-snis (Vec<String>)",
+    "trust_boundary": "External (may be copied from forums); SNI fronting variants for TLS fragmentation",
+    "attack_vector": "SNI field injection into TLS ClientHello (mitigated by validate_sni: length cap MAX_SNI_BYTES, ASCII-only byte check); no runtime impact on scanner itself",
+    "severity": "Low"
+   },
+   {
+    "input": "--phase2-custom (\"length,interval\" string)",
+    "trust_boundary": "Local user — controls TLS fragmentation parameters",
+    "attack_vector": "Raw fragment values passed verbatim into xray JSON config block without CLI-path validation (wizard calls validate_fragment, CLI build_phase2 does not — validation gap); non-numeric strings passed to xray which rejects or ignores them",
+    "severity": "Low (validation gap)"
+   },
+   {
+    "input": "WarpConfigAction::Generate { out, license, endpoint }",
+    "trust_boundary": "Local user — writes WireGuard config to file, sends license to Cloudflare API",
+    "attack_vector": "Arbitrary file write via --out path with no restriction; license key held in memory and sent over network (not logged); endpoint spoofing to attacker-controlled WireGuard server (user owns the config)",
+    "severity": "Medium (file write) / Low (license, endpoint)"
+   },
+   {
+    "input": "--retry-last (bool)",
+    "trust_boundary": "Local — reads ScanConfig from disk that the tool itself wrote previously",
+    "attack_vector": "Config file tampering if attacker can write to save location; mitigated by phase2 configs and WARP keys explicitly NOT being saved; cfg.validate() called on load",
+    "severity": "Low"
+   }
+  ]
+ },
+ {
+  "surfaces": [
+   {
+    "input": "Subscription URL passed to `fetch_subscription()` via `SubFetch::fetch()` (configs.rs:169-176) and validated by `validate_fetch_url()` (ranges/http.rs:27). The URL comes from CLI args or API JSON (`Phase2Config.probe_url` / `probe_urls`).",
+    "trust_boundary": "User-supplied URL string flows through `validate_fetch_url()` which enforces HTTPS-only, blocks loopback/unspecified/multicast/broadcast/link-local IPs, blocks localhost domain, and blocks hex/octal/decimal IPv4 obfuscation. Redirect policy also re-validates each hop.",
+    "attack_vector": "SSRF via subscription URL. Mitigated: HTTPS-only policy, IP allowlist (routable public only), 5-hop redirect cap with per-hop validation, and reqwest with `no_proxy()` + rustls. DNS rebinding is mitigated by reqwest resolving host before TLS connect. One remaining gap: `validate_fetch_url` allows RFC1918 IPs (e.g. 10.x.x.x) via plain `is_private()` — but those only hit if DNS resolves to them. Domain squatting / DNS rebinding to a public IP that then responds with a redirect to an internal IP on the next hop is blocked by the redirect policy re-validation.",
+    "severity": "low"
+   },
+   {
+    "input": "Probe URL from `Phase2Config.probe_url` / `Phase2Config.probe_urls` (validate.rs:112-121) — validated by `validate_probe_url()` which checks HTTPS, length cap, and delegates to `validate_fetch_url()`.",
+    "trust_boundary": "User-supplied HTTPS URL that xray will proxy-connect through. Same SSRF protections as subscription URL.",
+    "attack_vector": "SSRF via phase-2 probe URL. Mitigated identically to subscription URLs. Additionally, the URL is fetched through the tunnel (xray SOCKS proxy), not directly from the scanner process.",
+    "severity": "low"
+   },
+   {
+    "input": "Protocol config URIs (`vless://`, `trojan://`, `vmess://`, `ss://`) parsed by `parse_uri()` (configs.rs:179-187), entering from `parse_subscription()`, CLI wizard phase2 config input, or API JSON. These flow into `OutboundSpec` and ultimately into xray JSON config written to disk.",
+    "trust_boundary": "The `OutboundSpec` fields (server, port, user_id, sni, fingerprint, ws/grpc/xhttp paths/hosts) become xray JSON values. The xray binary is spawned with `Command::new(xray_bin).arg(\"run\").arg(\"-c\").arg(&config_path)` — never via a shell. The config is written to a file, not interpolated into a command string.",
+    "attack_vector": "Config injection into xray JSON. The parsed values are serialized via `serde_json::json!()` (xray.rs:60-150) and written as a JSON file. Since xray reads the config file directly (not shell-interpolated), shell injection is not possible. However, a malicious config could craft xray settings that cause xray to connect to attacker-controlled infrastructure, leak DNS, or establish unintended proxies. Mitigated by: server field validated against invalid characters (no whitespace, control chars, `@/\\?#`) in `finish_spec()`, all string fields capped at MAX_FIELD_VALUE_BYTES (2048), entry length capped at MAX_CONFIG_ENTRY_BYTES (8192).",
+    "severity": "medium"
+   },
+   {
+    "input": "VMess base64 payload decoded by `parse_vmess()` (configs.rs:310-370) — contains `add` (server), `port`, `id`, `net` (network type), `path`, `host`, `tls`, `sni`, `fp`, `scy` fields. These are extracted from raw JSON deserialization of arbitrary base64 input.",
+    "trust_boundary": "The base64-encoded JSON is fully user-controlled. While `finish_spec()` validates length and server characters, the vmess `path`, `host`, `sni`, `fp` fields are only length-capped. A malicious vmess URI could set `host` to a value like `evil.com\\r\\nX-Injected: true` or craft `path` values that confuse xray's WS/gRPC path handling.",
+    "attack_vector": "VMess config injection. The xhttp/ws path and host fields are placed into xray JSON as-is via serde_json::json!(). Since this is JSON serialization (not string interpolation), newline/quote injection into the JSON is handled by serde_json's escaping. The actual risk is semantic: a vmess config could set `sni` to any domain, causing xray to present an unintended SNI, or set `path` to route traffic through an attacker's CDN worker. Mitigated by: field length caps, server character validation. Residual: no semantic validation of SNI/path values.",
+    "severity": "medium"
+   },
+   {
+    "input": "SS base64 credential and host:port parsed by `parse_ss()` (configs.rs:372-412). The method, password, and host are extracted from base64-encoded `method:password@host:port`.",
+    "trust_boundary": "The SS method string is placed into xray JSON's `method` field without validation beyond length. An attacker-controlled SS config could set an unexpected cipher method, potentially causing xray to use a weak cipher or crash. The host is validated by `finish_spec()` against invalid characters.",
+    "attack_vector": "Shadowsocks config injection via method field. The `method` from user input flows directly into xray JSON `settings.servers[].method`. No allowlist of known ciphers. A config with method set to an unexpected value could cause xray behavioral differences. Mitigated by: length cap only. Low practical risk since xray validates cipher names itself.",
+    "severity": "low"
+   },
+   {
+    "input": "Xray JSON config parsed by `parse_xray_json()` (configs.rs:437-550) — full JSON deserialization of `XrayConfig` struct with nested outbounds, settings, stream settings. This is the most complex parser and handles the widest range of user-controlled fields.",
+    "trust_boundary": "Full xray JSON is parsed via serde into `XrayConfig` -> `XrayOutbound` -> `XraySettings`/`XrayStreamSettings` and sub-structs. All fields use `#[serde(default)]` for optional fields. The parsed values flow through `finish_spec()` for length/character validation before becoming `OutboundSpec`.",
+    "attack_vector": "Xray JSON config injection. The serde deserialization is safe against memory corruption. The main risk is that a crafted xray JSON could embed arbitrary xray settings (routing rules, DNS configs, additional outbounds) that get extracted into `OutboundSpec`, but the test suite shows that only the first matching outbound is extracted and extra fields are dropped. The `deny_unknown_fields` invariant mentioned in AGENTS.md is not applied to these serde structs (they use default), but unused fields are simply ignored by serde. Mitigated by: only protocol-specific fields are extracted, and they flow through `finish_spec()`.",
+    "severity": "medium"
+   },
+   {
+    "input": "WireGuard config parsed by `parse_wgconf()` (wgconf.rs:44-60) and `parse_awg_uri()` (wgconf.rs:63-134). User-supplied INI-style config or `wg://` URI containing private_key, public_key, address, DNS, MTU, AllowedIPs, Endpoint, and Amnezia parameters.",
+    "trust_boundary": "The parsed WgConfig is used to: (1) build a WireGuard tunnel for WARP verification, (2) write to a file via `render_wgconf()`. The private_key and public_key are validated to decode to exactly 32 bytes via `decode_key()`. AllowedIPs entries are validated against hostile characters. The endpoint flows into `WgPeer.endpoint` and is used as a network target. The DNS value is placed into the rendered config file as-is.",
+    "attack_vector": "WARP verification config injection. The `dns` field from wgconf is not validated — a malicious config could set DNS to an attacker-controlled server. The `endpoint` is placed into the WARP transport as the WireGuard peer endpoint — the transport will send WireGuard handshake to this address. The `allowed_ips` is validated against non-alphanumeric/./:/  characters but could still be a semantically malicious CIDR. The rendered config file is written to disk, not shell-interpolated. Mitigated by: key validation (32-byte decode), character validation on AllowedIPs, endpoint grammar validation in parse_awg_uri. Gap: no semantic validation of DNS or AllowedIPs values.",
+    "severity": "medium"
+   },
+   {
+    "input": "Custom CIDRs from CLI/API (`ScanConfig.custom_cidrs`) flow through `parse_cidr()` (validate.rs:160+) and `banned_ip()` check. These define the IP space to scan.",
+    "trust_boundary": "User-supplied CIDR notation parsed into (IpAddr, prefix). `banned_ip()` blocks loopback, unspecified, private, link-local, multicast, carrier-grade NAT (100.64/10), broadcast, and class-E ranges for both IPv4 and IPv6. Used by `ranges::pool` to generate scan targets.",
+    "attack_vector": "Scan target injection. A user could provide CIDRs that target unintended infrastructure. Mitigated by: `banned_ip()` blocks RFC1918/link-local/loopback. The scan targets are Cloudflare IPs by design (CDN mode fetches official CF IP lists). Custom CIDRs in CDN mode bypass the CF list and scan arbitrary public IPs — this is intentional for advanced users. Gap: custom CIDRs could target any routable IP, but this is a documented feature, not a vulnerability.",
+    "severity": "low"
+   },
+   {
+    "input": "Custom endpoints from CLI/API (`WarpConfig.custom_endpoints`) validated by `parse_endpoint()` and `banned_ip()` check. These are IPv4 addresses that WARP WireGuard handshakes are sent to.",
+    "trust_boundary": "User-supplied IP:port strings for WARP endpoint probing. Parsed via `parse_endpoint()` which validates IP + optional port, then checked against `banned_ip()`. The IP is used as the target for boringtun WireGuard Init messages.",
+    "attack_vector": "WARP endpoint injection. The endpoint IP flows directly into the WireGuard transport socket. A user could direct WARP probes at arbitrary infrastructure. Mitigated by: `banned_ip()` blocks internal/loopback/multicast/link-local. Only routable public IPs are accepted. This is by design — the feature lets users probe custom WARP endpoints.",
+    "severity": "low"
+   },
+   {
+    "input": "SNI override values from CLI/API (`Phase2Config.snis`) validated by `validate_sni()` (validate.rs:232+). These replace the server name in TLS connections.",
+    "trust_boundary": "User-supplied SNI string validated for length (MAX_SNI_BYTES), no control characters, no spaces, no certain special characters. Flows into xray `tlsSettings.serverName` and SIP002 URI `sni=` parameter.",
+    "attack_vector": "SNI override injection. The SNI is placed into xray TLS settings which controls the Server Name Indication in the TLS ClientHello. An attacker could set SNI to any domain, potentially bypassing CDN restrictions or causing xray to connect to unintended backends. Mitigated by: length cap, character validation (no control chars/spaces). Not blocked: arbitrary domain names (this is the feature's purpose — SNI fronting testing). No practical security fix needed.",
+    "severity": "low"
+   },
+   {
+    "input": "Fragment custom preset values from CLI/API (`CustomFragment.packets`, `length`, `interval`). These are strings like `tlshello`, `100-200`, `10-20` that control DPI fragmentation behavior.",
+    "trust_boundary": "User-supplied string fields validated by `validate_fragment()` which checks: `packets` must be `tlshello`, `length` and `interval` must be numeric ranges within bounds (1-65535 for length, 1-60000 for interval), formatted as `lo-hi` or just `lo`. Flows into xray freedom outbound's `fragment` block.",
+    "attack_vector": "Fragment config injection. The values are placed into xray JSON as-is. Since they go through serde_json serialization, they cannot break JSON structure. The risk is semantic: extreme fragmentation values could cause xray to behave unexpectedly or waste resources. Mitigated by: strict format validation and numeric range bounds.",
+    "severity": "low"
+   },
+   {
+    "input": "Identity file (`identity.json`) loaded by `load_identity()` (warpgen.rs:324) containing WARP registration state: id, token, private_key, client_id, account_type, peer_public_key. Loaded from `CF_SCANNER_DATA_DIR` env var or default data dir.",
+    "trust_boundary": "The identity file is loaded from a path controlled by the `CF_SCANNER_DATA_DIR` environment variable. If an attacker can set this env var, they could redirect the scanner to load a malicious identity file. The file is deserialized via serde_json from a trusted filesystem location.",
+    "attack_vector": "Identity file poisoning via env var. If `CF_SCANNER_DATA_DIR` points to an attacker-controlled directory, a crafted `identity.json` could inject a malicious private_key, peer_public_key, or token. The private_key is validated by `decode_key()` (must be valid base64 decoding to 32 bytes). The peer_public_key is validated similarly. The token is used as a Bearer token for Cloudflare API calls. Mitigated by: key validation, and the env var must be set before the process starts (not user-controllable at runtime in normal operation). Gap: no file permission check on the identity file on Windows (Unix path uses 0o600 permissions).",
+    "severity": "medium"
+   },
+   {
+    "input": "WireGuard config file path from CLI wizard (`cli_wizard.rs:76`) — user provides a path to a wg-quick / AmneziaWG config file. Read via `std::fs::File::open(&path)`.",
+    "trust_boundary": "The path is taken from interactive CLI input (no shell expansion). It's opened with `File::open()` which follows normal OS file open semantics. The file contents are parsed by `parse_wgconf()`.",
+    "attack_vector": "Path traversal via wgconf file path. The path is used directly with `File::open()` — no path traversal sanitization. On the one hand, this is a CLI tool and the user is providing the path to their own config. On the other hand, if the path is ever sourced from untrusted input in the future, it could read arbitrary files. Mitigated by: this is a CLI interactive prompt, not a web-facing API. The file is read-only. The parsed content goes through full wgconf validation.",
+    "severity": "low"
+   },
+   {
+    "input": "Output file path from CLI/API (`--export` / `--export-format`). Written via `write_out()` -> `write_private()` (warpgen.rs) or `write_private_replace()`. On Unix: creates with 0o600 permissions. On Windows: uses `paths::write_secret()`.",
+    "trust_boundary": "The output path comes from CLI args or API JSON. Written atomically via temp file + rename. No path traversal validation.",
+    "attack_vector": "Arbitrary file write via export path. The tool writes to a user-specified path. This is a CLI tool, so the user controls where files are written. If this were ever exposed as a web API without path restrictions, it would be a vulnerability. Mitigated by: CLI-only interface, atomic write with temp file pattern, file permissions on Unix.",
+    "severity": "low"
+   },
+   {
+    "input": "Extra headers passed to subscription fetch (`extra_headers` param in `fetch_tls_with_headers()`, ranges/http.rs:40). The `Accept: */*` header is hardcoded. The URL and User-Agent are the only dynamic parts.",
+    "trust_boundary": "The `extra_headers` string is hardcoded as `\"User-Agent: cf-scanner/0.1.0\\r\\Accept: */*\"` — no user input flows into headers. The header name/value parsing has its own validation (valid HeaderName/HeaderValue bytes).",
+    "attack_vector": "Header injection via subscription fetch. Not possible — headers are hardcoded. The header parsing code explicitly validates `HeaderName::from_bytes` and `HeaderValue::from_bytes` and skips invalid entries. Mitigated by: no user-controlled header values.",
+    "severity": "none"
+   },
+   {
+    "input": "Error messages containing parsed configs (`sanitize_error_text()` in configs.rs:67-87). Error text from failed network operations, parse failures, etc. is sanitized before display.",
+    "trust_boundary": "Error text from HTTP responses, xray stderr, parse failures, and network errors flows through `sanitize_error_text()` which: (1) strips control characters, (2) redacts URL userinfo (passwords), (3) masks vmess/ss base64 blobs, (4) truncates to MAX_ERROR_LINE_BYTES.",
+    "attack_vector": "Credential leak via error messages. The `redact_line()` function handles URL-style credentials (`scheme://user:pass@host`), vmess/ss opaque blobs (`vmess://base64`), and email-like `@` signs. It correctly handles percent-encoded `%40` as `@`. Mitigated by: proactive credential redaction, control character stripping, and line truncation. Gap: the function is a heuristic — unusual credential formats might not be redacted. But in practice, the codebase only uses standard URL credentials and base64 blobs, which are all handled.",
+    "severity": "low"
+   },
+   {
+    "input": "WARP registration response from Cloudflare API (warpgen.rs:365-390). The response contains Device struct with id, token, config.interface.addresses, config.peers[].public_key, config.peers[].endpoint.host.",
+    "trust_boundary": "The response is deserialized from the Cloudflare API into `Device` struct via serde_json. The `addresses.v4`, `addresses.v6`, `peers[].public_key`, and `peers[].endpoint.host` fields flow into `WgConfig` via `build_wgconf()`. These values come from Cloudflare's API and are trusted. However, if the API base URL were attacker-controlled (it's hardcoded as `DEFAULT_API_BASE`), a MITM could inject malicious values.",
+    "attack_vector": "MITM on WARP registration response. If the user overrides the API base (via `register_with_base()` in tests, but not exposed in production API), malicious values could flow into WireGuard config. Mitigated by: HTTPS-only (reqwest with rustls), hardcoded API base URL in production, TLS certificate validation by default. The `WarpClient` uses `no_proxy()` and follows redirects with validation.",
+    "severity": "low"
+   }
+  ]
+ },
+ {
+  "surfaces": [
+   {
+    "input": "CF_SCANNER_DATA_DIR environment variable read by paths::data_dir() with no validation, canonicalization, or absolute-path check; controls where binaries are downloaded, configs with credentials are written, trial dirs are created, and ranges are cached",
+    "trust_boundary": "Environment variable in shared/CI/container environments may be attacker-controllable",
+    "attack_vector": "Attacker sets CF_SCANNER_DATA_DIR to a controlled directory, causing xray binary execution from attacker-controlled path, credential file writes to attacker-readable location, or symlink-based config redirection",
+    "severity": "medium"
+   },
+   {
+    "input": "atomic_write_file() in export.rs performs remove_file(dest) then rename(tmp, dest) on Windows, creating a TOCTOU race window",
+    "trust_boundary": "Local multi-process — another process on the same Windows machine",
+    "attack_vector": "Between remove_file and rename, attacker places a symlink at dest pointing to a sensitive file; the rename overwrites the symlink target with scan results, or attacker reads the written data via junction point",
+    "severity": "medium"
+   },
+   {
+    "input": "write_pool_to() in ranges/pool.rs uses the same remove-then-rename pattern without MOVEFILE_REPLACE_EXISTING on Windows",
+    "trust_boundary": "Local multi-process on Windows",
+    "attack_vector": "Same TOCTOU race as export.rs atomic_write_file — attacker places symlink between directory listing and rename to redirect range file writes",
+    "severity": "medium"
+   },
+   {
+    "input": "write_secret() Windows fallback path creates file with File::create (default DACL) then applies lock_down_to_owner DACL separately",
+    "trust_boundary": "Local Windows multi-user — file briefly world-readable between create and DACL lockdown",
+    "attack_vector": "During the microsecond window between File::create and SetNamedSecurityInfoW, a local user on the same machine could read the file containing proxy credentials (UUID/passwords)",
+    "severity": "low"
+   },
+   {
+    "input": "fresh_trial_dir() in verify.rs creates directory with create_dir_all (default umask) then sets 0o700 permissions separately",
+    "trust_boundary": "Local Unix multi-user — directory briefly inherits umask permissions",
+    "attack_vector": "Brief window where trial dir with xray config.json (containing proxy credentials) is world-readable; mitigated by parent data dir already being 0o700",
+    "severity": "low"
+   },
+   {
+    "input": "sweep_stale_trial_dirs_before() checks entry.metadata().modified() then calls remove_dir_all(entry.path()) with TOCTOU gap",
+    "trust_boundary": "Local multi-process — directory could be replaced with symlink between check and removal",
+    "attack_vector": "Attacker predicts trial dir name (random salt) and replaces it with symlink to sensitive directory before sweep deletes it; mitigated by unpredictable random u32 salt in dir name",
+    "severity": "low"
+   },
+   {
+    "input": "atomic_write_file dest path comes directly from --export CLI argument with no path validation, symlink resolution, or directory restriction",
+    "trust_boundary": "User-controlled CLI input — user can write to arbitrary filesystem locations",
+    "attack_vector": "User passes --export /etc/cron.d/evil or a symlink path to write scan results to sensitive locations; acceptable for self-CLI but dangerous if tool is called by another program",
+    "severity": "low"
+   },
+   {
+    "input": "dgst.rs dgst_sha256_hex parser enforces exactly 64 hex chars, exactly one space after SHA2-256=, no leading whitespace, no tabs — consumed by xray.rs and build.rs to verify binary checksums before execution",
+    "trust_boundary": "Supply-chain — prevents tampered .dgst from passing a truncated or extended hash",
+    "attack_vector": "Strict parsing prevents hash truncation attacks, whitespace injection to extend hash, and leading whitespace bypass; callers verify checksums before xray binary execution",
+    "severity": "none"
+   },
+   {
+    "input": "export.rs embeds proxy credentials (UUID/passwords) in singbox/clash output formats by design; retry.rs strips phase2 configs before persisting to disk; last-scan.json never contains credentials",
+    "trust_boundary": "Data flow — credentials flow through exports for proxy client consumption but never written to persistent storage",
+    "attack_vector": "No actual leakage — credentials in exports are by design (consumed by proxy clients), and disk persistence explicitly sanitizes them",
+    "severity": "none"
+   }
+  ]
+ },
+ {
+  "surfaces": [
+   {
+    "input": "xray.rs:spawn() — tokio::process::Command::new(xray_bin).arg(\"run\").arg(\"-c\").arg(&config_path). xray_bin resolved from find_bundled()/cached_in_data_dir() — hardcoded filesystem lookups, never user input. config_path = {random_trial_dir}/config.json where trial_dir = trial-{counter}-{pid}-{osrng:08x}. Command::new() used without shell(true), no shell metacharacter interpretation. User-provided fields (user_id, tls_server_name, fingerprint, ws.path, ws.host, grpc.service_name, xhttp.path/xhttp.host/xhttp.mode) flow into serde_json::json!()-escaped JSON config — xray parses JSON, not shell. CustomFragment.packets/length/interval validated by validate_fragment_field() (api/validate.rs:170) to ASCII digit ranges or literal 'tlshello'.",
+    "trust_boundary": "Process boundary: xray binary reads structured JSON config, not shell commands. User data reaches xray only through serde serialization.",
+    "attack_vector": "Command injection: inject shell metacharacters into xray binary path or -c config path arguments, or craft config field values that escape into shell interpretation to achieve arbitrary code execution.",
+    "severity": "None — not exploitable. Command::new() bypasses shell. Binary path is application-resolved. Config path is randomly-generated trial dir. All user data is JSON-escaped by serde. Fragment fields are ASCII-only validated."
+   },
+   {
+    "input": "xray.rs:write_trial_config() writes credential-bearing JSON to {trial_dir}/config.json. Unix: OpenOptions::new().write(true).create(true).truncate(true).mode(0o600) — atomic creation with restrictive perms, no world-readable window. Windows: paths::write_secret() uses CreateFile2 with owner-only SECURITY_ATTRIBUTES DACL. Trial dir created with mode 0o700. xray.rs:download_binary() writes binary via temp file then std::fs::rename (atomic). Double existence check (before extract and after rename) prevents overwrite. SHA-256 checksum verified before any write.",
+    "trust_boundary": "Filesystem: trial directory randomly named, process-scoped, owner-only permissions. Binary destination has existence guards against TOCTOU.",
+    "attack_vector": "File overwrite: race condition on config.json path allowing credential file replacement; or binary overwrite via TOCTOU on download path to achieve code execution.",
+    "severity": "None — not exploitable. Unix atomic creation with 0o600 at open time (no window). Windows DACL restricts access. Binary uses temp+rename with double existence check. Minor Windows fallback concern (paths.rs:278) has brief empty-file window but parent dir already restricted."
+   },
+   {
+    "input": "verify.rs:socks::get_via_socks() fetches probe URLs through xray SOCKS proxy bound to 127.0.0.1 (local only). inline_verify.rs:establish() does TcpStream::connect(dial_ip, spec.port) directly to Cloudflare IP. inline_verify.rs:exchange() sends HTTP request through tunnel. Probe URLs validated by validate_probe_url() (api/validate.rs:149): must be https://, must pass validate_fetch_url() (ranges/http.rs:27) which blocks loopback (127.x.x.x, ::1), unspecified (0.0.0.0, ::), multicast, broadcast, link-local (169.254.x.x, fe80::), localhost domain, hex-encoded IPs, decimal IPs, .localhost TLD, non-HTTPS schemes.",
+    "trust_boundary": "Network: SOCKS inbound bound to 127.0.0.1 (local only). Probe URLs validated to non-routable hosts. Tunnel endpoint always Cloudflare IP from official list.",
+    "attack_vector": "SSRF: attacker-controlled probe URL causes xray or inline probe to connect to internal services (cloud metadata 169.254.169.254, localhost services, link-local devices, admin interfaces).",
+    "severity": "None — not exploitable. validate_probe_url() rejects non-routable hosts. validate_fetch_url() blocks all RFC 1918/loopback/link-local/multicast. Tunnel always connects to Cloudflare IP regardless of URL content. HTTPS-only prevents downgrade."
+   },
+   {
+    "input": "xray.rs:config_secrets() extracts user.id, server.password, tlsSettings.serverName, wsSettings.headers.Host from config JSON. mask_values() (xray.rs:274) sorts secrets by length descending and replaces all occurrences with '***' before stderr logging. Trial config files: 0o600 (Unix), owner-only DACL (Windows). TrialDirGuard removes trial dir on drop via tokio::spawn_blocking or std::thread::spawn. sweep_stale_trial_dirs() (verify.rs:237) removes dirs older than 1 hour. inline_verify.rs:119 Trojan sends SHA224(password) hash, not raw password. VLESS sends UUID bytes (protocol spec). redaction test (verify.rs redaction_tests) verifies inline probe Debug output never contains raw user_id.",
+    "trust_boundary": "Confidentiality: credentials at rest in trial config files; in transit over protocol wires; in xray stderr output; in debug/log output.",
+    "attack_vector": "Credential exposure: plaintext passwords/UUIDs leak to logs, other users on shared machines, or persist on disk after abnormal process termination.",
+    "severity": "Low — residual risk only. All primary channels mitigated. Stderr masking prevents log exposure. File permissions prevent unauthorized read. Trial dir lifecycle handles normal exit. Only concern: after abnormal termination (SIGKILL, OOM, power loss), trial dir with plaintext credentials persists on disk until next sweep (up to 1 hour). On shared machines, admin-level access could read during this window. On single-user systems, not a practical attack vector."
+   }
+  ]
+ }
+]

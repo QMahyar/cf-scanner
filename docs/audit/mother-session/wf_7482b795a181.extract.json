@@ -1,0 +1,1185 @@
+[
+ {
+  "deviations": [
+   {
+    "area": "Spec Section 9.1 — Server port",
+    "expected": "Server default port 8765, --port flag (active decision)",
+    "actual": "Server deleted (ADR-013); 8765 port and --port flag no longer exist",
+    "impact": "Stale vestigial reference to removed web server"
+   },
+   {
+    "area": "Spec Section 4 — main.rs description",
+    "expected": "main.rs described as full CLI entry with clap definitions",
+    "actual": "main.rs is a thin ~340-line runner; clap types live in src/cli.rs, scan-config building in src/cli/scan_args.rs (split in v0.13.0)",
+    "impact": "Project structure description is outdated"
+   },
+   {
+    "area": "Spec Section 4 — ranges.rs",
+    "expected": "src/ranges.rs listed as single file",
+    "actual": "Split into src/ranges/{mod,pool,official,http}.rs (v0.11.0)",
+    "impact": "Flat file reference outdated"
+   },
+   {
+    "area": "Spec Section 4 — Missing modules",
+    "expected": "Complete project structure listing",
+    "actual": "Missing: src/cli.rs, src/cli/scan_args.rs, src/enrich.rs, src/retry.rs, src/engine/neighbor.rs, src/engine/store.rs, src/engine/test_helpers.rs, src/lib.rs",
+    "impact": "Project structure is incomplete; 8+ modules unlisted"
+   },
+   {
+    "area": "Spec Section 2 — Tech Stack dependencies",
+    "expected": "tokio-stream and axum listed as production deps",
+    "actual": "tokio-stream removed (v0.13.0); axum is dev-only (warpgen mock registration server in tests)",
+    "impact": "Dependency list reflects pre-removal state"
+   },
+   {
+    "area": "Spec Section 1 — HTTPUpgrade gap",
+    "expected": "gRPC/XHTTP verified through xray (all transports covered)",
+    "actual": "HTTPUpgrade stays parse-only, deferred (noted in CHANGELOG 0.13.0 competitive catch-up item 9)",
+    "impact": "Behavioral claim incomplete; spec says every combo except vless/trojan goes through xray, but HTTPUpgrade does not"
+   },
+   {
+    "area": "Spec Section 4 — api/types.rs facade split",
+    "expected": "src/api/types.rs as sole contract file",
+    "actual": "api/types.rs split into limits.rs/error.rs/validate.rs + facade (v0.11.0); engine still consumes api::types per ADR-011",
+    "impact": "Minor: facade split not reflected"
+   },
+   {
+    "area": "Spec Section 4 — docs/ listing",
+    "expected": "docs/ described as intent, spec, ADRs, review, README",
+    "actual": "Missing: docs/development.md, docs/release-process.md, docs/wayfinder/, docs/research/",
+    "impact": "Incomplete directory listing"
+   }
+  ]
+ },
+ {
+  "deviations": [
+   {
+    "area": "ADR-001: Xray subprocess and bundling",
+    "adr": "ADR-001",
+    "expected": "xray spawned as subprocess; bundled binary in release archives; dev fallback to cached download with .dgst checksum verification; dist-workspace.toml include data/bundled",
+    "actual": "Fully implemented. src/xray.rs spawns xray via tokio::process::Command with 'run -c config.json'. build.rs downloads and verifies xray (feature-gated dist-bundle-xray). find_bundled() looks next to exe and in 'bundled/' subdir. ensure_binary() falls back to cached_in_data_dir(). .dgst checksum verified via SHA-256. dist-workspace.toml has include = [\"data/bundled\"]. Assets: Xray-windows-64.zip, Xray-linux-64.zip, Xray-linux-arm64-v8a.zip, Xray-macos-64.zip, Xray-macos-arm64-v8a.zip."
+   },
+   {
+    "area": "ADR-001: macOS targets still listed in xray.rs",
+    "adr": "ADR-001",
+    "expected": "macOS release targets dropped per ADR-009; asset_name() should only cover Linux + Windows",
+    "actual": "asset_name() in src/xray.rs still returns Xray-macos-64.zip and Xray-macos-arm64-v8a.zip for macOS targets. This is technically harmless for bundled binary resolution (macOS builds from source still need xray), but creates dead code paths in the release context.",
+    "impact": "Low. The asset_name() function is used by download_binary() for dev/fallback downloads. macOS users building from source still need this. No release-time impact since dist targets are correct in dist-workspace.toml."
+   },
+   {
+    "area": "ADR-002: boringtun WARP probes",
+    "adr": "ADR-002",
+    "expected": "Use boringtun crate; shape-only classification (Response type 2, 92B or Cookie type 3, 64B); no receiver-index matching; bundled server public key with fallback; zero-probe-loss verdict rule",
+    "actual": "Fully implemented. src/warp.rs uses boringtun::noise::Tunn for Init building and reply parsing. classify() uses Tunn::parse_incoming_packet matching HandshakeResponse and PacketCookieReply. No index matching. DUMMY_STATIC_PRIVATE used for shape-only probes. SERVER_PUBLIC_KEY_B64 bundled with fallback from persisted key. WARP worker in engine/warp.rs: latency_ms.filter(|_| failed == 0) ensures only zero-loss endpoints are emitted. Bundle pool: 8 * 256 = 2048 hosts verified."
+   },
+   {
+    "area": "ADR-003: Embedded db-ip GeoIP MMDB",
+    "adr": "ADR-003",
+    "expected": "db-ip.com Lite MMDB embedded via include_bytes!; maxminddb 0.30 Reader::from_source; CC BY 4.0 attribution in UI",
+    "actual": "Fully implemented. src/geo.rs has static EMBEDDED_MMDB: &[u8] = include_bytes!(...\"geoip.mmdb\"). Geo::embedded() uses maxminddb::Reader::from_source(EMBEDDED_MMDB). country() does reader.lookup(ip).decode::<Country>(). Fallback to None when DB unavailable."
+   },
+   {
+    "area": "ADR-004: DPI-bypass fragmentation",
+    "adr": "ADR-004",
+    "expected": "Fragment on Freedom outbound + sockopt.dialerProxy chaining; presets: light 100-200/10-20, medium 50-200/10-40, heavy 10-300/5-50; custom validated",
+    "actual": "Fully implemented. src/xray.rs fragment_outbound() creates Freedom outbound with fragment block. build_config() chains via streamSettings.sockopt.dialerProxy: \"fragment\". Presets match exactly: Light(100-200,10-20), Medium(50-200,10-40), Heavy(10-300,5-50). Custom validated in validate.rs validate_fragment(). Unit tests confirm presets and chaining."
+   },
+   {
+    "area": "ADR-005: Single binary, contract-first API",
+    "adr": "ADR-005",
+    "expected": "One engine (ScanController); CLI/wizard are thin clients; API contract in src/api/types.rs; probe transports injectable; server/UI removed per ADR-013",
+    "actual": "Fully implemented. ScanController is the single engine in src/engine/mod.rs. CLI (main.rs + cli/) and wizard (cli_wizard) are thin clients. src/api/types.rs defines ScanConfig, Verdict, StopCondition, ScanEvent. Probe transports use trait Transport with FakeTransport in tests. HTTP server, embedded UI, and tray were removed per ADR-013. axum remains as dev-dependency only."
+   },
+   {
+    "area": "ADR-006: No history, no telemetry",
+    "adr": "ADR-006",
+    "expected": "Results last-scan-only in memory; clear_store() replaces previous results; reset clears; no disk persistence; no telemetry/analytics; configs/keys never logged",
+    "actual": "Fully implemented. Store is Arc<Mutex<Vec<Verdict>>> in memory. run_reserved() calls clear_store() at start. reset() calls clear_store() when not running. results() returns snapshot from memory. config_secrets() extracts and mask_values() masks credentials in stderr. No persistence or telemetry code found."
+   },
+   {
+    "area": "ADR-007: Central versioning",
+    "adr": "ADR-007",
+    "expected": "Git tag is version source of truth; Cargo.toml must match tag; tag-push-triggered CI; releases immutable; changelog written with change",
+    "actual": "Implemented at process level. Cargo.toml version = 0.13.0. dist-workspace.toml present. The actual CI/release process is a process/documentation concern, not visible in source code. dist-workspace.toml exists with proper config. No manual publish paths visible."
+   },
+   {
+    "area": "ADR-008: Release profile and tokio features",
+    "adr": "ADR-008",
+    "expected": "[profile.release] with lto='thin' and codegen-units=1; tokio features: rt-multi-thread, macros, time, net, io-util, sync, process, signal",
+    "actual": "Fully implemented. Cargo.toml has [profile.release] with lto = 'thin' and codegen-units = 1. [profile.dist] also has lto = 'thin'. tokio features: rt-multi-thread, macros, time, net, io-util, sync, process, signal, fs. Note: 'fs' is an extra feature not listed in ADR-008 but needed by the code.",
+    "impact": "Low. The 'fs' feature was likely added after ADR-008 was written. It is used by tokio::fs operations in xray.rs and paths. The ADR's intent (explicit subset, not full) is preserved."
+   },
+   {
+    "area": "ADR-009: Drop macOS release targets",
+    "adr": "ADR-009",
+    "expected": "dist-workspace.toml targets: aarch64-unknown-linux-gnu, x86_64-unknown-linux-gnu, x86_64-pc-windows-msvc only",
+    "actual": "Fully implemented. dist-workspace.toml line 9: targets = [\"aarch64-unknown-linux-gnu\", \"x86_64-unknown-linux-gnu\", \"x86_64-pc-windows-msvc\"]. macOS targets are absent."
+   },
+   {
+    "area": "ADR-010: API hardening (superseded by ADR-013)",
+    "adr": "ADR-010",
+    "expected": "localhost-only API; register rate limit; overwrite guard; non-routable range rejection; ADR-013 supersedes the HTTP-surface parts",
+    "actual": "ADR-013 explicitly supersedes ADR-010's HTTP-surface guidance. The API hardening (rate limit, overwrite guard, non-routable rejection) was designed for the HTTP server which was removed. The non-routable range validation logic still exists in src/api/validate.rs (reject_non_routable, banned_ip functions) and is applied to ScanConfig validation, which benefits the CLI too.",
+    "impact": "The non-routable validation (banned_ip, reject_non_routable) survives in the shared validation layer and is applied via ScanConfig::validate(). This is a net positive -- the validation was not removed when the HTTP server was, protecting both CLI and any future API surface."
+   },
+   {
+    "area": "ADR-011: Contract boundary",
+    "adr": "ADR-011",
+    "expected": "src/api/types.rs is THE contract; engine returns domain types; server owns domain->API mapping; engine types never serialized directly",
+    "actual": "Implemented. src/api/types.rs defines all public types (ScanConfig, Verdict, ScanEvent, etc.). Engine (src/engine/) consumes api::types directly (ScanConfig, Verdict) as stated in ADR-012. The 'mapping' is minimal since the engine directly uses the API types. No duplicate domain layer exists."
+   },
+   {
+    "area": "ADR-012: Review-remediation scope",
+    "adr": "ADR-012",
+    "expected": "Engine consumes api::types directly; no serde(other) fallback on enums; SBOM via cargo-sbom",
+    "actual": "Implemented. Engine uses api::types directly (confirmed in engine/mod.rs imports). Mode/Preset enums have no #[serde(other)] -- serde rejects unknown variants by default. SBOM is a CI/release process concern not visible in source."
+   },
+   {
+    "area": "ADR-013: Pure CLI",
+    "adr": "ADR-013",
+    "expected": "Delete src/server/, src/tray.rs, ui/; remove serve command, --tray, --autostart; preserve export in src/export.rs; drop axum to dev-dependency; CI drops ui/ui-a11y jobs",
+    "actual": "Fully implemented. No src/server/ directory exists. No src/tray.rs. No ui/ directory. axum is [dev-dependencies] only in Cargo.toml. src/export.rs exists with full export functionality (csv, json, base64, raw, singbox, clash formats). No --tray or --autostart flags found in CLI. Grep for 'serve' in src/ only finds 'server' as field names in config types, not the old serve command."
+   }
+  ]
+ },
+ {
+  "deviations": [
+   {
+    "area": "Speed test",
+    "expected": "Intent explicitly says 'NO download/speed tests (user explicit: data- and time-hungry)'",
+    "actual": "engine/speed.rs implements opt-in speed testing with --speed-test and --min-speed-mbps flags, 8 MiB download per endpoint",
+    "impact": "Feature contradicts explicit user rejection in intent"
+   },
+   {
+    "area": "Neighbor scanning",
+    "expected": "Not mentioned in intent",
+    "actual": "engine/neighbor.rs implements cascading neighbor probes after a hit, exposed via --neighbor-scan flag",
+    "impact": "Undocumented feature with potential performance implications"
+   },
+   {
+    "area": "ProbeMode (TCP/TLS/HTTP)",
+    "expected": "Intent says 'TCP+TLS handshake scan' -- two probe types",
+    "actual": "Three-way ProbeMode enum (Tcp, Tls, Http) with separate transports and --probe CLI flag",
+    "impact": "HTTP probe mode and tri-modal selection are additions beyond intent"
+   },
+   {
+    "area": "Idle hold (RST detection)",
+    "expected": "Not mentioned in intent",
+    "actual": "ScanConfig.idle_hold_ms with --idle-hold flag, wired into Transport::probe()",
+    "impact": "Silent behavioral addition affecting latency measurement"
+   },
+   {
+    "area": "Colo filter",
+    "expected": "Intent describes colo codes in results but no user-facing filter",
+    "actual": "colo_filter: Vec<String> in ScanConfig with --colo CLI flag and ProbeContext.colo_allowed()",
+    "impact": "Filtering feature not described in intent"
+   },
+   {
+    "area": "ASN/ISP enrichment",
+    "expected": "Intent mentions only country from bundled mmdb",
+    "actual": "Verdict.asn and Verdict.isp fields, --enrich-asn flag, enrich::enrich_working()",
+    "impact": "Additional data dimensions not in intent"
+   },
+   {
+    "area": "Export-config subcommand",
+    "expected": "Not mentioned in intent",
+    "actual": "Command::ExportConfig swaps IP/port/SNI into a config URI",
+    "impact": "Utility feature not described"
+   },
+   {
+    "area": "Loss threshold / min latency filters",
+    "expected": "Not mentioned in intent",
+    "actual": "loss_threshold and min_latency_ms in ScanConfig, enforced in scan loops",
+    "impact": "Filtering capabilities not described"
+   },
+   {
+    "area": "Phase 1 packet loss reporting",
+    "expected": "Intent says 'Latency per IP only (no loss column in phase 1)'",
+    "actual": "Verdict.loss_pct is populated for phase 1 results",
+    "impact": "Behavioral contradiction with stated intent"
+   },
+   {
+    "area": "Verifier enum / config_index",
+    "expected": "Not mentioned in intent",
+    "actual": "Phase2Verdict has verifier (Inline/Xray) and config_index fields",
+    "impact": "Internal tracking metadata not described"
+   },
+   {
+    "area": "Phase2Progress event",
+    "expected": "Not mentioned in intent",
+    "actual": "ScanEvent::Phase2Progress emitted during phase 2 verification",
+    "impact": "Additional event type beyond described event model"
+   }
+  ]
+ },
+ {
+  "findings": [
+   {
+    "finding": "Cross-cutting #1: Unbounded task fan-out -> OOM (Agents 3,5,7,8,10)",
+    "status": "fixed",
+    "notes": "Worker pool in engine/cdn.rs (line 161-168) and engine/warp.rs (line 84-91): bounded mpsc::channel(4) per worker, concurrency workers, round-robin dispatch. should_stop() checked before dispatch. No more JoinSet-per-host."
+   },
+   {
+    "finding": "Cross-cutting #2: SSE is lossy and non-recovering (Agents 3,4,5,8,10)",
+    "status": "irrelevant",
+    "notes": "HTTP server removed 2026-09-02. No SSE, no browser UI. Pure CLI + wizard."
+   },
+   {
+    "finding": "Cross-cutting #3: Unauthenticated localhost API lacks Host validation (Agents 5,7)",
+    "status": "irrelevant",
+    "notes": "HTTP server removed. No rebinding, CSRF, or SSRF surface."
+   },
+   {
+    "finding": "Cross-cutting #4: Docs frozen at DRAFT, htmx/Pico dead (Agents 2,9)",
+    "status": "fixed",
+    "notes": "spec.md: zero htmx/Pico references remain (grep confirmed). AGENTS.md updated to document server/UI removal."
+   },
+   {
+    "finding": "Cross-cutting #5: Cancelled scans indistinguishable from completed (Agents 4,5)",
+    "status": "fixed",
+    "notes": "ScanSummary::cancelled: bool (api/types.rs:314). finish_quiet() reads cancel watch channel. CLI prints 'scan cancelled'. Wizard checks summary.cancelled. Dedicated tests exist."
+   },
+   {
+    "finding": "Cross-cutting #6: xray subprocess lifecycle gaps (Agents 6,10)",
+    "status": "fixed",
+    "notes": "Ctrl+C handler (main.rs:138-146), kill_on_drop(true) (xray.rs:194), XrayProcess::stop() kill+wait (xray.rs:160-163), TrialDirGuard Drop removes trial dirs (verify.rs:207-222), sweep_stale_trial_dirs_async on phase-2 entry (verify.rs:233-254)."
+   },
+   {
+    "finding": "Domain 2: Registration not in the browser UI",
+    "status": "irrelevant",
+    "notes": "No browser UI exists anymore."
+   },
+   {
+    "finding": "Domain 2: No automated live evidence in CI",
+    "status": "open",
+    "notes": "Real phase-2/xray/registration proof only in manual notes. No CI coverage gate."
+   },
+   {
+    "finding": "Domain 2: Dead API surface (generate_config, warp_plus_license)",
+    "status": "fixed",
+    "notes": "Zero grep matches for these fields in src/. Removed entirely."
+   },
+   {
+    "finding": "Domain 2: xray stderr discarded on spawn failure",
+    "status": "fixed",
+    "notes": "stderr(Stdio::piped()) (xray.rs:193), capture_stderr drains to tail buffer (xray.rs:359-382), surfaced in spawn failure errors (xray.rs:212-216). Tests verify masking and tail capture."
+   },
+   {
+    "finding": "Domain 3: Two CIDR/endpoint parsers (validate_cidr/validate_endpoint vs ranges)",
+    "status": "open",
+    "notes": "Partial mitigation: api/types_tests.rs has validate_endpoint_and_parse_endpoint_agree test. Duplication still exists."
+   },
+   {
+    "finding": "Domain 3: engine.rs = 1,559-line god-module",
+    "status": "fixed",
+    "notes": "Split into engine/mod.rs, cdn.rs, warp.rs, phase2.rs, plan.rs, neighbor.rs, store.rs, speed.rs, test_helpers.rs (8 submodules)."
+   },
+   {
+    "finding": "Domain 3: Lagged broadcast receivers silently lose events",
+    "status": "fixed",
+    "notes": "drive_run() handles TryRecvError::Lagged, falls back to snapshotting results. run_streaming_recovers_verdicts_an_overflowing_consumer_dropped test proves recovery. Channel enlarged to 4096."
+   },
+   {
+    "finding": "Domain 3: 5x duplication of pure helpers",
+    "status": "fixed",
+    "notes": "util.rs module exists, used by configs.rs and wgconf.rs for percent_decode. Partial extraction."
+   },
+   {
+    "finding": "Domain 3: Stop-condition overshoot",
+    "status": "open",
+    "notes": "Counters checked with Relaxed ordering, overshoot up to concurrency. Tests only pin concurrency=1."
+   },
+   {
+    "finding": "Domain 6: No coverage measurement",
+    "status": "open",
+    "notes": "No tarpaulin/llvm-cov config, no CI job. Spec's >=85% claim unenforced."
+   },
+   {
+    "finding": "Domain 6: XrayTunnelProbe subprocess lifecycle untested",
+    "status": "fixed",
+    "notes": "Extensive tests in xray.rs and verify.rs: early exit detection, cached binary verification, corrupt binary detection, concurrent download sharing, trial dir cleanup, sweep, spawn_retry. ~15 dedicated tests."
+   },
+   {
+    "finding": "Domain 6: CLI agent execution untested",
+    "status": "open",
+    "notes": "Actual scan NDJSON output, summary printing, and exit codes have zero tests. Only parse + config building tested."
+   },
+   {
+    "finding": "Domain 6: Test isolation flaw (refresh tests write to real data dir)",
+    "status": "fixed",
+    "notes": "paths::test_env::SEAM_DATA_DIR seam exists, used in xray tests via isolated_data_dir()."
+   },
+   {
+    "finding": "Domain 7: Unauthenticated OOM via port fan-out",
+    "status": "fixed",
+    "notes": "Worker pool bounds in-flight probes to concurrency * per_worker_cap (4)."
+   },
+   {
+    "finding": "Domain 7: Local file-read primitive via HTTP API",
+    "status": "irrelevant",
+    "notes": "No HTTP API exists anymore."
+   },
+   {
+    "finding": "Domain 7: WireGuard private keys exposed via GET /api/profiles",
+    "status": "irrelevant",
+    "notes": "No HTTP API exists anymore."
+   },
+   {
+    "finding": "Domain 7: xray trial configs written 0644",
+    "status": "fixed",
+    "notes": "mode(0o600) on Unix (xray.rs:273), write_secret on Windows (xray.rs:279)."
+   },
+   {
+    "finding": "Domain 7: Credentials on disk after crash",
+    "status": "fixed",
+    "notes": "TrialDirGuard Drop removes dirs. sweep_stale_trial_dirs_async cleans stale dirs >1hr old on phase-2 entry."
+   },
+   {
+    "finding": "Domain 8: Unbounded task fan-out (performance)",
+    "status": "fixed",
+    "notes": "Same as cross-cutting #1. Worker pool architecture."
+   },
+   {
+    "finding": "Domain 8: insert_sorted O(N) memmove under global Mutex",
+    "status": "fixed",
+    "notes": "Replaced by merge_sorted (engine/store.rs) with BATCH_FLUSH=256. Lazy sort on read via snapshot_sorted + store_dirty flag."
+   },
+   {
+    "finding": "Domain 10: Preset::Full + broad CIDR = OOM abort",
+    "status": "fixed",
+    "notes": "Bounded worker pool eliminates the crash vector."
+   },
+   {
+    "finding": "Domain 10: Panic inside server-spawned run task leaves UI stuck",
+    "status": "irrelevant",
+    "notes": "No server/spawned run tasks. Pure CLI with direct controller invocation."
+   },
+   {
+    "finding": "Domain 10: Orphaned xray on hard kill",
+    "status": "fixed",
+    "notes": "Ctrl+C handler + kill_on_drop(true) + TrialDirGuard + stale sweep."
+   },
+   {
+    "finding": "Domain 10: Credentials on disk after crash (orphaned trial dirs)",
+    "status": "fixed",
+    "notes": "TrialDirGuard Drop + sweep_stale_trial_dirs_async."
+   },
+   {
+    "finding": "Domain 10: Corrupt/mismatched binary = 10s per attempt",
+    "status": "fixed",
+    "notes": "wait_for_socks races child.try_wait() (xray.rs:208), fails fast with exit code + glibc hint (xray.rs:221-231)."
+   },
+   {
+    "finding": "Domain 10: Download races when xray missing",
+    "status": "fixed",
+    "notes": "BINARY_STATE OnceLock+Mutex (xray.rs:288-314) memoizes result; concurrent callers share one download. concurrent_attempts_share_one_download test verifies."
+   },
+   {
+    "finding": "Domain 10: Default logging ERROR-only, no --verbose",
+    "status": "fixed",
+    "notes": "--verbose flag (main.rs:34, 53-60) sets info level. RUST_LOG env var overrides."
+   },
+   {
+    "finding": "Domain 10: Graceful shutdown",
+    "status": "fixed",
+    "notes": "Ctrl+C signal handler at main.rs:138-146 calls controller.cancel(). No axum to shut down."
+   },
+   {
+    "finding": "Domain 10: Corrupt refreshed-ranges file fails the scan",
+    "status": "open",
+    "notes": "effective_pool propagates parse error. No fallback to bundled ranges on corruption."
+   },
+   {
+    "finding": "Domain 10: EADDRINUSE raw error",
+    "status": "open",
+    "notes": "No friendly message on port bind failure."
+   },
+   {
+    "finding": "Domain 10: Ambiguous 0-result success",
+    "status": "open",
+    "notes": "Zero found identical to network-down. total==0 silently wipes previous run results."
+   },
+   {
+    "finding": "Domain 1: MSI not self-contained",
+    "status": "open",
+    "notes": "Ships only cf-scanner.exe; xray in zips only. Requires WiX changes."
+   },
+   {
+    "finding": "Domain 1: macOS blocked-by-default (no signing)",
+    "status": "open",
+    "notes": "2/5 targets macOS, no Apple certs for notarization."
+   },
+   {
+    "finding": "Domain 1: 5-target matrix never compiled until release",
+    "status": "open",
+    "notes": "checks.yml runs ubuntu-latest only."
+   },
+   {
+    "finding": "Domain 1: Release pipeline zero quality gates",
+    "status": "open",
+    "notes": "No test/clippy/fmt on tagged commit."
+   },
+   {
+    "finding": "Domain 1: No --locked, unpinned toolchain in CI",
+    "status": "open",
+    "notes": "Toolchain bump can break edition-2024 build on release day."
+   },
+   {
+    "finding": "Domain 1: GeoIP mmdb unverified TOFU",
+    "status": "open",
+    "notes": "No checksum pin in build.rs for geoip mmdb."
+   },
+   {
+    "finding": "Domain 9: README missing customer essentials",
+    "status": "open",
+    "notes": "Quick Start is build-from-source only. No download links, screenshots, troubleshooting."
+   },
+   {
+    "finding": "Domain 9: Intent retains superseded claims",
+    "status": "open",
+    "notes": "embedded xray-core (should be subprocess), 14 subnets (should be 15)."
+   }
+  ]
+ },
+ {
+  "rating": 7,
+  "findings": [
+   {
+    "title": "snapshot_sorted holds Mutex during sort+clone — contention window on reads",
+    "description": "ScanController::snapshot_sorted (src/engine/mod.rs ~line 134) holds the store Mutex for the entire duration of sort_unstable_by + clone(). For 5k+ verdicts, this blocks every worker's merge_sorted flush for the duration of an O(n log n) sort + O(n) clone. Workers that attempt to flush during this window will spin on the mutex. The lazy dirty flag is good design, but the sort should happen outside the lock: take the vec, sort and clone while unlocked.",
+    "severity": "major",
+    "location": "src/engine/mod.rs:134-147 (snapshot_sorted)",
+    "improvement": "Swap the vec out under the lock (std::mem::take or swap), release the lock, then sort + clone on the local copy. This reduces the critical section to O(1) and eliminates contention during reads."
+   },
+   {
+    "title": "HttpTransport clones accepted_codes Vec<u16> on every probe",
+    "description": "HttpTransport::probe (src/probe.rs ~line 234) clones self.accepted_codes: Vec<u16> per invocation. This is a heap allocation + memcpy on every HTTP probe. With concurrency=500 and HTTP mode, this creates thousands of short-lived Vec allocations per second.",
+    "severity": "minor",
+    "location": "src/probe.rs:234 (HttpTransport::probe)",
+    "improvement": "Store accepted_codes as Arc<[u16]> and clone the Arc (pointer copy). Or accept &'a [u16] with a lifetime on the transport struct. The Arc approach is zero-cost for the hot path."
+   },
+   {
+    "title": "ScanEvent::Result(Box::new(verdict.clone())) double-clones + heap-allocs per hit",
+    "description": "In the CDN worker (src/engine/cdn.rs ~line 217) and WARP worker, every successful probe result goes through: (1) Verdict built on stack, (2) clone() for the event, (3) Box::new() heap allocation, (4) broadcast send. The original Verdict is then pushed to the batch Vec. This means every hit performs a clone + Box allocation solely for the broadcast channel.",
+    "severity": "minor",
+    "location": "src/engine/cdn.rs:217-218, src/engine/warp.rs:159-168",
+    "improvement": "Change ScanEvent::Result to carry Box::new(verdict) directly and clone only when broadcasting fails or is not needed. Alternatively, if Verdict is cheap to construct, construct it twice (once for broadcast, once for batch) instead of clone+box."
+   },
+   {
+    "title": "for_each_result clones the entire store Vec under lock",
+    "description": "ScanController::for_each_result (src/engine/mod.rs ~line 149) calls snapshot_sorted() which clones the full Vec, then iterates the clone. For the drive_run loop, this means the entire result set is duplicated on every final sweep. With 10k+ results, this allocates and copies ~10k Verdict structs (each ~150+ bytes with Option<String> fields).",
+    "severity": "minor",
+    "location": "src/engine/mod.rs:149-153 (for_each_result)",
+    "improvement": "For the terminal sweep in drive_run, consider emitting events directly from under the lock by iterating the sorted store without cloning. The broadcast channel capacity (4096) would handle the backpressure, and you avoid the O(n) allocation."
+   },
+   {
+    "title": "neighbor_candidates returns Vec<IpAddr> for bounded output",
+    "description": "neighbor_candidates (src/engine/neighbor.rs ~line 31) returns Vec<IpAddr> with a known max size (2*neighbor_count, bounded by 254). Each call allocates a heap Vec for at most 253 entries. With high hit rates, this is called once per successful probe.",
+    "severity": "minor",
+    "location": "src/engine/neighbor.rs:31-50 (neighbor_candidates)",
+    "improvement": "Use a SmallVec<[IpAddr; 16]> or a fixed-size array with a length counter. Since the max is 254, a stack buffer avoids heap allocation entirely for typical neighbor_count values (4-16)."
+   },
+   {
+    "title": "plan_hosts_iter returns Box<dyn Iterator> — heap allocation per CIDR block",
+    "description": "plan_hosts_iter (src/engine/plan.rs ~line 8) returns Box<dyn Iterator<Item=IpAddr>> for every PlanItem variant. This heap-allocates a state machine per CIDR block in the scan plan. For a /8 scan decomposed into many /24 blocks, this is hundreds of heap allocations during planning.",
+    "severity": "minor",
+    "location": "src/engine/plan.rs:8-35 (plan_hosts_iter)",
+    "improvement": "Use an enum iterator (PlanHosts enum implementing Iterator) to avoid the Box. The Sample variant's HashSet is the complex case; the other variants are simple range iterators that could be inlined."
+   },
+   {
+    "title": "Store batch flush design is well-calibrated (positive finding)",
+    "description": "The BATCH_FLUSH=256 threshold (src/engine/mod.rs ~line 311) provides a good balance: at 50k probes, workers acquire the store lock ~200 times, not 50k. Each lock hold is a Vec::extend (memcpy N Verdicts) + atomic store, which is O(batch_size) and fast. The per-worker channel cap (4) provides backpressure without blocking the producer.",
+    "severity": "minor",
+    "location": "src/engine/mod.rs:311 (BATCH_FLUSH), src/engine/cdn.rs:67-68 (per_worker_cap)"
+   },
+   {
+    "title": "Probe future heap allocation is unavoidable with current trait design",
+    "description": "Transport::probe returns ProbeFuture<'_> = Pin<Box<dyn Future<...>>>. Every probe invocation heap-allocates the future state machine. With concurrency=500, this means 500 concurrent Box allocations (amortized, since they are dropped after completion). This is inherent to the dyn-trait async pattern and acceptable for network I/O-bound work.",
+    "severity": "minor",
+    "location": "src/probe.rs:42-43 (ProbeFuture type alias)",
+    "improvement": "Could use async_trait or return a named future type per transport to avoid boxing, but the network latency (ms-scale) dwarfs the allocation cost (ns-scale). Not worth changing unless profiling shows otherwise."
+   },
+   {
+    "title": "Verdict struct contains Option<String> fields that heap-allocate on the hot path",
+    "description": "Verdict (src/api/types.rs ~line 174) has five Option<String> fields: country, colo, fail_reason, isp, and phase2 contains Option<String> fields too. Every verdict constructed on the hot path allocates these strings. Most probes produce Verdicts where country is Some (geo lookup returns &'static str, so .to_owned() allocates), colo is None (HTTP only), and fail_reason is Some (heap alloc).",
+    "severity": "minor",
+    "location": "src/api/types.rs:174-186 (Verdict struct)",
+    "improvement": "Consider using Cow<'static, str> for fields that are often static (country, fail_reason strings are &'static str in most cases). This avoids heap allocation for the common case while still supporting owned strings when needed."
+   },
+   {
+    "title": "merge_sorted name is misleading but the design is correct (minor nit)",
+    "description": "store::merge_sorted (src/engine/store.rs ~line 19) does not perform a merge of two sorted sequences. It extends the Vec and sets a dirty flag. The actual sort happens lazily in snapshot_sorted. The name suggests a sorted merge algorithm but the implementation is a batch append. This is not a performance issue but can mislead future contributors into expecting O(n) merge semantics.",
+    "severity": "minor",
+    "location": "src/engine/store.rs:19-24 (merge_sorted)",
+    "improvement": "Rename to flush_batch or append_dirty to accurately reflect the behavior."
+   },
+   {
+    "title": "Phase2 update index rebuild is O(n) on cache miss but amortized well",
+    "description": "update_verdict_phase2 (src/engine/store.rs ~line 31) falls back to a linear scan when the position index misses, then rebuilds the entire HashMap from scratch. Phase2 runs sequentially on each endpoint, so the cache hit rate is high after the first rebuild. The index is wrapped in Arc<HashMap> so rebuilds are cheap (swap pointer). This is acceptable.",
+    "severity": "minor",
+    "location": "src/engine/store.rs:31-56 (update_verdict_phase2)"
+   }
+  ]
+ },
+ {
+  "rating": 8,
+  "findings": [
+   {
+    "title": "mod.rs is NOT a god-module — it is a clean orchestrator",
+    "description": "At ~340 lines of logic (plus ~300 lines of tests), mod.rs serves as the ScanController definition, shared helper types (ProbeContext, ResetGuard), and the public API surface (run, cancel, reset, subscribe, results). All scan-mode-specific logic lives in cdn.rs, warp.rs, and phase2.rs. The file defines ScanController, ProbeContext, and reusable helpers (claim_milestone, cancelled_signal, colo_filter, progress_cadence), then delegates to mode-specific methods. This is the correct god-object-extracted-to-modules pattern: the controller owns state, modes own behavior.",
+    "severity": "minor",
+    "location": "src/engine/mod.rs",
+    "improvement": "ProbeContext could be extracted into its own file if it continues growing, but at ~60 lines it is well within the threshold for staying in mod.rs. No action needed."
+   },
+   {
+    "title": "Probe loops in cdn.rs and warp.rs are intentionally separate, not duplicated",
+    "description": "cdn.rs and warp.rs both have a producer-consumer pattern with worker channels, but the logic diverges meaningfully: CDN mode uses ProbeTask (ip+port from plan sampling, neighbor cascade, per-probe loss/latency filtering, colo filtering, progress milestones), while WARP mode uses WarpTask (grouped ip+port pairs, multi-probe-per-endpoint aggregation for loss calculation, no neighbors, no colo). The shared scaffolding (channel creation, JoinSet, cancel racing) is extracted into ProbeContext and helper functions. The minor overlap in channel setup boilerplate (~10 lines) is the cost of keeping the two modes independently readable. Extracting a generic worker pool abstraction would couple the modes and add indirection without reducing meaningful code.",
+    "severity": "minor",
+    "location": "src/engine/cdn.rs:worker loop (lines 170-250), src/engine/warp.rs:worker loop (lines 100-170)",
+    "improvement": "The duplication is acceptable. The one structural shared pattern is: (1) build N channel pairs, (2) spawn producer, (3) spawn N workers, (4) join workers then producer. If a third mode appears, a generic scan_scaffold() helper would be warranted. Not needed now."
+   },
+   {
+    "title": "Phase 2 (phase2.rs) uses a different concurrency model from phase 1 — correctly",
+    "description": "Phase 2 uses a flat atomic index (next.fetch_add) with JoinSet workers pulling (candidate, spec, sni) combos, rather than producer-consumer channels. This is the right design: phase-2 work is embarrassingly parallel with no ordering dependency, and the atomic-counter-stealing pattern avoids channel overhead for a work-stealing queue. The tradeoff is that phase-2.rs is the largest file (~350 lines + ~400 lines tests), but the logic is linear: parse configs, build combos, verify, record.",
+    "severity": "minor",
+    "location": "src/engine/phase2.rs:verify_phase (lines 30-200)",
+    "improvement": "The config parsing (parse_phase2_configs, ~60 lines) could move to a separate phase2_parse.rs if phase2.rs crosses 500 lines of logic, but it is currently fine."
+   },
+   {
+    "title": "Stop-condition logic is clean and centralized in ProbeContext::should_stop",
+    "description": "The stop-condition check is a single method on ProbeContext that combines cancel signal, found threshold, and cap threshold with Acquire ordering. Both cdn.rs and warp.rs call ctx.should_stop() at the top of their worker loops and after each probe. Phase 2 has its own inline check (cancel + attempts cap + passed count) but the same three conditions. The consistency is good; the only minor inconsistency is that phase-2 reimplements the check instead of reusing ProbeContext, but phase-2 operates on different counters (attempts, not scanned), so this is justified.",
+    "severity": "minor",
+    "location": "src/engine/mod.rs:ProbeContext::should_stop (line 175), src/engine/phase2.rs:verify_phase inner loop (lines 80-90)",
+    "improvement": "No change needed. The three-condition stop logic is trivially readable in both places and the counters are structurally different."
+   },
+   {
+    "title": "Worker channel design: per-worker bounded channels with round-robin dispatch",
+    "description": "CDN mode creates concurrency x mpsc::channel(4) pairs and dispatches via idx % concurrency round-robin. This avoids a shared receiver mutex (the AGENTS.md invariant). The small per-worker cap (4) provides backpressure without blocking the producer for long. The inflight AtomicU64 tracks outstanding work for the neighbor idle-poll exit condition. This is a well-tuned design. WARP mode uses the same pattern but without inflight tracking (not needed since there is no neighbor cascade).",
+    "severity": "minor",
+    "location": "src/engine/cdn.rs:channel setup (lines 100-115), forward_to_worker (lines 17-40)",
+    "improvement": "No change needed. The channel capacity of 4 is a reasonable default; making it configurable would be premature."
+   },
+   {
+    "title": "Store (store.rs) is minimal and well-scoped — a thin wrapper around Vec<Verdict>",
+    "description": "store.rs is ~80 lines of logic: Store type alias, lock helper (tolerates poisoned mutexes), merge_sorted (batch append + mark dirty), PosIndex for phase-2 O(1) lookup, set_asn, remove_verdict. The lazy sort pattern (sort only on read, mark dirty on write) is correct and documented. The PosIndex fallback rebuild on stale index is defensive and tested. This is a clean data-layer module.",
+    "severity": "minor",
+    "location": "src/engine/store.rs",
+    "improvement": "No change needed."
+   },
+   {
+    "title": "plan.rs is self-contained and well-tested — pure function design",
+    "description": "plan.rs (~180 lines + ~100 lines tests) defines PlanItem, SplitMix64 PRNG, and the plan() function. It is a pure-function module with no side effects, fully testable, and correctly handles edge cases (tiny CIDRs, v6 half-spaces, count-above-pool degradation to Every). The SplitMix64 is a simple, well-known PRNG appropriate for deterministic sampling. Clean.",
+    "severity": "minor",
+    "location": "src/engine/plan.rs",
+    "improvement": "No change needed."
+   },
+   {
+    "title": "speed.rs has a clean seam (SpeedTester trait) for test injection",
+    "description": "The speed-test module defines a SpeedTester trait and TunnelOpener trait, injected via Mutex-wrapped Arc<dyn ...> on ScanController. The real impls touch the network; fakes are used in tests. The passing index construction (build_passing_index) correctly filters to phase2-passed v4 endpoints with resolvable config indices. The min-speed threshold flips passed=false on slow endpoints, which cleanly removes them from the working set. Good design.",
+    "severity": "minor",
+    "location": "src/engine/speed.rs",
+    "improvement": "No change needed."
+   },
+   {
+    "title": "neighbor.rs is a focused utility — correct scope for its own file",
+    "description": "NeighborHub manages IP deduplication (Mutex<HashSet>) and candidate generation. The outward-walk algorithm (alternating -dist/+dist from the hit, skipping .0 and .255) is correct and well-tested. The NeighborHub feeds back into the main worker pool via a side channel, which is cleanly integrated in cdn.rs. The module boundary is correct: it has no knowledge of the scan controller.",
+    "severity": "minor",
+    "location": "src/engine/neighbor.rs",
+    "improvement": "No change needed."
+   },
+   {
+    "title": "Minor: scan mode dispatch is a simple if/else, not a trait dispatch",
+    "description": "run_seeded_with_pool does if cfg.mode == Mode::Warp { run_warp } else { run_cdn }. This is fine for two modes. If a third mode appears (e.g., DNS mode), a ModeHandler trait would be warranted. Currently, the if/else is the simplest correct solution.",
+    "severity": "minor",
+    "location": "src/engine/mod.rs:run_seeded_with_pool (line 240)",
+    "improvement": "No action needed now. If a third mode appears, refactor to a trait dispatch."
+   },
+   {
+    "title": "Test coverage is excellent across all modules",
+    "description": "Every module has comprehensive tests: mod.rs tests streaming, concurrency, cancel, reset, store sort. cdn.rs tests stop conditions, progress, neighbors, colo filtering, loss thresholds. warp.rs tests multi-probe aggregation, custom endpoints, exclusion. phase2.rs tests config parsing, SNI combos, colo filter, cancel, progress. speed.rs tests mbps math, min-speed flip, integration with scan. store.rs tests set_asn, lazy sort. plan.rs tests deterministic sampling. neighbor.rs tests candidate generation bounds. The FakeTransport/FakeTunnelProbe/FakeSpeedTester seams make all tests network-free.",
+    "severity": "minor",
+    "location": "All engine module test modules",
+    "improvement": "No change needed. Coverage is thorough."
+   }
+  ]
+ },
+ {
+  "rating": 7,
+  "findings": [
+   {
+    "title": "ScanController is a god object (13 fields, 1,118 lines)",
+    "description": "ScanController in src/engine/mod.rs owns result storage, store sorting, event broadcasting, cancellation coordination, phase-2 config retention, run lifecycle, and holds injected dependencies for both CDN and WARP modes. It acts as result store, lifecycle controller, event bus, scan orchestrator, and DI container simultaneously. The drive_run method alone is 40 lines of subtle event-relay coordination. Result-store operations (snapshot_sorted, clear_store, phase2_passed, working_found, for_each_result, set_asn) could be extracted into a ResultStore wrapper — the engine::store module already has primitives but the controller reimplements them at a higher level.",
+    "severity": "major",
+    "location": "src/engine/mod.rs",
+    "improvement": "Extract a ResultStore wrapper that encapsulates Arc<Mutex<Vec<Verdict>>>, sorted-snapshot caching, dirty flag, and the higher-level accessors (results, for_each_result, phase2_passed, working_found). Keep ScanController as a thin lifecycle/orchestration coordinator that delegates store operations."
+   },
+   {
+    "title": "configs.rs is 1,975 lines with 5+ unrelated responsibilities",
+    "description": "src/configs.rs contains subscription fetch+parse (SubFetch trait, RealSubFetch, parse_subscription, parse_subscriptions), VLESS/VMess URI parsing (parse_uri, parse_xray_json), outbound spec types (OutboundSpec, Protocol, wire format, fragment generation), config export (export_config_uri, export_xray_config), and error sanitization (sanitize_error_text). These have different dependency surfaces and different reasons to change — subscription/URI parsing touches network and encoding, outbound spec generation touches xray config format, error sanitization is a utility.",
+    "severity": "major",
+    "location": "src/configs.rs",
+    "improvement": "Decompose into configs/subscription.rs (fetch + parse), configs/outbound.rs (OutboundSpec, Protocol, wire format), configs/export.rs (export_config_uri, export_xray_config), configs/sanitize.rs (sanitize_error_text), with a thin configs/mod.rs re-exporting."
+   },
+   {
+    "title": "API contract is well-isolated (positive finding)",
+    "description": "src/api/ defines pure data types with no engine/transport/probe dependencies. It has its own error type (ConfigError) with exhaustive variants, owns validation logic co-located with types, uses #[serde(deny_unknown_fields)] for forward compatibility, and ScanConfig::validate() is self-contained. types.rs at 458 lines is one cohesive unit — the configuration, verdict, event, and summary types all flow together. The only minor coupling is ScanConfig::validate() reaching into crate::configs for sanitize_error_text and crate::ranges for validate_fetch_url.",
+    "severity": "minor",
+    "location": "src/api/",
+    "improvement": "No change needed. The flat ScanConfig struct with 23 fields is acceptable for a CLI tool."
+   },
+   {
+    "title": "No circular dependencies exist (positive finding)",
+    "description": "The dependency DAG is verified clean: api::types is the leaf node with no dependencies. The direction flows main -> engine/api -> configs/probe/ranges -> verify/warp/xray. No module imports upstream. No cycle exists.",
+    "severity": "minor",
+    "location": "src/lib.rs",
+    "improvement": "No change needed. Maintain this DAG discipline."
+   },
+   {
+    "title": "Three oversized single-responsibility files (acceptable)",
+    "description": "src/inline_verify.rs (1,265 lines, inline TLS tunnel probe), src/xray.rs (1,227 lines, xray subprocess management), src/warpgen.rs (1,165 lines, WARP identity registration) are all large but focused on single domains with coherent APIs. They are not god objects.",
+    "severity": "minor",
+    "location": "src/inline_verify.rs, src/xray.rs, src/warpgen.rs",
+    "improvement": "Low priority. Could add doc comments but splitting would scatter cohesive logic."
+   },
+   {
+    "title": "Engine submodule decomposition is correct (positive finding)",
+    "description": "The engine/ directory correctly splits scan strategies into cdn.rs (1,042 lines), warp.rs (621 lines), phase2.rs (1,115 lines), speed.rs (628 lines), with supporting modules plan.rs (381 lines, IP sampling), neighbor.rs (152 lines, correlation), and store.rs (133 lines, low-level operations). The problem is concentrated in mod.rs, not the submodules.",
+    "severity": "minor",
+    "location": "src/engine/",
+    "improvement": "No change needed for submodules. Focus on mod.rs decomposition."
+   }
+  ]
+ },
+ {
+  "rating": 7.5,
+  "findings": [
+   {
+    "title": "neighbor_count not rejected in WARP mode at API level",
+    "description": "The CLI rejects --neighbor-scan > 0 in WARP mode (cli/scan_args.rs:52-56), but ScanConfig::validate() never checks this. A programmatic API consumer could construct a WARP config with neighbor_count > 0 and pass validation. The engine likely ignores it, but the contract is incomplete.",
+    "severity": "major",
+    "location": "src/api/validate.rs (WARP validation block, ~line 503-520) — missing check; src/cli/scan_args.rs:52-56 — CLI-only enforcement",
+    "improvement": "Add to the WARP branch of validate(): if self.neighbor_count > 0 { return Err(ConfigError::NeighborWrongMode); } with a new ConfigError variant. This closes the gap between CLI and API validation."
+   },
+   {
+    "title": "validate() monolith mixes 6+ unrelated concerns in one ~100-line method",
+    "description": "ScanConfig::validate() handles port bounds, stop conditions, concurrency, timeout, mode-specific cross-field checks, phase2 sub-validation, colo validation, HTTP code validation, speed test constraints, neighbor counts, CIDR parsing, and non-routable checks — all in a single closure. While the mode-specific match block is clean, the flat method mixes many concerns.",
+    "severity": "minor",
+    "location": "src/api/types.rs:466-562",
+    "improvement": "Consider extracting helper functions like validate_scan_bounds(), validate_mode_invariants(), validate_phase2_options() to improve readability and testability. Alternatively, accept this as a deliberate 'assertion builder' pattern for auditability."
+   },
+   {
+    "title": "probe_mode = Tcp combined with accepted_http_codes is not rejected",
+    "description": "The code rejects ProbeMode::Http with empty accepted_http_codes, but accepts ProbeMode::Tcp with a non-empty accepted_http_codes list. HTTP status codes are meaningless for TCP probes — this is a dead configuration that should be rejected for consistency.",
+    "severity": "minor",
+    "location": "src/api/validate.rs (around line 530-533)",
+    "improvement": "Add: if self.probe_mode == ProbeMode::Tcp && !self.accepted_http_codes.is_empty() { return Err(ConfigError::TcpIgnoresHttpCodes); } with a new ConfigError variant."
+   },
+   {
+    "title": "stop.cap < stop.found is accepted silently at API level",
+    "description": "When cap < found, the scan terminates at the cap and never reaches the target. The CLI emits a warning (cli/scan_args.rs:304 cap_warning), but validate() accepts it silently. For an API consumer this is a semantic trap: user says 'find 20 working endpoints' but capped at 10.",
+    "severity": "minor",
+    "location": "src/api/types.rs:482-483 (validate) and types_tests.rs (accepts_cap_below_found test proves this is intentional)",
+    "improvement": "Consider either rejecting this combination in validate() with a new ConfigError variant, or adding a ConfigWarning return path so callers can surface warnings."
+   },
+   {
+    "title": "Duplicate validation between CLI and API creates maintenance gaps",
+    "description": "The CLI layer performs extensive pre-validation (validate_basic_flags, validate_mode_flags, validate_warp_flags, validate_phase2_flags) and then calls cfg.validate() again. This means two code paths must be kept in sync. Some checks exist only in CLI (neighbor_count in WARP, include_v6 in WARP), some only in API (probe_mode Tcp + http_codes). Error messages also differ between the two paths.",
+    "severity": "minor",
+    "location": "src/cli/scan_args.rs:112-176 (four validate_* functions) vs src/api/validate.rs",
+    "improvement": "Consider consolidating CLI-level checks into ScanConfig::validate() so there is a single source of truth for contract enforcement. CLI can still add UX-specific messages by mapping ConfigError variants."
+   },
+   {
+    "title": "validate_ports allows up to 4096 raw entries before dedup",
+    "description": "validate_ports() allows ports.len() > MAX_PORTS * 64 (= 4096) before rejecting, meaning 4096 identical ports (e.g., 4096 copies of 443) triggers allocation and sorting before the dedup-then-check rejects them. This is a minor efficiency concern for a malicious or accidental payload.",
+    "severity": "minor",
+    "location": "src/api/validate.rs:77-89",
+    "improvement": "Tighten the raw length check to MAX_PORTS * 2 or similar, or accept the current generous guard as a pragmatic choice."
+   },
+   {
+    "title": "probe_url / probe_urls dual-field legacy coexistence adds complexity",
+    "description": "Phase2Config has both probe_url (legacy single) and probe_urls (new list) fields. The effective_probe_urls() method correctly prefers probe_urls with fallback. Validation only checks probe_url when probe_urls is empty. This is handled well but adds ongoing maintenance burden until the legacy field is removed.",
+    "severity": "minor",
+    "location": "src/api/types.rs:137-149 (Phase2Config fields and effective_probe_urls)",
+    "improvement": "Acceptable tech debt for backward compatibility. Consider deprecation warnings when probe_url is explicitly set to a non-default value."
+   },
+   {
+    "title": "Limits are well-centralized and properly named",
+    "description": "All limits live in src/api/limits.rs with descriptive names (MAX_SCAN_COUNT, MAX_STOP_VALUE, MAX_COLO_CODES, MAX_NEIGHBORS, etc.). ConfigError variants reference the limit constants in their #[error] messages, keeping error text in sync. Limits are referenced consistently from validate.rs and types.rs defaults.",
+    "severity": "minor",
+    "location": "src/api/limits.rs",
+    "improvement": "No action needed — this is well-done."
+   },
+   {
+    "title": "ScanConfig flat struct with mode-gating is the right abstraction",
+    "description": "ScanConfig is a single flat struct with mode: Mode plus Option<Phase2Config> and Option<WarpConfig>. The #[serde(deny_unknown_fields)] attribute prevents accidental field injection. The Default impl provides sensible defaults. This avoids enum-matching in every engine consumer while keeping serializability for retry/save and JSON API.",
+    "severity": "minor",
+    "location": "src/api/types.rs:195-232",
+    "improvement": "No action needed — this is the right design for this domain."
+   },
+   {
+    "title": "WARP mode validation is thorough",
+    "description": "The WARP mode validation block correctly rejects: non-TLS probe mode, phase2 configs, phase2_only, colo_filter, speed_test, preset targets, custom_cidrs, and default warp port. WarpConfig::validate() handles probe count, wgconf dependency, endpoint limits, and endpoint syntax.",
+    "severity": "minor",
+    "location": "src/api/types.rs:503-520 and WarpConfig::validate() at types.rs:571-590",
+    "improvement": "No action needed — this is thorough."
+   },
+   {
+    "title": "Comprehensive test coverage for config validation",
+    "description": "The test suite in types_tests.rs (340+ lines) covers all validation error paths, serde round-trips, backward-compatible deserialization of legacy fields, edge cases (empty lists, boundary values, zero caps), mode-specific rejections, and grammar fixtures. This is strong coverage.",
+    "severity": "minor",
+    "location": "src/api/types_tests.rs",
+    "improvement": "Add tests for the new checks recommended in findings #1 and #2 (neighbor_count in WARP mode, Tcp + http_codes)."
+   }
+  ]
+ },
+ {
+  "rating": 8,
+  "findings": [
+   {
+    "title": "Typed error enums at the right boundaries",
+    "description": "Three well-structured thiserror enums exist exactly where they should: ConfigError (50+ variants for config validation), ProbeError (4 variants for network probing), WarpRegisterError (4 variants for WARP registration). All use #[error(\"...\")] with clear, actionable messages that include the offending value and constraints. AlreadyRunning in engine/mod.rs is correctly modeled as a unit struct. This is textbook Rust error architecture.",
+    "severity": "minor",
+    "location": "src/api/error.rs, src/probe.rs, src/warpgen.rs, src/engine/mod.rs:51"
+   },
+   {
+    "title": "Duplicate validation between CLI and ConfigError",
+    "description": "src/cli/scan_args.rs has its own validate_basic_flags/validate_mode_flags/validate_warp_flags/validate_phase2_flags that overlap significantly with ScanConfig::validate() and ConfigError variants. For example, --target must be at least 1 (CLI) mirrors InvalidFound(0) (ConfigError), --preset is CDN-only mirrors WarpPresetNotAllowed. This is intentional two-phase validation (CLI flags with --flag-name context vs config-level structured errors), but creates a maintenance burden where new constraints must be added in two places.",
+    "severity": "minor",
+    "location": "src/cli/scan_args.rs vs src/api/error.rs",
+    "improvement": "Document which validations live where, or generate CLI flag validation from ConfigError to keep them in sync."
+   },
+   {
+    "title": "WarpRegisterError detail field is never surfaced in output",
+    "description": "WarpRegisterError::Server { status: u16, detail: String } captures sanitized server response bodies, but the #[error(\"registration server error ({status})\")] Display impl only shows the status code, not the detail. The detail is only accessible via downcast_ref::<WarpRegisterError>() and inspecting the field. For debugging WARP registration failures, the sanitized diagnostic body is effectively lost.",
+    "severity": "minor",
+    "location": "src/warpgen.rs:27",
+    "improvement": "Include detail in the Display message when verbose mode is active, or log it at tracing::debug level in the WarpClient::attempt method."
+   },
+   {
+    "title": "WizardInterrupted error matching is fragile",
+    "description": "src/main.rs:44 uses err.is::<cli_wizard::WizardInterrupted>() to detect Ctrl+C from the wizard. This walks the anyhow chain to find the type. If any intermediate code wraps the error with additional context before it reaches main, the is::<T>() check would fail. The current code works but relies on no error wrapping happening between WizardInterrupted creation and main's catch.",
+    "severity": "minor",
+    "location": "src/main.rs:44, src/cli_wizard.rs:130",
+    "improvement": "Use a dedicated return type like Result<(), WizardExit> where WizardExit has an enum for Interrupted vs NormalExit, instead of relying on anyhow chain inspection."
+   },
+   {
+    "title": "Error sanitization is thorough and security-critical",
+    "description": "configs::sanitize_error_text strips control characters, redacts credentials from URIs (***@ prefix), and truncates long lines. Used consistently across engine scan failure events, WARP registration error details, export config error messages, and subscription parsing errors. No credential leakage paths visible in the codebase.",
+    "severity": "minor",
+    "location": "src/configs.rs sanitize_error_text, used at src/engine/mod.rs:324, src/warpgen.rs:82, src/main.rs:192, src/configs.rs:473"
+   }
+  ]
+ },
+ {
+  "rating": 7.5,
+  "findings": [
+   {
+    "title": "~12 flags have no help text in --help output",
+    "severity": "major",
+    "location": "src/cli.rs lines 230-310",
+    "description": "Flags like --count, --ports, --phase2-configs, --exclude, --custom-cidrs, --ipv6, --seed, --phase2-only, --phase2-custom, --phase2-snis, --phase2-probe-urls, --phase2-concurrency, and --cap have no help or long_help text, appearing as bare flags in --help output. The most critical undocumented flag is --phase2-configs (the entry point for all phase-2 verification).",
+    "improvement": "Add help = \"...\" to every flag. Follow the pattern already used on --loss-threshold, --min-latency, --idle-hold-ms which have excellent long_help descriptions."
+   },
+   {
+    "title": "Wizard missing --phase2-probe-urls (functional gap)",
+    "severity": "minor",
+    "location": "src/cli_wizard.rs line 686",
+    "description": "The wizard's prompt_phase2() hardcodes probe_urls: Vec::new() and only asks for a single probe_url. The CLI exposes --phase2-probe-urls for multi-URL probing. Wizard users cannot configure this.",
+    "improvement": "Extend prompt_phase2() to accept comma-separated probe URLs, or at minimum note this as a known wizard limitation."
+   },
+   {
+    "title": "--json-errors has no help text",
+    "severity": "minor",
+    "location": "src/cli.rs line 18",
+    "description": "This critical automation flag renders as a bare --json-errors in --help output with zero description. Scripts that need machine-readable error output must discover it by reading source.",
+    "improvement": "Add help = \"Print parse and runtime errors as JSON on stdout (for script consumption)\""
+   },
+   {
+    "title": "--target naming is ambiguous, default not explained",
+    "severity": "minor",
+    "location": "src/cli.rs line 75",
+    "description": "The flag --target (alias --stop-after) has no help text. 'Target' is ambiguous — could mean the scan target rather than 'number of working results to find'. The alias --stop-after is more intuitive. The default of 20 is only shown as [default: 20] with no context.",
+    "improvement": "Add help = \"Stop after finding N working endpoints (default: 20)\". Consider promoting --stop-after to the primary name."
+   },
+   {
+    "title": "--cap and --target interaction undocumented",
+    "severity": "minor",
+    "location": "src/cli.rs line 80, src/cli/scan_args.rs line 238",
+    "description": "Neither --cap nor --target explains how they interact. If --cap < --target, the scan stops early with fewer results. The cap_warning() function catches this but only emits to stderr.",
+    "improvement": "Add help text to --cap explaining: 'Hard limit on total probes sent; scan stops even if --target not reached'"
+   },
+   {
+    "title": "--phase2-fragment values lack byte/timing details",
+    "severity": "minor",
+    "location": "src/cli.rs line 180",
+    "description": "The help output shows [possible values: off, light, medium, heavy, custom] with no description. The wizard helpfully shows 'Light (100-200 bytes / 10-20 ms)' etc. but the CLI does not.",
+    "improvement": "Add long_help with the byte range and timing details already present in the wizard prompts (cli_wizard.rs lines 408-412)."
+   },
+   {
+    "title": "--enrich-asn under wrong help_heading",
+    "severity": "minor",
+    "location": "src/cli.rs line 288",
+    "description": "--enrich-asn is placed under 'Candidate selection' heading but is a post-scan annotation step. Its help text correctly says 'After the scan...' but the heading is misleading.",
+    "improvement": "Move to an 'Output' or 'Post-processing' heading alongside --export."
+   },
+   {
+    "title": "No --quiet / --no-progress flag for CI/scripting",
+    "severity": "minor",
+    "location": "src/main.rs streaming closure",
+    "description": "Progress output goes to stderr unconditionally (TTY-gated for ticker, but summary and phase-2 progress always print). No way to suppress stderr noise in CI or scripting contexts.",
+    "improvement": "Consider adding --quiet that suppresses all stderr progress output. Low priority since stderr is technically optional for parsers."
+   }
+  ]
+ },
+ {
+  "rating": 8,
+  "findings": [
+   {
+    "title": "boringtun integration is clean and well-bounded",
+    "description": "The `warp.rs` integration uses boringtun only for WireGuard Noise protocol (Tunn, x25519). No gRPC, no embedded runtime. The two probe modes (`ShapeOnly` vs `FullSession`) are cleanly separated via the `ProbeDepth` enum, and the `finish_full_session` function encapsulates the full handshake-then-data flow with proper timeout cascading. The `classify()` function correctly handles both HandshakeResponse and CookieReply without matching receiver indices (verified against live behavior per AGENTS.md). The `build_dns_probe_packet` function constructs valid IP/UDP/DNS packets inline for data-phase verification -- a pragmatic choice that avoids pulling in a packet-crafting library.",
+    "severity": "minor",
+    "location": "src/warp.rs:119-226",
+    "improvement": "One small observation: the DNS probe uses hardcoded source IP 172.16.0.2 and transaction ID 0x1a2b. This is fine for a probe-only tool, but if the DNS server ever rejects non-random IDs, this would silently break. Low risk since it is testing data-plane reachability, not actual DNS resolution."
+   },
+   {
+    "title": "SocketCache has a TOCTOU race in get_or_bind that is acceptable by design",
+    "description": "The `get_or_bind` method acquires the lock, checks for existence, drops the lock, binds a new socket, then re-acquires to insert. Between the first check and the insert, another task could insert the same key. The code handles this correctly with a second check after re-acquiring the lock (`if let Some(existing) = map.get(...)`). This is the standard double-check pattern and is correct. The eviction policy (remove first key when at MAX_SOCKETS) is FIFO-ish since HashMap iteration order is deterministic per process but not globally ordered. This is fine for a probe tool -- the evicted socket is the oldest one that happened to be first in the map's internal order.",
+    "severity": "minor",
+    "location": "src/warp.rs:119-156",
+    "improvement": "None needed. The design matches the v0.8.0 invariant: SocketCache is per-controller, injected via WarpTransport::with_cache, never held across .await, no global static."
+   },
+   {
+    "title": "Registration API client is well-factored with good retry semantics",
+    "description": "The `WarpClient` in `warpgen.rs` cleanly separates concerns: `post_json` for unauthenticated calls, `authed` for Bearer-token calls, and `attempt` for the retry loop. The retry logic correctly distinguishes retryable (429, 5xx, transport errors) from non-retryable (401/403, 4xx other) failures. The `retryable_transport` parameter on `attempt` is a smart design choice: `post_json` (registration) sets it to `false` because a new keypair must not be retried against a possibly-different session, while `authed` (enable_warp, fetch, bind_license) sets it to `true`. The Retry-After header parsing is present and capped. Error sanitization via `sanitize_error_text` prevents credential leaks in error messages, which is tested.",
+    "severity": "minor",
+    "location": "src/warpgen.rs:72-156",
+    "improvement": "The `attempt` method recreates the HTTP client on each call (`let http = Self::http_client(self.timeout)?`). This is wasteful for the `authed` path which retries. Consider creating the client once in `WarpClient::new` and storing it. However, since reqwest::Client is Arc-based internally and registration is a one-shot operation, this is a minor inefficiency, not a bug."
+   },
+   {
+    "title": "wgconf parsing is thorough and correct",
+    "description": "The parser handles both INI-style wg-quick configs (`parse_wgconf`) and AmneziaWG URIs (`parse_awg_uri`). It correctly validates: key lengths (MAX_KEY_B64_LEN=64 prevents base64 bomb), AllowedIPs character whitelist (no shell injection), line length limits (4096 bytes), URI userinfo rejection, and numeric overflow for Amnezia params. The `decode_key` function validates both base64 correctness and exact 32-byte length. The round-trip test (`render_round_trips_the_ini_fixture`) proves parse-render-parse consistency. The case-insensitive key matching and CRLF tolerance are correct for cross-platform configs.",
+    "severity": "minor",
+    "location": "src/wgconf.rs:1-230",
+    "improvement": "The `parse_awg_uri` function parses query parameters with `split_once('=')` which silently drops malformed pairs (e.g., `key=val=extra`). This is acceptable behavior since these are expected to be well-formed URIs from trusted sources (users or the registration API), not adversarial input."
+   },
+   {
+    "title": "wgconf rendering is complete and correct",
+    "description": "The `render_wgconf` function produces valid wg-quick format output. It correctly handles: conditional fields (DNS, MTU, Endpoint, PersistentKeepalive only rendered when present), empty Address suppression, Amnezia params, PresharedKey, and the AllowedIPs join. The test coverage includes round-trip validation, case-insensitive parsing, and CRLF tolerance. The render output is deterministic (no HashMap iteration order issues since BTreeMap is used internally).",
+    "severity": "minor",
+    "location": "src/wgconf.rs:137-184",
+    "improvement": "None needed."
+   },
+   {
+    "title": "WARP scan engine dispatch follows v0.8.0 invariants precisely",
+    "description": "The `run_warp` method in `engine/warp.rs` implements the per-worker bounded-channel dispatch pattern correctly: `i % concurrency` round-robin with `mpsc::channel(4)` backpressure. The `producer` task uses `tokio::select!` for cancellation. Workers use `tokio::select!` for both task receive and cancellation. The `probes_per_endpoint` loop correctly tracks latency (min across probes), loss, and only emits a Verdict when `failed == 0`. Batch flushing follows BATCH_FLUSH=256 with `merge_sorted`. The `warp_groups` method correctly handles both pool-based and custom-endpoint modes, with proper dedup and Count-based sampling.",
+    "severity": "minor",
+    "location": "src/engine/warp.rs:22-150",
+    "improvement": "The `warp_groups` method clones the entire `groups` Vec into the producer task. For the bundled pool (2048 hosts), this is ~40KB of IPv4+Arc<Vec<u16>> which is negligible. For custom endpoints, the dedup via HashSet is clean. No issues."
+   },
+   {
+    "title": "Server key resolution has a clean fallback chain",
+    "description": "The `server_public_key()` function in `warp.rs` implements a three-level fallback: (1) persisted peer_public_key from identity.json, (2) bundled constant SERVER_PUBLIC_KEY_B64, (3) error if the bundled key itself is corrupt. The `persisted_server_public_key()` function in `warpgen.rs` validates the persisted key with `decode_key` before returning it, and returns None on any corruption. This is thoroughly tested: both the override path and the corrupt fallback path have dedicated tests.",
+    "severity": "minor",
+    "location": "src/warp.rs:43-76, src/warpgen.rs:145-167",
+    "improvement": "None needed."
+   },
+   {
+    "title": "Identity file write safety is production-grade",
+    "description": "The `write_private_replace` function in `warpgen.rs` uses atomic write-to-tmp-then-rename with PID and random suffix to avoid collisions. On failure, the temp file is cleaned up. The `write_private` function uses 0o600 permissions on Unix and `write_secret` on Windows. The `data_write_guard()` call ensures the data directory exists before writing. The failed-replacement test verifies no temp files leak.",
+    "severity": "minor",
+    "location": "src/warpgen.rs:177-215",
+    "improvement": "None needed."
+   },
+   {
+    "title": "Minor: NEXT_INDEX skip-0 logic could collide with boringtun internals",
+    "description": "The global `NEXT_INDEX` atomics skips index 0 (`if v == 0 { fetch_add(1) }`). This means the actual index used is 1, 2, 3, ... which is correct for WireGuard (index 0 is reserved). However, `AtomicU32::new(1)` means the first call returns 1 directly (skipping the check), and the second call returns 2, etc. The wrap-around at u32::MAX is theoretically possible but astronomically unlikely for a probe tool. The use of `Relaxed` ordering is acceptable since there is no cross-thread dependency on the index value beyond uniqueness within a single probe.",
+    "severity": "minor",
+    "location": "src/warp.rs:237-243",
+    "improvement": "The skip-0 check is only needed when the atomic is 0, but it starts at 1, so the check `if v == 0` on line 240 is dead code for the entire process lifetime. This is harmless but could be simplified to just `NEXT_INDEX.fetch_add(1, Ordering::Relaxed)` with `AtomicU32::new(0)`, since fetch_add returns the previous value and we want the post-increment value. Actually, the current code returns the pre-increment value with a skip, which is equivalent to returning 1, 2, 3, ... This is correct. The dead-code 0 check is a safety net that costs nothing."
+   },
+   {
+    "title": "Test coverage is exceptional for this subsystem",
+    "description": "The WARP subsystem has comprehensive test coverage across all four files: unit tests for key validation, classification, identity persistence, wgconf round-trips, URI parsing, and socket cache eviction. Integration tests for the full registration flow against an axum mock server. Probing tests with mock UDP servers for both ShapeOnly and FullSession modes. Engine-level tests for stop conditions, cancellation, progress events, dedup, and count-based sampling. The `IDENTITY_LOCK` pattern for filesystem tests is a pragmatic solution to test isolation. Total: ~40 tests across the four files.",
+    "severity": "minor",
+    "location": "src/warp.rs, src/warpgen.rs, src/wgconf.rs, src/engine/warp.rs (test modules)",
+    "improvement": "None needed."
+   }
+  ]
+ },
+ {
+  "rating": 7,
+  "findings": [
+   {
+    "title": "Transport trait is clean and well-designed",
+    "description": "The Transport trait (probe.rs:33-35) has a minimal surface: four scalar parameters, a boxed future return, and is object-safe. The ProbeOutcome/ProbeError types derive PartialEq/Eq for easy testing. FakeTransport (probe.rs:262-347) is production-grade test infrastructure with builder-pattern scripting, sequence consumption, and Barrier-based rendezvous for cancel-race tests.",
+    "severity": "minor",
+    "location": "src/probe.rs:33-35"
+   },
+   {
+    "title": "idle_hold_ms silently ignored by WARP transports",
+    "description": "Both WarpTransport (warp.rs:145) and WgVerifyTransport (warp.rs:167) discard the idle_hold_ms parameter. This is correct behavior today but the hidden contract means a caller expecting idle-hold filtering in WARP mode will silently get nothing. No doc comment or #[allow(unused)] makes this explicit.",
+    "severity": "minor",
+    "location": "src/warp.rs:145,167",
+    "improvement": "Add a doc comment on the Transport trait or on the WARP impls explaining that idle_hold_ms is intentionally unused in UDP-based transports."
+   },
+   {
+    "title": "~200 lines of structural duplication between CDN and WARP probe loops",
+    "description": "The worker pool creation, channel wiring, producer task loop, JoinSet join loop, batch flush via merge_sorted, milestone_due+progress calls, and cancellation pattern are nearly identical between engine/cdn.rs:106-232 and engine/warp.rs:33-153. WarpTask is a private duplicate of ProbeTask (both { ip, port }). Verdict construction and batch-flush logic is also duplicated.",
+    "severity": "major",
+    "location": "src/engine/cdn.rs vs src/engine/warp.rs",
+    "improvement": "Extract a shared run_probe_loop function parameterized by a Task type and a process_fn closure. Unify WarpTask with ProbeTask. Extract a flush_verdict helper for the batch-merge and progress-reporting logic."
+   },
+   {
+    "title": "WARP transport selection leaks into the engine",
+    "description": "run_warp() (warp.rs:25-43) decides between WarpTransport (shape-only) and WgVerifyTransport (full session) based on warp.verify_with_wgconf. This decision should be encapsulated in the transport layer rather than branching in the engine.",
+    "severity": "minor",
+    "location": "src/engine/warp.rs:25-43",
+    "improvement": "Create a WarpTransportBuilder that accepts an optional WgConfig and returns the appropriate transport, keeping the engine transport-agnostic."
+   },
+   {
+    "title": "IPv4-only guard duplicated across WARP transports",
+    "description": "The IpAddr::V4 match with early-return Err(ProbeError::Refused(\"WARP endpoints are IPv4-only\")) is repeated verbatim in both WarpTransport::probe() and WgVerifyTransport::probe().",
+    "severity": "minor",
+    "location": "src/warp.rs:130-140",
+    "improvement": "Extract a helper function like require_ipv4(ip: IpAddr) -> Result<Ipv4Addr, ProbeError> to eliminate the duplication."
+   },
+   {
+    "title": "No transport composition or middleware pattern",
+    "description": "There is no way to stack behaviors (retry on timeout, add idle-hold, log latency) on top of a transport without modifying it. Retry logic is baked into each transport's probe() implementation. A RetryTransport<T: Transport> wrapper or combinator would improve composability.",
+    "severity": "minor",
+    "location": "src/probe.rs:33-35",
+    "improvement": "Add decorator-style transport wrappers (RetryTransport, IdleHoldTransport, LoggingTransport) that compose over a base Transport."
+   },
+   {
+    "title": "TunnelProbe and TunnelOpener are overlapping abstractions",
+    "description": "TunnelProbe::probe() opens a tunnel, runs probes, and closes it. TunnelOpener::open() opens a tunnel and returns a handle. These create two parallel abstractions for 'open a tunnel to an IP' with overlapping concerns.",
+    "severity": "minor",
+    "location": "src/verify.rs:18-25,35-47",
+    "improvement": "Consider unifying or explicitly documenting the boundary between these two traits to clarify which is used where."
+   },
+   {
+    "title": "ProbeRequest lifetime adds friction to TunnelProbe",
+    "description": "TunnelProbe uses ProbeRequest<'a> with a lifetime. XrayTunnelProbe::probe() clones everything out of the request immediately, making the lifetime unnecessary overhead. Owned ProbeRequest with String fields would simplify the trait.",
+    "severity": "minor",
+    "location": "src/verify.rs:18-25",
+    "improvement": "Change ProbeRequest to own its String fields and remove the lifetime parameter from TunnelProbe."
+   },
+   {
+    "title": "step_budgets is not configurable",
+    "description": "HttpTransport has a private step_budgets() function splitting timeout into 30/30/40 for connect/TLS/rw. This is not parameterizable without modifying the transport source.",
+    "severity": "minor",
+    "location": "src/probe.rs:148-208",
+    "improvement": "Consider making step_budgets configurable via HttpTransport constructor parameters or a BudgetConfig struct."
+   }
+  ]
+ },
+ {
+  "rating": 9,
+  "findings": [
+   {
+    "title": "5 injectable trait seams with fakes all cover network-free testing",
+    "description": "Transport, TunnelProbe, TunnelOpener, SpeedTester, and SubFetch all have trait boundaries with test doubles. ScanController constructor chain (new -> with_transports -> with_probes + set_speed_tester + set_tunnel_opener) allows tests to construct fully offline controllers. Every major scan path (CDN phase-1, phase-2, WARP, speed gate) can run without network.",
+    "severity": "major",
+    "location": "src/engine/mod.rs:59-101, src/probe.rs:64, src/verify.rs:37+146, src/engine/speed.rs:37, src/configs.rs:206"
+   },
+   {
+    "title": "FakeTransport is feature-rich with scripted sequences, delays, loss, colo, and barriers",
+    "description": "Supports .ok(), .ok_loss(), .ok_colo(), .ok_slow(), .fail(), .idle_rst(), .seq() for multi-probe scripted outcomes, and a rendezvous barrier for deterministic concurrency testing. Gated behind #[cfg(any(test, feature = 'test-helpers'))] for downstream consumers.",
+    "severity": "major",
+    "location": "src/probe.rs:381-502"
+   },
+   {
+    "title": "Inline probe tests use real loopback TLS servers, not mocks",
+    "description": "FakeServer with rcgen self-signed certs on 127.0.0.1 tests the full protocol matrix (Trojan+TLS, Vless+TLS, plain TCP, legacy acks, multi-URL keep-alive, 403, timeout, refused). HybridTunnelProbe routing (inline vs xray) verified exhaustively with RecordingProbe.",
+    "severity": "major",
+    "location": "src/inline_verify.rs:335-520, src/inline_verify.rs:670-870"
+   },
+   {
+    "title": "Phase-2 tests fully offline with FakeTunnelProbe and FakeSub",
+    "description": "FakeTunnelProbe supports IP-based pass/fail, SNI-based routing, colo injection, error simulation, rendezvous barriers, and URL-list recording. FakeSub (in test_helpers.rs) stubs subscription fetch. Covers: SNI combo iteration, subscription fetching, colo filtering, v6 skip, config index tracking, result re-emission.",
+    "severity": "major",
+    "location": "src/engine/phase2.rs:372-700, src/engine/test_helpers.rs"
+   },
+   {
+    "title": "Concurrency, cancellation, poisoning, and overflow recovery all tested",
+    "description": "Mutex poisoning tolerance verified (mod.rs:770-792). 1024-verdict scan with slow consumer tests streaming recovery (mod.rs:859-930). Lazy sort correctness with incremental merges (mod.rs:931-1000). Credential redaction in failed probe Debug output (verify.rs:669-695).",
+    "severity": "major",
+    "location": "src/engine/mod.rs:770-1000, src/verify.rs:669-695"
+   },
+   {
+    "title": "Gap: ranges::effective_pool() reads from disk with no trait seam",
+    "description": "effective_pool() calls paths::refreshed_ranges_path() for disk I/O with no injectable seam. Tests bypass via run_seeded_with_pool(). The pool logic itself is tested through effective_pool_from() with string overrides, but the path-to-pool plumbing is untested.",
+    "severity": "minor",
+    "location": "src/engine/mod.rs:365, src/ranges/pool.rs:282-304",
+    "improvement": "Add one integration test exercising run_seeded_unguarded() with a tempfile containing known CIDR data, or make effective_pool accept a path override parameter."
+   },
+   {
+    "title": "Gap: xray::spawn() and xray::ensure_binary() are not trait-injected",
+    "description": "XrayTunnelProbe calls xray::spawn() and xray::ensure_binary() directly. The xray process lifecycle (start, port binding, stop) is never unit-tested with mocks. Config generation is well-tested in xray.rs:642+, but HybridTunnelProbe routing avoids xray for common protocols, limiting blast radius.",
+    "severity": "minor",
+    "location": "src/verify.rs:31-35, src/verify.rs:67-110",
+    "improvement": "Consider a XraySpawner trait injected into XrayTunnelProbe (similar to TunnelOpener) to make the full open-tunnel-download-close flow testable without a real xray binary."
+   },
+   {
+    "title": "WARP registration flow tested with full axum mock server",
+    "description": "src/warpgen.rs:543-642 builds a mock Cloudflare WARP registration API (register, patch, fetch, account) as an axum Router, used for end-to-end registration flow tests. This is an exemplary pattern for testing external API integrations.",
+    "severity": "major",
+    "location": "src/warpgen.rs:543-642, src/warpgen.rs:780+"
+   }
+  ]
+ },
+ {
+  "rating": 8,
+  "findings": [
+   {
+    "title": "Clean format-dispatch pattern",
+    "description": "The export module uses a well-structured two-tier dispatch: render_bundle() and render_results() are the public entry points, with format validation via resolve_format() against static allowed-lists. Bundle_body() and result_dump() handle the actual rendering. This is straightforward and each format is isolated in its own rendering function. The pattern is simple and easy to follow.",
+    "severity": "minor",
+    "location": "src/export.rs:29-65",
+    "improvement": "No change needed — this is well-structured."
+   },
+   {
+    "title": "Adding a new format requires touching 4 locations",
+    "description": "To add a new export format, a developer must: (1) add to BUNDLE_FORMATS/RESULT_FORMATS const, (2) add variant to ExportFormatArg enum, (3) add to export_format_name(), (4) add match arm in bundle_body() or result_dump(). These are all in the same file but scattered across ~150 lines of distance. This is a minor friction point but not a blocker.",
+    "severity": "minor",
+    "location": "src/export.rs:55-60, 397-430, 432-445, 239-270",
+    "improvement": "Consider a trait-based format registry or a macro that generates the enum-to-string-to-handler mapping in one place, but the current approach is fine for 7 formats. The current approach is pragmatic for this codebase size."
+   },
+   {
+    "title": "singbox/clash config generation is correct",
+    "description": "The singbox outbound structure is accurate: type/tag/server/server_port/uuid for vless/vmess, password for trojan/ss, alter_id and vmess security handled, TLS block with server_name and utls fingerprint, transport blocks for ws/grpc/splithttp (singbox's name for xhttp). The Clash format uses the correct field names: 'type: ss' for shadowsocks (not 'shadowsocks'), 'cipher' instead of 'method', 'alterId', 'tls/servername/client-fingerprint', 'network' field, ws-opts/grpc-opts/xhttp-opts. Both are verified by targeted tests covering vmess, ss, grpc, and xhttp transport variants.",
+    "severity": "minor",
+    "location": "src/export.rs:186-270 (singbox), 272-360 (clash)",
+    "improvement": "Consider adding a singbox 'rules' section or clash 'rules' section with a default proxy-group, since a bare outbounds/proxies block alone won't route traffic. This is an enhancement, not a bug."
+   },
+   {
+    "title": "singbox/clash configs omit grpc mode field",
+    "description": "GrpcSettings has a mode field (gun/multi) that is forwarded during vmess URI rendering but is not included in singbox or clash outbound generation. The singbox gRPC transport does not have a mode field (it's not part of the spec), but Clash's grpc-opts supports 'grpc-service-name' and the mode could be relevant for multi-mode gRPC. This is a minor omission — default mode is gun, which is the common case.",
+    "severity": "minor",
+    "location": "src/export.rs:250-254 (singbox grpc), 324-327 (clash grpc)",
+    "improvement": "Pass grpc.mode through to the Clash grpc-opts if set, since Clash supports it. No change needed for singbox."
+   },
+   {
+    "title": "Test coverage is thorough for export formats",
+    "description": "22 tests cover: CSV field escaping (metacharacters, formula injection), JSON shape, base64 roundtrip, singbox and Clash output for vmess/ss/grpc/xhttp, IPv6 handling (error on all-v6, drop in mixed), diagnostic lines for all failure modes, atomic write roundtrip with no leftover tmp files, speed_test_mbps column presence, loss_pct and fail_reason columns, ASN/ISP enrichment in CSV and diagnostic lines. The singbox/clash tests verify full field presence including transport blocks. This is strong coverage.",
+    "severity": "minor",
+    "location": "src/export.rs:489-855 (test module)",
+    "improvement": "No gaps identified in the test coverage for the export module itself."
+   },
+   {
+    "title": "JSON export serializes full Verdict including phase2.config_index",
+    "description": "The render_results('json') path serializes the raw Verdict struct via serde_json. This includes phase2.config_index, phase2.sni, and phase2.fragment — internal bookkeeping fields. While config_index is an index into an internal Vec (not a credential), it could leak information about the scan's internal state. The SNI value is already a public TLS field. This is low-risk but is the only format that exposes these internal fields.",
+    "severity": "major",
+    "location": "src/export.rs:382 (render_results json branch)",
+    "improvement": "Consider adding #[serde(skip_serializing_if = \"Option::is_none\")] to config_index or using a separate ExportVerdict struct that omits internal fields. The Verdict struct already uses Serialize which means all fields go to the JSON output."
+   },
+   {
+    "title": "Bundle formats contain full proxy credentials in plaintext files",
+    "description": "The base64, raw, singbox, and clash export formats contain full proxy credentials (uuid/password) as plaintext in the exported file. This is by design — the user needs these credentials to use the configs. However, the atomic_write_file function does not set restrictive file permissions on the output file. On Unix, the default umask applies, which may create world-readable files. On Windows, permissions are ACL-based and not explicitly set.",
+    "severity": "major",
+    "location": "src/export.rs:454-479 (atomic_write_file)",
+    "improvement": "On Unix targets, consider setting file permissions to 0o600 (owner-only read/write) after creation. Use std::os::unix::fs::OpenOptionsExt or fchmod. The AGENTS.md notes that configs/keys must be kept out of logs, but the export files themselves have no access restriction beyond the filesystem."
+   },
+   {
+    "title": "IPv6 endpoints are silently dropped from bundle formats",
+    "description": "rewrite_uris() skips IPv6 endpoints entirely. If all endpoints are IPv6, the error message is clear and actionable. In mixed IPv4/IPv6 sets, IPv6 is silently dropped with no indication in the output. The user may not realize some endpoints are missing from their exported config.",
+    "severity": "minor",
+    "location": "src/export.rs:133 (rewrite_uris skips V6), 158-163 (error for all-V6)",
+    "improvement": "Consider printing a warning to stderr when IPv6 endpoints are skipped in a mixed set, so the user is aware of the limitation. The all-V6 error case is handled well."
+   },
+   {
+    "title": "singbox/clash generation silently skips malformed URI parses",
+    "description": "In singbox_body() and clash_body(), if parse_uri() fails for a URI (Err case), the endpoint is silently skipped. This means a malformed config URI from a passing endpoint will not appear in the output with no warning. The user may not understand why an endpoint is missing.",
+    "severity": "minor",
+    "location": "src/export.rs:190, 276",
+    "improvement": "Consider emitting warnings to stderr for URIs that fail to parse, so the user knows which endpoints were skipped and why. The tests do verify that bad config_index returns empty, which is correct."
+   }
+  ]
+ },
+ {
+  "gaps": [
+   {
+    "title": "bin/cf-scanner.js has no missing-binary guard",
+    "description": "If install.js fails (network error, checksum mismatch, unsupported platform), the bin/cf-scanner.js shim is already linked on PATH. Running it spawns a non-existent binary, resulting in a silent exit code 1 with no message. Should check for the binary and print a helpful error.",
+    "impact": "Medium — users see a silent failure with no guidance",
+    "effort": "Low — add an fs.existsSync check + error message in bin/cf-scanner.js"
+   },
+   {
+    "title": "Missing macOS targets (x64 + arm64)",
+    "description": "The TARGETS map has no darwin entries. macOS users (especially Apple Silicon) get the 'Unsupported platform' error and must download manually from GitHub releases. This is the single biggest platform gap.",
+    "impact": "High — any Mac user who runs npm install gets a failed install",
+    "effort": "Medium — requires CI to build and release macOS artifacts, then add two TARGETS entries"
+   },
+   {
+    "title": "Missing musl/Alpine Linux targets",
+    "description": "Alpine Linux and Docker images using musl libc cannot run the gnu-linked binaries. Users on Alpine, minimal Docker images, or CI runners with Alpine get a runtime crash or linker error after a successful download.",
+    "impact": "Medium-High — common in Docker/CI environments",
+    "effort": "Medium — requires musl cross-compilation in CI"
+   },
+   {
+    "title": "Error messages lack categorization",
+    "description": "install.js catches all errors under one 'Failed to download cf-scanner binary' block. Network errors, checksum mismatches, and extraction failures all produce the same generic message. Users cannot tell whether to retry, file a bug, or install system tools.",
+    "impact": "Low-Medium — increases time-to-resolution for users who hit failures",
+    "effort": "Low — wrap error types and match in the catch block"
+   },
+   {
+    "title": "No download progress indicator",
+    "description": "The entire binary is buffered into memory before any output. On slow connections users see 'Downloading: <url>' with no feedback until completion or failure. A periodic size log or progress bar would improve the experience.",
+    "impact": "Low — cosmetic but reduces perceived hangs",
+    "effort": "Low — add a data event counter logging every N KB"
+   }
+  ]
+ },
+ {
+  "gaps": [
+   {
+    "title": "sing-box export is bare outbound array only",
+    "description": "singbox_body() produces {\"outbounds\":[...]} with no DNS, route, or inbounds sections. Not importable as-is. Needs a full config wrapper.",
+    "impact": "high — largest growing client, output not usable without manual wrapping",
+    "effort": "medium — add DNS/route/inbounds template around existing outbound rendering"
+   },
+   {
+    "title": "Clash export missing proxy-groups, rules, DNS",
+    "description": "clash_body() produces {\"mixed-port\":7890,\"proxies\":[...]} without proxy-groups (url-test), rules (DOMAIN-SUFFIX/IP-CIDR), or dns sections. Not importable as standalone config.",
+    "impact": "high — Clash/Mihomo dominates desktop/router, users must paste into templates",
+    "effort": "medium — add proxy-groups, rules, DNS sections to clash_body()"
+   },
+   {
+    "title": "No v2ray/V2Ray JSON export format",
+    "description": "parse_xray_json() reads V2Ray JSON outbounds but no render_xray_json() exists to produce them. v2rayN/V2RayNG/NekoBox users cannot import directly.",
+    "impact": "high — huge user base on Windows/Android, all parsing infrastructure already exists",
+    "effort": "medium — new render function mapping OutboundSpec to V2Ray JSON with streamSettings"
+   },
+   {
+    "title": "No Shadowrocket export format",
+    "description": "Shadowrocket uses SIP002 vless:// trojan:// URIs (nearly identical to raw output) but needs minor additions: udp-relay flag, obfs/obfs-host for legacy SS.",
+    "impact": "medium — large iOS user base, almost trivial to add",
+    "effort": "low — variant of raw with Shadowrocket-specific query params"
+   },
+   {
+    "title": "No Quantumult X/QX export format",
+    "description": "Quantumult X uses comma-separated key=value URI format (vmess=IP:PORT, method=..., obfs=ws, obfs-host=xxx) which is structurally different from SIP002.",
+    "impact": "medium — smaller but loyal iOS user base",
+    "effort": "medium — new render_quantumult() mapping OutboundSpec fields to QX syntax"
+   },
+   {
+    "title": "singbox export omits WS packet_encoding",
+    "description": "WsSettings.packet_encoding is parsed and stored but singbox_body() does not emit it in the ws transport block. sing-box supports packetAddr in its WS settings.",
+    "impact": "low — edge case, xudp is auto-negotiated",
+    "effort": "low — add one field to the JSON"
+   },
+   {
+    "title": "Clash export missing udp flag on proxies",
+    "description": "Clash/Mihomo expects \"udp\": true on proxy entries for UDP-capable proxies. Not currently emitted.",
+    "impact": "low — most CF endpoints are TCP-only",
+    "effort": "low — add udp field to proxy JSON"
+   },
+   {
+    "title": "Stash format not needed separately",
+    "description": "Stash is a Clash Meta rebrand and imports standard Clash JSON. Improved clash output covers it.",
+    "impact": "none — covered by Clash improvements",
+    "effort": "none"
+   }
+  ]
+ }
+]

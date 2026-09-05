@@ -1,0 +1,1101 @@
+[
+ {
+  "modules": [
+   {
+    "name": "src/xray.rs",
+    "tested_fns": [
+     "fragment_block",
+     "fragment_outbound",
+     "build_outbound",
+     "build_config",
+     "config_secrets",
+     "mask_values",
+     "find_bundled_in",
+     "valid_bundled",
+     "parse_dgst",
+     "asset_name",
+     "exe_name",
+     "extract_xray_from_zip",
+     "cached_matches_dgst",
+     "ensure_binary",
+     "wait_for_socks",
+     "early_exit_message",
+     "find_binary",
+     "cached_in_data_dir"
+    ],
+    "untested_fns": [
+     "spawn (subprocess lifecycle)",
+     "XrayProcess::stop",
+     "write_trial_config",
+     "capture_stderr/drain_stderr (async streaming+truncation)",
+     "StderrCapture::tail",
+     "download_binary (full integration with file I/O races)",
+     "RealFetch::bytes (network fetch, URL validation, 64 MiB cap)",
+     "find_entry (error path: zip contains no xray)",
+     "make_executable"
+    ],
+    "risk_level": "CRITICAL — spawn and RealFetch are zero-coverage; the entire tunnel lifecycle and xray self-update depend on them"
+   },
+   {
+    "name": "src/verify.rs",
+    "tested_fns": [
+     "TrialDirGuard::cleanup_blocking",
+     "fresh_trial_dir",
+     "sweep_stale_trial_dirs_before",
+     "pick_ephemeral_port",
+     "spawn_with_retry (3 tests)",
+     "HybridTunnelProbe::supports_inline (matrix test)",
+     "HybridTunnelProbe::probe routing (5 tests)",
+     "credential leak prevention test"
+    ],
+    "untested_fns": [
+     "XrayTunnelProbe::probe (full end-to-end phase-2 flow)",
+     "XrayTunnelProbe::open_tunnel_session",
+     "RealTunnelOpener::open",
+     "sweep_stale_trial_dirs_async (atomic throttle/CAS logic)",
+     "require_xray_binary",
+     "TunnelSession::cleanup"
+    ],
+    "risk_level": "CRITICAL — XrayTunnelProbe is THE core verification path; always mocked in tests"
+   },
+   {
+    "name": "src/inline_verify.rs",
+    "tested_fns": [
+     "InlineTunnelProbe::probe (12+ FakeServer tests)",
+     "parse_uuid",
+     "build_protocol_header (Trojan+Vless via FakeServer)",
+     "read_http_response (6 focused tests)",
+     "read_response_marker (Vless+Trojan)",
+     "PrefixedReader",
+     "exchange",
+     "parse_target",
+     "open_live_tunnel",
+     "establish",
+     "write_socks5_addr",
+     "write_xray_addr",
+     "run_attempt (single target)"
+    ],
+    "untested_fns": [
+     "outer_server_name fallback to IP (when both SNI fields are None)",
+     "run_attempt multi-target retry (first target fails, second succeeds on fresh tunnel)",
+     "build_protocol_header bail for Shadowsocks/Vmess (unreachable but untested guard)"
+    ],
+    "risk_level": "MEDIUM — well-tested overall; only edge-case fallback paths lack coverage"
+   },
+   {
+    "name": "src/socks.rs",
+    "tested_fns": [
+     "http_request",
+     "http_request_keepalive",
+     "read_response (Content-Length, chunked, close-delimited, leading CRLF)",
+     "decode_chunked (7 tests + 3 proptests)",
+     "send_http (over-cap body)",
+     "get_via_socks (happy path + timeout)",
+     "socks5_connect (domain path via fake server)",
+     "tls_connector (indirectly)"
+    ],
+    "untested_fns": [
+     "timed_download_via_socks / timed_download_via_socks_inner (speed-test download path)",
+     "count_download (bytes+timing, cap enforcement, UnexpectedEof handling)",
+     "get_via_socks_inner HTTPS/TLS branch",
+     "read_line (against live stream with partial reads)",
+     "socks5_connect IPv4 (0x01) and IPv6 (0x04) address types",
+     "socks5_connect error paths (refused auth, unknown addr type, host too long)"
+    ],
+    "risk_level": "HIGH — timed_download_via_socks and count_download are critical speed-test paths with zero direct coverage"
+   }
+  ]
+ },
+ {
+  "modules": [
+   {
+    "name": "src/configs.rs",
+    "tested_fns": [
+     "parse_uri (vless/trojan/vmess/ss, scheme case, IPv6, ports, empty host, garbage, oversized, userinfo vs query id, percent-decoded userinfo, field caps, reality rejection)",
+     "parse_vmess (JSON parse, base64 variants, numeric port/aid, ws/grpc/xhttp, missing add/id, empty tls)",
+     "parse_ss (SIP002, full envelope, plaintext, IPv6 brackets, empty host)",
+     "parse_xray_json (ws/tls, grpc, xhttp, shadowsocks, unknown outbounds, malformed JSON)",
+     "parse_subscription (comments/blanks/bad lines, base64 blob, oversized blob, oversized entry)",
+     "fetch_subscription (injectable SubFetch with FakeSub)",
+     "render_uri (round-trips vless/trojan/vmess/ss, hostile passwords, grpc/xhttp)",
+     "render_sip002 (indirectly via render_uri; ws/grpc/xhttp/extra params/remarks)",
+     "render_vmess (indirectly; v2 payload)",
+     "render_ss (indirectly; SIP002 + remark)",
+     "export_config_uri (dial IP swap, sni override, unmanaged params, hostile remarks, grpc/xhttp)",
+     "sanitize_error_text (control chars, truncation, secret redaction, multi-URL)",
+     "redact_line (credentials masked, vmess/ss blobs masked, prose preserved)",
+     "sip002_passthrough_params (indirectly via export_config_uri)",
+     "finish_spec (field caps, empty user_id, hostile server, empty security)",
+     "reject_unsupported_security (indirectly)"
+    ],
+    "untested_fns": [
+     "decode_subscription_body (no dedicated test for multi-line-that-is-valid-base64; no non-UTF-8 failure test)",
+     "sip002_passthrough_params (no direct unit test for non-vless/trojan scheme passthrough)",
+     "base64_any (no direct test for all-four-decode-failure path)",
+     "split_host_port (no direct unit test for ]-without-[, no-port, IPv6 missing bracket)",
+     "RealSubFetch::fetch (no timeout test; fetch_subscription only tested with FakeSub)"
+    ],
+    "missing_edge_cases": [
+     "Port > 65535 via url crate (url::Url may accept, port() returns u16)",
+     "Network timeout scenarios for RealSubFetch",
+     "vless://...@host:99999 truncation path"
+    ]
+   },
+   {
+    "name": "src/wgconf.rs",
+    "tested_fns": [
+     "parse_wg_entry (wg:// + wireguard:// schemes, unrecognized input, missing keys, credentials rejected, host grammar, IPv6)",
+     "parse_wgconf (INI fixture, case insensitivity, comments/semicolons, CRLF, unknown sections, duplicate keys, line length cap, non-ASCII sections, allowed_ips, preshared key, oversized lines, missing mandatory fields)",
+     "parse_awg_uri (percent-decoded keys, Amnezia params, MTU, DNS)",
+     "render_wgconf (round-trip of INI fixture)",
+     "decode_key (32-byte accept, too short, overlong, non-canonical padding)"
+    ],
+    "untested_fns": [
+     "render_wgconf (no edge-case tests: empty AllowedIPs, no preshared_key, MTU boundary, zero vs None Amnezia)",
+     "build_wg_config (no direct test for empty-string AllowedIPs entry skip path)",
+     "parse_awg_uri (no direct missing-private_key test; parse_opt not directly tested for non-numeric strings like mtu=abc)"
+    ],
+    "missing_edge_cases": [
+     "No render round-trip test for wg:// URI format (only INI)",
+     "No test for IPv6 with zone ID or extremely long hostnames in wg:// URI"
+    ]
+   },
+   {
+    "name": "src/dgst.rs",
+    "tested_fns": [
+     "dgst_sha256_hex (correct extraction, lowercasing, garbage/empty, short hex, non-SHA-256 lines, duplicate labels, trailing filename, no-space rejected, double-space rejected, tab rejected, leading whitespace rejected, CRLF, 65-hex rejected, filename with spaces, tab-before-filename, uppercase/mixed-case hex)",
+     "hex_lower (indirectly through dgst_sha256_hex output)"
+    ],
+    "untested_fns": [
+     "hex_lower (no direct unit test for empty input, single byte, all zeros)"
+    ],
+    "missing_edge_cases": [
+     "No test for SHA2-256 line followed by null bytes",
+     "No test for multiple SHA2-256 lines where only the second is valid"
+    ]
+   },
+   {
+    "name": "src/geo.rs",
+    "tested_fns": [
+     "Geo::embedded() (constructs without panic, fallback to None)",
+     "Geo::country() (known public IPs, various IPs never panic, fallback state)",
+     "parse_colo (realistic trace body, garbage/missing keys, IATA codes, empty value, binary data, long codes rejected, hyphens rejected)"
+    ],
+    "untested_fns": [],
+    "missing_edge_cases": [
+     "No CRLF test for parse_colo",
+     "No test for multiple colo= lines (first-match behavior)",
+     "No test for Geo::country with link-local or private ranges",
+     "No test for parse_colo with 4-char non-alphanumeric value",
+     "No negative test for corrupted embedded mmdb"
+    ]
+   },
+   {
+    "name": "src/util.rs",
+    "tested_fns": [],
+    "untested_fns": [
+     "percent_decode (zero test coverage)"
+    ],
+    "missing_edge_cases": [
+     "Empty string, no-encoded chars, %20/%40/%3D, invalid percent sequences (%zz, %2, %), multi-byte UTF-8 (%C3%A9), all-ASCII passthrough, binary/non-UTF-8 bytes"
+    ]
+   },
+   {
+    "name": "src/retry.rs",
+    "tested_fns": [
+     "save_config (round-trip, phase2 stripped, credentials not on disk)",
+     "load_config (missing file error message, round-trip)"
+    ],
+    "untested_fns": [],
+    "missing_edge_cases": [
+     "Corrupt JSON on disk",
+     "Concurrent save/load from two threads",
+     "Empty/default ScanConfig serialization",
+     "Filesystem permission errors (read-only directory)",
+     "Extremely large config (pathologically large JSON)"
+    ]
+   },
+   {
+    "name": "src/enrich.rs",
+    "tested_fns": [
+     "parse_ipwho_response (valid response, unsuccessful, missing ASN/ISP, ASN=0, non-JSON, empty, long ISP truncation)",
+     "ipwho_url (IPv4 and IPv6 URL construction)"
+    ],
+    "untested_fns": [
+     "lookup (no test; requires network)",
+     "enrich_working (no test; requires ScanController + network)"
+    ],
+    "missing_edge_cases": [
+     "Network timeout scenario (8s LOOKUP_TIMEOUT)",
+     "HTTP 429/500 responses from ipwho.is",
+     "DNS resolution failure, connection refused, partial response body",
+     "enrich_working: empty results, all-lookups-fail, partial enrichment, concurrency semaphore, set_asn dedup",
+     "Very large ASN values (> u32::MAX)"
+    ]
+   }
+  ]
+ },
+ {
+  "modules": [
+   {
+    "name": "src/api/types.rs + types_tests.rs",
+    "tested_fns": [
+     "ScanConfig::validate() (40+ tests, all error variants)",
+     "StopCondition deny_unknown_fields",
+     "StopCondition::unlimited",
+     "ScanConfig serde round-trip",
+     "include_v6 serde default + round-trip",
+     "ProbeMode serde default + round-trip + lowercase parse",
+     "Phase2Config::effective_probe_urls()",
+     "Phase2Config probe_urls serde + legacy probe_url",
+     "Phase2Verdict config_index + speed_test_mbps defaults",
+     "Verdict new fields default on legacy JSON",
+     "ScanEvent serde round-trips (Progress/Result/Finished)",
+     "ScanSummary cancelled default + round-trip",
+     "event_tags_are_snake_case",
+     "parse_endpoint accept/reject",
+     "validate_sni accept/reject",
+     "parse_cidr via grammar fixture",
+     "WarpConfig::validate() (bad endpoints, probes_per_endpoint, verify_without_wgconf)",
+     "Custom fragment validation (malformed, valid, out-of-bounds)",
+     "CIDR validation delegation",
+     "Non-routable CIDR/endpoint rejection",
+     "Default warp port rejection in warp mode",
+     "Colo filter validation (bad codes, too many, CDN-only)",
+     "loss_threshold and idle_hold_ms validate+round-trip",
+     "min_latency_ms validate+round-trip",
+     "neighbor_count validate+round-trip",
+     "colo_filter round-trip",
+     "speed_test + min_speed_mbps validate+round-trip",
+     "accepted_http_codes validate",
+     "phase2 probe_urls validate (max count, max bytes, non-routable, http schemes)",
+     "phase2_only/rejects_phase2_in_warp/rejects_warp_in_cdn mode checks",
+     "grammar_fixture_endpoint_and_sni_cases_match_server_rules",
+     "grammar_fixture_cidr_cases_match_parse_cidr",
+     "rejects_stop_values_above_the_frontend_cap",
+     "rejects_too_many_unique_ports",
+     "rejects_too_many_exclude_and_custom_cidrs",
+     "rejects_too_many_phase2_configs_and_snis"
+    ],
+    "untested_fns": [
+     "Port::Serialize standalone",
+     "Port::From<u16> impl",
+     "FragmentPreset::Display",
+     "ProbeMode::Display"
+    ],
+    "missing_edge_cases": [
+     "ConfigError::ConfigEntryTooLong never triggered in types_tests",
+     "ConfigError::SniTooLong never triggered in types_tests",
+     "ConfigError::WgconfTooLong never triggered in types_tests",
+     "ConfigError::TooManyEndpoints never triggered in types_tests",
+     "ConfigError::InvalidPhase2Concurrency never triggered in types_tests",
+     "ConfigError::Phase2OnlyNeedsConfigs never triggered in types_tests",
+     "ConfigError::Phase2OnlyWrongMode never triggered in types_tests",
+     "ConfigError::WarpPresetNotAllowed never triggered in types_tests",
+     "ConfigError::WarpCidrsNotAllowed never triggered in types_tests",
+     "Error sanitization path (sanitize_error_text wrapping ConfigError) never exercised",
+     "ScanConfig with timeout_ms=30000 upper bound valid case",
+     "accepted_http_codes boundary values 100 and 599",
+     "Phase2 with fragment=Off and custom_fragment=Some (valid but untested)",
+     "ScanConfig concurrency=1000 valid upper bound"
+    ]
+   },
+   {
+    "name": "src/api/validate.rs",
+    "tested_fns": [
+     "parse_cidr (grammar fixture + explicit)",
+     "validate_sni (2 dedicated tests)",
+     "parse_endpoint (2 dedicated tests)",
+     "validate_ports (indirectly via ScanConfig::validate)",
+     "validate_phase2 (indirectly via ScanConfig::validate)",
+     "validate_probe_url (indirectly via rejects_bad_probe_url, rejects_too_many_or_oversized_probe_urls, rejects_non_routable_probe_urls)",
+     "validate_fragment / validate_fragment_field (3 tests)",
+     "banned_ip / reject_non_routable (via rejects_non_routable_custom_cidrs, rejects_non_routable_warp_endpoints)",
+     "reject_default_warp_ports (2 tests)",
+     "is_ascii_digits (indirectly)"
+    ],
+    "untested_fns": [],
+    "missing_edge_cases": [
+     "banned_ip with IPv6 mapped addresses as IpAddr::V6 directly (only tested via CIDR string parsing)",
+     "validate_fragment_field with packets field allow_tlshello=true and non-tlshello integer",
+     "parse_cidr with trailing whitespace in prefix (1.2.3.4 /24)",
+     "validate_phase2 with p2.concurrency == 0 (Preset defaults to 3, never 0)",
+     "validate_phase2 configs containing http:// prefix rejection (only tested via configs vec)"
+    ]
+   },
+   {
+    "name": "src/api/error.rs",
+    "tested_fns": [
+     "All ConfigError variants covered at least once via types_tests"
+    ],
+    "untested_fns": [],
+    "missing_edge_cases": [
+     "ConfigError::ConfigEntryTooLong (phase2 config > 8KB)",
+     "ConfigError::SniTooLong (SNI > 256 bytes)",
+     "ConfigError::WgconfTooLong (wgconf > 64KB)",
+     "ConfigError::TooManyEndpoints (> 2048 custom_endpoints)",
+     "ConfigError::InvalidPhase2Concurrency (0 or > 8)",
+     "ConfigError::Phase2OnlyNeedsConfigs",
+     "ConfigError::Phase2OnlyWrongMode",
+     "ConfigError::WarpPresetNotAllowed",
+     "ConfigError::WarpCidrsNotAllowed"
+    ]
+   },
+   {
+    "name": "src/engine/mod.rs (ScanController)",
+    "tested_fns": [
+     "ScanController::new",
+     "ScanController::with_transports",
+     "ScanController::with_probes",
+     "ScanController::subscribe",
+     "ScanController::summary",
+     "ScanController::results",
+     "ScanController::has_results",
+     "ScanController::for_each_result",
+     "ScanController::is_running",
+     "ScanController::reset",
+     "ScanController::cancel",
+     "ScanController::reserve",
+     "ScanController::run",
+     "ScanController::run_streaming (5 tests)",
+     "ScanController::run_streaming_recovers_verdicts",
+     "ScanController::run_reserved_streaming",
+     "ScanController::set_speed_tester",
+     "ScanController::set_tunnel_opener",
+     "claim_milestone (concurrent)",
+     "colo_in_filter / colo_rejected",
+     "snapshot_sorted (lazy sort)",
+     "Poisoned lock handling",
+     "Late subscriber receives full results",
+     "Empty pool finishes with zero summary"
+    ],
+    "untested_fns": [
+     "ScanController::phase2_configs() never tested directly",
+     "ScanController::set_asn() only tested in store.rs unit tests not engine integration"
+    ],
+    "missing_edge_cases": [
+     "phase2_configs accessor after run",
+     "for_each_result under concurrent mutation",
+     "set_asn at engine integration level"
+    ]
+   },
+   {
+    "name": "src/engine/cdn.rs",
+    "tested_fns": [
+     "collects_verdicts_until_found_stop",
+     "progress_milestones_are_monotonic_and_unique",
+     "cap_limits_probes",
+     "exhausts_pool_when_found_unreachable",
+     "scans_v6_hosts_from_an_explicit_pool",
+     "multiplies_ports_per_host",
+     "cancel_stops_mid_scan",
+     "cancel_racing_in_flight_probes_ends_consistently",
+     "worker_panic_surfaces_as_failed_event",
+     "rejects_unsupported_modes",
+     "progress_events_report_total",
+     "new_run_replaces_previous_results",
+     "http_probe_colo_reaches_the_verdict",
+     "failure_reasons_map_probe_errors",
+     "loss_threshold_filters_lossy_results_from_the_store",
+     "without_threshold_lossy_results_are_kept_with_their_loss",
+     "min_latency_drops_below_bound_and_keeps_at_bound",
+     "idle_hold_rst_surfaces_as_a_refused_failure",
+     "same_seed_resamples_identical_hosts",
+     "colo_filter_keeps_unknown_colo_results_with_a_warning_path",
+     "colo_filter_off_keeps_everything",
+     "rejects_invalid_config",
+     "neighbors_are_probed_and_stored_after_a_hit",
+     "neighbor_hits_cascade_within_the_dedup_bound",
+     "neighbor_scan_defaults_off",
+     "neighbor_scan_respects_cap",
+     "neighbor_scan_skips_ipv6_hits",
+     "cap_overshoot_is_bounded_by_worker_count"
+    ],
+    "untested_fns": [],
+    "missing_edge_cases": [
+     "run_cdn quality-gated top-up loop MAX_TOPUP_ROUNDS (tested in speed.rs not cdn.rs)",
+     "run_cdn_pass with clear=false skip set (tested indirectly)",
+     "Probe with idle_hold_ms > 0 and successful probe (no RST)",
+     "Multiple ports with different latency per port on same IP"
+    ]
+   },
+   {
+    "name": "src/engine/warp.rs",
+    "tested_fns": [
+     "warp_measures_loss_and_min_latency",
+     "warp_custom_endpoint_port_overrides_cfg_ports",
+     "warp_closed_endpoints_produce_no_verdicts",
+     "warp_stop_condition_stops_early",
+     "warp_stop_condition_counts_only_zero_loss_endpoints",
+     "warp_cancel_races_in_flight_probes",
+     "warp_completed_endpoints_keep_store_in_sync_with_summary",
+     "warp_full_pool_scan_visits_every_endpoint",
+     "warp_plan_shares_rng_across_items",
+     "warp_rejects_unparsable_exclusion_cidrs",
+     "warp_exclusion_removes_space_from_the_bundled_pool",
+     "warp_duplicate_custom_endpoints_probe_once",
+     "warp_overlapping_endpoint_entries_dedupe_at_port_granularity",
+     "warp_progress_total_counts_endpoint_port_pairs",
+     "warp_count_caps_custom_endpoints_by_sampling",
+     "warp_verify_fails_fast_without_a_wgconf",
+     "warp_verify_rejects_an_invalid_wgconf_before_probing"
+    ],
+    "untested_fns": [],
+    "missing_edge_cases": [
+     "WARP with real WarpTransport + SocketCache",
+     "WARP worker panic (only CDN panic tested)",
+     "WARP with probes_per_endpoint > 1 mixed OK/Err sequences beyond loss test"
+    ]
+   },
+   {
+    "name": "src/engine/phase2.rs",
+    "tested_fns": [
+     "phase2_attaches_verdicts_and_reemits_results",
+     "phase2_marks_failed_attempts_without_aborting",
+     "phase2_tries_sni_combos_until_one_passes",
+     "phase2_fetches_subscriptions_through_the_seam",
+     "phase2_probes_every_url_with_one_spawn_per_combo",
+     "phase2_without_candidates_is_a_noop",
+     "phase2_bad_config_aborts_the_run",
+     "phase2_local_failures_abort_with_a_reason",
+     "phase2_one_bad_config_entry_is_skipped_not_fatal",
+     "phase2_all_config_entries_bad_aborts_with_count",
+     "phase2_records_the_overshoot_pass_past_the_found_stop",
+     "phase2_terminal_progress_emitted_once",
+     "cancel_during_config_parse_aborts_promptly",
+     "cancel_during_tunnel_probe_aborts_promptly",
+     "phase2_progress_events_track_attempts",
+     "phase2_error_attempts_count_into_progress_done",
+     "phase2_error_verdicts_redact_config_credentials",
+     "phase2_only_summary_counts_verified_endpoints_only",
+     "phase2_skips_v6_candidates",
+     "redact_entry_strips_secrets_from_uris",
+     "update_verdict_phase2_never_downgrades_a_pass",
+     "colo_filter_drops_known_foreign_colo_results_in_phase2",
+     "colo_filter_keeps_matching_and_unknown_colo_results_in_phase2",
+     "cancel_during_phase1_stops_phase2_work"
+    ],
+    "untested_fns": [
+     "parse_verifier with unknown tag (returns None)"
+    ],
+    "missing_edge_cases": [
+     "parse_phase2_configs with xray JSON file path",
+     "parse_phase2_configs with nonexistent file",
+     "Subscription returning 0 specs without error",
+     "Subscription exceeding MAX_SUBSCRIPTION_SPECS",
+     "Subscription exceeding MAX_PHASE2_TOTAL_SPECS",
+     "Phase2 config entry starting with http:// prefix rejection at engine level",
+     "Phase2 with snis having one empty string"
+    ]
+   },
+   {
+    "name": "src/engine/plan.rs",
+    "tested_fns": [
+     "plan() with Count target",
+     "plan() with Preset targets (Quick/Normal/Full)",
+     "plan_hosts_iter for Every/Sample",
+     "plan_hosts_iter for /31 and /32",
+     "v6 sampling preserves first/last",
+     "Count plan partition on two half-space v6",
+     "Count=1 on single host pool",
+     "Count above pool degrades to Every",
+     "SplitMix64 new/next_u64/below/below_u128 indirectly"
+    ],
+    "untested_fns": [],
+    "missing_edge_cases": [
+     "plan_probe_count with mixed PlanItem types",
+     "PlanItem::Hosts variant never directly constructed in tests",
+     "plan_preset with pool having > MAX_PRESET_BLOCKS sub-24s",
+     "ipv4() unreachable panic path"
+    ]
+   },
+   {
+    "name": "src/engine/store.rs",
+    "tested_fns": [
+     "set_asn_annotates_only_the_matching_endpoint",
+     "merge_sorted (lazy sort order, failed verdicts sort after measured)",
+     "lock poison recovery",
+     "update_verdict_phase2 never downgrades a pass (including stale index fallback)",
+     "remove_verdict (indirectly via phase2.rs colo filter tests)"
+    ],
+    "untested_fns": [],
+    "missing_edge_cases": [
+     "remove_verdict when target not in store",
+     "merge_sorted with empty batch (early return)",
+     "update_verdict_phase2 with colo being Some (updates colo on the verdict)",
+     "set_asn when ISP exceeds MAX_ISP_CHARS"
+    ]
+   },
+   {
+    "name": "src/engine/speed.rs",
+    "tested_fns": [
+     "build_passing_index",
+     "mbps math and degenerate inputs",
+     "apply_speed_result (record, min_speed flip, error sanitize, noop)",
+     "speed_test_phase noop when disabled",
+     "measure_endpoint computes mbps",
+     "scan_with_speed_test_records_mbps_on_passing_verdicts",
+     "injected_slow_tester_flips_verdict_below_min_speed",
+     "speed_test_without_passing_endpoints_is_a_noop",
+     "quality_gated_stop_tops_up_until_min_speed_is_met"
+    ],
+    "untested_fns": [],
+    "missing_edge_cases": [
+     "speed_test_phase cancel during download",
+     "measure_through_tunnel when opener fails",
+     "apply_speed_result with min_speed = Some(NaN)",
+     "build_passing_index with empty candidates",
+     "Speed test with multiple passing endpoints (concurrency beyond 1)"
+    ]
+   },
+   {
+    "name": "src/engine/neighbor.rs",
+    "tested_fns": [
+     "neighbor_candidates (extremely thorough: bounds, edges, uniqueness, v6, limits)",
+     "NeighborHub::enqueue (indirectly via integration tests)",
+     "Neighbor dedup",
+     "Neighbor scan defaults off",
+     "Neighbor respects cap",
+     "IPv6 hits skip neighbors"
+    ],
+    "untested_fns": [],
+    "missing_edge_cases": [
+     "NeighborHub when tx.try_send fails (channel full under high concurrency)",
+     "NEIGHBOR_CHANNEL_CAP overflow"
+    ]
+   },
+   {
+    "name": "tests/property_tests.rs",
+    "tested_fns": [
+     "v4 CIDR exclusion split vs brute-force (64 rounds)",
+     "v6 CIDR exclusion split vs brute-force (32 rounds)",
+     "Cross-family exclusions",
+     "wgconf render/parse round-trip (200 rounds + proptest)",
+     "parse_uri never panics on arbitrary input",
+     "vless URI round-trip",
+     "wg_entry never panics",
+     "wg_ini round-trip",
+     "cidr parser never panics",
+     "v4/v6 CIDR canonical reprint",
+     "render_uri round-trips userinfo",
+     "dgst_sha256_hex accept/reject",
+     "validate_fetch_url loopback/public"
+    ],
+    "untested_fns": [],
+    "missing_edge_cases": [
+     "CidrPool::excluding with overlapping exclusions",
+     "CidrPool::host_count accuracy direct test",
+     "parse_subscription property tests",
+     "render_uri with grpc/xhttp settings"
+    ]
+   },
+   {
+    "name": "tests/cli_scan_agent.rs",
+    "tested_fns": [
+     "help_exits_zero_and_documents_scan",
+     "version_exits_zero_with_the_crate_version",
+     "unknown_subcommand_exits_nonzero_with_a_message",
+     "conflicting_preset_and_count_exit_nonzero",
+     "warp_mode_rejects_preset_with_a_clear_error",
+     "out_of_range_concurrency_exits_nonzero",
+     "invalid_custom_cidr_exits_nonzero",
+     "custom_fragment_without_values_exits_nonzero",
+     "e2e_scan_writes_export_files_and_ndjson_stdout (CSV+JSON)",
+     "retry_last_without_a_saved_config_names_the_fix",
+     "live_tiny_scan_prints_ndjson_and_a_final_summary (gated)"
+    ],
+    "untested_fns": [],
+    "missing_edge_cases": [
+     "--export-format base64/raw/singbox/clash",
+     "--json-errors flag",
+     "--wizard subcommand",
+     "WARP mode via CLI",
+     "Phase2 via CLI"
+    ]
+   },
+   {
+    "name": "tests/xray_lifecycle.rs + xray_lifecycle_windows.rs",
+    "tested_fns": [
+     "spawn_launches_fake_xray_and_stop_kills_it",
+     "tunnel_probe_lifecycle_spawns_and_cleans_trial_dirs"
+    ],
+    "untested_fns": [],
+    "missing_edge_cases": [
+     "Spawn with invalid xray binary path",
+     "Spawn timeout",
+     "Multiple concurrent xray processes",
+     "XrayTunnelProbe with real xray binary"
+    ]
+   },
+   {
+    "name": "tests/live_smoke.rs",
+    "tested_fns": [
+     "subscription_endpoint_returns_parseable_configs (gated)",
+     "vless_fixture_dials_its_own_server (gated)"
+    ],
+    "untested_fns": [],
+    "missing_edge_cases": [
+     "All tests gated on CFSCANNER_SUB_URL - never run in CI without env var"
+    ]
+   }
+  ]
+ },
+ {
+  "modules": [
+   {
+    "name": "src/probe.rs",
+    "tested_fns": [
+     "TlsTransport::new / Default / server name",
+     "FakeTransport scripting (ok/fail/ok_loss/idle_rst/seq)",
+     "ProbeError::reason()",
+     "parse_status_line (valid + garbage)",
+     "find_subsequence",
+     "step_budgets",
+     "HttpTransport stalled-TLS timeout",
+     "transport_for construction"
+    ],
+    "untested_fns": [
+     "parse_status_line with HTTP/2 or HTTP/3",
+     "HttpTransport accepted code filtering (403 rejected, 301 accepted)",
+     "HttpTransport real trace body -> colo parsing path",
+     "rewrite_uris v6_skip count assertion",
+     "remark_for with phase2 passed but no colo/country",
+     "unique_tag dedup [n] suffix path",
+     "plan_probe_count (zero unit tests)"
+    ],
+    "missing_edge_cases": [
+     "parse_status_line with HTTP/2 version string",
+     "HttpTransport with accepted_codes=[200] receiving 301",
+     "HttpTransport with accepted_codes=[200,301] receiving 403",
+     "idle_rst with delay_ms=0 (no-op path)",
+     "FakeTransport sequence with single-element vec (repeat semantics)"
+    ]
+   },
+   {
+    "name": "src/ranges/pool.rs",
+    "tested_fns": [
+     "parse_cidr (grammar fixture 15+ cases, parse+mask v4/v6, /0 v4, malformed)",
+     "Cidr::host_count / host / contains",
+     "CidrPool::bundled / bundled_v6 / parse / from_ranges / extend / excluding",
+     "subtract / decompose (brute-force 400 v4 rounds, 200 v6 rounds)",
+     "base_pool / base_pool_v6 with runtime refresh and corrupt fallback",
+     "effective_pool_from (custom/exclude/v6/refresh corruption)",
+     "last_updated_of / rfc3339_utc (5 known instants)",
+     "write_pool_to (via refresh_to_disk in official.rs)"
+    ],
+    "untested_fns": [
+     "effective_pool (async wrapper reading from disk)",
+     "CidrPool::host_count on empty ranges",
+     "sub24_count (only implicitly via plan tests)",
+     "parse_lines comment-line filtering (# prefix)",
+     "unix_now (never directly asserted)"
+    ],
+    "missing_edge_cases": [
+     "Cidr::host_count for /0 v4 (shift=32, should be 2^32)",
+     "Cidr::host at index host_count-1 for /0 v4 boundary wrap",
+     "CidrPool::from_ranges with overlapping-but-distinct ranges (not just exact dupes)",
+     "CidrPool::excluding with 3+ overlapping exclusions in a single call",
+     "decompose with len=0 (zero-length remainder)",
+     "write_pool_to TMP_SEQ counter and .tmp naming",
+     "rfc3339_utc at year 3000 / century-boundary leap years",
+     "host_count overflow guard: shift=0 (prefix=128) vs shift=127",
+     "effective_pool_from with both refresh strings empty-string (not None)",
+     "CidrPool::excluding with exclusion covering exact start of outer CIDR",
+     "CidrPool::excluding with exclusion covering exact end of outer CIDR"
+    ]
+   },
+   {
+    "name": "src/ranges/official.rs",
+    "tested_fns": [
+     "parse_official (success, error response, v6 filtering)",
+     "refresh_to_disk (round-trip, keeps last-good on empty)",
+     "refresh_v6_to_disk (round-trip, rejects non-v6, keeps last-good)"
+    ],
+    "untested_fns": [
+     "refresh_to_disk with malformed JSON body",
+     "refresh_v6_to_disk with malformed text body",
+     "parse_official with result: null",
+     "refresh_to_disk when data_dir() fails",
+     "parse_official with multiple v6 entries in ipv4_cidrs"
+    ],
+    "missing_edge_cases": [
+     "Concurrent refresh races (DATA_DIR_LOCK exists but never tested for concurrency)",
+     "refresh_to_disk with valid JSON but empty ipv4_cidrs array",
+     "refresh_v6_to_disk with only whitespace content",
+     "parse_official with extra unknown fields (deny_unknown_fields not checked)",
+     "refresh_to_disk atomicity (rename + tmp cleanup on partial write)"
+    ]
+   },
+   {
+    "name": "src/ranges/http.rs",
+    "tested_fns": [
+     "validate_fetch_url (comprehensive: non-https, loopback, link-local, multicast, broadcast, hex IPs, decimal IPs, localhost, domain names)"
+    ],
+    "untested_fns": [
+     "fetch_tls_with_headers",
+     "fetch_bytes",
+     "fetch_tls_inner (header parsing, body cap, redirect policy)",
+     "sanitize_url_for_error (credential masking, query/fragment stripping)",
+     "HTTP_CLIENT redirect policy (5-hop limit, validate per hop)"
+    ],
+    "missing_edge_cases": [
+     "fetch_tls_inner extra_headers with empty lines, missing colons, invalid header names",
+     "fetch_tls_inner body exceeding 64 MiB cap (Content-Length check)",
+     "fetch_tls_inner streaming body exceeding 64 MiB (chunk accumulation)",
+     "validate_fetch_url with [::ffff:0.0.0.0] (mapped unspecified)",
+     "validate_fetch_url with [::ffff:224.0.0.1] (mapped multicast)",
+     "validate_fetch_url with decimal IP 2130706433 (untested: octal 0x7f000001)",
+     "sanitize_url_for_error with no query/fragment (passthrough path)",
+     "sanitize_url_for_error with malformed URL (fallback to raw string)"
+    ]
+   },
+   {
+    "name": "src/paths.rs",
+    "tested_fns": [
+     "data_dir / refreshed_ranges_path / refreshed_ranges_v6_path / xray_binary_path",
+     "lock_down_to_owner (Windows)",
+     "write_secret (Windows)"
+    ],
+    "untested_fns": [
+     "data_write_guard mutex poisoning recovery (unwrap_or_else path)",
+     "write_secret on Unix (mode 0o600 path)"
+    ],
+    "missing_edge_cases": [
+     "data_dir with whitespace-only CF_SCANNER_DATA_DIR",
+     "data_dir with CF_SCANNER_DATA_DIR pointing to nonexistent path",
+     "xray_binary_path test seam SEAM_DATA_DIR override behavior",
+     "write_secret with parent dir already existing (create_dir_all no-op)"
+    ]
+   },
+   {
+    "name": "src/export.rs",
+    "tested_fns": [
+     "render_results (CSV header/schema/columns/empty, JSON shape/empty/keys)",
+     "render_bundle (raw/base64 round-trip, singbox vmess/grpc/xhttp, clash vmess/grpc/xhttp, sharelinks, empty, IPv6-only error, mixed IPv6 drop)",
+     "csv_field (quoting, formula-leadins, combined)",
+     "diagnostic_line (4 failure modes, passing rows, ASN/ISP)",
+     "atomic_write_file (round-trip, no tmp leftovers)",
+     "singbox_body / clash_body (vmess full shape, ss method, grpc, xhttp)"
+    ],
+    "untested_fns": [
+     "write_export (top-level orchestrator)",
+     "remark_for (only tested indirectly via diagnostic_line)"
+    ],
+    "missing_edge_cases": [
+     "render_bundle with Trojan URI through singbox/clash",
+     "render_bundle with Shadowsocks URI through singbox/clash",
+     "singbox_body/clash_body tag deduplication ([n] suffix path)",
+     "csv_field with empty string",
+     "diagnostic_line with phase2 verifier Some(Inline) prefix",
+     "diagnostic_line with phase2 verifier Some(Xray) prefix",
+     "diagnostic_line with phase2 passed=false and error=None",
+     "diagnostic_line with phase2 speed_test_mbps present",
+     "remark_for with latency but no colo/country (CF-{CF}-{l}ms)",
+     "render_bundle sharelinks with multiple endpoints",
+     "render_results JSON with multiple verdicts",
+     "render_results JSON phase2=null serialization",
+     "atomic_write_file write failure / sync failure / rename failure",
+     "result_dump CSV with all 14 fields populated"
+    ]
+   },
+   {
+    "name": "src/engine/plan.rs",
+    "tested_fns": [
+     "plan (Quick/Normal/Full presets, Count target)",
+     "plan_count (determinism, degeneration to Every)",
+     "plan_preset (per-/24 splitting, tiny CIDR -> Every, dense block sampling)",
+     "plan_hosts_iter (Every and Hosts variants)",
+     "SplitMix64 (indirectly through plan)"
+    ],
+    "untested_fns": [
+     "plan_probe_count (zero tests)",
+     "plan_hosts_iter Sample variant skip_net_bcast IP assertion"
+    ],
+    "missing_edge_cases": [
+     "plan_count with empty pool (host_count==0)",
+     "plan_count with count=0",
+     "SplitMix64::below(0) modulo-by-zero panic guard",
+     "plan_preset with /8 exceeding MAX_PRESET_BLOCKS (fallback to Sample)",
+     "plan_hosts_iter with Hosts variant having empty offsets vec",
+     "plan_preset with /29 or /30 (2-8 hosts, below per-/24 threshold)",
+     "plan_count requesting exactly pool.host_count() (degenerates to Every)",
+     "plan with pool containing single /32 v6 range"
+    ]
+   },
+   {
+    "name": "tests/property_tests.rs",
+    "tested_fns": [
+     "v4/v6 CIDR exclusion brute-force (64 v4, 32 v6)",
+     "cross-family exclusion safety",
+     "CIDR parse-reprint roundtrip (v4 + v6)",
+     "URI parse panic-free / roundtrips",
+     "wgconf render-parse roundtrip",
+     "dgst parse",
+     "validate_fetch_url public vs loopback"
+    ],
+    "untested_fns": [],
+    "missing_edge_cases": [
+     "Cidr::host_count consistency with Cidr::host (all i < host_count stays in CIDR)",
+     "CidrPool::excluding with 2+ overlapping exclusions as property",
+     "plan output consistency (every produced IP falls within input pool)",
+     "csv_field idempotency (csv_field(csv_field(x)) == csv_field(x))",
+     "Cidr::contains reflexive property (c.contains(c) == true for all CIDRs)",
+     "CidrPool::excluding with exclusion identical to pool range (result should be empty)"
+    ]
+   }
+  ]
+ },
+ {
+  "ignoredTests": [
+   {
+    "test": "tests/live_smoke.rs::subscription_endpoint_returns_parseable_configs",
+    "reason": "Hits the user's live subscription endpoint (CFSCANNER_SUB_URL) over the network. Cannot run in CI or offline. The mock-convertible parsing logic is already covered by existing unit tests (parse_uri, config validation). No conversion needed.",
+    "shouldEnable": false,
+    "suggestion": "Keep as #[ignore]; serves as opt-in live smoke test for manual pre-release validation. Existing unit tests already cover the parsing path."
+   },
+   {
+    "test": "tests/live_smoke.rs::vless_fixture_dials_its_own_server",
+    "reason": "Opens a real TCP connection to a Cloudflare IP parsed from a bundled fixture. Requires network access and the IP must be reachable. The entire value of this test IS the live handshake proof, which cannot be meaningfully mocked.",
+    "shouldEnable": false,
+    "suggestion": "Keep as #[ignore]; not convertible to unit test. The live dial is inherently the point — mocking it would just re-test parse_uri which is already covered elsewhere."
+   },
+   {
+    "test": "tests/cli_scan_agent.rs::live_tiny_scan_prints_ndjson_and_a_final_summary",
+    "reason": "Runs the actual binary against live Cloudflare IPs. Requires CFSCANNER_SUB_URL and network access. The NDJSON output format and summary structure validation (the mock-convertible portion) is already covered by the non-ignored e2e_scan_writes_export_files_and_ndjson_stdout test which uses TEST-NET-3.",
+    "shouldEnable": false,
+    "suggestion": "Keep as #[ignore]; the format/structure testing is already covered by e2e_scan_writes_export_files_and_ndjson_stdout (non-ignored). This test's unique value is the live subscription + real IP scan, which cannot be mocked."
+   }
+  ]
+ },
+ {
+  "gaps": [
+   {
+    "title": "10 validation rules have zero test coverage",
+    "description": "Phase2OnlyNeedsConfigs, Phase2OnlyWrongMode, WarpPresetNotAllowed, WarpCidrsNotAllowed, InvalidPhase2Concurrency, ConfigEntryTooLong, SniTooLong, WgconfTooLong, TooManyEndpoints, and HTTP config entry rejection in phase2 are all validated in code but never exercised by any test. A regression removing any of these checks would go unnoticed.",
+    "severity": "high"
+   },
+   {
+    "title": "Boundary values missing for concurrency, timeout, probes_per_endpoint, accepted_http_codes",
+    "description": "concurrency: tested 0 reject and 1001 reject, but never 1 accept or 1000 accept. timeout_ms: tested 50 reject, but never 99 reject / 100 accept / 30000 accept / 30001 reject. probes_per_endpoint: tested 0 reject and 11 reject, but never 1 accept or 10 accept. accepted_http_codes: tested 99 reject and 600 reject, but never 100 accept or 599 accept. loss_threshold = 0 (valid) is untested. phase2 concurrency 0 and >8 are untested. f32::INFINITY for min_speed_mbps is untested (NaN and -1.0 are tested, but is_finite() also catches infinity).",
+    "severity": "high"
+   },
+   {
+    "title": "ScanEvent::Phase2Progress and ScanEvent::Failed have no serde round-trip tests",
+    "description": "The serde round-trip test for ScanEvent only covers Progress, Result, and Finished variants. Phase2Progress and Failed variants have zero round-trip coverage, meaning a serde attribute regression on either variant would go undetected.",
+    "severity": "medium"
+   },
+   {
+    "title": "Verdict round-trip only tests legacy defaults, not all fields",
+    "description": "verdict_new_fields_default_when_absent only verifies that omitted fields default correctly. There is no round-trip test for a fully-populated Verdict with sent, received, loss_pct, fail_reason, asn, isp, and phase2 all set. A serde regression on any of these fields would be missed.",
+    "severity": "medium"
+   },
+   {
+    "title": "No serde round-trips for WarpConfig, full Phase2Config, or payload types",
+    "description": "WarpConfig has no round-trip test at all. Phase2Config only tests probe_urls, not the full struct (configs, fragment, snis, concurrency, custom_fragment). ResultsPayload, StatusPayload, RangesPayload, ExportConfigRequest/Response, and RegisterRequest/Response have no round-trip coverage.",
+    "severity": "low"
+   },
+   {
+    "title": "No invalid configs would incorrectly pass validation",
+    "description": "All validation logic is correct — no invalid config can pass validate(). The risk is purely that the untested paths could regress silently. The code is sound; only the test coverage has gaps."
+   }
+  ]
+ },
+ {
+  "testFiles": [
+   {
+    "file": "tests/cli_scan_agent.rs",
+    "issues": [
+     "No test for --json-errors flag behavior (defined as a contract in AGENTS.md)",
+     "No test for invalid --export-format value (e.g. --export-format xml)",
+     "No cleanup guard (Drop-style) on temp dirs — panics before remove_dir_all leak directories",
+     "live_tiny_scan has redundant gating (both #[ignore] and env-var return)",
+     "e2e_scan test assumes 203.0.113.0/30 is routable-per-policy without a comment explaining this assumption"
+    ],
+    "quality_score": 8.5
+   },
+   {
+    "file": "tests/live_smoke.rs",
+    "issues": [
+     "Zero error-case tests — no coverage for bad URLs, timeouts, 404s, or malformed subscriptions",
+     "vless_fixture_dials_its_own_server connects to a hardcoded live Cloudflare Worker IP — fails silently if the Worker is redeployed or down",
+     "subscription test only checks specs.is_empty() and basic field presence — does not verify protocol, security, or WebSocket settings",
+     "assert!(... .expect(...)) pattern panics on fetch failure rather than testing graceful degradation",
+     "Both tests depend on live Cloudflare infrastructure making flakiness inherently high"
+    ],
+    "quality_score": 6
+   },
+   {
+    "file": "tests/property_tests.rs",
+    "issues": [
+     "No proptest for full wgconf round-trip — parse_wgconf (full config) is only covered deterministically, not fuzzed with random data",
+     "No property test for export output format validity",
+     "wg_ini_round_trips uses parse_wg_entry (INI-level) not parse_wgconf (full config level) — lower-level parser is fuzzed but higher-level is not"
+    ],
+    "quality_score": 9.5
+   },
+   {
+    "file": "tests/xray_lifecycle.rs",
+    "issues": [
+     "tunnel_probe_lifecycle has a conditional skip that silently passes if CF_SCANNER_DATA_DIR is not honored — test may pass without testing anything",
+     "fake_xray_child holds the socket for 120 seconds — if test hangs it blocks for 2 minutes before failing",
+     "No test for spawn failure modes (missing binary, dgst mismatch, port already in use)",
+     "ENV_LOCK with std::sync::Mutex in async code — safe in this case but the await_holding_lock suppression hides a potential maintenance hazard"
+    ],
+    "quality_score": 8
+   },
+   {
+    "file": "tests/xray_lifecycle_windows.rs",
+    "issues": [
+     "FAKE_SRC parses config JSON by text splitting on 'port' — fragile if xray config format changes",
+     "rustc invocation only checks status.success() — no check of stderr for compilation errors",
+     "No test for write_fake_xray failure paths (e.g. rustc not on PATH)",
+     "No test for spawn failure modes (missing binary, dgst mismatch, port in use)"
+    ],
+    "quality_score": 8
+   }
+  ]
+ },
+ {
+  "issues": [
+   {
+    "severity": "info",
+    "title": "Feature gating is correct and complete",
+    "description": "FakeTransport is gated cfg(any(test, feature=\"test-helpers\")). FakeSub, FakeTunnelProbe, FakeOpener, FakeTester are all cfg(test) inline. The test-helpers feature in Cargo.toml:51 is empty (pure compile-gate). No public test-only types leak into non-test builds."
+   },
+   {
+    "severity": "medium",
+    "title": "FakeTransport never simulates ProbeError variants in CDN tests",
+    "description": "Every CDN-mode test uses only ok() or empty FakeTransport (implicit Refused). No test injects ProbeError::Timeout, ProbeError::TlsHandshake, or ProbeError::ConnectionRefused into a CDN scan path. The probe loop's error-to-fail_reason mapping is untested at the CDN level. Add 2-3 tests scripting failure variants to exercise that path."
+   },
+   {
+    "severity": "low",
+    "title": "TunnelOpener::open() returning Err during speed testing is untested",
+    "description": "FakeOpener always returns Ok. The error path in measure_through_tunnel (which records the error on the verdict via apply_speed_result) is never exercised. Add one test where FakeOpener.open() returns Err and verify the verdict records the sanitized error."
+   },
+   {
+    "severity": "low",
+    "title": "FakeTunnelProbe never produces passed=true with latency_ms=None",
+    "description": "Real tunnel probes can produce a passing result without a measured latency. The code handles this but no test covers this edge case. Add a test with a colo-only result to exercise it."
+   },
+   {
+    "severity": "info",
+    "title": "FakeSub duplicated across configs.rs:1096 and engine/test_helpers.rs",
+    "description": "Two independent FakeSub implementations exist. Both wrap a string and return it from fetch(). Consider consolidating, though both are trivial and unlikely to diverge."
+   },
+   {
+    "severity": "info",
+    "title": "No Arc-drop or mid-flight transport failure simulation",
+    "description": "All mocks succeed on construction. No test simulates Arc<dyn Transport> being dropped mid-scan. Mutex poisoning is tested, but transport-level mid-flight failures beyond the scripted set are not."
+   },
+   {
+    "severity": "info",
+    "title": "Mock infrastructure overall is well-architected",
+    "description": "All six injectable dependencies have test doubles. The milestone stress test is an 8-thread correctness verification with uniqueness and monotonicity checks. Cancel-race tests use real barriers. Quality-gated stop exercises the full multi-pass scan loop. Sort correctness is covered by three dedicated tests. The primary gap is CDN error-path coverage at the transport level."
+   }
+  ]
+ },
+ {
+  "issues": [
+   {
+    "test": "tests/xray_lifecycle.rs: tunnel_probe_lifecycle_spawns_and_cleans_trial_dirs",
+    "issue": "Silent early-return on non-matching data dir. If `data_dir.starts_with(&tmp)` is false, the test prints a message and returns Ok(()) -- it passes without running any assertions. This masks regressions in CF_SCANNER_DATA_DIR handling.",
+    "fix": "Either panic with a clear error, or gate the test with #[cfg] so it is properly ignored in CI environments where the path cannot be redirected."
+   },
+   {
+    "test": "tests/live_smoke.rs: vless_fixture_dials_its_own_server",
+    "issue": "Returns early without any assertion when CFSCANNER_SUB_URL is unset. Combined with #[ignore], this means the test effectively never runs in CI and the early-return makes it silently succeed when it does run without the env var.",
+    "fix": "Remove the early return. If the test is #[ignore], the env var check should panic with a clear skip message, not silently return Ok(().)."
+   },
+   {
+    "test": "tests/live_smoke.rs: subscription_endpoint_returns_parseable_configs",
+    "issue": "Uses .expect() which panics with a confusing message if the subscription fetch fails. The assertion only checks that specs is non-empty, not that the configs have expected fields.",
+    "fix": "Replace .expect() with .unwrap_or_else() that prints the URL, and add assertions on at least one spec's protocol and security fields."
+   },
+   {
+    "test": "tests/cli_scan_agent.rs: e2e_scan_writes_export_files_and_ndjson_stdout",
+    "issue": "The second scan run writes to JSON but does not verify the CSV from the first run was overwritten or left intact. The two export runs are independent, so a broken atomic-write could still pass the test.",
+    "fix": "Add an assertion after the second run that the CSV file still exists and its content matches the expected schema, or remove the CSV path if it's not the focus."
+   },
+   {
+    "test": "tests/cli_scan_agent.rs: help_exits_zero_and_documents_scan",
+    "issue": "assert!(text.contains(\"scan\")) is too weak -- it would pass if 'scan' appeared in any context (e.g., inside a URL or unrelated word).",
+    "fix": "Use assert!(text.contains(\"\\n  scan \") || text.contains(\"\\tscan \")) to check that 'scan' appears as a subcommand, not buried in prose."
+   },
+   {
+    "test": "src/export.rs: render_results_csv_header_schema",
+    "issue": "Hardcodes the exact 14-column CSV header as a string literal. If a new column is added to the CSV output, this test breaks even though the behavior is correct.",
+    "fix": "Derive the expected header from the CSV column definitions (or count columns from the passing() helper's fields) rather than a literal string."
+   },
+   {
+    "test": "src/geo.rs: embedded_db_resolves_a_known_public_ip_when_present",
+    "issue": "Uses `if geo.country.is_none() { return; }` -- silently passes when the mmdb is absent, which is the case on some CI runners.",
+    "fix": "Either embed a test fixture mmdb or mark this #[ignore] with a clear explanation, rather than silently passing."
+   },
+   {
+    "test": "src/geo.rs: embedded_db_looks_up_v6_addresses_when_present",
+    "issue": "Same silent-pass pattern as the v4 test above.",
+    "fix": "Same fix: #[ignore] or a dedicated test fixture."
+   },
+   {
+    "test": "src/socks.rs: decode_chunked_empty_input_and_terminal_chunk",
+    "issue": "Tests that decode_chunked(b\"\") returns an error, but does not verify the error message content. A future refactor that changes the error type would still pass.",
+    "fix": "Add an assertion on the error message or type: assert!(matches!(decode_chunked(b\"\"), Err(e) if e.to_string().contains(\"empty\")));"
+   },
+   {
+    "test": "src/api/types_tests.rs: rejects_malformed_cidrs",
+    "issue": "assert!(c.validate().is_err()) is too loose -- it would pass if the error was a completely wrong variant (e.g., InvalidPort instead of InvalidCidr).",
+    "fix": "Use assert!(matches!(c.validate(), Err(ConfigError::InvalidCidr(_, _))) for each case, or at minimum check the error message contains 'CIDR'."
+   },
+   {
+    "test": "src/api/types_tests.rs: rejects_bad_warp_endpoints",
+    "issue": "The '::1' case uses assert!(w.validate().is_err()) without checking the error variant. A wrong error type would pass.",
+    "fix": "Use assert!(matches!(w.validate(), Err(ConfigError::NonRoutableEndpoint(_)))) for the loopback case."
+   },
+   {
+    "test": "src/engine/warp.rs: warp_full_pool_scan_visits_every_endpoint",
+    "issue": "assert_eq!(summary.scanned, 8 * 256) is a count-only assertion. If the scan visits some hosts twice and skips others, the count could still match.",
+    "fix": "Collect all scanned IPs from results and assert that no duplicate (ip, port) pairs exist, or check that the set of scanned IPs has cardinality 8 * 256."
+   },
+   {
+    "test": "src/inline_verify.rs (multiple tests)",
+    "issue": "Heavy use of .unwrap() in TLS server setup (e.g., rcgen::generate_simple_self_signed(...).unwrap(), tokio::net::TcpListener::bind(...).await.unwrap()). If setup fails, the panic message is a bare 'called Result::unwrap() on an Err' with no context about which test or what failed.",
+    "fix": "Replace key setup unwraps with .expect(\"descriptive message\") so failures are diagnosable, e.g., .expect(\"test TLS cert generation\")."
+   },
+   {
+    "test": "Missing: src/socks.rs concurrent access",
+    "issue": "No test exercises send_http / get_via_socks from multiple tasks concurrently against the same socks proxy. A race in the SOCKS state machine would go undetected.",
+    "fix": "Add a test that spawns N concurrent get_via_socks calls against a single fake_socks_server and asserts all complete successfully."
+   },
+   {
+    "test": "Missing: src/engine/store.rs concurrent writes",
+    "issue": "Store is Arc<Mutex<Vec<Verdict>>> but there is no test that pushes verdicts from multiple threads concurrently and then checks consistency.",
+    "fix": "Add a test that spawns 8 threads each pushing 1000 verdicts, then asserts results().len() == 8000 and results() is sorted."
+   },
+   {
+    "test": "Missing: src/ranges/pool.rs large-prefix IPv6 exclusion",
+    "issue": "No test for excluding a /32 (single-host) from a /128 pool, or excluding a prefix equal to the pool prefix (full removal).",
+    "fix": "Add tests: (1) pool of /128 excluding /128 = empty, (2) pool of /128 excluding non-overlapping /128 = unchanged, (3) pool of /64 excluding /32 = error or empty."
+   },
+   {
+    "test": "Missing: src/verify.rs spawn_with_retry edge cases",
+    "issue": "No test for spawn_with_retry when the closure returns an error on every attempt (always fails). Only 3-failure is tested.",
+    "fix": "Add a test where the closure always fails, and assert the error propagates after exactly MAX_RETRIES attempts with the final error message."
+   },
+   {
+    "test": "Missing: src/configs.rs parse_uri with deeply malformed base64 in vmess",
+    "issue": "The vmess parser uses base64 decode but there is no test for vmess URIs with valid base64 that decodes to JSON with missing required fields (e.g., no 'add' key).",
+    "fix": "Add tests: vmess with base64 that decodes to {}, vmess with base64 that decodes to {\"v\":\"2\"} (missing add/port/id), vmess with base64 that decodes to valid JSON but with wrong 'v' value."
+   },
+   {
+    "test": "Missing: src/engine/phase2.rs subscription fetch failure",
+    "issue": "No test for what happens when the subscription fetch fails during phase-2 (network error, timeout). The FakeSub always succeeds.",
+    "fix": "Add a test with a FakeSub that returns Err, and assert the scan completes with phase2_passed=false and a meaningful fail_reason."
+   },
+   {
+    "test": "Missing: src/export.rs export with IPv6-only results to all bundle formats",
+    "issue": "Only tests IPv6 rejection for the 'raw' bundle format. Other formats (singbox, clash, sharelinks) are not tested with IPv6-only input.",
+    "fix": "Add IPv6-only assertions for singbox, clash, and sharelinks bundle formats."
+   }
+  ]
+ }
+]
