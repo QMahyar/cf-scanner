@@ -355,7 +355,11 @@ impl ScanController {
     }
 
     async fn run_seeded_unguarded(&self, cfg: ScanConfig, seed: u64) -> Result<ScanSummary> {
-        let pool = ranges::effective_pool(&cfg.custom_cidrs, &cfg.exclude, cfg.include_v6).await?;
+        let (pool, warnings) =
+            ranges::effective_pool(&cfg.custom_cidrs, &cfg.exclude, cfg.include_v6).await?;
+        for warning in warnings {
+            tracing::error!("{warning}");
+        }
         self.run_seeded_with_pool(cfg, seed, pool).await
     }
 
