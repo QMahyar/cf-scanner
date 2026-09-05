@@ -34,13 +34,19 @@ pub fn load_config() -> Result<ScanConfig> {
         .map_err(|e| anyhow!("no retryable scan saved ({}: {e})", path.display()))?;
     let cfg: ScanConfig = serde_json::from_str(&raw)
         .map_err(|e| anyhow!("saved scan config is corrupt ({}: {e})", path.display()))?;
+    cfg.validate().map_err(|e| {
+        anyhow!(
+            "saved scan config is invalid ({}: {e}) — re-run the scan",
+            path.display()
+        )
+    })?;
     Ok(cfg)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::api::types::{Phase2Config, ScanTarget, WarpConfig};
+    use crate::api::types::{Mode, Phase2Config, Port, ScanTarget, WarpConfig};
     use crate::paths::test_env::{DATA_DIR_LOCK, IsolatedDataDir};
 
     fn sample() -> ScanConfig {
@@ -76,6 +82,8 @@ mod tests {
         let _guard = DATA_DIR_LOCK.blocking_lock();
         let _isolated = IsolatedDataDir::new();
         let mut cfg = sample();
+        cfg.mode = Mode::Warp;
+        cfg.ports = vec![Port::new(2408)];
         cfg.warp = Some(WarpConfig {
             wgconf: Some("[Interface]\nPrivateKey = SUPERSECRETACTUALKEY1234567890=\n".to_owned()),
             verify_with_wgconf: true,
@@ -93,6 +101,24 @@ mod tests {
         assert!(
             !on_disk.contains("SUPERSECRETACTUALKEY"),
             "private key must never hit disk"
+        );
+    }
+
+    #[test]
+    fn load_rejects_well_typed_but_invalid_config() {
+        let _guard = DATA_DIR_LOCK.blocking_lock();
+        let _isolated = IsolatedDataDir::new();
+        save_config(&sample()).unwrap();
+        let path = last_scan_path().unwrap();
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(raw.contains("concurrency"), "precondition");
+        let tampered = raw.replace("\"concurrency\": 64", "\"concurrency\": 0");
+        assert_ne!(tampered, raw, "precondition: concurrency field present");
+        std::fs::write(&path, tampered).unwrap();
+        let err = load_config().unwrap_err().to_string();
+        assert!(
+            err.contains("invalid") && err.contains("re-run"),
+            "must name the fix, got: {err}"
         );
     }
 
