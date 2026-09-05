@@ -104,6 +104,61 @@ mod tests {
         );
     }
 
+    fn warp_sample() -> ScanConfig {
+        let mut cfg = sample();
+        cfg.mode = Mode::Warp;
+        cfg.ports = vec![Port::new(2408)];
+        cfg.warp = Some(WarpConfig {
+            wgconf: Some("[Interface]\nPrivateKey = K\n".to_owned()),
+            verify_with_wgconf: true,
+            ..Default::default()
+        });
+        cfg
+    }
+
+    #[test]
+    fn load_tolerates_old_shape_without_newer_fields() {
+        let _guard = DATA_DIR_LOCK.blocking_lock();
+        let _isolated = IsolatedDataDir::new();
+        let mut v = serde_json::to_value(warp_sample()).unwrap();
+        v.as_object_mut().unwrap().remove("neighbor_count");
+        v["warp"]
+            .as_object_mut()
+            .unwrap()
+            .remove("verify_with_wgconf");
+        std::fs::write(
+            last_scan_path().unwrap(),
+            serde_json::to_string_pretty(&v).unwrap(),
+        )
+        .unwrap();
+        let loaded = load_config().unwrap();
+        let warp = loaded.warp.expect("warp block must survive");
+        assert!(!warp.verify_with_wgconf, "new flags default off");
+        assert_eq!(loaded.neighbor_count, 0, "new scalars default");
+        assert!(warp.wgconf.is_some(), "present keys must survive");
+    }
+
+    #[test]
+    fn load_ignores_unknown_top_level_keys_but_not_nested_ones() {
+        let _guard = DATA_DIR_LOCK.blocking_lock();
+        let _isolated = IsolatedDataDir::new();
+        let mut v = serde_json::to_value(warp_sample()).unwrap();
+        v["future_flag"] = serde_json::Value::Bool(true);
+        std::fs::write(
+            last_scan_path().unwrap(),
+            serde_json::to_string_pretty(&v).unwrap(),
+        )
+        .unwrap();
+        load_config().expect("unknown top-level keys must be ignored");
+        v["warp"]["future_nested"] = serde_json::Value::Bool(true);
+        std::fs::write(
+            last_scan_path().unwrap(),
+            serde_json::to_string_pretty(&v).unwrap(),
+        )
+        .unwrap();
+        load_config().expect_err("nested strictness must be preserved");
+    }
+
     #[test]
     fn load_rejects_well_typed_but_invalid_config() {
         let _guard = DATA_DIR_LOCK.blocking_lock();

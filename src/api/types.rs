@@ -138,6 +138,7 @@ pub struct Phase2Config {
     pub probe_url: String,
     #[serde(default)]
     pub probe_urls: Vec<String>,
+    #[serde(default = "default_phase2_concurrency")]
     pub concurrency: u8,
 }
 
@@ -162,7 +163,7 @@ impl Default for Phase2Config {
             snis: Vec::new(),
             probe_url: DEFAULT_PROBE_URL.to_owned(),
             probe_urls: Vec::new(),
-            concurrency: 3,
+            concurrency: DEFAULT_PHASE2_CONCURRENCY,
         }
     }
 }
@@ -170,9 +171,12 @@ impl Default for Phase2Config {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WarpConfig {
+    #[serde(default)]
     pub custom_endpoints: Vec<String>,
+    #[serde(default = "default_probes_per_endpoint")]
     pub probes_per_endpoint: u8,
     pub wgconf: Option<String>,
+    #[serde(default)]
     pub verify_with_wgconf: bool,
 }
 
@@ -180,15 +184,19 @@ impl Default for WarpConfig {
     fn default() -> Self {
         Self {
             custom_endpoints: Vec::new(),
-            probes_per_endpoint: 3,
+            probes_per_endpoint: DEFAULT_PROBES_PER_ENDPOINT,
             wgconf: None,
             verify_with_wgconf: false,
         }
     }
 }
 
+// NOTE: ScanConfig intentionally has NO deny_unknown_fields. It is the
+// persisted --retry-last root (serde JSON only ever happens in
+// retry::load_config; the CLI builds it programmatically from clap flags),
+// so unknown top-level keys must be ignored for forward compatibility.
+// Strictness is preserved on every nested type and by validate().
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct ScanConfig {
     pub mode: Mode,
     pub target: ScanTarget,
