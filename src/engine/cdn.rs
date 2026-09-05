@@ -251,7 +251,39 @@ impl ScanController {
                                 }
                             }
                             Err(mpsc::error::TryRecvError::Empty) => {
-                                if inflight.load(Ordering::Acquire) == 0 {
+                                // A worker enqueues (try_send) before it decrements
+                                // inflight, but our recv and our inflight load are
+                                // still two separate reads: a completion landing
+                                // between them orphans its enqueue. Confirm with a
+                                // second consecutive Empty + zero pair before
+                                // quitting. The pair is conclusive: only this
+                                // producer raises inflight and it forwarded nothing
+                                // since the first Empty, so no worker was mid-probe
+                                // at the second recv and no enqueue can land after it.
+                                let quiescent = inflight.load(Ordering::Acquire) == 0
+                                    && match rx.try_recv() {
+                                        Ok(task) => {
+                                            if !forward_to_worker(
+                                                task,
+                                                &worker_txs,
+                                                &mut idx,
+                                                concurrency,
+                                                &inflight,
+                                                &ctx,
+                                                &skip,
+                                            )
+                                            .await
+                                            {
+                                                break;
+                                            }
+                                            false
+                                        }
+                                        Err(mpsc::error::TryRecvError::Empty) => {
+                                            inflight.load(Ordering::Acquire) == 0
+                                        }
+                                        Err(mpsc::error::TryRecvError::Disconnected) => true,
+                                    };
+                                if quiescent {
                                     break;
                                 }
                                 tokio::time::sleep(Duration::from_millis(NEIGHBOR_IDLE_POLL_MS))
