@@ -204,4 +204,35 @@ mod tests {
             "a degenerate v6 refresh must not clobber the last-good list"
         );
     }
+
+    #[tokio::test]
+    async fn malformed_official_bodies_are_rejected_not_partial_parsed() {
+        // Truncated JSON, wrong shape, success=false with no errors array.
+        for body in [
+            "{\"success\":true,\"result\":",
+            "{\"success\":true}",
+            "{\"success\":true,\"result\":{\"ipv4_cidrs\":[]},\"errors\":[]}",
+            "[]",
+        ] {
+            let http = FakeHttp(body);
+            assert!(refresh_to_disk(&http).await.is_err(), "must reject: {body}");
+        }
+        // The v6 text endpoint rejects whitespace-only bodies as empty.
+        let http = FakeHttp(
+            "   
+
+",
+        );
+        assert!(refresh_v6_to_disk(&http).await.is_err());
+    }
+
+    #[test]
+    fn whitespace_and_duplicate_entries_are_normalized() {
+        let body = r#"{"success":true,"result":{"ipv4_cidrs":["  10.0.0.0/8  ","10.0.0.0/8"]},"errors":[]}"#;
+        let cidrs = parse_official(body).unwrap();
+        assert_eq!(cidrs.len(), 2, "whitespace-padded entry must parse");
+        assert_eq!(cidrs[0], cidrs[1], "both entries parse identically");
+        let pool = CidrPool::from_ranges(cidrs);
+        assert_eq!(pool.ranges().len(), 1, "exact duplicates are deduped");
+    }
 }

@@ -184,4 +184,43 @@ mod tests {
         let err = load_config().unwrap_err().to_string();
         assert!(err.contains("no retryable scan saved"), "{err}");
     }
+
+    #[test]
+    fn load_without_any_saved_file_names_the_expected_path() {
+        let _guard = crate::paths::test_env::DATA_DIR_LOCK.blocking_lock();
+        let _isolated = crate::paths::test_env::IsolatedDataDir::new();
+        let err = load_config().unwrap_err().to_string();
+        assert!(err.contains("no retryable scan saved"), "{err}");
+        assert!(err.contains("last-scan.json"), "{err}");
+    }
+
+    #[test]
+    fn corrupt_saved_config_fails_with_a_corrupt_error_not_a_panic() {
+        let _guard = crate::paths::test_env::DATA_DIR_LOCK.blocking_lock();
+        let _isolated = crate::paths::test_env::IsolatedDataDir::new();
+        let path = last_scan_path().unwrap();
+        std::fs::write(&path, b"{ not json !!!").unwrap();
+        let err = load_config().unwrap_err().to_string();
+        assert!(err.contains("corrupt"), "{err}");
+    }
+
+    #[test]
+    fn concurrent_saves_serialize_and_keep_the_file_valid() {
+        let _guard = crate::paths::test_env::DATA_DIR_LOCK.blocking_lock();
+        let _isolated = crate::paths::test_env::IsolatedDataDir::new();
+        let cfg = sample();
+        let handles: Vec<_> = (0..8)
+            .map(|i| {
+                let mut cfg = cfg.clone();
+                cfg.concurrency = 100 + i as u16;
+                std::thread::spawn(move || save_config(&cfg).unwrap())
+            })
+            .collect();
+        for h in handles {
+            h.join().unwrap();
+        }
+        // The file must be valid JSON (no interleaved torn writes).
+        let cfg = load_config().unwrap();
+        assert!((100..=107).contains(&cfg.concurrency));
+    }
 }

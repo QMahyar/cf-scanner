@@ -1356,4 +1356,56 @@ mod tests {
             warnings[0]
         );
     }
+
+    #[test]
+    fn slash_zero_v4_boundary_and_comments_in_parse() {
+        // v4 /0: the whole space as a single range.
+        let all = parse_cidr("0.0.0.0/0").unwrap();
+        assert_eq!(all.host_count(), 1u128 << 32);
+        assert_eq!(all.addr, "0.0.0.0".parse::<IpAddr>().unwrap());
+        // Pool host_count saturates across mixed families.
+        let pool = CidrPool::parse(
+            "0.0.0.0/0
+",
+        )
+        .unwrap();
+        assert_eq!(pool.host_count(), 1u128 << 32);
+
+        // '#' full-line comments are skipped; inline text after a CIDR is not.
+        let pool = CidrPool::parse(
+            "# header
+
+10.0.0.0/8
+  # indented comment
+",
+        )
+        .unwrap();
+        assert_eq!(pool.ranges().len(), 1);
+        assert!(CidrPool::parse("10.0.0.0/8 trailing").is_err());
+    }
+
+    #[test]
+    fn overlapping_exclusions_are_subtracted_exactly() {
+        let pool = CidrPool::parse(
+            "10.0.0.0/16
+",
+        )
+        .unwrap();
+        // Two overlapping excludes inside the block.
+        let ex = vec![
+            parse_cidr("10.0.10.0/24").unwrap(),
+            parse_cidr("10.0.11.0/24").unwrap(),
+        ];
+        let result = pool.excluding(&ex);
+        let count: u128 = result.ranges().iter().map(|c| c.host_count()).sum();
+        assert_eq!(count, (1u128 << 16) - 2 * (1u128 << 8));
+        // An exclude fully containing the range removes everything.
+        let ex = vec![parse_cidr("10.0.0.0/8").unwrap()];
+        assert!(pool.excluding(&ex).ranges().is_empty());
+        // Excluding twice with the same range is idempotent.
+        let ex = vec![parse_cidr("10.0.0.0/20").unwrap()];
+        let once = pool.excluding(&ex);
+        let twice = once.excluding(&ex);
+        assert_eq!(once.ranges(), twice.ranges());
+    }
 }

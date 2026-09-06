@@ -931,4 +931,82 @@ mod tests {
         assert!(leftovers.is_empty(), "no tmp files must remain");
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    #[test]
+    fn remark_for_prefers_colo_then_country_then_placeholder() {
+        let mut v = passing("1.2.3.4", 443, Some(0));
+        assert_eq!(remark_for(&v).as_deref(), Some("CF-LAX-40ms"));
+        v.colo = None; // fall back to country
+        assert_eq!(remark_for(&v).as_deref(), Some("CF-US-40ms"));
+        v.country = None; // then the "CF" placeholder (place slot, so CF-CF)
+        assert_eq!(remark_for(&v).as_deref(), Some("CF-CF-40ms"));
+        v.phase2.as_mut().unwrap().latency_ms = None;
+        v.latency_ms = None;
+        assert_eq!(remark_for(&v).as_deref(), Some("CF-CF"));
+        // A failed phase-2 never gets a remark.
+        v.phase2.as_mut().unwrap().passed = false;
+        assert_eq!(remark_for(&v), None);
+        // No phase-2 at all: no remark.
+        v.phase2 = None;
+        assert_eq!(remark_for(&v), None);
+    }
+
+    #[test]
+    fn unique_tag_appends_dedup_suffixes_in_insertion_order() {
+        let mut seen = std::collections::HashMap::new();
+        assert_eq!(unique_tag("CF-LAX".to_owned(), &mut seen), "CF-LAX");
+        assert_eq!(unique_tag("CF-LAX".to_owned(), &mut seen), "CF-LAX-2");
+        assert_eq!(unique_tag("CF-LAX".to_owned(), &mut seen), "CF-LAX-3");
+        assert_eq!(unique_tag("CF-NRT".to_owned(), &mut seen), "CF-NRT");
+        assert_eq!(unique_tag("CF-LAX".to_owned(), &mut seen), "CF-LAX-4");
+    }
+
+    #[tokio::test]
+    async fn write_export_writes_csv_and_json_files_atomically() {
+        let c = Arc::new(ScanController::new(Arc::new(
+            crate::probe::FakeTransport::new(),
+        )));
+        crate::engine::store_seed(&c, vec![passing("1.2.3.4", 443, Some(0))]);
+        let dir = std::env::temp_dir().join(format!("cf-scanner-export-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let csv_path = dir.join("out.csv");
+        write_export(&c, &csv_path, ExportFormatArg::Csv).unwrap();
+        let csv = std::fs::read_to_string(&csv_path).unwrap();
+        assert!(csv.starts_with("ip,port,latency_ms,"), "{csv}");
+        assert!(csv.contains("1.2.3.4,443"), "{csv}");
+        assert!(!dir.join("out.csv.tmp-0-0").exists(), "tmp file cleaned");
+
+        let json_path = dir.join("out.json");
+        write_export(&c, &json_path, ExportFormatArg::Json).unwrap();
+        let json = std::fs::read_to_string(&json_path).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["results"][0]["ip"], "1.2.3.4");
+
+        // Overwrite replaces the file cleanly.
+        write_export(&c, &csv_path, ExportFormatArg::Csv).unwrap();
+        let tmps: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().contains(".tmp-"))
+            .collect();
+        assert!(tmps.is_empty(), "no tmp leftovers: {tmps:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn write_export_fails_loudly_on_an_unwritable_target() {
+        let c = Arc::new(ScanController::new(Arc::new(
+            crate::probe::FakeTransport::new(),
+        )));
+        crate::engine::store_seed(&c, vec![passing("1.2.3.4", 443, Some(0))]);
+        let dir =
+            std::env::temp_dir().join(format!("cf-scanner-export-fail-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // A directory where the file should be: atomic write must fail.
+        let err = write_export(&c, &dir, ExportFormatArg::Csv).unwrap_err();
+        assert!(err.to_string().contains("could not write"), "{err:#}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

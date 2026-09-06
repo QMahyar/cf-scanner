@@ -378,4 +378,41 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn plan_probe_count_multiplies_hosts_by_ports_and_saturates() {
+        use crate::api::types::Port;
+        let cidr = crate::ranges::parse_cidr("10.0.0.0/24").unwrap();
+        let plan = vec![PlanItem::Every { cidr }];
+        assert_eq!(plan_probe_count(&plan, &[Port::new(443)]), 256);
+        assert_eq!(
+            plan_probe_count(&plan, &[Port::new(80), Port::new(443)]),
+            512
+        );
+
+        // Sample is capped by the host count of the block.
+        let plan = vec![PlanItem::Sample {
+            cidr,
+            count: 1_000_000,
+        }];
+        assert_eq!(plan_probe_count(&plan, &[Port::new(443)]), 256);
+
+        // Hosts item counts offsets.
+        let plan = vec![PlanItem::Hosts {
+            cidr,
+            offsets: vec![0, 3, 7],
+        }];
+        assert_eq!(plan_probe_count(&plan, &[Port::new(443)]), 3);
+
+        // Empty plan and no ports → 0.
+        assert_eq!(plan_probe_count(&[], &[Port::new(443)]), 0);
+        assert_eq!(plan_probe_count(&plan, &[]), 0);
+
+        // u64 saturation: a /1 v6 block (2^127 hosts) x 1000 ports clamps,
+        // not wraps (v6 /0 itself is rejected at parse time).
+        let v6 = crate::ranges::parse_cidr("2000::/1").unwrap();
+        let plan = vec![PlanItem::Every { cidr: v6 }];
+        let ports: Vec<Port> = (0..1000).map(|i| Port::new(1000 + i as u16)).collect();
+        assert_eq!(plan_probe_count(&plan, &ports), u64::MAX);
+    }
 }

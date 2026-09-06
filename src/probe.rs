@@ -751,4 +751,14 @@ mod tests {
         );
         assert_eq!(find_subsequence(b"no terminator", b"\r\n\r\n"), None);
     }
+
+    #[test]
+    fn status_line_parse_accepts_http2_and_reasonless_responses() {
+        // HTTP/2 has no reason phrase: "HTTP/2 200".
+        assert_eq!(parse_status_line(b"HTTP/2 200"), Some(200));
+        assert_eq!(parse_status_line(b"HTTP/1.1 403"), Some(403));
+        assert_eq!(parse_status_line(b"HTTP/3 204 no body"), Some(204));
+        // Version token alone is not enough.
+        assert_eq!(parse_status_line(b"HTTP/2"), None);
+    }
 }
