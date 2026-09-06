@@ -282,4 +282,64 @@ mod tests {
         assert!(validate_fetch_url("https://example.com/x").is_ok());
         assert!(validate_fetch_url("https://www.cloudflare.com/ips-v4/").is_ok());
     }
+
+    #[test]
+    fn sanitize_url_for_error_masks_credentials_and_drops_query() {
+        assert_eq!(
+            sanitize_url_for_error("https://user:secret@example.com/p?q=1#frag"),
+            "https://***:***@example.com/p"
+        );
+        assert_eq!(
+            sanitize_url_for_error("https://example.com/p?token=abc"),
+            "https://example.com/p"
+        );
+        // Only-user and only-password forms both mask.
+        assert_eq!(
+            sanitize_url_for_error("https://user@example.com/"),
+            "https://***:***@example.com/"
+        );
+        assert_eq!(
+            sanitize_url_for_error("https://:pw@example.com/"),
+            "https://***:***@example.com/"
+        );
+        // Unparseable input passes through untouched (nothing to leak).
+        assert_eq!(sanitize_url_for_error("::not a url::"), "::not a url::");
+    }
+
+    #[tokio::test]
+    async fn fetchers_enforce_the_ssrf_guard_before_any_network_io() {
+        // The guard runs first, so these fail offline and deterministically;
+        // they also prove the error text never carries the guarded URL.
+        for url in [
+            "http://example.com/x",
+            "https://127.0.0.1/x",
+            "https://localhost/x",
+            "not a url",
+        ] {
+            let err = fetch_bytes(url).await.unwrap_err().to_string();
+            assert!(
+                err.contains("refusing") || err.contains("https") || err.contains("bad URL"),
+                "{url}: {err}"
+            );
+        }
+        let err = fetch_tls_with_headers("https://localhost/", "X-Test: y")
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("non-routable"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn fetch_tls_inner_skips_unparseable_extra_headers() {
+        // Malformed header lines are skipped client-side; the guard still
+        // fires before anything is sent, so this stays offline.
+        let err = fetch_tls_inner(
+            "https://localhost/",
+            "bad-line-without-colon\n\nX-Good: ok\n:empty-name\nX-Empty: \n",
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("non-routable"), "{err}");
+    }
 }

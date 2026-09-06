@@ -499,6 +499,218 @@ mod tests {
         addr
     }
 
+    /// SOCKS5 server that records the request's ATYP/addr bytes and then
+    /// serves a scripted HTTP response with a configurable status.
+    struct SocksScripted {
+        addr: SocketAddr,
+        request: tokio::sync::oneshot::Receiver<Vec<u8>>,
+    }
+
+    async fn socks_scripted(status_line: &'static str, body: &'static [u8]) -> SocksScripted {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (tx, request) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            let (mut sock, _) = match listener.accept().await {
+                Ok(v) => v,
+                Err(_) => return,
+            };
+            let mut greeting = [0u8; 3];
+            if sock.read_exact(&mut greeting).await.is_err() {
+                return;
+            }
+            let _ = sock.write_all(&[0x05, 0x00]).await;
+            let mut req = Vec::new();
+            loop {
+                let mut byte = [0u8; 1];
+                if sock.read_exact(&mut byte).await.is_err() {
+                    return;
+                }
+                req.push(byte[0]);
+                let atyp = req.get(3).copied();
+                let want = match atyp {
+                    Some(0x01) => 4,
+                    Some(0x04) => 16,
+                    Some(0x03) if req.len() >= 5 => req[4] as usize,
+                    _ => 0,
+                };
+                if atyp.is_some() && atyp != Some(0x03) && req.len() >= 4 + want + 2 {
+                    break;
+                }
+                if atyp == Some(0x03) && req.len() >= 5 + want + 2 {
+                    break;
+                }
+            }
+            let _ = tx.send(req);
+            // Reply: BND.ADDR all zeros (IPv4 shape is what clients accept).
+            let _ = sock
+                .write_all(&[0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0])
+                .await;
+            let mut http = Vec::new();
+            while !http.ends_with(b"\r\n\r\n") {
+                let mut byte = [0u8; 1];
+                if sock.read_exact(&mut byte).await.is_err() {
+                    return;
+                }
+                http.push(byte[0]);
+            }
+            let head = format!("{status_line}\r\nContent-Length: {}\r\n\r\n", body.len());
+            let _ = sock.write_all(head.as_bytes()).await;
+            let _ = sock.write_all(body).await;
+        });
+        SocksScripted { addr, request }
+    }
+
+    #[tokio::test]
+    async fn timed_download_counts_plain_http_body() {
+        let scripted = socks_scripted("HTTP/1.1 200 OK", &[0xABu8; 4096]).await;
+        let (total, elapsed) = timed_download_via_socks(
+            "http://speed.example/data",
+            scripted.addr,
+            1 << 20,
+            Duration::from_secs(5),
+        )
+        .await
+        .unwrap();
+        assert_eq!(total, 4096);
+        assert!(elapsed > 0.0, "elapsed must be measured");
+        let req = scripted.request.await.unwrap();
+        assert_eq!(req[3], 0x03, "domain name uses ATYP=domain");
+        let host_len = req[4] as usize;
+        assert_eq!(&req[5..5 + host_len], b"speed.example");
+    }
+
+    #[tokio::test]
+    async fn timed_download_caps_the_transfer_at_max_bytes() {
+        let scripted = socks_scripted("HTTP/1.1 200 OK", &[7u8; 100_000]).await;
+        let (total, _) = timed_download_via_socks(
+            "http://speed.example/data",
+            scripted.addr,
+            10_000,
+            Duration::from_secs(5),
+        )
+        .await
+        .unwrap();
+        assert_eq!(total, 10_000, "the cap stops the count, not the server");
+    }
+
+    #[tokio::test]
+    async fn timed_download_rejects_non_200() {
+        let scripted = socks_scripted("HTTP/1.1 403 Forbidden", b"no").await;
+        let err = timed_download_via_socks(
+            "http://speed.example/data",
+            scripted.addr,
+            1 << 20,
+            Duration::from_secs(5),
+        )
+        .await
+        .unwrap_err();
+        assert!(err.to_string().contains("403"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn timed_download_times_out_when_the_server_stalls() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let socks = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            if let Ok((mut sock, _)) = listener.accept().await {
+                let mut buf = [0u8; 3];
+                let _ = sock.read_exact(&mut buf).await;
+                let _ = tokio::time::sleep(Duration::from_secs(10)).await;
+            }
+        });
+        let err = timed_download_via_socks(
+            "http://speed.example/data",
+            socks,
+            1 << 20,
+            Duration::from_millis(80),
+        )
+        .await
+        .unwrap_err();
+        assert!(err.to_string().contains("timed out"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn socks5_connect_sends_v4_and_v6_atyp_requests() {
+        // Server accepts and replies with an IPv4-shaped BND.ADDR.
+        for (host, atyp) in [("127.0.0.1", 0x01u8), ("2001:db8::1", 0x04)] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let socks = listener.local_addr().unwrap();
+            tokio::spawn(async move {
+                let (mut sock, _) = listener.accept().await.unwrap();
+                let mut g = [0u8; 3];
+                let _ = sock.read_exact(&mut g).await;
+                let _ = sock.write_all(&[0x05, 0x00]).await;
+                // Request: VER CMD RSV ATYP ADDR(4|16) PORT(2).
+                let mut req = vec![0u8; 3 + 1 + if atyp == 0x01 { 4 } else { 16 } + 2];
+                let _ = sock.read_exact(&mut req).await;
+                let _ = sock
+                    .write_all(&[0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0])
+                    .await;
+            });
+            let mut stream = TcpStream::connect(socks).await.unwrap();
+            socks5_connect(&mut stream, host, 443).await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn socks5_connect_rejects_bad_method_and_unknown_atyp_replies() {
+        // Server answers the greeting with 0xFF (no acceptable method).
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let socks = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut g = [0u8; 3];
+            let _ = sock.read_exact(&mut g).await;
+            let _ = sock.write_all(&[0x05, 0xFF]).await;
+        });
+        let mut stream = TcpStream::connect(socks).await.unwrap();
+        let err = socks5_connect(&mut stream, "example.test", 80)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("refused no-auth"), "{err}");
+
+        // Server replies with an unknown ATYP in the CONNECT response. It must
+        // drain the whole domain request first or the close sends RST before
+        // the client reads the reply.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let socks = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut g = [0u8; 3];
+            let _ = sock.read_exact(&mut g).await;
+            let _ = sock.write_all(&[0x05, 0x00]).await;
+            let mut head = [0u8; 5];
+            let _ = sock.read_exact(&mut head).await;
+            assert_eq!(head[3], 0x03);
+            let mut rest = vec![0u8; head[4] as usize + 2];
+            let _ = sock.read_exact(&mut rest).await;
+            let _ = sock
+                .write_all(&[0x05, 0x00, 0x00, 0x7F, 0, 0, 0, 0, 0, 0])
+                .await;
+        });
+        let mut stream = TcpStream::connect(socks).await.unwrap();
+        let err = socks5_connect(&mut stream, "example.test", 80)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("unknown addr type"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn count_download_enforces_header_and_status_caps() {
+        // Over-long response headers bail out explicitly.
+        let junk = vec![b'x'; MAX_HEADER_BYTES + 16];
+        let mut stream = &junk[..];
+        let err = count_download(&mut stream, 1024).await.unwrap_err();
+        assert!(err.to_string().contains("cap"), "{err}");
+
+        // Malformed status line fails with a clear error.
+        let resp = b"NOT-HTTP\r\n\r\n";
+        let mut stream = &resp[..];
+        let err = count_download(&mut stream, 1024).await.unwrap_err();
+        assert!(err.to_string().contains("malformed status"), "{err}");
+    }
+
     #[tokio::test]
     async fn tunnel_probe_gets_http_through_fake_socks() {
         let socks = fake_socks_server().await;

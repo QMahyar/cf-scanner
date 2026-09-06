@@ -1061,6 +1061,160 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn write_trial_config_round_trips_and_restricts_perms() {
+        let dir = std::env::temp_dir().join(format!("cf-scanner-trialcfg-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.json");
+        let cfg = serde_json::json!({"z": 1, "a": [true, null, "x"]});
+        write_trial_config(&path, &cfg).await.unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        let back: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(back, cfg, "written config must parse back identically");
+        assert!(text.contains('\n'), "pretty-printed for stderr diagnostics");
+        // Re-write must truncate, not append.
+        write_trial_config(&path, &serde_json::json!({"q": 2}))
+            .await
+            .unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        let back: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(back, serde_json::json!({"q": 2}));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600, "trial configs hold credentials");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn find_entry_locates_by_basename_and_errors_when_absent() {
+        let mut buf = std::io::Cursor::new(Vec::new());
+        {
+            let mut w = zip::ZipWriter::new(&mut buf);
+            w.start_file("docs/readme.txt", zip::write::SimpleFileOptions::default())
+                .unwrap();
+            std::io::Write::write_all(&mut w, b"readme").unwrap();
+            w.start_file(
+                format!("deep/nested/{}", exe_name()),
+                zip::write::SimpleFileOptions::default(),
+            )
+            .unwrap();
+            std::io::Write::write_all(&mut w, b"payload").unwrap();
+            w.finish().unwrap();
+        }
+        let zip_bytes = buf.into_inner();
+        let archive = zip::ZipArchive::new(std::io::Cursor::new(&zip_bytes[..])).unwrap();
+        let idx = find_entry(&archive, exe_name()).unwrap();
+        let name = archive.name_for_index(idx).unwrap().to_owned();
+        assert_eq!(name.rsplit('/').next().unwrap(), exe_name());
+
+        let mut empty = std::io::Cursor::new(Vec::new());
+        {
+            let mut w = zip::ZipWriter::new(&mut empty);
+            w.start_file("only/other.bin", zip::write::SimpleFileOptions::default())
+                .unwrap();
+            std::io::Write::write_all(&mut w, b"x").unwrap();
+            w.finish().unwrap();
+        }
+        let empty_bytes = empty.into_inner();
+        let archive = zip::ZipArchive::new(std::io::Cursor::new(&empty_bytes[..])).unwrap();
+        let err = find_entry(&archive, exe_name()).unwrap_err().to_string();
+        assert!(err.contains("contains no"), "{err}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn make_executable_sets_owner_exec_bits() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let path = std::env::temp_dir().join(format!("cf-scanner-exec-{}", std::process::id()));
+        std::fs::write(&path, b"binary").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        make_executable(&path).unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o755);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn real_fetch_enforces_the_ssrf_guard_before_any_request() {
+        // validate_fetch_url runs before the client sends anything, so these
+        // fail offline and deterministically.
+        let err = RealFetch.bytes("http://example.com/x").await.unwrap_err();
+        assert!(err.to_string().contains("https"), "{err:#}");
+        let err = RealFetch.bytes("https://127.0.0.1/x").await.unwrap_err();
+        assert!(err.to_string().contains("non-routable"), "{err:#}");
+        let err = RealFetch.bytes("not a url").await.unwrap_err();
+        assert!(err.to_string().contains("bad URL"), "{err:#}");
+    }
+
+    #[tokio::test]
+    async fn download_binary_refuses_to_overwrite_an_existing_binary() {
+        let _guard = crate::paths::test_env::DATA_DIR_LOCK.lock().await;
+        let _isolated = isolated_data_dir().await;
+        let bin = paths::xray_binary_path().unwrap();
+        std::fs::write(&bin, b"existing install").unwrap();
+        reset_binary_state().await;
+        let (zip_bytes, zip_dgst) = fake_zip(b"new payload");
+        struct FakeFetch(Vec<u8>, String);
+        impl BinaryFetch for FakeFetch {
+            async fn bytes(&self, url: &str) -> Result<Vec<u8>> {
+                if url.ends_with(".dgst") {
+                    Ok(self.1.clone().into_bytes())
+                } else {
+                    Ok(self.0.clone())
+                }
+            }
+        }
+        let err = download_binary(&FakeFetch(zip_bytes, zip_dgst))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("refusing to overwrite"), "{err}");
+        assert_eq!(
+            std::fs::read(&bin).unwrap(),
+            b"existing install",
+            "the existing binary must be untouched"
+        );
+    }
+
+    #[tokio::test]
+    async fn capture_stderr_tails_the_last_lines_masked() {
+        let (program, args): (&str, Vec<&str>) = if cfg!(windows) {
+            (
+                "cmd",
+                vec![
+                    "/C",
+                    "echo line-a 1>&2& echo SECRET-VALUE 1>&2& echo line-c 1>&2",
+                ],
+            )
+        } else {
+            (
+                "/bin/sh",
+                vec!["-c", "printf 'line-a\\nSECRET-VALUE\\nline-c\\n' 1>&2"],
+            )
+        };
+        let mut child = tokio::process::Command::new(program)
+            .args(&args)
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let stderr = child.stderr.take().unwrap();
+        let capture = capture_stderr(stderr, vec!["SECRET-VALUE".to_owned()]);
+        child.wait().await.unwrap();
+        let tail = capture.tail().await;
+        assert_eq!(tail.lines().count(), 3, "{tail}");
+        assert!(tail.contains("line-a") && tail.contains("line-c"), "{tail}");
+        assert!(
+            !tail.contains("SECRET-VALUE"),
+            "secret must be masked: {tail}"
+        );
+        assert!(tail.contains("***"), "{tail}");
+    }
+
+    #[tokio::test]
     async fn wait_for_socks_fails_fast_with_exit_code_on_early_child_exit() {
         let mut child = exit_3_command()
             .stdout(Stdio::null())

@@ -715,4 +715,96 @@ mod tests {
         );
         assert!(err.chain().any(|e| e.to_string().contains("boom")));
     }
+
+    #[tokio::test]
+    async fn require_xray_binary_reflects_the_data_dir_seam() {
+        use crate::paths::test_env::{DATA_DIR_LOCK, IsolatedDataDir};
+        let _guard = DATA_DIR_LOCK.lock().await;
+        let _isolated = IsolatedDataDir::new();
+        // The target/debug/deps test dir has no bundled xray, so resolution
+        // falls through to the data dir.
+        if crate::xray::find_bundled().is_none() {
+            assert!(
+                require_xray_binary().is_err(),
+                "empty data dir must yield the actionable error"
+            );
+            let bin = crate::paths::xray_binary_path().unwrap();
+            std::fs::write(&bin, vec![0u8; 1 << 20]).unwrap();
+            let found = require_xray_binary().unwrap();
+            assert_eq!(found, bin);
+        }
+    }
+
+    #[tokio::test]
+    async fn stale_trial_sweep_cas_runs_once_per_hour_then_gates() {
+        let dir =
+            std::env::temp_dir().join(format!("cf-scanner-verify-cas-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // First sweep: CAS from 0 advances the gate.
+        LAST_SWEEP_SECS.store(0, std::sync::atomic::Ordering::Relaxed);
+        sweep_stale_trial_dirs_async(&dir).await;
+        let stamped = LAST_SWEEP_SECS.load(std::sync::atomic::Ordering::Relaxed);
+        assert!(stamped > 0, "first sweep must stamp the rate gate");
+
+        // Concurrent second sweep within the hour: the CAS loses, no re-stamp,
+        // no sweep work.
+        #[cfg(unix)]
+        {
+            use std::time::Duration;
+            let stale = dir.join("trial-stale");
+            std::fs::create_dir_all(&stale).unwrap();
+            let old = std::time::SystemTime::now() - Duration::from_secs(2 * 60 * 60);
+            let f = std::fs::File::open(&stale).unwrap();
+            f.set_times(std::fs::FileTimes::new().set_modified(old))
+                .unwrap();
+            drop(f);
+            sweep_stale_trial_dirs_async(&dir).await;
+            assert!(
+                stale.exists(),
+                "gated sweep must not remove dirs between CAS stamps"
+            );
+        }
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        LAST_SWEEP_SECS.store(now, std::sync::atomic::Ordering::Relaxed);
+        sweep_stale_trial_dirs_async(&dir).await;
+        assert_eq!(
+            LAST_SWEEP_SECS.load(std::sync::atomic::Ordering::Relaxed),
+            now,
+            "a gated sweep must not re-stamp"
+        );
+
+        // A reset gate allows the sweep again (unix: stale dir now removed).
+        LAST_SWEEP_SECS.store(0, std::sync::atomic::Ordering::Relaxed);
+        sweep_stale_trial_dirs_async(&dir).await;
+        #[cfg(unix)]
+        assert!(
+            !dir.join("trial-stale").exists(),
+            "an ungated sweep removes dirs older than the age cap"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn opened_tunnel_cleanup_deferred_future_stops_the_process() {
+        use std::sync::atomic::AtomicUsize;
+        static CLEANUPS: AtomicUsize = AtomicUsize::new(0);
+        let tunnel = OpenedTunnel::new(
+            SocketAddr::from(([127, 0, 0, 1], 1)),
+            Box::pin(async {
+                CLEANUPS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }),
+        );
+        assert_eq!(CLEANUPS.load(std::sync::atomic::Ordering::SeqCst), 0);
+        tunnel.cleanup().await;
+        assert_eq!(
+            CLEANUPS.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "cleanup runs exactly once, only when awaited"
+        );
+    }
 }
