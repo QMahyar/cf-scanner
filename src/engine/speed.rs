@@ -777,4 +777,90 @@ mod tests {
         );
         assert!(fast >= 1, "at least one fast endpoint was banked");
     }
+
+    /// Opener whose open() always fails (xray missing / spawn exhausted).
+    struct FailingOpener;
+
+    impl crate::verify::TunnelOpener for FailingOpener {
+        fn open(
+            &self,
+            _spec: &OutboundSpec,
+            _preset: &FragmentPreset,
+            _custom: Option<&crate::api::types::CustomFragment>,
+            _sni: Option<&str>,
+            _dial_ip: Ipv4Addr,
+        ) -> Pin<Box<dyn Future<Output = Result<crate::verify::OpenedTunnel>> + Send + '_>>
+        {
+            Box::pin(async { Err(anyhow::anyhow!("no verified xray binary")) })
+        }
+    }
+
+    fn speed_cfg() -> ScanConfig {
+        ScanConfig {
+            speed_test: true,
+            ..ScanConfig::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn opener_failure_records_a_sanitized_error_and_keeps_going() {
+        let c = Arc::new(ScanController::new(Arc::new(
+            crate::probe::FakeTransport::new(),
+        )));
+        crate::engine::store_seed(&c, vec![passing("203.0.113.1".parse().unwrap(), 443, 0)]);
+        c.set_tunnel_opener(Arc::new(FailingOpener));
+        let cfg = speed_cfg();
+        let p2 = Phase2Config::default();
+        let spec =
+            crate::configs::parse_uri("vless://aaaaaaaa-bbbb-cccc-dddd-eeeeffff0000@1.2.3.4:443")
+                .unwrap();
+        c.speed_test_phase(&cfg, &p2, &[(spec, 0)]).await.unwrap();
+        let results = c.results();
+        assert_eq!(results.len(), 1);
+        let p2v = results[0].phase2.as_ref().unwrap();
+        assert!(
+            p2v.error
+                .as_deref()
+                .is_some_and(|e| e.contains("xray binary")),
+            "opener failure must be recorded on the verdict: {:?}",
+            p2v.error
+        );
+        assert_eq!(p2v.speed_test_mbps, None, "no measurement was possible");
+    }
+
+    #[tokio::test]
+    async fn speed_test_with_no_passing_endpoints_is_a_clean_noop() {
+        let c = Arc::new(ScanController::new(Arc::new(
+            crate::probe::FakeTransport::new(),
+        )));
+        // No stored verdicts at all: the empty-index path.
+        c.set_tunnel_opener(Arc::new(FailingOpener));
+        let cfg = speed_cfg();
+        let p2 = Phase2Config::default();
+        c.speed_test_phase(&cfg, &p2, &[]).await.unwrap();
+        assert!(c.results().is_empty());
+    }
+
+    #[test]
+    fn nan_min_speed_never_flips_a_verdict_and_nan_mbps_is_not_recorded() {
+        let c = Arc::new(ScanController::new(Arc::new(
+            crate::probe::FakeTransport::new(),
+        )));
+        crate::engine::store_seed(&c, vec![passing("203.0.113.5".parse().unwrap(), 443, 0)]);
+        // mbps() rejects a non-finite/zero duration: None, so no measurement.
+        assert_eq!(mbps(1000, 0.0), None);
+        assert_eq!(mbps(1000, f64::NAN), None);
+        // min_speed = NaN: comparison is false, verdict stays passed.
+        let updated = apply_speed_result(
+            &c.store,
+            "203.0.113.5".parse().unwrap(),
+            443,
+            &Ok(0.5),
+            Some(f32::NAN),
+        )
+        .unwrap();
+        let p2v = updated.phase2.as_ref().unwrap();
+        assert_eq!(p2v.speed_test_mbps, Some(0.5));
+        assert!(p2v.passed, "NaN threshold must not fail the endpoint");
+    }
 }

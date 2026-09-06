@@ -1319,4 +1319,60 @@ mod tests {
         assert!(!err.contains("SecretPass123"), "{err}");
         assert!(err.contains("***@1.2.3.4:443"), "{err}");
     }
+
+    #[test]
+    fn verifier_tag_parsing_is_strict_and_unknown_tags_are_none() {
+        assert_eq!(parse_verifier("inline"), Some(Verifier::Inline));
+        assert_eq!(parse_verifier("xray"), Some(Verifier::Xray));
+        assert_eq!(parse_verifier("XRay"), None, "tags are lowercase");
+        assert_eq!(parse_verifier(""), None);
+        assert_eq!(parse_verifier("hybrid"), None);
+        assert_eq!(parse_verifier("xray "), None, "no implicit trim");
+    }
+
+    #[test]
+    fn mixed_ok_and_err_probe_sequences_count_both_and_stop_on_found() {
+        // The verdict store must record every outcome, not just successes:
+        // errors carry diagnostics, oks carry progress.
+        let c = Arc::new(ScanController::new(Arc::new(
+            crate::probe::FakeTransport::new(),
+        )));
+        let ok = Verdict {
+            ip: IpAddr::V4("203.0.113.1".parse().unwrap()),
+            port: 443,
+            latency_ms: Some(10),
+            country: None,
+            colo: None,
+            phase2: Some(Phase2Verdict {
+                passed: true,
+                fragment: FragmentPreset::Off,
+                sni: String::new(),
+                latency_ms: Some(30),
+                error: None,
+                config_index: Some(0),
+                verifier: Some(Verifier::Xray),
+                speed_test_mbps: None,
+            }),
+            sent: 1,
+            received: 1,
+            loss_pct: Some(0),
+            fail_reason: None,
+            asn: None,
+            isp: None,
+        };
+        let mut err = ok.clone();
+        err.ip = IpAddr::V4("203.0.113.2".parse().unwrap());
+        err.phase2 = Some(Phase2Verdict {
+            passed: false,
+            latency_ms: None,
+            error: Some("handshake failed".to_owned()),
+            ..err.phase2.clone().unwrap()
+        });
+        crate::engine::store_seed(&c, vec![ok, err]);
+        let results = c.results();
+        assert_eq!(results.len(), 2, "both outcomes are stored");
+        assert!(results[0].phase2.as_ref().unwrap().passed);
+        assert!(!results[1].phase2.as_ref().unwrap().passed);
+        assert!(results[1].phase2.as_ref().unwrap().error.is_some());
+    }
 }
