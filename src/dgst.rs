@@ -141,3 +141,26 @@ mod tests {
         assert_eq!(dgst_sha256_hex(&dgst), Some("abcdef01".repeat(8)));
     }
 }
+
+#[test]
+fn hex_lower_matches_known_vectors() {
+    assert_eq!(hex_lower(&[]), "");
+    assert_eq!(hex_lower(&[0x00, 0x0f, 0xff]), "000fff");
+    assert_eq!(hex_lower(b"abc"), "616263");
+}
+
+#[test]
+fn multiple_sha2_256_lines_take_the_first_valid_one() {
+    let dgst = format!("SHA2-256= {}\nSHA2-256= {}", "a".repeat(64), "b".repeat(64));
+    assert_eq!(dgst_sha256_hex(&dgst), Some("a".repeat(64)));
+    // First line invalid (bad length), second clean: parser finds the first
+    // SHA2-256= line and stops — so a broken first line means failure.
+    let dgst = format!("SHA2-256= {}\nSHA2-256= {}", "a".repeat(63), "b".repeat(64));
+    assert_eq!(dgst_sha256_hex(&dgst), None);
+}
+
+#[test]
+fn non_hex_digits_rejected() {
+    let dgst = format!("SHA2-256= {}", "g".repeat(64));
+    assert_eq!(dgst_sha256_hex(&dgst), None);
+}

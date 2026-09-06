@@ -599,4 +599,71 @@ mod tests {
         let ok = "wg://my-gateway.example.com:7103?private_key=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA%3D&public_key=bmXOC%2BF1FxEMF9dyiK2H5%2F1SUtzH0JuVo51h2wPfgyo%3D";
         assert!(parse_wg_entry(ok).is_ok());
     }
+
+    #[test]
+    fn render_edges_omit_empty_fields_and_round_trip() {
+        let key = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+        let peer_key = "bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=";
+        let wg = WgConfig {
+            private_key: key.to_owned(),
+            address: String::new(), // no Address line
+            dns: None,
+            mtu: None, // MTU boundary: absent stays absent
+            amnezia: AmneziaParams::default(),
+            peer: WgPeer {
+                public_key: peer_key.to_owned(),
+                preshared_key: None, // no PSK line
+                allowed_ips: vec![], // no AllowedIPs line
+                endpoint: None,
+                persistent_keepalive: None,
+            },
+        };
+        let rendered = render_wgconf(&wg);
+        assert!(!rendered.contains("Address"));
+        assert!(!rendered.contains("DNS"));
+        assert!(!rendered.contains("MTU"));
+        assert!(!rendered.contains("PresharedKey"));
+        assert!(!rendered.contains("AllowedIPs"));
+        assert!(!rendered.contains("Endpoint"));
+        assert!(!rendered.contains("Jc"));
+        let reparsed = parse_wgconf(&rendered).unwrap();
+        assert_eq!(wg, reparsed);
+    }
+
+    #[test]
+    fn render_keeps_psk_and_mtu_and_round_trips() {
+        let key = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+        let peer_key = "bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=";
+        let wg = WgConfig {
+            private_key: key.to_owned(),
+            address: "172.16.0.2/32".to_owned(),
+            dns: Some("1.1.1.1".to_owned()),
+            mtu: Some(1280),
+            amnezia: AmneziaParams::default(),
+            peer: WgPeer {
+                public_key: peer_key.to_owned(),
+                preshared_key: Some("cHFsc2VjcmV0cHFsc2VjcmV0cHFsc2VjcmV0MTIzNDU=".to_owned()),
+                allowed_ips: vec!["0.0.0.0/0".to_owned()],
+                endpoint: Some("8.6.112.31:4198".to_owned()),
+                persistent_keepalive: Some(25),
+            },
+        };
+        let rendered = render_wgconf(&wg);
+        assert!(rendered.contains("PresharedKey = cHFsc2VjcmV0"));
+        assert!(rendered.contains("MTU = 1280"));
+        assert!(rendered.contains("AllowedIPs = 0.0.0.0/0"));
+        assert_eq!(parse_wgconf(&rendered).unwrap(), wg);
+    }
+
+    #[test]
+    fn mtu_non_numeric_is_rejected() {
+        let text = INI_FIXTURE.replace("MTU = 1280", "MTU = abc");
+        assert!(parse_wgconf(&text).is_err());
+    }
+
+    #[test]
+    fn mtu_boundary_value_parses() {
+        let text = INI_FIXTURE.replace("MTU = 1280", "MTU = 65535");
+        assert_eq!(parse_wgconf(&text).unwrap().mtu, Some(65535));
+    }
 }

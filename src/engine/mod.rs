@@ -4,6 +4,11 @@ mod phase2;
 mod plan;
 mod speed;
 mod store;
+
+#[cfg(test)]
+pub(crate) fn store_seed(c: &Arc<ScanController>, batch: Vec<crate::api::types::Verdict>) {
+    merge_sorted(&c.store, &c.store_dirty, batch);
+}
 #[cfg(test)]
 mod test_helpers;
 mod warp;

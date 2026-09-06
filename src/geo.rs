@@ -122,3 +122,25 @@ mod tests {
         assert_eq!(geo.country(google).as_deref(), Some("US"));
     }
 }
+
+#[test]
+fn colo_parse_handles_crlf_whitespace_and_duplicate_keys() {
+    assert_eq!(
+        parse_colo(b"ip=1.2.3.4\r\ncolo=LAX\r\n").as_deref(),
+        Some("LAX")
+    );
+    // First plausible key wins; later garbage lines never override it.
+    assert_eq!(parse_colo(b"colo=LAX\ncolo=@@@@\n").as_deref(), Some("LAX"));
+    // Whitespace-padded values are trimmed.
+    assert_eq!(parse_colo(b"colo=  LHR  \n").as_deref(), Some("LHR"));
+    // Whitespace-padded keys are also trimmed (lenient by design).
+    assert_eq!(parse_colo(b" colo =LHR\n").as_deref(), Some("LHR"));
+}
+
+#[test]
+fn colo_parse_four_char_garbage_is_shape_valid_but_filtered_by_callers() {
+    // "colo=" with 4 alphanumerics parses; semantic junk (e.g. "0000",
+    // "ZZZZ") passes the shape check by design — the engine filters on it.
+    assert_eq!(parse_colo(b"colo=0000").as_deref(), Some("0000"));
+    assert_eq!(parse_colo(b"colo=ZZZZ").as_deref(), Some("ZZZZ"));
+}
