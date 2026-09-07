@@ -156,14 +156,14 @@ impl ScanController {
             return Ok(());
         }
         let min_speed = cfg.min_speed_mbps;
-        let candidates = lock(&self.store).clone();
+        let candidates = lock(&self.progress.store).clone();
         let index = build_passing_index(&candidates, specs);
         if index.is_empty() {
             tracing::info!("speed test: no phase-2 passing endpoints to measure");
             return Ok(());
         }
-        let tester: Arc<dyn SpeedTester> = lock(&self.speed_tester).clone();
-        let opener: Arc<dyn TunnelOpener> = lock(&self.session_opener).clone();
+        let tester: Arc<dyn SpeedTester> = lock(&self.handles.speed_tester).clone();
+        let opener: Arc<dyn TunnelOpener> = lock(&self.handles.session_opener).clone();
         let cancel_rx = self.cancel_signal();
         tracing::info!(
             count = index.len(),
@@ -179,7 +179,7 @@ impl ScanController {
             for ((ip, port), entry) in chunk {
                 let tester = tester.clone();
                 let opener = opener.clone();
-                let store = self.store.clone();
+                let store = self.progress.store.clone();
                 let events = self.events.clone();
                 let cancel = cancel_rx.clone();
                 let measured = measured.clone();
@@ -852,7 +852,7 @@ mod tests {
         assert_eq!(mbps(1000, f64::NAN), None);
         // min_speed = NaN: comparison is false, verdict stays passed.
         let updated = apply_speed_result(
-            &c.store,
+            &c.progress.store,
             "203.0.113.5".parse().unwrap(),
             443,
             &Ok(0.5),

@@ -90,7 +90,7 @@ impl ScanController {
             }
         }
         summary.scanned = scanned_total;
-        *lock(&self.summary) = Some(summary.clone());
+        *lock(&self.progress.summary) = Some(summary.clone());
         self.emit(ScanEvent::Finished(summary.clone()));
         Ok(summary)
     }
@@ -106,7 +106,7 @@ impl ScanController {
         let skip: ProbedSet = if clear {
             Arc::new(std::collections::HashSet::new())
         } else {
-            Arc::new(lock(&self.store).iter().map(|v| v.ip).collect())
+            Arc::new(lock(&self.progress.store).iter().map(|v| v.ip).collect())
         };
         let mut cfg = cfg.clone();
         let phase2 = cfg.phase2.take();
@@ -138,8 +138,8 @@ impl ScanController {
             last_milestone: AtomicU64::new(0),
             cadence,
             total,
-            store: self.store.clone(),
-            dirty: self.store_dirty.clone(),
+            store: self.progress.store.clone(),
+            dirty: self.progress.store_dirty.clone(),
             events: self.events.clone(),
             geo: self.geo.clone(),
             colo_filter: Arc::new(cfg.colo_filter.clone()),

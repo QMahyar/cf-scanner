@@ -33,7 +33,7 @@ impl ScanController {
             p2.snis.iter().map(|s| Some(s.clone())).collect()
         };
         let probe_urls = p2.effective_probe_urls();
-        let candidates = lock(&self.store).clone();
+        let candidates = lock(&self.progress.store).clone();
         let v4_candidates: Vec<(Ipv4Addr, u16)> = candidates
             .iter()
             .filter(|v| v.latency_ms.is_some())
@@ -76,8 +76,8 @@ impl ScanController {
         let v4_candidates = Arc::new(v4_candidates);
         let mut tasks = JoinSet::new();
         for _ in 0..p2.concurrency {
-            let probe = self.tunnel_probe.clone();
-            let store = self.store.clone();
+            let probe = self.handles.tunnel_probe.clone();
+            let store = self.progress.store.clone();
             let events = self.events.clone();
             let cancel = cancel_rx.clone();
             let passed = passed.clone();
@@ -272,7 +272,7 @@ impl ScanController {
             }
             let result = if entry.starts_with("http://") || entry.starts_with("https://") {
                 let body = tokio::select! {
-                    body = self.sub_fetch.fetch(entry) => body,
+                    body = self.handles.sub_fetch.fetch(entry) => body,
                     _ = cancelled_signal(cancel.clone()) => return Ok((specs, true)),
                 }
                 .with_context(|| format!("subscription {} failed", redact_entry(entry)));
