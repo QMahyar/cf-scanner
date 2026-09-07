@@ -22,7 +22,9 @@ and nothing leaves your machine.
 
 With Node >= 14.14 on any platform, install from npm. The wrapper downloads
 the right binary from the GitHub Release and checks its SHA-256 against the
-published checksum before extracting:
+published checksum before extracting. The npm binaries are glibc-linked
+(Debian/Ubuntu/Fedora/Arch work out of the box); musl/Alpine needs a glibc
+container.
 
 ```sh
 npm i -g @qmahyar/cf-scanner

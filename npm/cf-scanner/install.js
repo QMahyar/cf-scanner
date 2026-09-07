@@ -55,7 +55,33 @@ function getDownloadUrl(target) {
   return `https://github.com/${REPO}/releases/download/${RELEASE_TAG}/${filename}`;
 }
 
-function downloadOnce(url, hops = 0) {
+// Bucket errors so the final message tells users what kind of fix applies:
+// platform (wrong OS/arch or missing tools), checksum (corrupt/tampered
+// download), or network (offline / blocked / rate-limited).
+function classifyError(err) {
+  const msg = String((err && err.message) || err);
+  if (/HTTP 403|HTTP 429|rate limit/i.test(msg)) {
+    return `network (rate-limited or blocked): ${msg}`;
+  }
+  if (/ENOTFOUND|ECONNREFUSED|ECONNRESET|ETIMEDOUT|Timeout downloading|HTTP 5\d\d/i.test(msg)) {
+    return `network: ${msg}`;
+  }
+  if (/checksum/i.test(msg)) {
+    return `checksum (the downloaded archive does not match its published digest): ${msg}`;
+  }
+  if (/Unsupported platform/i.test(msg)) {
+    return `platform: ${msg}`;
+  }
+  if (/tar extraction|Expand-Archive/i.test(msg)) {
+    return `platform (extraction tool missing or failed; needs tar / PowerShell): ${msg}`;
+  }
+  if (/ENOENT|EACCES|ENOSPC|EACCES/i.test(msg)) {
+    return `filesystem: ${msg}`;
+  }
+  return msg;
+}
+
+function downloadOnce(url, hops = 0, onProgress = null) {
   return new Promise((resolve, reject) => {
     if (!url.startsWith("https:")) {
       const scheme = url.slice(0, url.indexOf(":") + 1) || "(no scheme)";
@@ -68,15 +94,23 @@ function downloadOnce(url, hops = 0) {
     }
     const request = https.get(url, { headers: { "User-Agent": "cf-scanner-npm" } }, (res) => {
       if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
-        downloadOnce(res.headers.location, hops + 1).then(resolve, reject);
+        downloadOnce(res.headers.location, hops + 1, onProgress).then(resolve, reject);
         return;
       }
       if (res.statusCode !== 200) {
         reject(new Error(`HTTP ${res.statusCode} downloading ${url}`));
         return;
       }
+      const total = parseInt(res.headers["content-length"] || "0", 10);
       const chunks = [];
-      res.on("data", (chunk) => chunks.push(chunk));
+      let received = 0;
+      res.on("data", (chunk) => {
+        chunks.push(chunk);
+        received += chunk.length;
+        if (onProgress && total > 0) {
+          onProgress(received, total);
+        }
+      });
       res.on("end", () => resolve(Buffer.concat(chunks)));
       res.on("error", reject);
     });
@@ -88,11 +122,31 @@ function downloadOnce(url, hops = 0) {
   });
 }
 
+function progressLabel(received, total) {
+  const mb = (n) => (n / (1024 * 1024)).toFixed(1);
+  return `  ${mb(received)} / ${mb(total)} MB (${Math.round((received / total) * 100)}%)`;
+}
+
 function download(url, hops = 0) {
-  return downloadOnce(url, hops).catch(() => {
+  return downloadOnce(url, hops).catch((firstErr) => {
     return new Promise((resolve, reject) => {
       setTimeout(() => {
-        downloadOnce(url, hops).then(resolve, reject);
+        downloadOnce(url, hops, (received, total) => {
+          if (process.stderr.isTTY) {
+            process.stderr.write(`\r${progressLabel(received, total)}   `);
+          }
+        })
+          .then((buf) => {
+            if (process.stderr.isTTY) process.stderr.write("\n");
+            resolve(buf);
+          })
+          .catch((retryErr) => {
+            reject(
+              new Error(
+                `${classifyError(firstErr)}; retry also failed: ${classifyError(retryErr)}`
+              )
+            );
+          });
       }, 500);
     });
   });
@@ -211,6 +265,31 @@ async function main() {
   console.log(`@qmahyar/cf-scanner v${VERSION}`);
   console.log(`Platform: ${process.platform}-${process.arch} → ${target}`);
   console.log(`Downloading: ${url}`);
+  if (
+    process.platform === "linux" &&
+    !/musl|alpine/i.test(process.version + " " + (process.report?.getReport?.()?.header?.osName || ""))
+  ) {
+    // Harmless on glibc distros; surfaces early on musl where the glibc
+    // binary would fail at spawn time with a confusing loader error.
+    const isMuslShell = (() => {
+      try {
+        return require("fs").readFileSync("/etc/os-release", "utf8").toLowerCase().includes("musl") ||
+          require("fs").existsSync("/lib/ld-musl-x86_64.so.1");
+      } catch {
+        return false;
+      }
+    })();
+    if (isMuslShell) {
+      console.log("");
+      console.log(
+        "NOTE: musl/Alpine detected. The npm binary is glibc-linked; on Alpine it will fail to start."
+      );
+      console.log(
+        "Use the standalone static-musl build from GitHub Releases when available, or run inside a glibc container."
+      );
+      console.log("");
+    }
+  }
 
   try {
     const buffer = await download(url);
@@ -248,7 +327,7 @@ async function main() {
   } catch (err) {
     console.error("");
     console.error("Failed to download cf-scanner binary:");
-    console.error(`  ${err.message}`);
+    console.error(`  ${classifyError(err)}`);
     console.error("");
     console.error("You can install cf-scanner manually from:");
     console.error(`  https://github.com/${REPO}/releases/tag/${RELEASE_TAG}`);
