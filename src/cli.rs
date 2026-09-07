@@ -426,7 +426,7 @@ pub(crate) struct ScanArgs {
         value_enum,
         default_value_t = ExportFormatArg::Csv,
         help_heading = "Export",
-        help = "Export format: csv, json, base64, raw, singbox, clash, sharelinks (default csv)"
+        help = "Export format: csv, json, base64, raw, singbox, clash, sharelinks, v2ray, shadowrocket, quantumult (default csv)"
     )]
     pub(crate) export_format: ExportFormatArg,
 }

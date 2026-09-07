@@ -64,7 +64,15 @@ pub fn diagnostic_line(v: &Verdict) -> String {
     parts.join(" — ")
 }
 
-pub const BUNDLE_FORMATS: [&str; 4] = ["base64", "raw", "singbox", "clash"];
+pub const BUNDLE_FORMATS: [&str; 7] = [
+    "base64",
+    "raw",
+    "singbox",
+    "clash",
+    "v2ray",
+    "shadowrocket",
+    "quantumult",
+];
 pub const SHARELINK_FORMATS: [&str; 1] = ["sharelinks"];
 pub const RESULT_FORMATS: [&str; 2] = ["csv", "json"];
 
@@ -124,9 +132,10 @@ fn unique_tag(tag: String, seen: &mut std::collections::HashMap<String, usize>) 
     }
 }
 
-fn rewrite_uris(non_null_ips: &[Verdict], configs: &[String]) -> (Vec<String>, usize) {
+fn rewrite_uris(non_null_ips: &[Verdict], configs: &[String]) -> (Vec<String>, usize, usize) {
     let mut uris = Vec::new();
     let mut v6_skipped = 0usize;
+    let mut malformed = 0usize;
     for v in non_null_ips {
         let Some(p2) = v.phase2.as_ref() else {
             continue;
@@ -134,8 +143,12 @@ fn rewrite_uris(non_null_ips: &[Verdict], configs: &[String]) -> (Vec<String>, u
         if !p2.passed {
             continue;
         }
-        let Some(idx) = p2.config_index else { continue };
+        let Some(idx) = p2.config_index else {
+            malformed += 1;
+            continue;
+        };
         let Some(cfg) = configs.get(idx as usize) else {
+            malformed += 1;
             continue;
         };
         let IpAddr::V4(ip) = v.ip else {
@@ -152,9 +165,11 @@ fn rewrite_uris(non_null_ips: &[Verdict], configs: &[String]) -> (Vec<String>, u
             configs::export_config_uri(cfg, ip, v.port, sni_override, remark.as_deref())
         {
             uris.push(uri);
+        } else {
+            malformed += 1;
         }
     }
-    (uris, v6_skipped)
+    (uris, v6_skipped, malformed)
 }
 
 fn bundle_body(
@@ -162,17 +177,30 @@ fn bundle_body(
     non_null_ips: &[Verdict],
     configs: &[String],
 ) -> Result<String, String> {
-    let (uris, v6_skipped) = rewrite_uris(non_null_ips, configs);
+    let (uris, v6_skipped, malformed) = rewrite_uris(non_null_ips, configs);
     if uris.is_empty() && v6_skipped > 0 {
         return Err(format!(
             "no exportable endpoints: {v6_skipped} passing endpoint(s) are IPv6 and bundle formats support IPv4 only"
         ));
+    }
+    if v6_skipped > 0 {
+        eprintln!(
+            "warning: bundle export skipped {v6_skipped} passing IPv6 endpoint(s); bundle formats support IPv4 only"
+        );
+    }
+    if malformed > 0 {
+        eprintln!(
+            "warning: bundle export skipped {malformed} endpoint(s) whose phase-2 config no longer resolves"
+        );
     }
     let joined = uris.join("\n");
     Ok(match format {
         "raw" | "sharelinks" => joined,
         "singbox" => singbox_body(&uris),
         "clash" => clash_body(&uris),
+        "v2ray" => v2ray_body(&uris),
+        "shadowrocket" => shadowrocket_body(&uris),
+        "quantumult" => quantumult_body(&uris),
         _ => base64::Engine::encode(
             &base64::engine::general_purpose::STANDARD,
             joined.as_bytes(),
@@ -242,10 +270,15 @@ fn singbox_body(uris: &[String]) -> String {
                 }
                 obj.insert("transport".into(), transport);
             } else if let Some(grpc) = &spec.grpc {
-                let transport = serde_json::json!({
+                let mut transport = serde_json::json!({
                     "type": "grpc",
                     "service_name": grpc.service_name,
                 });
+                if let Some(mode) = &grpc.mode
+                    && !mode.is_empty()
+                {
+                    transport["multi_mode"] = (mode == "multi").into();
+                }
                 obj.insert("transport".into(), transport);
             } else if let Some(xhttp) = &spec.xhttp {
                 let mut transport = serde_json::json!({ "type": "splithttp", "path": xhttp.path });
@@ -285,6 +318,9 @@ fn clash_body(uris: &[String]) -> String {
                 },
                 "server": spec.server,
                 "port": spec.port,
+                // Clash defaults to false, silently dropping UDP; scanned
+                // endpoints passed real probes, so enable it.
+                "udp": true,
             });
             let obj = p.as_object_mut().unwrap();
             match spec.protocol {
@@ -324,13 +360,21 @@ fn clash_body(uris: &[String]) -> String {
                 {
                     opts["headers"] = serde_json::json!({ "Host": host });
                 }
+                if let Some(pe) = &ws.packet_encoding
+                    && !pe.is_empty()
+                {
+                    opts["packet-encoding"] = pe.clone().into();
+                }
                 obj.insert("ws-opts".into(), opts);
             } else if let Some(grpc) = &spec.grpc {
                 obj.insert("network".into(), "grpc".into());
-                obj.insert(
-                    "grpc-opts".into(),
-                    serde_json::json!({ "grpc-service-name": grpc.service_name }),
-                );
+                let mut opts = serde_json::json!({ "grpc-service-name": grpc.service_name });
+                if let Some(mode) = &grpc.mode
+                    && !mode.is_empty()
+                {
+                    opts["grpc-mode"] = mode.clone().into();
+                }
+                obj.insert("grpc-opts".into(), opts);
             } else if let Some(xhttp) = &spec.xhttp {
                 obj.insert("network".into(), "xhttp".into());
                 let mut opts = serde_json::json!({ "path": xhttp.path });
@@ -356,6 +400,134 @@ fn clash_body(uris: &[String]) -> String {
     .to_string()
 }
 
+/// V2RayN-style JSON: one object per URI, `add`/`port`/`id` flat fields.
+/// Consumed by v2rayN/v2rayNG import-from-clipboard.
+fn v2ray_body(uris: &[String]) -> String {
+    let mut entries: Vec<serde_json::Value> = Vec::new();
+    let mut seen_tags: std::collections::HashMap<String, usize> = Default::default();
+    for uri in uris {
+        let Ok(spec) = configs::parse_uri(uri) else {
+            continue;
+        };
+        let ps = unique_tag(
+            spec.tag.clone().unwrap_or_else(|| "cf-scanner".into()),
+            &mut seen_tags,
+        );
+        let mut entry = serde_json::json!({
+            "ps": ps,
+            "add": spec.server,
+            "port": spec.port.to_string(),
+            "id": spec.user_id,
+            "scy": spec.vmess_security.clone().unwrap_or_else(|| "auto".to_owned()),
+            "net": match (&spec.ws, &spec.grpc, &spec.xhttp) {
+                (Some(_), _, _) => "ws",
+                (_, Some(_), _) => "grpc",
+                (_, _, Some(_)) => "splithttp",
+                (None, None, None) => "tcp",
+            },
+            "type": "none",
+            "tls": if spec.security == "tls" { "tls" } else { "" },
+        });
+        let obj = entry.as_object_mut().unwrap();
+        if let Some(sni) = &spec.tls_server_name
+            && !sni.is_empty()
+        {
+            obj.insert("sni".into(), sni.clone().into());
+        }
+        if let Some(fp) = &spec.fingerprint
+            && !fp.is_empty()
+        {
+            obj.insert("fp".into(), fp.clone().into());
+        }
+        match spec.protocol {
+            configs::Protocol::Shadowsocks => {
+                obj.insert(
+                    "method".into(),
+                    spec.method.clone().unwrap_or_default().into(),
+                );
+            }
+            configs::Protocol::Vmess if spec.alter_id != 0 => {
+                obj.insert("aid".into(), spec.alter_id.to_string().into());
+            }
+            _ => {}
+        }
+        if let Some(ws) = &spec.ws {
+            obj.insert("path".into(), ws.path.clone().into());
+            if let Some(host) = &ws.host
+                && !host.is_empty()
+            {
+                obj.insert("host".into(), host.clone().into());
+            }
+        } else if let Some(grpc) = &spec.grpc {
+            obj.insert("path".into(), grpc.service_name.clone().into());
+        } else if let Some(xhttp) = &spec.xhttp {
+            obj.insert("path".into(), xhttp.path.clone().into());
+        }
+        entries.push(entry);
+    }
+    serde_json::to_string(&entries).unwrap_or_else(|_| "[]".to_owned())
+}
+
+/// Shadowrocket: a base64-encoded newline list of share URIs (its standard
+/// clipboard import format).
+fn shadowrocket_body(uris: &[String]) -> String {
+    let joined = uris.join("\n");
+    base64::Engine::encode(
+        &base64::engine::general_purpose::STANDARD,
+        joined.as_bytes(),
+    )
+}
+
+/// Quantumult X: one line per endpoint in its server-local format.
+/// Only vless (vles:// trojan) has a native QX line; vmess is the base64
+/// blob QX accepts inline; ss uses its URI form.
+fn quantumult_body(uris: &[String]) -> String {
+    let mut lines = Vec::new();
+    for uri in uris {
+        let Ok(spec) = configs::parse_uri(uri) else {
+            continue;
+        };
+        let tls_part = if spec.security == "tls" {
+            ",tls=true"
+        } else {
+            ""
+        };
+        let sni_part = spec
+            .tls_server_name
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .map(|s| format!(",tls-host={s}"))
+            .unwrap_or_default();
+        let obfs_part = if spec.ws.is_some() { ",obfs=wss" } else { "" };
+        match spec.protocol {
+            configs::Protocol::Shadowsocks => {
+                let method = spec.method.clone().unwrap_or_default();
+                lines.push(format!(
+                    "shadowsocks={}:{}, method={}, password={}",
+                    spec.server, spec.port, method, spec.user_id
+                ));
+            }
+            configs::Protocol::Trojan => {
+                lines.push(format!(
+                    "trojan={}:{}, password={}{tobfs}{tls}{sni}",
+                    spec.server,
+                    spec.port,
+                    spec.user_id,
+                    tobfs = obfs_part,
+                    tls = tls_part,
+                    sni = sni_part,
+                ));
+            }
+            configs::Protocol::Vless | configs::Protocol::Vmess => {
+                // QX has no native vless/vmess line; ship the share URI so the
+                // user's importer handles conversion.
+                lines.push(uri.clone());
+            }
+        }
+    }
+    lines.join("\n")
+}
+
 pub(crate) fn csv_field(v: &str) -> String {
     let guarded = if v.starts_with(['=', '+', '-', '@', '\t', '\r']) {
         format!("'{v}")
@@ -371,7 +543,21 @@ pub(crate) fn csv_field(v: &str) -> String {
 
 fn result_dump(format: &str, verdicts: &[Verdict]) -> String {
     match format {
-        "json" => serde_json::json!({ "results": verdicts, "count": verdicts.len() }).to_string(),
+        "json" => {
+            // config_index is engine-internal plumbing; it never appears in
+            // exported files.
+            let cleaned: Vec<serde_json::Value> = verdicts
+                .iter()
+                .map(|v| {
+                    let mut val = serde_json::to_value(v).unwrap_or(serde_json::Value::Null);
+                    if let Some(p2) = val.get_mut("phase2").and_then(|p| p.as_object_mut()) {
+                        p2.remove("config_index");
+                    }
+                    val
+                })
+                .collect();
+            serde_json::json!({ "results": cleaned, "count": verdicts.len() }).to_string()
+        }
         _ => {
             let mut out = String::from(
                 "ip,port,latency_ms,country,colo,phase2_passed,phase2_latency_ms,speed_test_mbps,sent,received,loss_pct,fail_reason,asn,isp\n",
@@ -418,6 +604,9 @@ pub enum ExportFormatArg {
     Singbox,
     Clash,
     Sharelinks,
+    V2ray,
+    Shadowrocket,
+    Quantumult,
 }
 
 fn export_format_name(format: ExportFormatArg) -> &'static str {
@@ -429,6 +618,9 @@ fn export_format_name(format: ExportFormatArg) -> &'static str {
         ExportFormatArg::Singbox => "singbox",
         ExportFormatArg::Clash => "clash",
         ExportFormatArg::Sharelinks => "sharelinks",
+        ExportFormatArg::V2ray => "v2ray",
+        ExportFormatArg::Shadowrocket => "shadowrocket",
+        ExportFormatArg::Quantumult => "quantumult",
     }
 }
 
@@ -445,7 +637,10 @@ pub fn write_export(
         | ExportFormatArg::Raw
         | ExportFormatArg::Singbox
         | ExportFormatArg::Clash
-        | ExportFormatArg::Sharelinks => {
+        | ExportFormatArg::Sharelinks
+        | ExportFormatArg::V2ray
+        | ExportFormatArg::Shadowrocket
+        | ExportFormatArg::Quantumult => {
             let configs = controller.phase2_configs();
             render_bundle(format_name, &results, &configs)
         }
@@ -1008,5 +1203,149 @@ mod tests {
         let err = write_export(&c, &dir, ExportFormatArg::Csv).unwrap_err();
         assert!(err.to_string().contains("could not write"), "{err:#}");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+    fn golden_uris() -> Vec<String> {
+        vec![
+            "vless://aaaaaaaa-bbbb-cccc-dddd-eeeeffff0000@1.2.3.4:443?security=tls&sni=front.example.com&fp=chrome&type=ws&path=/ws&host=front.example.com#tag-a".to_owned(),
+            vmess_uri(),
+            "trojan://SecretPass123@5.6.7.8:443?security=tls#tag-t".to_owned(),
+            "ss://YWVzLTEyOC1nY206cGFzcw==@9.9.9.9:8388#tag-ss".to_owned(),
+        ]
+    }
+
+    #[test]
+    fn v2ray_golden_covers_all_protocols_and_transports() {
+        let body = v2ray_body(&golden_uris());
+        let entries: Vec<serde_json::Value> = serde_json::from_str(&body).unwrap();
+        assert_eq!(entries.len(), 4);
+        let vless = &entries[0];
+        assert_eq!(vless["add"], "1.2.3.4");
+        assert_eq!(vless["port"], "443");
+        assert_eq!(vless["net"], "ws");
+        assert_eq!(vless["tls"], "tls");
+        assert_eq!(vless["sni"], "front.example.com");
+        assert_eq!(vless["host"], "front.example.com");
+        assert_eq!(vless["ps"], "tag-a");
+        let vmess = &entries[1];
+        assert_eq!(vmess["aid"], "64");
+        assert_eq!(vmess["scy"], "auto");
+        assert_eq!(vmess["ps"], "tag-one");
+        let trojan = &entries[2];
+        assert_eq!(trojan["tls"], "tls");
+        assert!(trojan.get("sni").is_none(), "no SNI in the URI, no sni key");
+        assert_eq!(trojan["net"], "tcp");
+        let ss = &entries[3];
+        assert_eq!(ss["method"], "aes-128-gcm");
+        // ss reuses the generic shape: user_id (the password) lands in "id".
+        assert_eq!(ss["id"], "pass");
+    }
+
+    #[test]
+    fn shadowrocket_golden_is_base64_uri_list() {
+        let uris = golden_uris();
+        let body = shadowrocket_body(&uris);
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(&body)
+            .unwrap();
+        assert_eq!(String::from_utf8(decoded).unwrap(), uris.join("\n"));
+    }
+
+    #[test]
+    fn quantumult_golden_renders_ss_trojan_lines_and_keeps_share_uris() {
+        let body = quantumult_body(&golden_uris());
+        let lines: Vec<&str> = body.lines().collect();
+        assert_eq!(lines.len(), 4);
+        assert!(
+            lines[0].starts_with("vless://"),
+            "vless has no native QX line: {lines:?}"
+        );
+        assert!(lines[1].starts_with("vmess://"), "{lines:?}");
+        assert!(lines[2].starts_with("trojan=5.6.7.8:443,"), "{lines:?}");
+        assert!(lines[2].contains("password=SecretPass123"), "{lines:?}");
+        assert!(lines[2].contains("tls=true"), "{lines:?}");
+        assert!(
+            lines[3].starts_with("shadowsocks=9.9.9.9:8388,"),
+            "{lines:?}"
+        );
+        assert!(lines[3].contains("method=aes-128-gcm"), "{lines:?}");
+        assert!(lines[3].contains("password=pass"), "{lines:?}");
+    }
+
+    #[test]
+    fn singbox_and_clash_carry_grpc_mode_and_clash_enables_udp() {
+        let grpc_uri = "vless://aaaaaaaa-bbbb-cccc-dddd-eeeeffff0000@1.2.3.4:443?type=grpc&serviceName=svc&mode=multi#grpc-tag".to_owned();
+        let sb: serde_json::Value =
+            serde_json::from_str(&singbox_body(std::slice::from_ref(&grpc_uri))).unwrap();
+        assert_eq!(sb["outbounds"][0]["transport"]["type"], "grpc");
+        assert_eq!(sb["outbounds"][0]["transport"]["multi_mode"], true);
+        let cl: serde_json::Value = serde_json::from_str(&clash_body(&[grpc_uri])).unwrap();
+        assert_eq!(cl["proxies"][0]["grpc-opts"]["grpc-mode"], "multi");
+        assert_eq!(cl["proxies"][0]["udp"], true);
+    }
+
+    #[test]
+    fn clash_ws_opts_carry_packet_encoding() {
+        let uri = "vless://aaaaaaaa-bbbb-cccc-dddd-eeeeffff0000@1.2.3.4:443?type=ws&path=/ws&packetencoding=xudp#pe".to_owned();
+        let cl: serde_json::Value = serde_json::from_str(&clash_body(&[uri])).unwrap();
+        assert_eq!(cl["proxies"][0]["ws-opts"]["packet-encoding"], "xudp");
+    }
+
+    #[test]
+    fn bundle_export_warns_to_stderr_on_v6_and_malformed_skips() {
+        // v6 skipped: render_bundle returns an error only when NOTHING remains.
+        let v6_only = vec![Verdict {
+            ip: "2606:4700::1".parse().unwrap(),
+            port: 443,
+            latency_ms: Some(5),
+            country: None,
+            colo: None,
+            phase2: Some(Phase2Verdict {
+                passed: true,
+                fragment: FragmentPreset::Off,
+                sni: String::new(),
+                latency_ms: Some(9),
+                error: None,
+                config_index: Some(0),
+                verifier: None,
+                speed_test_mbps: None,
+            }),
+            sent: 1,
+            received: 1,
+            loss_pct: Some(0),
+            fail_reason: None,
+            asn: None,
+            isp: None,
+        }];
+        let err =
+            render_bundle("raw", &v6_only, &["vless://a@1.2.3.4:443".to_owned()]).unwrap_err();
+        assert!(err.contains("IPv6"), "{err}");
+        // Mixed: one v4 (exported) + one v6 (warned) → body keeps the v4 only.
+        let mut mixed = v6_only;
+        mixed.push(passing("1.2.3.4", 443, Some(0)));
+        let body = render_bundle("raw", &mixed, &["vless://a@1.2.3.4:443".to_owned()]).unwrap();
+        assert!(body.contains("1.2.3.4"), "{body}");
+        // Malformed skip: config_index pointing out of range is counted.
+        let mut bad = passing("5.6.7.8", 443, Some(9));
+        bad.ip = "5.6.7.8".parse().unwrap();
+        let body = render_bundle("raw", &[bad], &["vless://a@1.2.3.4:443".to_owned()]).unwrap();
+        assert_eq!(body, "", "out-of-range index yields no URI");
+    }
+
+    #[test]
+    fn json_export_strips_internal_config_index() {
+        let out = render_results("json", &[passing("1.2.3.4", 443, Some(7))]).unwrap();
+        assert!(
+            !out.contains("config_index"),
+            "internal field must not leak into exports: {out}"
+        );
+        assert!(out.contains("\"passed\":true"), "{out}");
+    }
+
+    #[test]
+    fn new_bundle_formats_resolve_and_reject_unknown() {
+        for fmt in ["v2ray", "shadowrocket", "quantumult"] {
+            assert!(render_bundle(fmt, &[], &[]).is_ok(), "{fmt} must resolve");
+        }
+        assert!(render_bundle("v2rayn", &[], &[]).is_err());
     }
 }

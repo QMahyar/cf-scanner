@@ -51,7 +51,8 @@ cf-scanner scan --mode warp --count 512
 
 Results print as newline-delimited JSON on stdout; progress goes to stderr.
 Pipe to `jq` for processing, or write an export file with `--export`
-(`csv`, `json`, `base64`, `raw`, `singbox`, `clash`, `sharelinks`;
+(`csv`, `json`, `base64`, `raw`, `singbox`, `clash`, `sharelinks`,
+`v2ray`, `shadowrocket`, `quantumult`;
 `-` writes to stdout). `sharelinks` rewrites your phase-2 config links onto
 every passing endpoint, one URI per line.
 
@@ -143,7 +144,7 @@ scan; results up to that point are kept.
 | Flag | Meaning |
 |------|---------|
 | `--export FILE` | Write results to this file when the scan ends (`-` = stdout) |
-| `--export-format FMT` | `csv`, `json`, `base64`, `raw`, `singbox`, `clash`, `sharelinks` (default `csv`) |
+| `--export-format FMT` | `csv`, `json`, `base64`, `raw`, `singbox`, `clash`, `sharelinks`, `v2ray`, `shadowrocket`, `quantumult` (default `csv`) |
 | `--retry-last` | Replay the last scan's saved configuration (saved after each scan; phase-2 configs and WARP keys are never saved — re-supply those) |
 | `--json-errors` | Print `{"error": …}` on stdout when the program fails (for scripts) |
 | `--verbose` | Per-IP diagnostics on stderr plus info logs |
