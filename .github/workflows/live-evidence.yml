@@ -1,0 +1,53 @@
+
+name: Live evidence
+
+# Opt-in, secrets-gated: runs the #[ignore]d live test suite against a real
+# subscription URL. Never runs on PRs or forks (no secret -> jobs no-op).
+# The subscription URL IS a credential: stored as a repo secret, passed to
+# the process environment only, never echoed, never written to the log.
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Weekly, so evidence stays current even without a manual run.
+    - cron: '0 7 * * 1'
+
+permissions:
+  "contents": "read"
+
+concurrency:
+  group: live-evidence-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  live:
+    name: live suite (secrets-gated)
+    runs-on: ubuntu-latest
+    env:
+      CFSCANNER_SUB_URL: ${{ secrets.CFSCANNER_SUB_URL }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@1.88
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+      - name: Skip notice (no secret)
+        if: ${{ env.CFSCANNER_SUB_URL == '' }}
+        run: |
+          echo "CFSCANNER_SUB_URL is not set in repo secrets — live suite skipped."
+          echo "To enable: Settings -> Secrets and variables -> Actions -> New repository secret."
+      - name: Run live tests
+        if: ${{ env.CFSCANNER_SUB_URL != '' }}
+        run: >-
+          cargo test --locked --test live_smoke -- --ignored --nocapture
+          && cargo test --locked --test cli_scan_agent -- --ignored --nocapture
+      - name: Upload evidence
+        if: ${{ env.CFSCANNER_SUB_URL != '' && always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: live-evidence
+          path: |
+            target/live-evidence/
+          if-no-files-found: ignore
