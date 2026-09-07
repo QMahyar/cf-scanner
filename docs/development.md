@@ -8,9 +8,15 @@ locally here should be exercised before pushing.
 
 - Rust edition 2024. `rust-toolchain.toml` pins the toolchain to 1.88, the
   same version CI uses. Any rustup-installed toolchain resolves to it on
-  first build. `Cargo.toml` keeps the MSRV floor at 1.85.
+  first build. `Cargo.toml` keeps the MSRV floor at 1.88 (the pin and the
+  floor agree; the version-parity CI job fails a release that drifts).
 - Put `curl` on PATH. build.rs uses it to fetch the GeoIP mmdb, and in dist
-  builds only, the pinned xray binary.
+  builds only, the pinned xray binary. A missing `curl` surfaces as
+  `db-ip download failed` on the first build (see the troubleshooting table
+  below).
+- **Nightly CI.** `checks.yml` also runs on a nightly cron (06:00 UTC) so
+  dependency drift and flaky tests surface between commits; a nightly
+  failure needs no action unless it reproduces locally on `main`.
 - The first build needs network access for the db-ip download. build.rs pins
   the mmdb by SHA-256, so a failed download or checksum mismatch fails the
   build; there is no empty-database fallback. The validated download is

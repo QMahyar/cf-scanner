@@ -1973,3 +1973,22 @@ mod tests {
         assert_eq!(parsed.ignored, 1);
     }
 }
+
+#[cfg(test)]
+mod httpupgrade_tests {
+    use super::*;
+
+    // Pins the HTTPUpgrade claim in docs/spec.md §9 item 9: the URI parses,
+    // but the transport is NOT modeled — it falls through to plain TCP.
+    #[test]
+    fn httpupgrade_uris_parse_with_the_transport_unmodeled() {
+        let spec = parse_uri(
+            "vless://aaaaaaaa-bbbb-cccc-dddd-eeeeffff0000@1.2.3.4:443?type=httpupgrade&path=/x",
+        )
+        .unwrap();
+        assert!(
+            spec.ws.is_none() && spec.grpc.is_none() && spec.xhttp.is_none(),
+            "httpupgrade must not silently model as another transport"
+        );
+    }
+}

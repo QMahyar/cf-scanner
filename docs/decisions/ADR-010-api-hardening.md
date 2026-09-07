@@ -1,7 +1,10 @@
 # ADR-010: API hardening — localhost-only, register rate limit, overwrite guard
 
 ## Status
-Accepted
+Superseded by [ADR-013](ADR-013-pure-cli.md) (pure CLI — the HTTP API this
+ADR hardened was removed 2026-09-02). The hardening techniques live on in
+the remaining network surfaces: SSRF fetch guards (`ranges/http.rs`),
+atomic writes (`export.rs`), and input validation (`api/validate.rs`).
 
 ## Date
 2026-08-16

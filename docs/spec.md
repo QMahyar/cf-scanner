@@ -106,12 +106,24 @@ Release:          dist build --output-format=json "--artifacts=global" ... (CI o
 src/
   main.rs            CLI entry (clap): scan | wizard | ranges |
                      warp-config | export-config
+  cli.rs             clap definitions + examples (all flags documented;
+                     a test keeps README in sync)
+  cli/scan_args.rs   ScanArgs → ScanConfig building + flag validation
+  lib.rs             crate root (engine, api, export, etc. as a library
+                     for integration tests)
   engine/            ScanController: orchestration, stop conditions, progress
     mod.rs           controller, event stream re-sync, pool planning/sampling
     cdn.rs           CDN phase-1 probe loop + phase-2 handoff
     phase2.rs        phase-2 real-config verification orchestration (hybrid routing)
     warp.rs          WARP UDP probe orchestration
     plan.rs          plan + SplitMix64 sampling (dense /24 skip, lazy Every)
+    store.rs         verdict store (batched pushes, lazy sort, atomic updates)
+    neighbor.rs      neighbor-hub widening after a hit (same /24, deduped)
+    speed.rs         opt-in post-stop throughput test (capped sample per
+                     phase-2-passing endpoint)
+  retry.rs           last-scan config persistence for --retry-last
+                     (secrets stripped, validated on load)
+  enrich.rs          opt-in ASN/ISP enrichment (ipwho.is, injectable fetch)
   ranges/{mod,pool,official,http}.rs  bundled CF ranges, pool, refresh, custom CIDR, exclusions
   xray.rs            xray binary management: download/cache/checksum, spawn,
                      config build (fragment/sockopt), per-IP verdict
@@ -136,8 +148,6 @@ src/
                       clash, sharelinks)
   util.rs            shared small helpers (`percent_decode` for configs,
                       ranges, wgconf)
-  engine/speed.rs    opt-in post-stop throughput test (capped sample per
-                      phase-2-passing endpoint)
   api/{types,limits,validate,error}.rs  request/response contract + caps
 data/
   cf-ranges.txt      official IPv4 CIDRs
@@ -319,7 +329,9 @@ opt-in additions; default scan behavior is unchanged. Work tracked in
 8. **Idle-hold stability probe** — `--idle-hold-ms`; handshake-only latency;
    RST-after-idle fails the probe.
 9. **gRPC/XHTTP verification** — parsed, verified through xray, exported to
-   sing-box/clash. HTTPUpgrade stays parse-only (deferred).
+   sing-box/clash. HTTPUpgrade URIs parse, but the transport is not modeled:
+   they fall through to plain TCP (pinned by
+   `configs::httpupgrade_tests`; deferred).
 10. **Opt-in speed test** — `--speed-test` + `--min-speed`; capped 8 MiB
     sample per phase-2-passing endpoint. The intent ban on *default* speed
     testing (`docs/intent/cf-scanner.md`) stands.

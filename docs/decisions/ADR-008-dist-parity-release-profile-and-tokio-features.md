@@ -25,6 +25,8 @@ compile time and binary size.
   feature list the code actually uses: `rt-multi-thread`, `macros`, `time`,
   `net`, `io-util`, `sync`, `process`, `signal`. This keeps `signal`
   (Ctrl+C handling) and `process` (xray subprocess) while dropping the rest.
+  *(2026-09-05: `fs` was added later when ranges refresh moved to
+  `tokio::fs`; the list stays explicit per this ADR.)*
 
 ## Alternatives Considered
 

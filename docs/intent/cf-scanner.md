@@ -37,6 +37,9 @@ CLI — all driving the same in-process engine.
 - **Constraint:** Single binary, IPv4 by default (opt-in IPv6 since v0.2.0),
   no history (last scan + reset), configs never leave the
   machine, no telemetry, no speed tests.
+  > *(2026-08-28 note: "no speed tests" was relaxed to opt-in —*
+  > *`--speed-test`/`--min-speed` exist but stay off by default; the intent*
+  > *ban on default speed testing stands. See 0.13.0 changelog.)*
 
 ## Detailed Intent (verbatim decisions)
 
@@ -89,15 +92,19 @@ CLI — all driving the same in-process engine.
   loss (WARP/phase-2 only). Sortable by latency (default), country, datacenter,
   loss. Phase 2 adds verdict + fragment/SNI combo detail.
 - Country: bundled offline mmdb (IP2Location LITE, free redistributable).
+  > *(Superseded 2026-08-13, correction #5: switched to db-ip.com Lite MMDB;*
+  > *see the Stack note below and ADR-003.)*
   Datacenter: colo code via `/cdn-cgi/trace` (phase 2); phase 1 country-only.
 - Copy with ports (ip:port per line) or raw IPs (per line); no leading/trailing
   whitespace; newline-separated. Save (file download). Reset.
+  > *(2026-09-02 note: "file download" UI is gone with ADR-013; the CLI*
+  > *equivalent is `--export FILE`.)*
 
 ### Stack (confirmed)
 - Rust 2024, tokio, clap, serde, tokio-rustls, reqwest,
   x25519-dalek + chacha20poly1305 + blake2 (WireGuard handshake),
-  maxminddb (IP2Location LITE mmdb), tracing, xray as a spawned subprocess
-  (see correction #1).
+  maxminddb (db-ip.com Lite mmdb since correction #5; originally IP2Location
+  LITE), tracing, xray as a spawned subprocess (see correction #1).
 - Output: NDJSON results on stdout + final summary (`--json-errors` for
   scripted failures); `--export` renders csv/json/base64/raw/singbox/clash
   bundles via `src/export.rs`.

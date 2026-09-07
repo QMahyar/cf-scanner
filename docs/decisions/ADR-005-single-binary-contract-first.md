@@ -12,10 +12,11 @@ principle stands for the CLI + wizard clients.
 2026-08-13
 
 ## Context
-The product has three front doors: a CLI (`serve`, `scan`, `ranges`), an
-interactive wizard, and a browser UI. Without a shared core, each would
-grow its own scan logic, stop conditions, and result handling — three
-sources of truth for the same behavior, drifting apart.
+*(Historical: written when the product had three front doors.)* The product
+had three front doors: a CLI (`serve`, `scan`, `ranges`), an interactive
+wizard, and a browser UI. Without a shared core, each would grow its own
+scan logic, stop conditions, and result handling — three sources of truth
+for the same behavior, drifting apart.
 
 ## Decision
 One in-process engine (`ScanController`) owns all scanning state and
@@ -26,6 +27,9 @@ and never serializes engine types directly. The frontend is one embedded
 HTML file (htmx + SSE, no build step) served by the same binary on
 127.0.0.1. Probe transports are injectable traits so tests never touch the
 network.
+*(2026-09-02: the HTTP server and embedded frontend no longer exist —
+see ADR-013. The engine-owns-state principle and injectable transports
+stand for the CLI + wizard clients.)*
 
 ## Alternatives Considered
 
@@ -48,6 +52,8 @@ network.
 
 ## Consequences
 - API changes require explicit review (ask first) because every client shares
+  the same contract. *(Today: the contract is consumed in-process by the CLI
+  and wizard; see ADR-011/ADR-013.)*
   them.
 - The SSE stream, JSON CLI output, and wizard share one event source.
 - The embedded UI ships in the release archives alongside xray via the same

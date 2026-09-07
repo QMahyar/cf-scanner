@@ -91,7 +91,7 @@ npm publishing knowledge (AGENTS must know, condensed from `docs/release-process
 - CLI agents: `scan` prints newline-delimited JSON on stdout + final summary;
   stderr carries human-only noise (progress ticker is TTY-gated).
   `--json-errors` prints `{"error": ...}` on stdout for failures.
-  `--export FILE --export-format csv|json|base64|raw|singbox|clash` writes
+  `--export FILE --export-format csv|json|base64|raw|singbox|clash|sharelinks` writes
   results/bundles to a file (`-` = stdout) via `src/export.rs`.
 
 ### v0.8.0 invariants (do not regress)
