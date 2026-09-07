@@ -2,13 +2,13 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use anyhow::{Result, anyhow};
+use anyhow::Result;
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 
 use super::neighbor::{NEIGHBOR_CHANNEL_CAP, NEIGHBOR_IDLE_POLL_MS, NeighborHub, ProbeTask};
 use super::plan::{plan_hosts_iter, plan_probe_count};
-use super::{BATCH_FLUSH, ProbeContext, ScanController, lock, merge_sorted, progress_cadence};
+use super::{ProbeContext, ScanController, lock, merge_sorted, progress_cadence};
 use crate::api::types::{ScanConfig, ScanEvent, ScanProgress, ScanSummary, Verdict};
 use crate::engine::plan::{SplitMix64, plan};
 use crate::probe::ProbeOutcome;
@@ -148,13 +148,8 @@ impl ScanController {
 
         let concurrency = usize::from(cfg.concurrency).max(1);
         let per_worker_cap: usize = 4;
-        let mut worker_txs = Vec::with_capacity(concurrency);
-        let mut worker_rxs = Vec::with_capacity(concurrency);
-        for _ in 0..concurrency {
-            let (tx, rx) = mpsc::channel::<ProbeTask>(per_worker_cap);
-            worker_txs.push(tx);
-            worker_rxs.push(rx);
-        }
+        let (worker_txs, worker_rxs) =
+            super::driver::worker_channels::<ProbeTask>(concurrency, per_worker_cap);
 
         let (hub, mut side_rx) = if cfg.neighbor_count > 0 {
             let (tx, rx) = mpsc::channel::<ProbeTask>(NEIGHBOR_CHANNEL_CAP);
@@ -376,15 +371,7 @@ impl ScanController {
                     // the neighbor queue before the producer can see inflight==0
                     inflight.fetch_sub(1, Ordering::AcqRel);
                     if let Some(verdict) = verdict {
-                        if verdict.latency_ms.is_some() {
-                            ctx.found.fetch_add(1, Ordering::Release);
-                            let _ =
-                                ctx.events.send(ScanEvent::Result(Box::new(verdict.clone())));
-                        }
-                        batch.push(verdict);
-                        if batch.len() >= BATCH_FLUSH {
-                            merge_sorted(&ctx.store, &ctx.dirty, std::mem::take(&mut batch));
-                        }
+                        super::driver::record_and_batch(&ctx, &mut batch, verdict);
                     }
                     let scanned = ctx.scanned.load(Ordering::Relaxed);
                     if ctx.milestone_due(scanned) {
@@ -395,16 +382,7 @@ impl ScanController {
             });
         }
 
-        while let Some(res) = workers.join_next().await {
-            if let Err(join_err) = res {
-                producer.abort();
-                self.cancel();
-                return Err(anyhow!("probe worker panicked: {join_err}"));
-            }
-        }
-        producer
-            .await
-            .map_err(|e| anyhow!("probe producer panicked: {e}"))?;
+        super::driver::drain_workers(workers, producer, || self.cancel(), "probe").await?;
 
         if let Some(p2) = phase2 {
             self.verify_phase(&cfg, &p2).await?;

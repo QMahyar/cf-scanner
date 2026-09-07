@@ -1,4 +1,5 @@
 mod cdn;
+mod driver;
 mod neighbor;
 mod phase2;
 mod plan;
@@ -429,7 +430,7 @@ impl ScanController {
     }
 }
 
-const BATCH_FLUSH: usize = 256;
+pub(super) const BATCH_FLUSH: usize = 256;
 
 fn claim_milestone(last: &AtomicU64, observed: u64, cadence: u64) -> bool {
     let threshold = observed / cadence;
