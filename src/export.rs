@@ -64,33 +64,102 @@ pub fn diagnostic_line(v: &Verdict) -> String {
     parts.join(" — ")
 }
 
-pub const BUNDLE_FORMATS: [&str; 7] = [
-    "base64",
-    "raw",
-    "singbox",
-    "clash",
-    "v2ray",
-    "shadowrocket",
-    "quantumult",
+/// The single source of truth for export formats (F-27.6). Adding a format
+/// means: one `FormatSpec` row here + one `ExportFormatArg` variant +
+/// one `export_format_name` arm + one `write_export` group arm; the
+/// name lists, resolvers, and docs derive from this table.
+pub struct FormatSpec {
+    pub name: &'static str,
+    pub kind: FormatKind,
+    pub description: &'static str,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum FormatKind {
+    /// Row-per-verdict results (csv, json).
+    Results,
+    /// Re-rendered config bundles keyed off phase-2 passing verdicts.
+    Bundle,
+    /// A bundle that is itself share URIs (raw/sharelinks).
+    Sharelinks,
+}
+
+pub const FORMATS: &[FormatSpec] = &[
+    FormatSpec {
+        name: "csv",
+        kind: FormatKind::Results,
+        description: "spreadsheet rows, one endpoint per line",
+    },
+    FormatSpec {
+        name: "json",
+        kind: FormatKind::Results,
+        description: "full verdict objects with a count header",
+    },
+    FormatSpec {
+        name: "base64",
+        kind: FormatKind::Bundle,
+        description: "base64 of the share-URI list",
+    },
+    FormatSpec {
+        name: "raw",
+        kind: FormatKind::Sharelinks,
+        description: "share URIs, one per line",
+    },
+    FormatSpec {
+        name: "singbox",
+        kind: FormatKind::Bundle,
+        description: "sing-box outbounds JSON",
+    },
+    FormatSpec {
+        name: "clash",
+        kind: FormatKind::Bundle,
+        description: "clash proxies JSON",
+    },
+    FormatSpec {
+        name: "sharelinks",
+        kind: FormatKind::Sharelinks,
+        description: "share URIs, one per line",
+    },
+    FormatSpec {
+        name: "v2ray",
+        kind: FormatKind::Bundle,
+        description: "v2rayN clipboard JSON",
+    },
+    FormatSpec {
+        name: "shadowrocket",
+        kind: FormatKind::Bundle,
+        description: "base64 URI list for Shadowrocket import",
+    },
+    FormatSpec {
+        name: "quantumult",
+        kind: FormatKind::Bundle,
+        description: "Quantumult X server lines",
+    },
 ];
-pub const SHARELINK_FORMATS: [&str; 1] = ["sharelinks"];
-pub const RESULT_FORMATS: [&str; 2] = ["csv", "json"];
+
+pub(crate) fn format_names(kind: Option<FormatKind>) -> Vec<&'static str> {
+    FORMATS
+        .iter()
+        .filter(|f| kind.is_none_or(|k| f.kind == k))
+        .map(|f| f.name)
+        .collect()
+}
 
 pub fn render_bundle(
     format: &str,
     verdicts: &[Verdict],
     configs: &[String],
 ) -> Result<String, String> {
-    let mut allowed: Vec<&str> = BUNDLE_FORMATS.to_vec();
-    allowed.extend_from_slice(&SHARELINK_FORMATS);
+    let allowed = format_names(None);
     resolve_format(format, &allowed)
         .ok_or_else(|| unknown_format(format, &allowed))
         .and_then(|fmt| bundle_body(fmt, verdicts, configs))
 }
 
 pub fn render_results(format: &str, verdicts: &[Verdict]) -> Result<String, String> {
-    resolve_format(format, &RESULT_FORMATS)
-        .ok_or_else(|| unknown_format(format, &RESULT_FORMATS))
+    let allowed = format_names(Some(FormatKind::Results));
+    resolve_format(format, &allowed)
+        .ok_or_else(|| unknown_format(format, &allowed))
         .map(|fmt| result_dump(fmt, verdicts))
 }
 
@@ -845,7 +914,7 @@ mod tests {
     fn render_bundle_errors_when_only_ipv6_passed() {
         let v6 = passing("2001:db8::1", 443, Some(0));
         let configs = [VLESS.to_owned()];
-        for fmt in BUNDLE_FORMATS.into_iter().chain(SHARELINK_FORMATS) {
+        for fmt in format_names(None) {
             let err = render_bundle(fmt, std::slice::from_ref(&v6), &configs).unwrap_err();
             assert!(err.contains("IPv6"), "{fmt}: {err}");
         }

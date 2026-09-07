@@ -34,6 +34,24 @@ pub(crate) struct Cli {
     pub(crate) command: Command,
 }
 
+/// Derived from the export registry (src/export.rs FORMATS) so a new
+/// format row updates the help automatically.
+fn export_format_help() -> String {
+    let mut s = String::from("Export format (default csv): ");
+    let mut first = true;
+    for f in cf_scanner::export::FORMATS {
+        if !first {
+            s.push_str("; ");
+        }
+        first = false;
+        s.push_str(f.name);
+        s.push_str(" (");
+        s.push_str(f.description);
+        s.push(')');
+    }
+    s
+}
+
 const EXAMPLES: &str = "\
 Examples:
   cf-scanner scan --preset quick           1 IP per /24 of the official ranges (fast sweep)
@@ -426,7 +444,7 @@ pub(crate) struct ScanArgs {
         value_enum,
         default_value_t = ExportFormatArg::Csv,
         help_heading = "Export",
-        help = "Export format: csv, json, base64, raw, singbox, clash, sharelinks, v2ray, shadowrocket, quantumult (default csv)"
+        help = export_format_help()
     )]
     pub(crate) export_format: ExportFormatArg,
 }
