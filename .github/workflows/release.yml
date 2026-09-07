@@ -101,6 +101,9 @@ jobs:
     needs:
       - plan
       - gate
+      # The 3-target cross-compile matrix must pass before artifacts are
+      # built: a tag push must not be the first place a target fails.
+      - cross-check
     if: ${{ fromJson(needs.plan.outputs.val).ci.github.artifacts_matrix.include != null && (needs.plan.outputs.publishing == 'true' || fromJson(needs.plan.outputs.val).ci.github.pr_run_mode == 'upload') }}
     strategy:
       fail-fast: false
