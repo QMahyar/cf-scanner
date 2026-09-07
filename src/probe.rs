@@ -73,7 +73,7 @@ pub fn transport_for(
     match mode {
         ProbeMode::Tcp => Arc::new(TcpTransport),
         ProbeMode::Tls => Arc::new(TlsTransport::new()),
-        ProbeMode::Http => Arc::new(HttpTransport::new(accepted_codes.to_vec())),
+        ProbeMode::Http => Arc::new(HttpTransport::with_shared(Arc::from(accepted_codes))),
     }
 }
 
@@ -196,11 +196,16 @@ impl Transport for TcpTransport {
 pub struct HttpTransport {
     connector: TlsConnector,
     server_name: ServerName<'static>,
-    accepted_codes: Vec<u16>,
+    accepted_codes: std::sync::Arc<[u16]>,
 }
 
 impl HttpTransport {
     pub fn new(accepted_codes: Vec<u16>) -> Self {
+        Self::with_shared(std::sync::Arc::from(accepted_codes))
+    }
+
+    /// Shared-codes constructor: each probe clones the Arc, not the Vec.
+    pub fn with_shared(accepted_codes: std::sync::Arc<[u16]>) -> Self {
         Self {
             connector: TlsConnector::from(Arc::new(no_verify_client_config())),
             server_name: ServerName::try_from(PROBE_SNI.to_owned())

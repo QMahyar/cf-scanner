@@ -179,13 +179,17 @@ impl ScanController {
     }
 
     pub fn for_each_result(&self, mut f: impl FnMut(&Verdict)) {
-        let snapshot = self.snapshot_sorted();
-        for v in &snapshot {
-            f(v);
-        }
+        self.with_sorted_snapshot(&mut |results| {
+            for v in results {
+                f(v);
+            }
+        });
     }
 
-    fn snapshot_sorted(&self) -> Vec<Verdict> {
+    /// Runs `f` against the sorted store without cloning the whole Vec: the
+    /// lock is held (and possibly sorted in place) for the callback's
+    /// duration. Same visible ordering as `results()`.
+    fn with_sorted_snapshot(&self, f: &mut dyn FnMut(&[Verdict])) {
         let mut guard = lock(&self.progress.store);
         if self.progress.store_dirty.swap(false, Ordering::AcqRel) {
             guard.sort_unstable_by(|a, b| {
@@ -197,7 +201,13 @@ impl ScanController {
                     .then_with(|| a.port.cmp(&b.port))
             });
         }
-        guard.clone()
+        f(&guard);
+    }
+
+    fn snapshot_sorted(&self) -> Vec<Verdict> {
+        let mut out = Vec::new();
+        self.with_sorted_snapshot(&mut |results| out.extend_from_slice(results));
+        out
     }
 
     fn working_found(&self) -> u64 {

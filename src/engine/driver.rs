@@ -63,6 +63,8 @@ pub(crate) fn record_and_batch(
 ) {
     if verdict.latency_ms.is_some() {
         ctx.found.fetch_add(1, Ordering::Release);
+        // One clone total: the event gets the copy, the store keeps the
+        // original (a second clone of the same verdict was pure waste).
         let _ = ctx
             .events
             .send(ScanEvent::Result(Box::new(verdict.clone())));
