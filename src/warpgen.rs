@@ -24,9 +24,19 @@ pub enum WarpRegisterError {
     RateLimited,
     #[error("registration rejected ({status})")]
     Unauthorized { status: u16 },
-    #[error("registration server error ({status})")]
+    #[error("registration server error ({status}){}", detail_suffix(.detail))]
     Server { status: u16, detail: String },
 }
+/// Detail is sanitized at construction (no tokens/keys); surface it in
+/// messages so a failed registration explains itself.
+fn detail_suffix(detail: &str) -> String {
+    if detail.trim().is_empty() {
+        String::new()
+    } else {
+        format!(": {detail}")
+    }
+}
+
 const MAX_ATTEMPTS: u32 = 3;
 const RETRY_SLEEP: Duration = Duration::from_millis(300);
 const DNS: &str = "1.1.1.1, 1.0.0.1";
@@ -1161,5 +1171,42 @@ pub(crate) mod tests {
                 && !resolved.is_relative(),
             "empty env must fall back to the default data dir, got {resolved:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod detail_surface_tests {
+    use super::*;
+
+    #[test]
+    fn server_error_display_carries_sanitized_detail() {
+        let err = WarpRegisterError::Server {
+            status: 502,
+            detail: "upstream says no".to_owned(),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("502"), "{msg}");
+        assert!(msg.contains("upstream says no"), "{msg}");
+    }
+
+    #[test]
+    fn server_error_display_omits_empty_detail() {
+        let err = WarpRegisterError::Server {
+            status: 500,
+            detail: String::new(),
+        };
+        assert_eq!(err.to_string(), "registration server error (500)");
+    }
+
+    #[test]
+    fn server_error_display_redacts_secret_shaped_details() {
+        // Construction sanitizes: the password is masked by the URI redactor.
+        let err = WarpRegisterError::Server {
+            status: 0,
+            detail: crate::configs::sanitize_error_text("vless://id:secret@host:443 leak"),
+        };
+        let msg = err.to_string();
+        assert!(!msg.contains("secret"), "{msg}");
+        assert!(msg.contains("***@host"), "{msg}");
     }
 }

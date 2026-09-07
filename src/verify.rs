@@ -35,6 +35,12 @@ pub struct ProbeRequest<'a> {
 }
 
 pub trait TunnelProbe: Send + Sync {
+    /// One-shot verification of a single candidate: build a tunnel through
+    /// `req`, run the probe URLs through it, return pass/fail + latency +
+    /// colo. Implementors: `InlineTunnelProbe` (in-process, vless/trojan),
+    /// `XrayTunnelProbe` (xray subprocess, all transports/fragments),
+    /// `HybridTunnelProbe` (routes per-config between the two). Session
+    /// lifecycle (spawn/cleanup) is internal to each call.
     fn probe(
         &self,
         req: ProbeRequest<'_>,
@@ -144,6 +150,11 @@ impl OpenedTunnel {
 }
 
 pub trait TunnelOpener: Send + Sync {
+    /// Long-lived session for the speed test: open a tunnel once, hand back
+    /// its socks address plus a deferred cleanup future. Distinct from
+    /// [`TunnelProbe`]: one session is reused across a whole download, not
+    /// one call per candidate. Implementors: `RealTunnelOpener` (xray),
+    /// plus test fakes.
     fn open(
         &self,
         spec: &OutboundSpec,
