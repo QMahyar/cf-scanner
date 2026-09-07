@@ -1,18 +1,11 @@
-use std::collections::BTreeMap;
-use std::future::Future;
-use std::net::Ipv4Addr;
-use std::pin::Pin;
-
 use anyhow::{Result, anyhow, bail};
 use base64::Engine as _;
-use percent_encoding::{AsciiSet, CONTROLS, utf8_percent_encode};
-use serde::Deserialize;
+use std::collections::BTreeMap;
+
+use percent_encoding::{AsciiSet, CONTROLS};
 use url::Url;
 
 use crate::api::types::MAX_CONFIG_ENTRY_BYTES;
-use crate::util::percent_decode;
-
-use crate::ranges;
 
 const SUB_UA: &str = "cf-scanner/0.1.0";
 const WS: &str = "ws";
@@ -196,35 +189,7 @@ impl Protocol {
     }
 }
 
-#[derive(Debug, Default, PartialEq, Eq)]
-pub struct SubscriptionParse {
-    pub specs: Vec<OutboundSpec>,
-    pub ignored: usize,
-    pub errors: Vec<String>,
-}
-
-pub trait SubFetch: Send + Sync {
-    fn fetch(&self, url: &str) -> Pin<Box<dyn Future<Output = Result<String>> + Send + '_>>;
-}
-
-pub struct RealSubFetch;
-
-impl SubFetch for RealSubFetch {
-    fn fetch(&self, url: &str) -> Pin<Box<dyn Future<Output = Result<String>> + Send + '_>> {
-        let url = url.to_owned();
-        Box::pin(async move {
-            ranges::fetch_tls_with_headers(&url, &format!("User-Agent: {SUB_UA}\r\nAccept: */*"))
-                .await
-        })
-    }
-}
-
-pub async fn fetch_subscription(fetch: &impl SubFetch, url: &str) -> Result<SubscriptionParse> {
-    let body = fetch.fetch(url).await?;
-    Ok(parse_subscription(&body))
-}
-
-fn check_len(field: &str, value: &str, max: usize) -> Result<()> {
+pub(crate) fn check_len(field: &str, value: &str, max: usize) -> Result<()> {
     let actual = value.len();
     if actual > max {
         bail!("{field} exceeds {max} bytes");
@@ -232,647 +197,7 @@ fn check_len(field: &str, value: &str, max: usize) -> Result<()> {
     Ok(())
 }
 
-pub fn parse_uri(entry: &str) -> Result<OutboundSpec> {
-    let entry = entry.trim();
-    if entry.len() > MAX_CONFIG_ENTRY_BYTES {
-        bail!("config entry exceeds {MAX_CONFIG_ENTRY_BYTES} bytes");
-    }
-    let scheme = entry
-        .split_once("://")
-        .map(|(s, _)| s.to_ascii_lowercase())
-        .ok_or_else(|| anyhow!("config entry has no scheme"))?;
-    match scheme.as_str() {
-        "vless" | "trojan" => parse_sip002(entry),
-        "vmess" => parse_vmess(entry),
-        "ss" => parse_ss(entry),
-        other => bail!("unsupported scheme '{other}'"),
-    }
-}
-
-fn fragment(remark: Option<&str>) -> String {
-    match remark {
-        Some(r) if !r.trim().is_empty() => {
-            let encoded = utf8_percent_encode(r, QUERY_VALUE_ENCODE_SET).to_string();
-            format!("#{encoded}")
-        }
-        _ => String::new(),
-    }
-}
-
-fn render_sip002(
-    spec: &OutboundSpec,
-    dial_ip: Ipv4Addr,
-    sni_override: Option<&str>,
-    remark: Option<&str>,
-    extras: &[(String, String)],
-) -> Result<String> {
-    let mut out = String::with_capacity(160);
-    out.push_str(spec.protocol.as_str());
-    out.push_str("://");
-    out.push_str(&utf8_percent_encode(&spec.user_id, USERINFO_ENCODE_SET).to_string());
-    out.push('@');
-    out.push_str(&dial_ip.to_string());
-    out.push(':');
-    out.push_str(&spec.port.to_string());
-    let mut params: Vec<String> = Vec::new();
-    let mut add = |key: &str, value: &str| {
-        params.push(format!(
-            "{key}={}",
-            utf8_percent_encode(value, QUERY_VALUE_ENCODE_SET)
-        ));
-    };
-    add("security", &spec.security);
-    let sni = sni_override
-        .map(str::to_owned)
-        .or_else(|| spec.tls_server_name.clone());
-    if let Some(sni) = sni {
-        add("sni", &sni);
-    }
-    if let Some(fp) = &spec.fingerprint {
-        add("fp", fp);
-    }
-    if let Some(ws) = &spec.ws {
-        add("type", WS);
-        add("path", &ws.path);
-        if let Some(host) = &ws.host {
-            add("host", host);
-        }
-        if let Some(packet_encoding) = &ws.packet_encoding {
-            add("packetencoding", packet_encoding);
-        }
-    } else if let Some(grpc) = &spec.grpc {
-        add("type", GRPC);
-        add("serviceName", &grpc.service_name);
-        if let Some(mode) = &grpc.mode {
-            add("mode", mode);
-        }
-    } else if let Some(xhttp) = &spec.xhttp {
-        add("type", XHTTP);
-        add("path", &xhttp.path);
-        if let Some(host) = &xhttp.host {
-            add("host", host);
-        }
-        if let Some(mode) = &xhttp.mode {
-            add("mode", mode);
-        }
-    }
-    for (key, value) in extras {
-        params.push(format!(
-            "{}={}",
-            utf8_percent_encode(key, QUERY_VALUE_ENCODE_SET),
-            utf8_percent_encode(value, QUERY_VALUE_ENCODE_SET)
-        ));
-    }
-    out.push('?');
-    out.push_str(&params.join("&"));
-    out.push_str(&fragment(remark));
-    Ok(out)
-}
-
-const MANAGED_SIP002_KEYS: &[&str] = &[
-    "security",
-    "sni",
-    "fp",
-    "type",
-    "path",
-    "host",
-    "packetencoding",
-    "servicename",
-    "mode",
-    "id",
-    "password",
-];
-
-fn sip002_passthrough_params(original_config: &str) -> Vec<(String, String)> {
-    let Ok(url) = Url::parse(original_config) else {
-        return Vec::new();
-    };
-    if !matches!(url.scheme(), "vless" | "trojan") {
-        return Vec::new();
-    }
-    url.query_pairs()
-        .filter(|(k, _)| {
-            let key = k.to_ascii_lowercase();
-            !MANAGED_SIP002_KEYS.contains(&key.as_str())
-        })
-        .map(|(k, v)| (k.into_owned(), v.into_owned()))
-        .collect()
-}
-
-pub fn render_uri(
-    spec: &OutboundSpec,
-    dial_ip: Ipv4Addr,
-    sni_override: Option<&str>,
-    remark: Option<&str>,
-) -> Result<String> {
-    match spec.protocol {
-        Protocol::Vless | Protocol::Trojan => {
-            render_sip002(spec, dial_ip, sni_override, remark, &[])
-        }
-        Protocol::Vmess => render_vmess(spec, dial_ip, sni_override, remark),
-        Protocol::Shadowsocks => render_ss(spec, dial_ip, remark),
-    }
-}
-
-fn render_vmess(
-    spec: &OutboundSpec,
-    dial_ip: Ipv4Addr,
-    sni_override: Option<&str>,
-    remark: Option<&str>,
-) -> Result<String> {
-    let mut payload = serde_json::Map::new();
-    payload.insert("v".into(), serde_json::json!("2"));
-    payload.insert(
-        "ps".into(),
-        serde_json::json!(remark.unwrap_or("").to_string()),
-    );
-    payload.insert("add".into(), serde_json::json!(dial_ip.to_string()));
-    payload.insert("port".into(), serde_json::json!(spec.port.to_string()));
-    payload.insert("id".into(), serde_json::json!(spec.user_id));
-    payload.insert("aid".into(), serde_json::json!(spec.alter_id.to_string()));
-    if let Some(scy) = &spec.vmess_security {
-        payload.insert("scy".into(), serde_json::json!(scy));
-    }
-    let net = spec.network();
-    payload.insert("net".into(), serde_json::json!(net));
-    payload.insert("type".into(), serde_json::json!("none"));
-    match (&spec.ws, &spec.grpc, &spec.xhttp) {
-        (Some(ws), _, _) => {
-            payload.insert("path".into(), serde_json::json!(ws.path));
-            if let Some(host) = &ws.host {
-                payload.insert("host".into(), serde_json::json!(host));
-            }
-        }
-        (_, Some(grpc), _) => {
-            payload.insert("path".into(), serde_json::json!(grpc.service_name));
-            if let Some(mode) = &grpc.mode {
-                payload.insert("mode".into(), serde_json::json!(mode));
-            }
-        }
-        (_, _, Some(xhttp)) => {
-            payload.insert("path".into(), serde_json::json!(xhttp.path));
-            if let Some(host) = &xhttp.host {
-                payload.insert("host".into(), serde_json::json!(host));
-            }
-        }
-        _ => {}
-    }
-    let tls = if spec.security == "tls" {
-        "tls"
-    } else {
-        "none"
-    };
-    payload.insert("tls".into(), serde_json::json!(tls));
-    let sni = sni_override
-        .map(str::to_owned)
-        .or_else(|| spec.tls_server_name.clone());
-    if let Some(sni) = sni {
-        payload.insert("sni".into(), serde_json::json!(sni));
-    }
-    if let Some(fp) = &spec.fingerprint {
-        payload.insert("fp".into(), serde_json::json!(fp));
-    }
-    let json = serde_json::Value::Object(payload);
-    let b64 = base64::engine::general_purpose::STANDARD.encode(json.to_string());
-    Ok(format!("vmess://{b64}"))
-}
-
-fn render_ss(spec: &OutboundSpec, dial_ip: Ipv4Addr, remark: Option<&str>) -> Result<String> {
-    let method = spec.method.as_deref().unwrap_or("aes-128-gcm");
-    let userinfo = format!("{method}:{}", spec.user_id);
-    let b64 = base64::engine::general_purpose::STANDARD_NO_PAD.encode(userinfo);
-    let mut out = format!("ss://{b64}@{dial_ip}:{}", spec.port);
-    out.push_str(&fragment(remark));
-    Ok(out)
-}
-
-pub fn export_config_uri(
-    original_config: &str,
-    dial_ip: Ipv4Addr,
-    port: u16,
-    sni_override: Option<&str>,
-    remark: Option<&str>,
-) -> Result<String> {
-    if original_config.len() > MAX_EXPORT_CONFIG_BYTES {
-        bail!("config exceeds {MAX_EXPORT_CONFIG_BYTES} bytes");
-    }
-    let mut spec = parse_uri(original_config)?;
-    spec.server = dial_ip.to_string();
-    spec.port = port;
-    let extras = sip002_passthrough_params(original_config);
-    match spec.protocol {
-        Protocol::Vless | Protocol::Trojan => {
-            render_sip002(&spec, dial_ip, sni_override, remark, &extras)
-        }
-        Protocol::Vmess => render_vmess(&spec, dial_ip, sni_override, remark),
-        Protocol::Shadowsocks => render_ss(&spec, dial_ip, remark),
-    }
-}
-
-pub fn parse_subscription(body: &str) -> SubscriptionParse {
-    let text = decode_subscription_body(body);
-    let mut out = SubscriptionParse::default();
-    for (idx, line) in text.lines().enumerate() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        if line.len() > MAX_CONFIG_ENTRY_BYTES {
-            out.errors.push(format!(
-                "line {}: entry exceeds {MAX_CONFIG_ENTRY_BYTES} bytes",
-                idx + 1
-            ));
-            out.ignored += 1;
-            continue;
-        }
-        match parse_uri(line) {
-            Ok(spec) => out.specs.push(spec),
-            Err(err) => {
-                let reason = sanitize_error_text(&format!("{err:#}"));
-                out.errors.push(format!("line {}: {reason}", idx + 1));
-                out.ignored += 1;
-            }
-        }
-    }
-    out
-}
-
-fn decode_subscription_body(body: &str) -> String {
-    let trimmed = body.trim();
-    if trimmed.lines().count() != 1 {
-        return body.to_owned();
-    }
-    if trimmed.len() > MAX_SUB_BLOB_BYTES {
-        return body.to_owned();
-    }
-    let line = trimmed;
-    let looks_like_uri = line
-        .split_once("://")
-        .map(|(s, _)| {
-            matches!(
-                s.to_ascii_lowercase().as_str(),
-                "vless" | "trojan" | "vmess" | "ss"
-            )
-        })
-        .unwrap_or(false);
-    if looks_like_uri {
-        return body.to_owned();
-    }
-    let Ok(decoded) = base64_any(line) else {
-        return body.to_owned();
-    };
-    let Ok(text) = String::from_utf8(decoded) else {
-        return body.to_owned();
-    };
-    if text.lines().any(|l| {
-        let l = l.trim();
-        l.starts_with("vless://")
-            || l.starts_with("trojan://")
-            || l.starts_with("vmess://")
-            || l.starts_with("ss://")
-    }) {
-        text
-    } else {
-        body.to_owned()
-    }
-}
-
-fn parse_sip002(entry: &str) -> Result<OutboundSpec> {
-    let url = Url::parse(entry).map_err(|e| anyhow!("bad URL: {e}"))?;
-    let protocol = match url.scheme() {
-        "vless" => Protocol::Vless,
-        "trojan" => Protocol::Trojan,
-        s => bail!("unexpected scheme '{s}'"),
-    };
-    let host = url
-        .host_str()
-        .ok_or_else(|| anyhow!("missing host"))?
-        .trim_start_matches('[')
-        .trim_end_matches(']')
-        .to_owned();
-    let port = url.port().unwrap_or(443);
-    let q = query_map(&url);
-
-    let userinfo = percent_decode(url.username());
-    let user_id = match q.get("id").or_else(|| q.get("password")) {
-        Some(id) if userinfo.is_empty() || id.is_empty() => id.clone(),
-        _ if userinfo.is_empty() => bail!("missing user id or password"),
-        _ => userinfo,
-    };
-
-    let security = q.get("security").cloned().unwrap_or_else(|| {
-        if protocol == Protocol::Trojan {
-            "tls".to_owned()
-        } else {
-            "none".to_owned()
-        }
-    });
-    reject_unsupported_security(&security)?;
-    let mut ws = None;
-    let mut grpc = None;
-    let mut xhttp = None;
-    match q.get("type").map(String::as_str) {
-        Some(WS) => {
-            ws = Some(WsSettings {
-                path: q.get("path").cloned().unwrap_or_else(|| "/".to_owned()),
-                host: q.get("host").cloned(),
-                packet_encoding: q.get("packetencoding").filter(|v| !v.is_empty()).cloned(),
-            });
-        }
-        Some(GRPC) => {
-            grpc = Some(GrpcSettings {
-                service_name: q.get("servicename").cloned().unwrap_or_default(),
-                mode: q.get("mode").cloned(),
-            });
-        }
-        Some(XHTTP) | Some(SPLITHTTP) => {
-            xhttp = Some(XhttpSettings {
-                path: q.get("path").cloned().unwrap_or_else(|| "/".to_owned()),
-                host: q.get("host").cloned(),
-                mode: q.get("mode").cloned(),
-            });
-        }
-        _ => {}
-    }
-
-    finish_spec(OutboundSpec {
-        protocol,
-        server: host,
-        port,
-        user_id,
-        method: None,
-        security,
-        tls_server_name: q.get("sni").cloned(),
-        fingerprint: q.get("fp").cloned(),
-        ws,
-        grpc,
-        xhttp,
-        tag: url.fragment().map(percent_decode),
-        alter_id: 0,
-        vmess_security: None,
-    })
-}
-
-fn parse_vmess(entry: &str) -> Result<OutboundSpec> {
-    let (b64, tag) = match entry.split_once('#') {
-        Some((b, t)) => (b, Some(t.to_owned())),
-        None => (entry, None),
-    };
-    let b64 = strip_scheme(b64, "vmess").ok_or_else(|| anyhow!("bad vmess prefix"))?;
-    let decoded = base64_any(b64).map_err(|_| anyhow!("bad vmess base64"))?;
-    let json: serde_json::Value =
-        serde_json::from_slice(&decoded).map_err(|e| anyhow!("vmess payload is not JSON: {e}"))?;
-    let o = json
-        .as_object()
-        .ok_or_else(|| anyhow!("vmess payload is not an object"))?;
-    let get = |k: &str| o.get(k).and_then(|v| v.as_str());
-    let get_flex = |k: &str| o.get(k).and_then(value_to_string);
-
-    let server = get("add")
-        .filter(|s| !s.is_empty())
-        .ok_or_else(|| anyhow!("vmess missing add"))?;
-    let port: u16 = get_flex("port")
-        .and_then(|p| p.parse().ok())
-        .ok_or_else(|| anyhow!("vmess missing/invalid port"))?;
-    let user_id = get("id")
-        .filter(|s| !s.is_empty())
-        .ok_or_else(|| anyhow!("vmess missing id"))?;
-    let security = get("tls")
-        .filter(|s| !s.is_empty())
-        .unwrap_or("none")
-        .to_owned();
-    reject_unsupported_security(&security)?;
-    let alter_id: u16 = get_flex("aid").and_then(|a| a.parse().ok()).unwrap_or(0);
-    let vmess_security = get("scy").filter(|s| !s.is_empty()).map(str::to_owned);
-    let mut ws = None;
-    let mut grpc = None;
-    let mut xhttp = None;
-    match get("net") {
-        Some(WS) => {
-            ws = Some(WsSettings {
-                path: get("path").unwrap_or("/").to_owned(),
-                host: get("host").filter(|h| !h.is_empty()).map(str::to_owned),
-                packet_encoding: None,
-            });
-        }
-        Some(GRPC) => {
-            grpc = Some(GrpcSettings {
-                service_name: get("servicename")
-                    .or_else(|| get("path"))
-                    .unwrap_or("")
-                    .to_owned(),
-                mode: get("mode").filter(|m| !m.is_empty()).map(str::to_owned),
-            });
-        }
-        Some(XHTTP) | Some(SPLITHTTP) => {
-            xhttp = Some(XhttpSettings {
-                path: get("path").unwrap_or("/").to_owned(),
-                host: get("host").filter(|h| !h.is_empty()).map(str::to_owned),
-                mode: get("mode").filter(|m| !m.is_empty()).map(str::to_owned),
-            });
-        }
-        _ => {}
-    }
-    finish_spec(OutboundSpec {
-        protocol: Protocol::Vmess,
-        server: server.to_owned(),
-        port,
-        user_id: user_id.to_owned(),
-        method: None,
-        security,
-        tls_server_name: get("sni").filter(|s| !s.is_empty()).map(str::to_owned),
-        fingerprint: get("fp").filter(|s| !s.is_empty()).map(str::to_owned),
-        ws,
-        grpc,
-        xhttp,
-        tag: tag.as_deref().map(percent_decode),
-        alter_id,
-        vmess_security,
-    })
-}
-
-fn parse_ss(entry: &str) -> Result<OutboundSpec> {
-    let (b64, tag) = match entry.split_once('#') {
-        Some((b, t)) => (b, Some(t.to_owned())),
-        None => (entry, None),
-    };
-    let b64 = strip_scheme(b64, "ss").ok_or_else(|| anyhow!("bad ss prefix"))?;
-
-    let (userinfo, host_port) = if let Some((u, hp)) = b64.split_once('@') {
-        let decoded = base64_any(u).unwrap_or_else(|_| u.as_bytes().to_vec());
-        (decoded, hp.to_owned())
-    } else {
-        let decoded = base64_any(b64).map_err(|_| anyhow!("bad ss base64"))?;
-        let text = String::from_utf8_lossy(&decoded);
-        let (u, hp) = text
-            .split_once('@')
-            .ok_or_else(|| anyhow!("ss envelope has no @"))?;
-        (u.as_bytes().to_vec(), hp.to_owned())
-    };
-
-    let userinfo_text = String::from_utf8_lossy(&userinfo);
-    let (method, password) = userinfo_text
-        .split_once(':')
-        .ok_or_else(|| anyhow!("ss userinfo is not method:password"))?;
-    if method.is_empty() {
-        bail!("ss method is empty");
-    }
-
-    let (host, port) =
-        split_host_port(&host_port).ok_or_else(|| anyhow!("ss missing host:port"))?;
-    let port: u16 = port.parse().map_err(|_| anyhow!("ss bad port"))?;
-    if host.is_empty() {
-        bail!("ss host is empty");
-    }
-
-    finish_spec(OutboundSpec {
-        protocol: Protocol::Shadowsocks,
-        server: host.to_owned(),
-        port,
-        user_id: password.to_owned(),
-        method: Some(method.to_owned()),
-        security: "none".to_owned(),
-        tls_server_name: None,
-        fingerprint: None,
-        ws: None,
-        grpc: None,
-        xhttp: None,
-        tag: tag.as_deref().map(percent_decode),
-        alter_id: 0,
-        vmess_security: None,
-    })
-}
-
-pub fn parse_xray_json(text: &str) -> Result<OutboundSpec> {
-    let cfg: XrayConfig = serde_json::from_str(text).map_err(|e| anyhow!("bad xray JSON: {e}"))?;
-    for out in &cfg.outbounds {
-        let protocol = match out.protocol.as_str() {
-            "vless" => Protocol::Vless,
-            "trojan" => Protocol::Trojan,
-            "vmess" => Protocol::Vmess,
-            "shadowsocks" => Protocol::Shadowsocks,
-            _ => continue,
-        };
-
-        let (server, port, user_id, method) = match protocol {
-            Protocol::Vless | Protocol::Vmess => {
-                let v = out
-                    .settings
-                    .vnext
-                    .first()
-                    .ok_or_else(|| anyhow!("outbound has no vnext"))?;
-                let user = v
-                    .users
-                    .first()
-                    .ok_or_else(|| anyhow!("vnext has no users"))?;
-                (v.address.clone(), v.port, user.id.clone(), None)
-            }
-            Protocol::Trojan | Protocol::Shadowsocks => {
-                let s = out
-                    .settings
-                    .servers
-                    .first()
-                    .ok_or_else(|| anyhow!("outbound has no servers"))?;
-                let password = s
-                    .password
-                    .clone()
-                    .ok_or_else(|| anyhow!("server has no password"))?;
-                (s.address.clone(), s.port, password, s.method.clone())
-            }
-        };
-        let vmess_meta = match protocol {
-            Protocol::Vmess => {
-                let user = out.settings.vnext.first().and_then(|v| v.users.first());
-                (
-                    user.and_then(|u| u.alter_id).unwrap_or(0),
-                    user.and_then(|u| u.security.as_ref())
-                        .filter(|s| !s.is_empty())
-                        .cloned(),
-                )
-            }
-            _ => (0, None),
-        };
-
-        let stream = out.stream_settings.as_ref();
-        let network = stream.map(|s| s.network.as_str()).unwrap_or("");
-        let security = stream
-            .map(|s| s.security.clone())
-            .unwrap_or_else(|| "none".to_owned());
-        reject_unsupported_security(&security)?;
-        let (ws, grpc, xhttp) = match network {
-            WS => {
-                let w = stream.and_then(|s| s.ws_settings.as_ref());
-                (
-                    Some(WsSettings {
-                        path: w.map(|w| w.path.clone()).unwrap_or_else(|| "/".to_owned()),
-                        host: w
-                            .and_then(|w| w.headers.as_ref())
-                            .and_then(|h| h.host.clone()),
-                        packet_encoding: w
-                            .and_then(|w| w.packet_encoding.as_ref())
-                            .and_then(value_to_string),
-                    }),
-                    None,
-                    None,
-                )
-            }
-            GRPC => {
-                let g = stream.and_then(|s| s.grpc_settings.as_ref());
-                (
-                    None,
-                    Some(GrpcSettings {
-                        service_name: g.and_then(|g| g.service_name.clone()).unwrap_or_default(),
-                        mode: g
-                            .map(|g| g.multi_mode)
-                            .unwrap_or(false)
-                            .then(|| "multi".to_owned()),
-                    }),
-                    None,
-                )
-            }
-            XHTTP | SPLITHTTP => {
-                let x = stream
-                    .and_then(|s| s.xhttp_settings.as_ref().or(s.splithttp_settings.as_ref()));
-                (
-                    None,
-                    None,
-                    Some(XhttpSettings {
-                        path: x
-                            .and_then(|x| x.path.clone())
-                            .unwrap_or_else(|| "/".to_owned()),
-                        host: x.and_then(|x| x.host.clone()),
-                        mode: x.and_then(|x| x.mode.clone()),
-                    }),
-                )
-            }
-            _ => (None, None, None),
-        };
-
-        return finish_spec(OutboundSpec {
-            protocol,
-            server,
-            port,
-            user_id,
-            method,
-            security,
-            tls_server_name: stream
-                .and_then(|s| s.tls_settings.as_ref())
-                .and_then(|t| t.server_name.clone()),
-            fingerprint: stream
-                .and_then(|s| s.tls_settings.as_ref())
-                .and_then(|t| t.fingerprint.clone()),
-            ws,
-            grpc,
-            xhttp,
-            tag: out.tag.clone(),
-            alter_id: vmess_meta.0,
-            vmess_security: vmess_meta.1,
-        });
-    }
-    bail!("no usable outbound found")
-}
-
-fn finish_spec(spec: OutboundSpec) -> Result<OutboundSpec> {
+pub(crate) fn finish_spec(spec: OutboundSpec) -> Result<OutboundSpec> {
     if spec.user_id.is_empty() {
         bail!("user id is empty");
     }
@@ -936,26 +261,26 @@ fn finish_spec(spec: OutboundSpec) -> Result<OutboundSpec> {
     Ok(spec)
 }
 
-fn strip_scheme<'a>(s: &'a str, scheme: &str) -> Option<&'a str> {
+pub(crate) fn strip_scheme<'a>(s: &'a str, scheme: &str) -> Option<&'a str> {
     let prefix = format!("{scheme}://");
     (s.len() >= prefix.len() && s[..prefix.len()].eq_ignore_ascii_case(&prefix))
         .then(|| &s[prefix.len()..])
 }
 
-fn query_map(url: &Url) -> BTreeMap<String, String> {
+pub(crate) fn query_map(url: &Url) -> BTreeMap<String, String> {
     url.query_pairs()
         .map(|(k, v)| (k.into_owned().to_ascii_lowercase(), v.into_owned()))
         .collect()
 }
 
-fn reject_unsupported_security(security: &str) -> Result<()> {
+pub(crate) fn reject_unsupported_security(security: &str) -> Result<()> {
     if security.eq_ignore_ascii_case("reality") {
         bail!("security 'reality' is not supported; use tls or none")
     }
     Ok(())
 }
 
-fn base64_any(s: &str) -> Result<Vec<u8>> {
+pub(crate) fn base64_any(s: &str) -> Result<Vec<u8>> {
     use base64::engine::general_purpose::{STANDARD, STANDARD_NO_PAD, URL_SAFE, URL_SAFE_NO_PAD};
     STANDARD
         .decode(s)
@@ -965,7 +290,7 @@ fn base64_any(s: &str) -> Result<Vec<u8>> {
         .map_err(|_| anyhow!("invalid base64"))
 }
 
-fn split_host_port(s: &str) -> Option<(&str, &str)> {
+pub(crate) fn split_host_port(s: &str) -> Option<(&str, &str)> {
     if let Some(rest) = s.strip_prefix('[') {
         let (host, rest) = rest.split_once(']')?;
         return Some((host, rest.strip_prefix(':')?));
@@ -981,117 +306,24 @@ fn value_to_string(v: &serde_json::Value) -> Option<String> {
     }
 }
 
-#[derive(Deserialize)]
-struct XrayConfig {
-    outbounds: Vec<XrayOutbound>,
-}
+mod subscription;
+mod uri;
+mod xray_json;
 
-#[derive(Deserialize)]
-struct XrayOutbound {
-    protocol: String,
-    tag: Option<String>,
-    #[serde(default)]
-    settings: XraySettings,
-    #[serde(default, rename = "streamSettings")]
-    stream_settings: Option<XrayStreamSettings>,
-}
-
-#[derive(Deserialize, Default)]
-struct XraySettings {
-    #[serde(default)]
-    vnext: Vec<XrayVnext>,
-    #[serde(default)]
-    servers: Vec<XrayServer>,
-}
-
-#[derive(Deserialize)]
-struct XrayVnext {
-    address: String,
-    port: u16,
-    #[serde(default)]
-    users: Vec<XrayUser>,
-}
-
-#[derive(Deserialize)]
-struct XrayUser {
-    id: String,
-    #[serde(default, rename = "alterId")]
-    alter_id: Option<u16>,
-    #[serde(default)]
-    security: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct XrayServer {
-    address: String,
-    port: u16,
-    method: Option<String>,
-    password: Option<String>,
-}
-
-#[derive(Deserialize, Default)]
-struct XrayStreamSettings {
-    #[serde(default)]
-    network: String,
-    #[serde(default)]
-    security: String,
-    #[serde(default, rename = "tlsSettings")]
-    tls_settings: Option<XrayTlsSettings>,
-    #[serde(default, rename = "wsSettings")]
-    ws_settings: Option<XrayWsSettings>,
-    #[serde(default, rename = "grpcSettings")]
-    grpc_settings: Option<XrayGrpcSettings>,
-    #[serde(default, rename = "xhttpSettings")]
-    xhttp_settings: Option<XrayXhttpSettings>,
-    #[serde(default, rename = "splithttpSettings")]
-    splithttp_settings: Option<XrayXhttpSettings>,
-}
-
-#[derive(Deserialize)]
-struct XrayTlsSettings {
-    #[serde(default, rename = "serverName")]
-    server_name: Option<String>,
-    fingerprint: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct XrayWsSettings {
-    #[serde(default)]
-    path: String,
-    headers: Option<XrayWsHeaders>,
-    #[serde(default, rename = "packetEncoding")]
-    packet_encoding: Option<serde_json::Value>,
-}
-
-#[derive(Deserialize)]
-struct XrayWsHeaders {
-    #[serde(default, rename = "Host")]
-    host: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct XrayGrpcSettings {
-    #[serde(default, rename = "serviceName")]
-    service_name: Option<String>,
-    #[serde(default, rename = "multiMode")]
-    multi_mode: bool,
-}
-
-#[derive(Deserialize)]
-struct XrayXhttpSettings {
-    #[serde(default)]
-    path: Option<String>,
-    #[serde(default)]
-    host: Option<String>,
-    #[serde(default)]
-    mode: Option<String>,
-}
+pub use subscription::{
+    RealSubFetch, SubFetch, SubscriptionParse, fetch_subscription, parse_subscription,
+};
+pub use uri::{export_config_uri, parse_uri, render_uri};
+pub use xray_json::parse_xray_json;
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use percent_encoding::utf8_percent_encode;
+    use std::future::Future;
+    use std::pin::Pin;
 
-    const FIXTURE: &str = include_str!("../tests/fixtures/vless-worker.txt");
+    const FIXTURE: &str = include_str!("../../tests/fixtures/vless-worker.txt");
 
     struct FakeSub(String);
 
