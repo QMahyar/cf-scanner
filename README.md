@@ -240,10 +240,24 @@ Design rationale lives in [docs/decisions/](docs/decisions/).
 - **Windows SmartScreen.** Release binaries are unsigned, so SmartScreen
   shows a warning. This trade-off is accepted for a free tool; ADR-001
   documents the same trade-off for the bundled xray.
-- **Termux (Android).** Termux builds static musl binaries, but the xray
-  linux-arm64 release is glibc. Install Termux's glibc package, or let the
-  runtime fallback download fetch a working binary instead of using the
-  bundled one.
+- **Termux (Android).** The CI static builds are musl; the xray helper is
+  glibc. Step by step:
+  1. Install the binary from the GitHub Release (the portable
+     `x86_64-unknown-linux-musl` tarball runs natively under Termux).
+  2. Give phase-2 a glibc runtime: `pkg install glibc-runner` and run the
+     binary through it (`termux-fix-shebang` not needed; use
+     `glibc-runner ./cf-scanner …`), or install Termux's `glibc` package
+     per its wiki.
+  3. Grant storage once: `termux-setup-storage`, and keep the data dir on
+     local storage (CF_SCANNER_DATA_DIR) so trial configs are writable.
+  4. WARP mode needs a real WireGuard UDP path — some mobile networks
+     block it; use CDN mode if endpoints never answer.
+  The runtime download fallback can also fetch a working xray itself if
+  the bundled one will not start.
+- **Docker/musl images.** The npm binaries are glibc-linked. On Alpine use
+  a glibc base (e.g. `debian:slim` or the `gcompat` layer) or the
+  standalone `x86_64-unknown-linux-musl` archive from GitHub Releases
+  (see also the T-35 musl proposal for native musl npm support).
 - **Offline builds.** The first build needs network for the GeoIP download:
   `build.rs` fetches the release pinned in `data/geoip-version.txt` and
   verifies its SHA-256. A failed download or checksum mismatch fails the
@@ -268,11 +282,11 @@ Design rationale lives in [docs/decisions/](docs/decisions/).
 |---------|-----|
 | Windows SmartScreen warning | Click **More info**, then **Run anyway**. Binaries are unsigned; see ADR-001. |
 | Termux: phase-2 xray fails to start | Termux builds static musl; xray linux-arm64 is glibc. Install Termux's glibc package. |
-| Phase 2: "no verified xray binary" | Run `cf-scanner ranges refresh` is unrelated — instead re-run the scan; the runtime re-downloads xray from the pinned GitHub release and checks its SHA-256. Behind a blocked proxy, download the zip manually into the data dir (path is printed in the error). |
+| Phase 2: "no verified xray binary" | Re-run the scan; the runtime re-downloads xray from the pinned GitHub release and checks its SHA-256. Behind a blocked proxy, download the archive manually into the data dir (the path is printed in the error). |
 | Phase 2: everything fails with handshake errors | Try `--phase2-fragment medium` (DPI bypass), then `--phase2-fragment heavy`. Try `--phase2-snis` with a fronting domain your ISP allows. |
 | WARP mode finds no results | WARP is UDP; some networks block it entirely. Try `--ports 2408,500,1701,4500`, or `--warp-probes 10`. If nothing answers, the network blocks WireGuard — use CDN mode. |
 | Scan finds no results | Check network reachability, run `cf-scanner ranges refresh`, or try WARP mode or other ports. |
-| Ranges refresh fails | The refresh fetches `api.cloudflare.com/client/v4/ips` over HTTPS with SSRF guards. If it fails, the scan keeps using the bundled (possibly older) list and warns. |
+| Ranges refresh fails | The refresh fetches `api.cloudflare.com/client/v4/ips` over HTTPS with SSRF guards. If it fails, the scan keeps the bundled (possibly older) list and warns once. Automate refreshes — see `docs/refresh-automation.md` (cron/systemd/Task Scheduler/Termux). |
 
 ## Support and contributing
 
@@ -300,6 +314,7 @@ MIT.
 ## Documentation
 
 - `docs/README.md`: documentation index
+- `docs/refresh-automation.md`: keeping the Cloudflare range lists current
 - `CONTEXT.md`: context map with module index and domain glossary
 - `docs/intent/cf-scanner.md`: confirmed user intent and research corrections
 - `docs/spec.md`: the approved spec

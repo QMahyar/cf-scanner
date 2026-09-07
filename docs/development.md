@@ -103,3 +103,6 @@ signing and notarization.
 | `xray checksum mismatch` | The pinned tag in `data/xray-version.txt` was re-released. Re-verify the `.dgst` and pin the new tag. |
 | `dist: command not found` | `~/.cargo/bin` is not on PATH. Call `dist.exe` by full path. |
 | MSI step error (`candle`) | Local only: WiX is missing. See Local-only limitations. |
+
+Keeping the bundled Cloudflare ranges current (cron, systemd timers,
+Task Scheduler, Termux) is documented in `docs/refresh-automation.md`.
