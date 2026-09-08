@@ -76,7 +76,6 @@ pub(crate) fn build_scan_config(args: &ScanArgs) -> Result<ScanConfig> {
         concurrency: args.concurrency,
         timeout_ms: args.timeout_ms,
         phase2,
-        phase2_only: args.phase2_only,
         warp,
         loss_threshold: args.loss_threshold,
         min_latency_ms: args.min_latency,
@@ -190,11 +189,6 @@ fn validate_phase2_flags(args: &ScanArgs) -> Result<()> {
     if mode == ModeArg::Warp && !args.phase2_configs.is_empty() {
         return Err(anyhow!(
             "--phase2-configs is CDN-only; xray verification does not apply to WARP"
-        ));
-    }
-    if args.phase2_only {
-        return Err(anyhow!(
-            "--phase2-only needs phase-1 results from a running scan; one-shot scans cannot use it"
         ));
     }
     if args.speed_test && mode == ModeArg::Warp {

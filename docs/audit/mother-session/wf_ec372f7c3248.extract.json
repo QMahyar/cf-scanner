@@ -1,0 +1,1298 @@
+[
+ {
+  "findings": []
+ },
+ {
+  "findings": []
+ },
+ {
+  "findings": []
+ },
+ {
+  "findings": []
+ },
+ {
+  "findings": [
+   {
+    "file": "E:/code/CF-Scanner/src/main.rs",
+    "lines": "285",
+    "severity": "nit",
+    "category": "test-assertion",
+    "title": "unwrap() in test — Cli::try_parse_from",
+    "description": "Inside #[cfg(test)]. unwrap() on Cli::try_parse_from with a known-good argv literal. Would panic if the test fixture were malformed, but this is test code compiled only under #[test], never triggered by user input or network data."
+   },
+   {
+    "file": "E:/code/CF-Scanner/src/main.rs",
+    "lines": "291",
+    "severity": "nit",
+    "category": "test-assertion",
+    "title": "unwrap() in test — run_export_config success path",
+    "description": "Inside #[cfg(test)]. unwrap() on run_export_config result in the success-path test. Would panic if the function returned Err on a valid config, but this is test-only code."
+   },
+   {
+    "file": "E:/code/CF-Scanner/src/main.rs",
+    "lines": "292",
+    "severity": "nit",
+    "category": "test-assertion",
+    "title": "unreachable!() in test — exhaustive match arm",
+    "description": "Inside #[cfg(test)]. unreachable!() in the catch-all arm of a match on Command variants. The match already destructures the only expected variant (ExportConfig); this arm would panic if the CLI parser ever returned a different variant from this argv, which is impossible with the fixed argv literal."
+   },
+   {
+    "file": "E:/code/CF-Scanner/src/main.rs",
+    "lines": "294-295",
+    "severity": "nit",
+    "category": "test-assertion",
+    "title": "assert!() in test — URI prefix check",
+    "description": "Inside #[cfg(test)]. Asserts the exported URI starts with the expected vless:// prefix. Panics the test on mismatch; never runs in production."
+   },
+   {
+    "file": "E:/code/CF-Scanner/src/main.rs",
+    "lines": "298-299",
+    "severity": "nit",
+    "category": "test-assertion",
+    "title": "assert!() in test — SNI and fingerprint check",
+    "description": "Inside #[cfg(test)]. Asserts sni=b.me and fp=chrome are present in the URI. Test-only."
+   },
+   {
+    "file": "E:/code/CF-Scanner/src/main.rs",
+    "lines": "308",
+    "severity": "nit",
+    "category": "test-assertion",
+    "title": "unwrap() in test — Ipv4Addr::parse for bad-port test",
+    "description": "Inside #[cfg(test)]. unwrap() on a .parse() of a hardcoded valid IPv4 literal. Would only panic if the literal were malformed, which is a compile-time-level bug in the test itself."
+   },
+   {
+    "file": "E:/code/CF-Scanner/src/main.rs",
+    "lines": "313",
+    "severity": "nit",
+    "category": "test-assertion",
+    "title": "assert!() in test — error message content check",
+    "description": "Inside #[cfg(test)]. Asserts the error string contains \"--port\". Test-only assertion on an expected error path."
+   },
+   {
+    "file": "E:/code/CF-Scanner/src/main.rs",
+    "lines": "315",
+    "severity": "nit",
+    "category": "test-assertion",
+    "title": "unwrap_err() + unwrap() in test — bad-config error path",
+    "description": "Inside #[cfg(test)]. unwrap_err() on an expected-Err result, then unwrap() on Ipv4Addr::parse for a hardcoded valid literal. Both test-only."
+   },
+   {
+    "file": "E:/code/CF-Scanner/src/main.rs",
+    "lines": "316",
+    "severity": "nit",
+    "category": "test-assertion",
+    "title": "assert!() in test — error message contains 'export failed'",
+    "description": "Inside #[cfg(test)]. Verifies the error text. Test-only."
+   },
+   {
+    "file": "E:/code/CF-Scanner/src/main.rs",
+    "lines": "346",
+    "severity": "nit",
+    "category": "test-assertion",
+    "title": "unwrap() in test — Ipv4Addr::parse for verdict fixture",
+    "description": "Inside #[cfg(test)]. unwrap() on parsing a hardcoded valid IP literal to construct a test Verdict. Test-only."
+   },
+   {
+    "file": "E:/code/CF-Scanner/src/main.rs",
+    "lines": "359",
+    "severity": "nit",
+    "category": "test-assertion",
+    "title": "unwrap() in test — serialize_event success path",
+    "description": "Inside #[cfg(test)]. unwrap() on the successful JSON serialization of a well-formed Verdict. Tests that serialize_event works on valid data."
+   },
+   {
+    "file": "E:/code/CF-Scanner/src/main.rs",
+    "lines": "360",
+    "severity": "nit",
+    "category": "test-assertion",
+    "title": "assert!() in test — serialized JSON content check",
+    "description": "Inside #[cfg(test)]. Asserts the serialized JSON contains the expected IP string. Test-only."
+   },
+   {
+    "file": "E:/code/CF-Scanner/src/main.rs",
+    "lines": "361",
+    "severity": "nit",
+    "category": "test-assertion",
+    "title": "assert!() in test — serialization failure returns None",
+    "description": "Inside #[cfg(test)]. Asserts serialize_event returns None when the inner Serialize impl fails. Verifies graceful degradation; test-only."
+   }
+  ]
+ },
+ {
+  "findings": []
+ },
+ {
+  "findings": [
+   {
+    "file": "src/cli_wizard.rs",
+    "lines": "23",
+    "severity": "major",
+    "category": "Integer truncation / incorrect fallback",
+    "title": "u128-to-u32 silent truncation with misleading fallback",
+    "description": "warp::bundled_pool().host_count() returns u128. u32::try_from(...).unwrap_or(MAX_SCAN_COUNT) silently substitutes 100,000 if the value exceeds u32::MAX. A huge pool (billions of hosts) would be treated as exactly MAX_SCAN_COUNT rather than being capped. The correct pattern is .try_from(...).unwrap_or(u32::MAX).min(MAX_SCAN_COUNT) — clamp to u32 range first, then cap at the limit.",
+    "trigger": "u32::try_from(warp::bundled_pool().host_count())"
+   },
+   {
+    "file": "src/cli_wizard.rs",
+    "lines": "55",
+    "severity": "nit",
+    "category": "Numeric cast",
+    "title": "usize-to-u64 cast relies on implicit platform assumption",
+    "description": "MAX_WGCONF_BYTES is usize. `as u64` would truncate on hypothetical 128-bit platforms. Safe today but formally unsafe against future targets.",
+    "trigger": "file.take(MAX_WGCONF_BYTES as u64 + 1)"
+   },
+   {
+    "file": "src/cli_wizard.rs",
+    "lines": "211",
+    "severity": "minor",
+    "category": "Incorrect default / misleading display",
+    "title": "unwrap_or(0) for optional latency produces indistinguishable 0ms",
+    "description": "latency.unwrap_or(0) displays '0ms' when latency is None (failed probe, timeout). This is indistinguishable from an actual 0ms measurement. Should display 'N/A' or similar for the None case.",
+    "trigger": "latency.unwrap_or(0)"
+   },
+   {
+    "file": "src/cli_wizard.rs",
+    "lines": "284",
+    "severity": "nit",
+    "category": "Type inconsistency",
+    "title": "Phase2Config concurrency is u8 vs phase-1 u16",
+    "description": "Phase2Config::concurrency is u8 (max 255) while ScanConfig::concurrency is u16 (max 1000). No truncation occurs in this file, but the inconsistency in the data model is a design smell.",
+    "trigger": "p2.concurrency in format string"
+   },
+   {
+    "file": "src/cli_wizard.rs",
+    "lines": "299",
+    "severity": "minor",
+    "category": "Precision loss (f64->f32)",
+    "title": "parse_min_speed parses directly as f32",
+    "description": "User input is parsed directly as f32. Values with sub-f32 precision are silently lost. Since ScanConfig::min_speed_mbps is Option<f32>, the loss propagates to comparisons. f64 would be more conventional and more precise.",
+    "trigger": "value.parse::<f32>()"
+   },
+   {
+    "file": "src/cli_wizard.rs",
+    "lines": "280",
+    "severity": "nit",
+    "category": "Fragile sentinel pattern",
+    "title": "unwrap_or(u32::MAX) sentinel in min_by_key could break if latency_ms can be u32::MAX",
+    "description": "v.latency_ms.unwrap_or(u32::MAX) ensures None-latency verdicts are never selected as best. Works correctly now since u32::MAX ms (~49.7 days) is unreachable as real latency. Would silently break if a future change allowed latency_ms to be Some(u32::MAX).",
+    "trigger": "v.latency_ms.unwrap_or(u32::MAX)"
+   }
+  ]
+ },
+ {
+  "findings": []
+ },
+ {
+  "findings": [
+   {
+    "file": "E:\\code\\CF-Scanner\\src\\engine\\mod.rs",
+    "lines": "90",
+    "severity": "minor",
+    "category": "Hardcoded invariant expectation",
+    "title": "expect() on WARP server key decode in ScanController::new()",
+    "description": ".expect(\"WARP server key must decode\") on the result of WarpTransport::from_cache() with a freshly-created default SocketCache. If the embedded WARP server public key constant ever fails to decode (corrupted constant, toolchain change, code change to key format), this panics at controller construction time. Not reachable via user input or network data — the key is a compile-time constant. Only affects the ScanController::new() constructor; with_transports() and with_probes() are unaffected. Recommended fix: replace with .map_err() to propagate the error as anyhow, or add a targeted unit test.",
+    "trigger": "Compile-time constant decode failure (not user/network triggered). CI would also catch via cargo test."
+   }
+  ]
+ },
+ {
+  "findings": [
+   {
+    "file": "E:\\code\\CF-Scanner\\src\\engine\\neighbor.rs",
+    "lines": "63-73",
+    "severity": "nit",
+    "category": "numeric cast safety",
+    "title": "Unannotated narrowing cast `offset as u8`",
+    "description": "`offset as u8` (i64 to u8) is guarded by `(1..=254).contains(&offset)` on line 72, so the cast is safe today. However, the trust boundary between the range check and the narrowing cast is unannotated — no debug_assert, no #[allow], no comment. If the guard range were ever widened, the cast would silently wrap. Not a string/path bug, just a minor defensive-coding nit.",
+    "trigger": "no string or path bugs found; file is purely numeric IP arithmetic"
+   }
+  ]
+ },
+ {
+  "findings": [
+   {
+    "file": "E:/code/CF-Scanner/src/engine/store.rs",
+    "lines": "13-14",
+    "severity": "major",
+    "category": "swallowed error / silent data corruption",
+    "title": "Poisoned Mutex Silently Swallowed",
+    "description": "lock() uses unwrap_or_else(|e| e.into_inner()) to recover from mutex poison. When a thread panics mid-mutation, the inner data is in an undefined state, but every subsequent store operation proceeds on that corrupted data with no log, warning, or metric. This converts a hard crash into silent data corruption that is extremely difficult to diagnose. In a pure-CLI context with no crash-recovery, the defensive option is to panic or abort so the user gets a stack trace.",
+    "trigger": "lock(m: &Mutex<T>) -> MutexGuard<'_, T>"
+   },
+   {
+    "file": "E:/code/CF-Scanner/src/engine/store.rs",
+    "lines": "32,34",
+    "severity": "major",
+    "category": "concurrency / deadlock risk",
+    "title": "Nested Lock Acquisition Without Documented Ordering",
+    "description": "update_verdict_phase2 acquires store then pos_index. remove_verdict also acquires store then pos_index (same order, safe today). However the pattern is fragile: if any future call site starts from pos_index first, a classic ABBA deadlock occurs. Because the lock() helper silently recovers from poison, a deadlock would manifest as a hung process with no diagnostic output. Line 40 re-acquires pos_index while results is still held, compounding the risk.",
+    "trigger": "lock(store) on line 32, then lock(pos_index) on line 34"
+   },
+   {
+    "file": "E:/code/CF-Scanner/src/engine/store.rs",
+    "lines": "82-92",
+    "severity": "minor",
+    "category": "swallowed error / missing observability",
+    "title": "remove_verdict Silently Discards Unknown-Endpoint Removal",
+    "description": "When the endpoint is not found in the store, remove_verdict returns () silently. In phase2.rs:161, this is called when a colo-filtered verdict must be removed. If the verdict was already removed by a concurrent worker (a race between two phase-2 probes for the same endpoint), the caller has no way to know. set_asn already returns bool for this same pattern; remove_verdict should do the same.",
+    "trigger": "if let Some(pos) = results.iter().position(...) — no else branch or return value"
+   },
+   {
+    "file": "E:/code/CF-Scanner/src/engine/store.rs",
+    "lines": "89",
+    "severity": "minor",
+    "category": "correctness / performance degradation",
+    "title": "remove_verdict Discards Entire Position Index",
+    "description": "After removing one verdict, the entire pos_index is replaced with an empty HashMap. The next update_verdict_phase2 call that hits the None arm (line 36) will trigger a full O(n) index rebuild from scratch. With high concurrency and frequent remove_verdict calls (every colo-filtered phase-2 result triggers one), this causes repeated full-index rebuilds. Between the empty assignment and the next rebuild, update_verdict_phase2 always falls through to the linear scan.",
+    "trigger": "*lock(pos_index) = Arc::new(HashMap::new());"
+   },
+   {
+    "file": "E:/code/CF-Scanner/src/engine/store.rs",
+    "lines": "16-22",
+    "severity": "minor",
+    "category": "missing invariant enforcement",
+    "title": "merge_sorted Appends Without Deduplication",
+    "description": "Despite the name 'merge_sorted', the function is a plain extend/append. The actual sort happens lazily in results(). There is no deduplication check. If a scan worker crashes after producing a batch but before advancing its cursor and the batch is replayed, or if two workers independently probe the same IP+port, duplicate verdicts enter the store. Because update_verdict_phase2 uses position() (first match only), duplicates mean the second copy is orphaned — never updated, never removed, always included in results.",
+    "trigger": "results.extend(batch); — no dedup before insert"
+   },
+   {
+    "file": "E:/code/CF-Scanner/src/engine/store.rs",
+    "lines": "24,55-57",
+    "severity": "nit",
+    "category": "ambiguous return / lost typed information",
+    "title": "update_verdict_phase2 Returns None for Two Semantically Distinct Cases",
+    "description": "The ? operator on line 46 returns None meaning 'endpoint not in store'. Line 55 returns None meaning 'already passed phase-2, intentionally skipping'. Current callers treat both identically (no Result event emitted), but a future caller cannot distinguish 'nothing happened because the endpoint was filtered away' from 'nothing happened because it already passed'. This is a design-level observation, not a runtime bug.",
+    "trigger": "return None; at line 55 vs implicit None via ? at line 46"
+   },
+   {
+    "file": "E:/code/CF-Scanner/src/engine/store.rs",
+    "lines": "70-79",
+    "severity": "nit",
+    "category": "silent data loss / observability",
+    "title": "set_asn Silently Drops ASN Data for Missing Endpoints",
+    "description": "set_asn returns false when the endpoint is absent (e.g., already removed by remove_verdict due to colo-filtering). enrich.rs:81 calls set_asn for every endpoint, but there is no counter for failed enrichments — only the success count is logged. The user has no visibility into how many verdicts lost their ASN annotation.",
+    "trigger": "false return in the else branch of set_asn"
+   }
+  ]
+ },
+ {
+  "findings": []
+ },
+ {
+  "findings": [
+   {
+    "file": "E:\\code\\CF-Scanner\\src\\xray.rs",
+    "severity": "nit",
+    "category": "atomic ordering",
+    "title": "No atomic ordering issues found",
+    "description": "This file contains no atomic ordering issues. All atomic operations are confined to test code (lines 1192-1225) where a simple AtomicUsize call counter uses Ordering::Relaxed for both fetch_add and load. This is correct: the counter is only inspected after all spawned tasks have been joined via handle.await, which provides the necessary happens-before edge. The production code uses OnceLock (correctly, for one-time initialization of a tokio::Mutex), tokio::sync::Mutex (for async state in ensure_binary), and std::sync::Mutex (for stderr capture tail). None of these involve user-facing atomic ordering decisions."
+   }
+  ]
+ },
+ {
+  "findings": [
+   {
+    "file": "E:\\code\\CF-Scanner\\src\\api\\types.rs",
+    "lines": "171-187",
+    "severity": "major",
+    "category": "Missing #[serde(default)] on deny_unknown_fields struct",
+    "title": "WarpConfig.verify_with_wgconf missing #[serde(default)] breaks backward-compatible deserialization",
+    "description": "WarpConfig has #[serde(deny_unknown_fields)] and its Default impl sets verify_with_wgconf to false, confirming it is an opt-in flag. However, the field declaration `pub verify_with_wgconf: bool` lacks #[serde(default)]. Because deny_unknown_fields is active, any WarpConfig JSON produced by an older version (before this field existed) that omits verify_with_wgconf will fail to deserialize with \"missing field `verify_with_wgconf`\" instead of defaulting to false. Every other opt-in boolean in the file (e.g. ScanConfig.include_v6, ScanConfig.phase2_only, ScanConfig.speed_test) correctly carries #[serde(default)]. This field is the sole outlier. Fix: add #[serde(default)] to verify_with_wgconf.",
+    "trigger": "deny_unknown_fields + bool without default on an opt-in field"
+   },
+   {
+    "file": "E:\\code\\CF-Scanner\\src\\api\\types.rs",
+    "lines": "247-260",
+    "severity": "minor",
+    "category": "Redundant #[serde(default)] on Option fields",
+    "title": "Verdict fields loss_pct, fail_reason, asn, isp carry redundant #[serde(default)]",
+    "description": "In the Verdict struct, the fields loss_pct: Option<u32>, fail_reason: Option<String>, asn: Option<u32>, and isp: Option<String> all carry #[serde(default)]. For Option<T> fields, serde already treats absent JSON as None without any attribute, so #[serde(default)] is redundant here. Compare with the older Option fields in the same struct (latency_ms, country, colo, phase2) which correctly omit the attribute. This is not a functional bug but creates an inconsistent style where some Option fields have the redundant attribute and others do not, making it harder to distinguish genuinely defaulted fields from inherently-optional ones during code review.",
+    "trigger": "Option<T> with #[serde(default)] is no-op"
+   },
+   {
+    "file": "E:\\code\\CF-Scanner\\src\\api\\types.rs",
+    "lines": "306-322",
+    "severity": "nit",
+    "category": "Redundant #[serde(default)] on Option fields",
+    "title": "Phase2Verdict fields error, config_index, verifier, speed_test_mbps carry redundant #[serde(default)]",
+    "description": "Same pattern as Verdict: error: Option<String>, config_index: Option<u32>, verifier: Option<Verifier>, and speed_test_mbps: Option<f32> all carry #[serde(default)], which is a no-op for Option types. The latency_ms: Option<u32> field in the same struct correctly omits it. Not a functional bug, just inconsistent noise.",
+    "trigger": "Option<T> with #[serde(default)] is no-op"
+   }
+  ]
+ },
+ {
+  "findings": [
+   {
+    "file": "E:/code/CF-Scanner/src/engine/cdn.rs",
+    "lines": "326",
+    "severity": "major",
+    "category": "Atomic ordering",
+    "title": "scanned incremented with Relaxed, read with Acquire in stop-check",
+    "description": "Workers write ctx.scanned.fetch_add(1, Ordering::Relaxed) but ProbeContext::should_stop() reads it with Ordering::Acquire. Relaxed stores do not establish a happens-before relationship with any other thread. On weakly-ordered architectures (AArch64/ARM), the producer can read a stale scanned value for an unbounded number of poll iterations and overshoot the cap stop condition. The test cap_overshoot_is_bounded_by_worker_count runs on x86 (TSO) where Relaxed is equivalent to SeqCst in practice and would not catch a real AArch64 regression. The worker write should use Ordering::Release.",
+    "trigger": "ctx.scanned.fetch_add(1, Ordering::Relaxed)"
+   },
+   {
+    "file": "E:/code/CF-Scanner/src/engine/cdn.rs",
+    "lines": "328",
+    "severity": "major",
+    "category": "Atomic ordering",
+    "title": "found incremented with Relaxed, read with Acquire in stop-check",
+    "description": "Same pattern as the scanned issue. Workers do ctx.found.fetch_add(1, Ordering::Relaxed) and should_stop() reads it with Ordering::Acquire. On weakly-ordered architectures the producer can miss the found-stop threshold entirely for a non-trivial window, causing unnecessary probes to be dispatched even after enough results exist. Should be Ordering::Release on the write side.",
+    "trigger": "ctx.found.fetch_add(1, Ordering::Relaxed)"
+   },
+   {
+    "file": "E:/code/CF-Scanner/src/engine/cdn.rs",
+    "lines": "218-230",
+    "severity": "major",
+    "category": "TOCTOU race / data loss",
+    "title": "side_rx drain exits on inflight==0, silently dropping undrained neighbor tasks",
+    "description": "After the main producer loop, the final drain loop breaks when inflight==0. Between a worker decrementing inflight and the producer checking it, a previously-completed worker can enqueue a new neighbor task into side_rx. The producer sees inflight==0 and drops the channel. Those orphaned tasks are never forwarded to any worker, never probed, and never counted in scanned or found. The data loss is small (at most one batch of neighbor candidates per cascading hit) but it means the store and summary can undercount on neighbor-heavy scans.",
+    "trigger": "Err(mpsc::error::TryRecvError::Empty) => { if inflight.load(Ordering::Acquire) == 0 { break; } }"
+   },
+   {
+    "file": "E:/code/CF-Scanner/src/engine/cdn.rs",
+    "lines": "374-376",
+    "severity": "minor",
+    "category": "Atomic ordering / race",
+    "title": "last_milestone uses Relaxed across multiple worker threads",
+    "description": "ProbeContext.last_milestone is shared across all workers. Each worker calls milestone_due which does a compare_exchange with Ordering::Relaxed. On weakly-ordered architectures a worker can see a stale last_milestone value and skip a milestone entirely, or emit a milestone that was already emitted. This is cosmetic (progress events only) but violates the monotonicity guarantee that the test progress_milestones_are_monotonic_and_unique asserts. The test runs on x86 where this cannot manifest.",
+    "trigger": "fn claim_milestone(last: &AtomicU64, observed: u64, cadence: u64) -> bool"
+   },
+   {
+    "file": "E:/code/CF-Scanner/src/engine/cdn.rs",
+    "lines": "340-342",
+    "severity": "minor",
+    "category": "Silent data loss",
+    "title": "events broadcast send silently drops when receivers are lagging",
+    "description": "Workers send ScanEvent::Result via let _ = ctx.events.send(...). broadcast::Sender::send returns Err when all receivers have been dropped or when the channel's lagging-receiver buffer is full. The error is discarded with let _ =. If the ScanEvent receiver drops (e.g. the main agent disconnects mid-scan), all subsequent result events are silently lost while workers continue probing.",
+    "trigger": "let _ = ctx.events.send(ScanEvent::Result(Box::new(verdict.clone())));"
+   },
+   {
+    "file": "E:/code/CF-Scanner/src/engine/store.rs",
+    "lines": "30-40",
+    "severity": "nit",
+    "category": "TOCTOU",
+    "title": "snapshot_sorted dirty-flag consumption races with concurrent merge_sorted",
+    "description": "snapshot_sorted checks and swaps the dirty flag, then sorts under the mutex. Concurrently, a worker flush calls merge_sorted which pushes new verdicts and sets dirty=true. If the push happens between the snapshot's dirty.swap and the sort, dirty was already consumed but the new items are not yet in the vec. The snapshot then sorts and clones a stale view. Functionally safe (the next snapshot catches it) but means results() can return an unsorted view with newly-appended items at the end.",
+    "trigger": "if self.store_dirty.swap(false, Ordering::AcqRel) { guard.sort_unstable_by(...) }"
+   }
+  ]
+ },
+ {
+  "findings": [
+   {
+    "file": "src/inline_verify.rs",
+    "lines": "488-489",
+    "severity": "minor",
+    "category": "test-mutex-poisoning",
+    "title": "Mutex poisoning silently recovered in FakeServer and RecordingProbe",
+    "description": "Every test mutex lock uses `lock().unwrap_or_else(|e| e.into_inner())` to recover from poisoned mutexes (e.g., lines 488, 496, 613). If a test panics while holding a mutex guard, the mutex becomes poisoned. The `into_inner()` path silently discards the poison, allowing subsequent tests to proceed with potentially corrupted state. In this codebase each test constructs its own FakeServer/RecordingProbe, so the practical impact is limited — but the pattern masks panics that should propagate. Consider using `.lock().unwrap()` instead so test failures surface immediately.",
+    "trigger": "spawn_fake_server, serve_one, RecordingProbe::observed"
+   },
+   {
+    "file": "src/inline_verify.rs",
+    "lines": "380-381",
+    "severity": "nit",
+    "category": "test-atomic-ordering",
+    "title": "AtomicUsize connections counter uses SeqCst instead of Relaxed",
+    "description": "Line 381 uses `connections_task.fetch_add(1, Ordering::SeqCst)`. Since this is a simple monotonic counter with no dependent ordering requirements, `Ordering::Relaxed` is sufficient and cheaper, especially on ARM. The corresponding read on line 475 (`connections.load(Ordering::SeqCst)`) also uses SeqCst where Relaxed would suffice. Not a correctness bug, but unnecessarily expensive.",
+    "trigger": "connections_task.fetch_add(1, Ordering::SeqCst)"
+   },
+   {
+    "file": "src/inline_verify.rs",
+    "lines": "N/A (entire production path)",
+    "severity": "nit",
+    "category": "no-concurrency-issues",
+    "title": "Production code is concurrency-clean — no findings",
+    "description": "The production path (InlineTunnelProbe::probe, run_attempt, LiveTunnel, exchange, establish, open_live_tunnel, PrefixedReader, build_protocol_header, parse_uuid) uses no shared mutable state. All values are exclusively owned or mutably borrowed within a single sequential async task. The TlsConnector is Arc-backed and safely cloned. The socks::tls_connector() global is a LazyLock that returns .clone() of an Arc-wrapped connector. There are no Mutex/RwLock, no atomics, no channels, and no tokio::spawn in the production path. No TOCTOU races, no lock ordering issues, and no deadlock potential exist."
+   }
+  ]
+ },
+ {
+  "findings": [
+   {
+    "file": "E:\\code\\CF-Scanner\\src\\verify.rs",
+    "lines": "303",
+    "severity": "major",
+    "category": "silent error swallowing",
+    "title": "fresh_trial_dir silently ignores create_dir_all failure",
+    "description": "`let _ = std::fs::create_dir_all(&dir)` discards the Result. If directory creation fails (disk full, permissions, read-only filesystem), the function returns a PathBuf pointing to a nonexistent directory. Downstream callers (make_trial_dir, the probe, xray::spawn) will fail later with confusing errors that do not point back to this root cause. The function signature returns `PathBuf` with no `Result` wrapper, so callers have no way to detect this failure. This is called on every scan probe.",
+    "trigger": "Disk full, read-only data directory, or OS-level permission denial in the data dir."
+   },
+   {
+    "file": "E:\\code\\CF-Scanner\\src\\verify.rs",
+    "lines": "307-308",
+    "severity": "major",
+    "category": "security — credential exposure",
+    "title": "fresh_trial_dir silently ignores chmod 0700 on Unix",
+    "description": "`let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))` silently swallows the error. The comment explicitly states 'Trial dirs hold xray config.json with proxy credentials: owner-only listing.' If this fails, the trial directory (containing proxy credentials and xray config) remains world-readable. On a shared system, other users could read the SOCKS proxy credentials from config.json.",
+    "trigger": "Unusual filesystem that does not honor POSIX permissions (e.g., FAT32, certain FUSE mounts), or ACL interference on Linux."
+   },
+   {
+    "file": "E:\\code\\CF-Scanner\\src\\verify.rs",
+    "lines": "311-312",
+    "severity": "minor",
+    "category": "panic on edge-case system state",
+    "title": "SystemTime arithmetic can panic on misconfigured system clock",
+    "description": "`std::time::SystemTime::now() - STALE_TRIAL_AGE` uses the Sub<Duration> impl which panics if the result would precede SystemTime::UNIX_EPOCH. STALE_TRIAL_AGE is 3600 seconds. If the system clock is set to a time within the first hour after Unix epoch (before 1970-01-01 01:00:00 UTC), this panics. Not exploitable via network or user input, but an unguarded panic in production code that could crash the scan mid-flight. The async variant (line 364) correctly uses `duration_since().unwrap_or_default()`, so this inconsistency suggests the blocking path was overlooked.",
+    "trigger": "System clock set to an epoch-adjacent time (e.g., during NTP misconfiguration, VM clock reset, or dual-boot clock skew)."
+   },
+   {
+    "file": "E:\\code\\CF-Scanner\\src\\verify.rs",
+    "lines": "245",
+    "severity": "nit",
+    "category": "safe unwrap_or",
+    "title": "unwrap_or on split().next() — safe, no action needed",
+    "description": "`url.split(['?', '#']).next().unwrap_or(url)` is technically safe because `str::split` always yields at least one element. The `unwrap_or` is a defensive belt-and-suspenders guard. No risk of panic from user input (a URL string always produces at least one split token). Included only for completeness.",
+    "trigger": "None — this cannot fail."
+   },
+   {
+    "file": "E:\\code\\CF-Scanner\\src\\verify.rs",
+    "lines": "364",
+    "severity": "nit",
+    "category": "safe unwrap_or_default",
+    "title": "unwrap_or_default on duration_since — safe, no action needed",
+    "description": "`std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default()` gracefully handles the case where the system clock is before UNIX_EPOCH by defaulting to 0. Included only for completeness.",
+    "trigger": "None — this cannot fail."
+   },
+   {
+    "file": "E:\\code\\CF-Scanner\\src\\verify.rs",
+    "lines": "446",
+    "severity": "nit",
+    "category": "safe unwrap_or_else",
+    "title": "unwrap_or_else on last_err — safe, always produces a value",
+    "description": "`last_err.unwrap_or_else(|| anyhow!(...))` is safe: the `for` loop in `spawn_with_retry` always sets `last_err` on failure, and the `unwrap_or_else` provides a fallback message anyway. No risk of panic.",
+    "trigger": "None — this cannot fail."
+   }
+  ]
+ },
+ {
+  "findings": [
+   {
+    "file": "E:\\code\\CF-Scanner\\src\\cli\\scan_args.rs",
+    "lines": "195-198",
+    "severity": "major",
+    "category": "dead code / unreachable branch",
+    "title": "--phase2-only is unconditionally rejected and unreachable in the scan subcommand",
+    "description": "validate_phase2_flags always rejects phase2_only=true, but the flag is declared on ScanArgs (cli.rs:224), clap requires --phase2-configs, and the engine code (engine/cdn.rs:115) actually handles it. No user-provided flag combination can succeed. The wizard also never sets it. The flag is exposed in --help but always fails.",
+    "trigger": "if args.phase2_only { return Err(anyhow!(\"--phase2-only needs phase-1 results from a running scan; one-shot scans cannot use it\")); }"
+   },
+   {
+    "file": "E:\\code\\CF-Scanner\\src\\retry.rs",
+    "lines": "16-23",
+    "severity": "major",
+    "category": "security inconsistency / incorrect behavior",
+    "title": "save_config does NOT strip warp.wgconf despite help text claiming WARP keys are never saved",
+    "description": "The --retry-last long help (cli.rs:308-312) states 'Phase-2 configs and WARP keys are never saved', but save_config only drops phase2 (sanitized.phase2 = None). The WarpConfig.wgconf field containing a WireGuard private key is serialized to last-scan.json via write_secret. Either the save function should also drop warp.wgconf (security bug) or the help text is factually wrong.",
+    "trigger": "sanitized.phase2 = None; // warp.wgconf is NOT stripped"
+   },
+   {
+    "file": "E:\\code\\CF-Scanner\\src\\cli\\scan_args.rs",
+    "lines": "12-21",
+    "severity": "minor",
+    "category": "missing edge case handling",
+    "title": "retry_last path does not re-apply --warp-wgconf-file despite help text promising it",
+    "description": "The help text says 're-supply them with --phase2-configs / --warp-wgconf-file' but the retry path only re-applies --phase2-configs. When a user runs --retry-last --warp-wgconf-file new-key.txt --mode warp, the file is never loaded and the saved config's warp.wgconf is used as-is. The user-supplied flag is silently ignored.",
+    "trigger": "if !args.phase2_configs.is_empty() { /* only phase2 is re-applied */ } // No equivalent for args.warp_wgconf_file"
+   },
+   {
+    "file": "E:\\code\\CF-Scanner\\src\\cli\\scan_args.rs",
+    "lines": "213-218",
+    "severity": "nit",
+    "category": "dead code",
+    "title": "Unreachable phase2_configs.is_empty() branch in build_phase2 custom validation",
+    "description": "The function returns Ok(None) at line 189 when phase2_configs is empty, so execution never reaches the phase2_custom validation with an empty configs list. The condition args.phase2_configs.is_empty() in the || is always false. Additionally clap enforces requires=\"phase2_configs\" on --phase2-custom. The dead branch is harmless but misleading.",
+    "trigger": "if args.phase2_custom.is_some() && (args.phase2_configs.is_empty() || fragment != FragmentPreset::Custom)"
+   },
+   {
+    "file": "E:\\code\\CF-Scanner\\src\\cli\\scan_args.rs",
+    "lines": "82-86",
+    "severity": "minor",
+    "category": "missing edge case handling",
+    "title": "No warning when --count is less than --target",
+    "description": "cap_warning only checks cap < target. But --count sets total IPs to scan (ScanTarget::Count) and --target sets working endpoints to find. Running --count 5 --target 10 scans only 5 IPs but demands 10 working endpoints, which is impossible. No warning is emitted. The analogous cap < target case does warn.",
+    "trigger": "cap_warning only checks: (cap < args.target).then(|| ...)"
+   },
+   {
+    "file": "E:\\code\\CF-Scanner\\src\\cli\\scan_args.rs",
+    "lines": "12-21",
+    "severity": "minor",
+    "category": "silent no-op / inconsistent behavior",
+    "title": "retry_last silently ignores most scan flags without warning",
+    "description": "When --retry-last is active, the entire config is loaded from the saved file. Every ScanArgs field (--mode, --target, --count, --concurrency, --timeout-ms, --probe, --ipv6, --seed, --warp-probes, etc.) is silently ignored. Only --phase2-configs is selectively re-applied. Meanwhile caller-facing flags like --verbose, --json-errors, --export ARE honored. This inconsistency between related scan flags is likely to surprise users.",
+    "trigger": "if args.retry_last { let mut cfg = cf_scanner::retry::load_config()?; ... return Ok(cfg); }"
+   }
+  ]
+ },
+ {
+  "findings": [
+   {
+    "file": "E:\\code\\CF-Scanner\\src\\socks.rs",
+    "lines": "166-180",
+    "severity": "minor",
+    "category": "Dead code path",
+    "title": "Redundant post-loop cap check in close-delimited body reader",
+    "description": "In read_body's close-delimited branch (the else at line 166), the cap check body.len() > max_body appears both inside the loop (line 170) and after the loop (line 180). The post-loop check is dead code because the loop already bails whenever body.len() > max_body. The only path out of the loop is Ok(0) or Err (both break), and on each successful read the cap is checked before the next iteration. A body exactly equal to max_body bytes passes both checks (since the comparison is strict >), which is correct, but the second check can never trigger an error that the first doesn't already catch."
+   },
+   {
+    "file": "E:\\code\\CF-Scanner\\src\\socks.rs",
+    "lines": "299-301",
+    "severity": "nit",
+    "category": "Dead code path",
+    "title": "path.is_empty() fallback is unreachable in timed_download_via_socks_inner",
+    "description": "The url::Url::path() method always returns at least '/' for well-formed URLs. The check `if path.is_empty()` at line 299 followed by the \"/\" fallback on line 301 is dead code. The identical pattern exists in get_via_socks_inner at lines 367-369."
+   },
+   {
+    "file": "E:\\code\\CF-Scanner\\src\\socks.rs",
+    "lines": "94, 187",
+    "severity": "nit",
+    "category": "Dead code",
+    "title": "unwrap_or(\"\") on split(';').next() is unreachable",
+    "description": "In both read_body (line 94) and decode_chunked (line 187), the pattern .split(';').next().unwrap_or(\"\") is used. split(';') on any string always returns an iterator with at least one element, so next() is never None and the unwrap_or fallback is dead code."
+   },
+   {
+    "file": "E:\\code\\CF-Scanner\\src\\socks.rs",
+    "lines": "333-341",
+    "severity": "nit",
+    "category": "Unnecessary I/O",
+    "title": "count_download loop performs one extra zero-byte read after reaching cap",
+    "description": "In count_download, the cap check `if total >= cap { break; }` is at the top of the loop (line 338). After a read that brings total to cap via .min(cap) on line 341, the loop continues to the next iteration where it breaks. This means one additional read() syscall is attempted after the cap is already reached. The read likely returns 0 (EOF) or some bytes that are discarded, so it is harmless but wastes one syscall. Breaking inside the Ok(n) branch after .min(cap) would be cleaner."
+   },
+   {
+    "file": "E:\\code\\CF-Scanner\\src\\socks.rs",
+    "lines": "416-419",
+    "severity": "nit",
+    "category": "Fragile test code",
+    "title": "fake_socks_server only handles domain-name (0x03) SOCKS5 requests",
+    "description": "The test fake_socks_server's inner loop breaks only when req[3] == 0x03 (domain name address type). If the test were ever called with an IP address (0x01 for IPv4 or 0x04 for IPv6), the loop would never break and the test would hang. Currently safe because all test URLs use domain names, but fragile if tests change."
+   }
+  ]
+ },
+ {
+  "findings": [
+   {
+    "file": "src/ranges/pool.rs",
+    "lines": "161-168",
+    "severity": "major",
+    "category": "swallowed error",
+    "title": "base_pool discards refresh parse error via .ok()",
+    "description": "In base_pool, CidrPool::parse(text).ok() silently discards the parse error when refreshed IPv4 ranges fail to parse or yield an empty pool. The function falls back to bundled() and returns Ok with no way for the caller to distinguish 'refresh succeeded' from 'refresh was garbage, silently fell back'. The error should propagate with context, or the caller should receive a richer signal than Ok(bundled).",
+    "trigger": "CidrPool::parse(text).ok().filter(|p| !p.ranges.is_empty())"
+   },
+   {
+    "file": "src/ranges/pool.rs",
+    "lines": "170-177",
+    "severity": "major",
+    "category": "swallowed error",
+    "title": "base_pool_v6 discards refresh parse error via .ok() (same pattern)",
+    "description": "base_pool_v6 mirrors the same issue for IPv6 ranges. CidrPool::parse(text).ok() silently drops the parse error and falls back to bundled_v6() with only a tracing::warn. No mechanism for the caller to detect the fallback occurred.",
+    "trigger": "CidrPool::parse(text).ok().filter(|p| !p.ranges.is_empty())"
+   },
+   {
+    "file": "src/ranges/pool.rs",
+    "lines": "197-201",
+    "severity": "major",
+    "category": "swallowed error",
+    "title": "effective_pool silently swallows I/O and path errors on v4 refresh read",
+    "description": "tokio::fs::read_to_string(p).await.ok() silently swallows I/O errors (permission denied, file locked, disk error) when reading the refreshed v4 ranges file. The paths::refreshed_ranges_path() error is also silently consumed into None via Err(_) => None. If the file exists but is unreadable, the user gets bundled ranges with no error, no warning log, and no way to diagnose the issue.",
+    "trigger": "Ok(p) => tokio::fs::read_to_string(p).await.ok(), Err(_) => None"
+   },
+   {
+    "file": "src/ranges/pool.rs",
+    "lines": "202-207",
+    "severity": "major",
+    "category": "swallowed error",
+    "title": "effective_pool silently swallows I/O and path errors on v6 refresh read",
+    "description": "The v6 path has the identical silent .ok() on read_to_string and silent Err(_) => None on path resolution. Both swallow I/O failures without logging. This is the same bug repeated for the v6 refresh path.",
+    "trigger": "Ok(p) => tokio::fs::read_to_string(p).await.ok(), Err(_) => None"
+   },
+   {
+    "file": "src/ranges/pool.rs",
+    "lines": "243-244",
+    "severity": "minor",
+    "category": "swallowed error",
+    "title": "Temp-file cleanup failure silently ignored",
+    "description": "In write_pool_to, the error-cleanup branch does `let _ = fs::remove_file(&tmp)`. A leftover temp file is silently left behind on disk on rename failure (common on Windows due to file locking). At minimum a debug/warn log of the removal failure would help diagnose issues.",
+    "trigger": "let _ = fs::remove_file(&tmp);"
+   },
+   {
+    "file": "src/ranges/pool.rs",
+    "lines": "231-232",
+    "severity": "nit",
+    "category": "missing error context",
+    "title": "data_write_guard result silently discarded via _gate",
+    "description": "paths::data_write_guard() returns a guard whose construction error, if any, is hidden by the _gate variable name which suppresses unused-result warnings. If data_write_guard returns a Result, any error is lost.",
+    "trigger": "let _gate = paths::data_write_guard();"
+   },
+   {
+    "file": "src/ranges/pool.rs",
+    "lines": "197-208",
+    "severity": "minor",
+    "category": "inconsistent error semantics",
+    "title": "Async effective_pool buries errors that sync effective_pool_from exposes",
+    "description": "effective_pool_from (sync, used in tests) takes Option<&str> so errors are the caller's problem. effective_pool (async runtime path) silently swallows I/O and path-resolution errors internally. This asymmetry means tests cannot exercise the 'file exists but is unreadable' codepath because the error is already buried before reaching effective_pool_from.",
+    "trigger": "fn effective_pool vs fn effective_pool_from"
+   },
+   {
+    "file": "src/ranges/pool.rs",
+    "lines": "58-59",
+    "severity": "nit",
+    "category": "lossy error conversion",
+    "title": "Typed parse error flattened to anyhow string",
+    "description": "parse_cidr converts the typed error from crate::api::types::parse_cidr into a bare anyhow!(\"{e}\"), flattening the original error type (its variant, field values, structured data) into a string message. Any caller that wants to match on a specific parse failure reason cannot do so through anyhow::Error.",
+    "trigger": "crate::api::types::parse_cidr(s).map_err(|e| anyhow!(\"{e}\"))"
+   }
+  ]
+ },
+ {
+  "findings": []
+ },
+ {
+  "findings": [
+   {
+    "file": "src/configs.rs",
+    "lines": "570",
+    "severity": "minor",
+    "category": "silent truncation",
+    "title": "alter_id silently truncated to 0 on values > 65535",
+    "description": "get_flex(\"aid\").and_then(|a| a.parse().ok()).unwrap_or(0) converts any invalid u16 parse to 0 with no error or warning. vmess spec allows alter_id as any non-negative integer; values in 65536..u64::MAX are silently discarded. Contrast with port parsing two lines above which correctly rejects invalid input with bail!.",
+    "trigger": "let alter_id: u16 = get_flex(\"aid\").and_then(|a| a.parse().ok()).unwrap_or(0);"
+   },
+   {
+    "file": "src/configs.rs",
+    "lines": "570",
+    "severity": "minor",
+    "category": "inconsistent error handling",
+    "title": "Invalid alter_id silently zeroed while invalid port is a hard error",
+    "description": "The alter_id parse uses .ok().unwrap_or(0) to mask failure, while the port parse on line 568 uses .ok_or_else(|| anyhow!(...))? to propagate the error. This asymmetry means a vmess config with a non-numeric or overflowed aid field is silently accepted with alter_id=0, which may produce a different xray config than intended.",
+    "trigger": "port parse uses ok_or_else/bail, alter_id parse uses ok/unwrap_or"
+   }
+  ]
+ },
+ {
+  "findings": [
+   {
+    "file": "E:/code/CF-Scanner/src/engine/mod.rs",
+    "lines": "128-140",
+    "severity": "minor",
+    "category": "contention",
+    "title": "snapshot_sorted holds Mutex during O(n log n) sort",
+    "description": "snapshot_sorted() acquires the store Mutex, swaps store_dirty, sorts the entire Vec in-place, then clones. While the lock is held, all worker flushes (merge_sorted), results(), has_results(), for_each_result(), set_asn(), phase2_passed(), and working_found() are blocked. Under high concurrency with large result sets, this creates a latency spike for every reader. The sort itself is correct (AcqRel ordering on the dirty flag ensures Release stores from merge_sorted are visible).",
+    "trigger": "Any call to results()/for_each_result() while workers are flushing large batches"
+   },
+   {
+    "file": "E:/code/CF-Scanner/src/engine/phase2.rs",
+    "lines": "75-120",
+    "severity": "minor",
+    "category": "contention",
+    "title": "Phase-2 workers lock the passed HashSet up to 5 times per iteration",
+    "description": "Each phase-2 worker iteration acquires the passed Mutex for: (1) contains check, (2) len check, (3) insert on pass, (4) len check after pass, (5) len check for overshoot. Under high phase-2 concurrency (p2.concurrency), this serializes on a single Mutex. The checks are individually correct but the group is not atomic -- between the len check and the insert, other workers can also pass the check, causing passed to overshoot stop_found. This overshoot is tested and accepted behavior (phase2_records_the_overshoot_pass_past_the_found_stop), but the multiple lock acquisitions are unnecessary overhead.",
+    "trigger": "Phase-2 verification with high concurrency and a small stop.found"
+   },
+   {
+    "file": "E:/code/CF-Scanner/src/engine/store.rs",
+    "lines": "33-62",
+    "severity": "minor",
+    "category": "contention",
+    "title": "update_verdict_phase2 holds store lock while rebuilding PosIndex",
+    "description": "When the cached PosIndex is stale (position mismatch), update_verdict_phase2 rebuilds the entire HashMap from the store while holding the store Mutex. This is O(n) where n is the number of stored verdicts. During the rebuild, all other store access (merge_sorted from workers, snapshot_sorted from readers) is blocked. For stores with thousands of verdicts, this creates a noticeable stall.",
+    "trigger": "Phase-2 verification after remove_verdict invalidated the index, or after store mutations shifted positions"
+   },
+   {
+    "file": "E:/code/CF-Scanner/src/engine/phase2.rs",
+    "lines": "96-102",
+    "severity": "minor",
+    "category": "counter-accuracy",
+    "title": "Phase-2 attempts counter overcounts cancelled probes",
+    "description": "attempts.fetch_add(1, Ordering::Relaxed) is called before the probe runs. If the probe is cancelled via tokio::select! (cancelled_signal branch), the attempt is counted but no work was done. The error message 'every attempt failed before a probe ran' can be misleading when the real cause is cancellation. The terminal progress event also includes these phantom attempts in its done count.",
+    "trigger": "Cancel signal received during phase-2 verification"
+   },
+   {
+    "file": "E:/code/CF-Scanner/src/engine/cdn.rs",
+    "lines": "193-197",
+    "severity": "nit",
+    "category": "ordering",
+    "title": "scanned counter uses Relaxed for fetch_add but Acquire for should_stop load",
+    "description": "Workers increment ctx.scanned with Ordering::Relaxed, while ProbeContext::should_stop() reads it with Ordering::Acquire. The Acquire load will see its own Relaxed stores (single-thread coherence) but may not see other workers' increments immediately. This means the cap stop condition can be overshoot by up to (concurrency - 1) probes. This is documented behavior (cap_overshoot_is_bounded_by_worker_count test), but using Release for the fetch_add would make the overshoot strictly bounded to 1 instead of concurrency.",
+    "trigger": "Scan with --cap and high concurrency"
+   },
+   {
+    "file": "E:/code/CF-Scanner/src/warp.rs",
+    "lines": "288-296",
+    "severity": "nit",
+    "category": "atomic-waste",
+    "title": "NEXT_INDEX skip-0 logic wastes an index on wrap-around",
+    "description": "When NEXT_INDEX wraps from u32::MAX to 0, the skip-0 logic does a second fetch_add, wasting index 0. The first fetch_add returns 0, then the second returns 1. Thread A gets index 1, but the value 0 is lost. This is harmless (one wasted index out of 4 billion) but the skip could be done more cleanly with a compare_exchange loop that avoids the wasted value.",
+    "trigger": "After ~4 billion WARP probes (effectively never)"
+   },
+   {
+    "file": "E:/code/CF-Scanner/src/engine/phase2.rs",
+    "lines": "108-116",
+    "severity": "nit",
+    "category": "lock-pattern",
+    "title": "Phase-2 passed set checked multiple times non-atomically between probe and store mutation",
+    "description": "After a probe completes, the worker checks lock(&passed).len() >= stop_found and lock(&passed).len() > stop_found in two separate lock acquisitions. Between these checks, another worker could insert into passed, making the overshoot check return a different result than expected. The code handles this correctly (the overshoot flag just causes an early break), but the two checks could be merged into a single lock acquisition for clarity.",
+    "trigger": "Phase-2 verification hitting the stop.found boundary with concurrent workers"
+   }
+  ]
+ },
+ {
+  "findings": [
+   {
+    "file": "src/ranges/official.rs",
+    "lines": "53",
+    "severity": "nit",
+    "category": "Unbounded collection (theoretical)",
+    "title": "OfficialResponse.errors uses untyped Vec<serde_json::Value>",
+    "description": "The errors field is Vec<serde_json::Value>, where each element is an untyped JSON tree. A pathological API response with a large errors array containing deeply nested objects could consume disproportionate memory during deserialization. In practice, error arrays are 1-2 elements and the entire Vec is bounded by the already-buffered HTTP response body size. No action needed."
+   }
+  ]
+ },
+ {
+  "findings": []
+ },
+ {
+  "findings": [
+   {
+    "file": "src/ranges/official.rs",
+    "lines": "18-26",
+    "severity": "major",
+    "category": "blocking the runtime",
+    "title": "refresh_to_disk calls blocking I/O and std::sync::Mutex from async fn without spawn_blocking",
+    "description": "refresh_to_disk is an async fn that awaits the HTTP fetch then calls write_pool_to synchronously. write_pool_to (pool.rs:310-327) performs fs::create_dir_all, fs::write, fs::rename, and fs::remove_file — all blocking syscalls — while holding a std::sync::Mutex guard (data_write_guard). Because no tokio::task::spawn_blocking wraps this work, the blocking I/O and the mutex acquisition run directly on a Tokio worker thread. If another task (in the same or a different scan) contends for data_write_guard, the worker thread blocks entirely, stalling all other tasks on that thread. The window is small (small file writes) but the pattern is incorrect.",
+    "trigger": "refresh_to_disk calls write_pool_to synchronously within an async context"
+   },
+   {
+    "file": "src/ranges/official.rs",
+    "lines": "28-40",
+    "severity": "major",
+    "category": "blocking the runtime",
+    "title": "refresh_v6_to_disk has the same blocking I/O + std::sync::Mutex under async fn issue",
+    "description": "Identical to refresh_to_disk: the async fn calls write_pool_to synchronously, which performs blocking filesystem operations while holding a std::sync::Mutex. The fix is the same: wrap the write_pool_to call in tokio::task::spawn_blocking (or make write_pool_to async with tokio::fs equivalents), and convert the std::sync::Mutex to a tokio::sync::Mutex if the guard needs to cross await points in the future.",
+    "trigger": "refresh_v6_to_disk calls write_pool_to synchronously within an async context"
+   },
+   {
+    "file": "src/ranges/http.rs",
+    "lines": "91-106",
+    "severity": "minor",
+    "category": "missing timeout on body read",
+    "title": "Body chunk reading loop has no timeout; slow server stalls the connection indefinitely",
+    "description": "fetch_tls_inner sets a 20-second timeout on the initial request (line 86), but the chunk-reading loop (while let Some(chunk) = response.chunk().await) has no per-chunk or overall deadline. A malicious or degraded server that sends one byte every 19 seconds will keep the connection and the Tokio task alive indefinitely, without tripping the reqwest timeout. A tokio::time::timeout wrapping the entire body read (or the loop body) would close this leak.",
+    "trigger": "The while let Some(chunk) = response.chunk().await loop has no timeout protection"
+   }
+  ]
+ },
+ {
+  "findings": [
+   {
+    "file": "src/engine/warp.rs",
+    "lines": "134-150",
+    "severity": "minor",
+    "category": "integer overflow",
+    "title": "sent/received u32 accumulators have no overflow guard",
+    "description": "sent and received are u32 accumulators summed across probes_per_endpoint iterations (max 10). Each probe贡献 a u32 from ProbeOutcome. In release mode, u32 wrapping addition silently produces incorrect counter values if the transport ever returns large sent/received counts. Currently safe because WARP transports return ProbeOutcome::plain (sent=1, received=1), but the Transport trait is open — a custom or future transport could return arbitrary values. Use saturating_add or checked_add to guard against silent wrapping in release builds.",
+    "trigger": "sent += probe.sent;\nreceived += probe.received;"
+   },
+   {
+    "file": "src/engine/warp.rs",
+    "lines": "134-136",
+    "severity": "nit",
+    "category": "unnecessary wider type",
+    "title": "probes_per_endpoint is cast to u64 but only used in a for-range loop bound",
+    "description": "Line 41 casts probes_per_endpoint from u8 to u64 (probes_per_endpoint.max(1) as u64). The value is only used as the upper bound of a for _ in 0..probes_per_endpoint loop. A u8 or even u8 widened to usize would suffice. The u64 is harmless but unnecessarily wide and could mask intent if a future use interprets it as a global count rather than a per-endpoint loop bound.",
+    "trigger": "let probes_per_endpoint = warp.probes_per_endpoint.max(1) as u64;"
+   },
+   {
+    "file": "src/engine/warp.rs",
+    "lines": "172",
+    "severity": "nit",
+    "category": "unused computation / dead code",
+    "title": "sent and received accumulators are computed but discarded for lossy endpoints",
+    "description": "When failed > 0, no verdict is emitted, so the accumulated sent/received values are never used. More importantly, when failed == 0 the loss_pct is hardcoded to Some(0) regardless of sent/received. The sent/received counters serve no purpose in the verdict path for zero-loss endpoints — they are only useful if the verdict were to carry actual loss data. This is not a numeric bug but means the overflow risk in finding #1 exists purely for data that is partially or wholly discarded.",
+    "trigger": "loss_pct: Some(0),"
+   }
+  ]
+ },
+ {
+  "findings": [
+   {
+    "file": "src/paths.rs",
+    "lines": "9",
+    "severity": "major",
+    "category": "Swallowed error / silent data corruption risk",
+    "title": "PoisonError silently recovered without diagnostics",
+    "description": "data_write_guard() recovers from PoisonError via unwrap_or_else(|e| e.into_inner()). A PoisonError means a previous lock holder panicked while holding the gate, implying broken invariants. Silently recovering lets subsequent code proceed on potentially corrupted state with no trace, log, or metric emitted.",
+    "trigger": "Any thread panic while holding WRITE_GATE"
+   },
+   {
+    "file": "src/paths.rs",
+    "lines": "193-197",
+    "severity": "major",
+    "category": "Swallowed error — security degradation hidden",
+    "title": "build_owner_dacl error discarded in Windows write_secret fallback",
+    "description": "The Err(_) arm discards the original io::Error from build_owner_dacl() and silently falls back to plain File::create + lock_down_to_owner. The caller never learns the preferred DACL path failed. If the fallback itself fails, the root cause is lost entirely.",
+    "trigger": "build_owner_dacl() failure inside write_secret on Windows"
+   },
+   {
+    "file": "src/paths.rs",
+    "lines": "225-230",
+    "severity": "major",
+    "category": "Swallowed error — typed information lost",
+    "title": "CreateFile2 error discarded in Windows write_secret fallback",
+    "description": "The Err(_) arm discards the windows::core::Error from CreateFile2 (which carries the Win32 error code: access denied, path not found, sharing violation, etc.) and falls back to a plain File::create with no DACL. The original error context is gone, and the security downgrade is invisible.",
+    "trigger": "CreateFile2 failure inside write_secret on Windows"
+   },
+   {
+    "file": "src/paths.rs",
+    "lines": "131-134",
+    "severity": "minor",
+    "category": "Missing error context",
+    "title": "Generic error message loses WIN32_ERROR detail",
+    "description": "When the first GetTokenInformation sizing check succeeds (expected=true) but the logic still hits the error path, the returned error is a hardcoded 'token user size query failed' with no Win32 error code or description. The original WIN32_ERROR is discarded.",
+    "trigger": "Unexpected failure path in build_owner_dacl token info sizing"
+   },
+   {
+    "file": "src/paths.rs",
+    "lines": "216",
+    "severity": "minor",
+    "category": "Swallowed I/O error",
+    "title": "set_permissions on parent directory silently ignored",
+    "description": "In the non-Windows write_secret, let _ = std::fs::set_permissions(parent, 0o700) discards any I/O error. On a restrictive filesystem or container this can fail, leaving the parent directory world-readable while the file itself is 0o600 — a permission mismatch invisible to the caller.",
+    "trigger": "set_permissions failure on parent directory (non-Windows path)"
+   },
+   {
+    "file": "src/paths.rs",
+    "lines": "232-233",
+    "severity": "minor",
+    "category": "Swallowed I/O error",
+    "title": "Redundant set_permissions on file silently ignored",
+    "description": "After opening the file with .mode(0o600) via OpenOptions and writing data, a second let _ = set_permissions(path, 0o600) discards any error. This is redundant if the open succeeded with the correct mode, but the silent discard means any unexpected failure (e.g. symlink race) goes unnoticed.",
+    "trigger": "set_permissions failure on the file itself after write"
+   },
+   {
+    "file": "src/paths.rs",
+    "lines": "8",
+    "severity": "nit",
+    "category": "Missing error diagnostics",
+    "title": "PoisonError recovery has no trace or log",
+    "description": "The unwrap_or_else(|e| e.into_inner()) recovery path is completely silent — no tracing::warn!, no metric, no comment. If lock poisoning occurs in production, there is zero observability into the event, making it impossible to diagnose intermittent data corruption.",
+    "trigger": "PoisonError on WRITE_GATE mutex"
+   },
+   {
+    "file": "src/paths.rs",
+    "lines": "193-197",
+    "severity": "minor",
+    "category": "Missing error context in fallback",
+    "title": "Fallback lock_down_to_owner error lacks root-cause chain",
+    "description": "Both Err(_) fallback paths call lock_down_to_owner(path)? after the primary secure path failed. If lock_down_to_owner fails, the returned error contains no context about the preceding DACL or CreateFile2 failure. Using .context(\"fallback after DACL build failure\") or similar would make the error chain diagnosable.",
+    "trigger": "lock_down_to_owner failure in either fallback path"
+   }
+  ]
+ },
+ {
+  "findings": [
+   {
+    "file": "src/probe.rs",
+    "lines": "435-454",
+    "severity": "minor",
+    "category": "TOCTOU race",
+    "title": "FakeTransport builder methods have insert-then-mutate TOCTOU",
+    "description": "ok_slow() and idle_rst() perform two separate lock acquisitions: first insert() (lock/insert/unlock), then get_mut() (lock/mutate/unlock). Between the two critical sections, another thread could remove or replace the entry. This is a formal TOCTOU race that would break under concurrent builder calls. In practice it is harmless because builder methods are called sequentially during test setup, but the pattern is technically incorrect. Fix: use a single lock acquisition that inserts and then mutates."
+   },
+   {
+    "file": "src/probe.rs",
+    "lines": "528-534",
+    "severity": "minor",
+    "category": "simulation fidelity / logic bug",
+    "title": "idle_rst fake ignores timing relationship between rst_after_ms and idle_hold_ms",
+    "description": "The FakeTransport idle_hold simulation always returns Err when both idle_hold_ms > 0 and idle_rst_ms is Some, regardless of whether rst_after_ms is shorter or longer than the idle_hold window. The real transports check whether a read within idle_hold_ms returns EOF/RST. This means the fake never exercises the success path (rst_after_ms > idle_hold_ms), so no test can verify that a probe succeeds when the peer holds the connection past the idle window."
+   },
+   {
+    "file": "src/probe.rs",
+    "lines": "411-510",
+    "severity": "nit",
+    "category": "error handling / test robustness",
+    "title": "Mutex poisoning cascades across tests",
+    "description": "Every FakeTransport Mutex::lock() call uses .unwrap(). If any test panics while holding the lock (e.g., the sequence pop_front unwrap), the mutex becomes poisoned and every subsequent probe call on that FakeTransport instance panics, causing cascading unrelated test failures that obscure the root cause. Using .lock().unwrap_or_else(|e| e.into_inner()) would be more resilient in test code."
+   },
+   {
+    "file": "src/probe.rs",
+    "lines": "213-218",
+    "severity": "nit",
+    "category": "arithmetic safety",
+    "title": "step_budgets arithmetic overflow for extreme timeout values",
+    "description": "timeout_ms * 30 overflows u64 when timeout_ms > u64::MAX / 30 (~19.6 billion years of ms). In debug builds this panics; in release builds it wraps to a garbage value producing nonsensical sub-timeout budgets. Practically unreachable but the fix (u128 intermediate or saturating_mul) is trivial and removes a latent defect."
+   },
+   {
+    "file": "src/probe.rs",
+    "lines": "110-155 vs 220-330",
+    "severity": "nit",
+    "category": "API consistency / lifetime coupling",
+    "title": "TlsTransport borrows &self through the future while HttpTransport does not",
+    "description": "TlsTransport::probe captures &self via self.connector.connect() inside the async block, making the returned ProbeFuture lifetime-bound to the &self borrow. HttpTransport::probe and TcpTransport::probe clone all data before the async block, making their futures 'static. This inconsistency means TlsTransport futures cannot outlive the Transport borrow while the others can. Not a correctness bug but a maintenance hazard for refactoring."
+   }
+  ]
+ },
+ {
+  "findings": []
+ },
+ {
+  "findings": [
+   {
+    "file": "E:\\code\\CF-Scanner\\src\\util.rs",
+    "lines": "3-4",
+    "severity": "minor",
+    "category": "encoding_assumptions",
+    "title": "Lossy UTF-8 decode silently swallows invalid percent-encoded data",
+    "description": "decode_utf8_lossy() replaces invalid UTF-8 sequences with U+FFFD instead of returning an error. A malformed percent-encoded proxy URI (e.g., truncated multibyte sequences like %E4%A0) will produce garbled credentials/server names silently rather than failing fast. All callers (configs.rs userinfo, wgconf.rs key-value pairs, tag/fragment) would silently propagate the corrupted string into ScanConfig fields.",
+    "trigger": "percent_encoding::percent_decode_str(s).decode_utf8_lossy()"
+   },
+   {
+    "file": "E:\\code\\CF-Scanner\\src\\util.rs",
+    "lines": "2-4",
+    "severity": "nit",
+    "category": "null_bytes_in_strings",
+    "title": "Interior null bytes from %00 decoding",
+    "description": "percent_decode_str will decode %00 into a null byte. Rust String handles interior nulls fine, but if any caller ever passes the result to a C API (FFI), OS shell command, or file path, the null would truncate at that point. Current callers (proxy URI parsing) do not hit this, but there is no guardrail against future misuse.",
+    "trigger": "percent_encoding::percent_decode_str(s)"
+   }
+  ]
+ },
+ {
+  "findings": [
+   {
+    "file": "E:\\code\\CF-Scanner\\src\\enrich.rs",
+    "lines": "53-82",
+    "severity": "minor",
+    "category": "missing cancellation safety",
+    "title": "Enrichment loop never checks stop conditions",
+    "description": "The enrich_working function spawns all HTTP lookups and drains the JoinSet without consulting the ScanController's cancellation/stop-condition state. If the scan is cancelled or a stop condition fires, the function continues blocking the JoinSet drain and all in-flight HTTP requests (up to 8s timeout each) until every lookup completes. A tokio::select! racing set.join_next() against the controller's cancellation signal would let the function bail out promptly.",
+    "trigger": "tokio::select! with cancellation signal absent from the while-let join_next loop"
+   },
+   {
+    "file": "E:\\code\\CF-Scanner\\src\\enrich.rs",
+    "lines": "74-79",
+    "severity": "nit",
+    "category": "O(n*m) inefficiency in async loop",
+    "title": "Linear scan of targets for each enriched IP",
+    "description": "For every successfully enriched IP, the code linearly scans the entire targets vector to find matching endpoints, calling controller.set_asn (which acquires a std::sync::Mutex) once per match. This is O(n*m) where n = enriched count and m = total targets. A HashMap<(IpAddr, u16), usize> built once from targets would turn this into O(1) per enriched IP and eliminate redundant lock acquisitions. Acceptable at expected scale but unnecessary overhead.",
+    "trigger": "nested for loop over targets inside while-let join_next drain"
+   },
+   {
+    "file": "E:\\code\\CF-Scanner\\src\\enrich.rs",
+    "lines": "75",
+    "severity": "nit",
+    "category": "sync Mutex acquired from async context",
+    "title": "std::sync::Mutex locked inside async drain loop",
+    "description": "controller.set_asn internally acquires a std::sync::MutexGuard via lock(&self.store). This happens inside the async while-let join_next loop, so a sync mutex is locked from an async task. Benign here because the guard is created and dropped within a single synchronous statement (iter_mut + find + assign, microseconds), never held across an .await point, and the drain loop is sequential so contention is minimal. Noted for completeness; no fix needed.",
+    "trigger": "set_asn call inside async while-let join_next body"
+   }
+  ]
+ },
+ {
+  "findings": [
+   {
+    "file": "E:\\code\\CF-Scanner\\src\\warpgen.rs",
+    "lines": "870, 889",
+    "severity": "nit",
+    "category": "atomic-ordering",
+    "title": "SeqCst used where Relaxed suffices in test counter (429 retry test)",
+    "description": "In `warp_register_maps_429_to_rate_limited_with_retry`, `hits.fetch_add(1, Ordering::SeqCst)` (line 870) and `hits.load(Ordering::SeqCst)` (line 889) use SeqCst for a simple test hit counter. The counter is only used for approximate assertion (checking total retry count). The preceding `.await` chain provides sufficient happens-before ordering, so `Relaxed` would be correct and sufficient. SeqCst is not a correctness bug here, but it imposes an unnecessary total-ordering constraint. This is test-only code; performance impact is zero.",
+    "trigger": "hits.fetch_add(1, Ordering::SeqCst); / hits.load(Ordering::SeqCst)"
+   },
+   {
+    "file": "E:\\code\\CF-Scanner\\src\\warpgen.rs",
+    "lines": "902, 921",
+    "severity": "nit",
+    "category": "atomic-ordering",
+    "title": "SeqCst used where Relaxed suffices in test counter (401 test)",
+    "description": "In `warp_register_maps_401_to_unauthorized_immediate`, the same pattern: `hits.fetch_add(1, Ordering::SeqCst)` (line 902) and `hits.load(Ordering::SeqCst)` (line 921). The mock handler increments; the test asserts after the await completes. `Relaxed` ordering is sufficient. Test-only; no production impact.",
+    "trigger": "hits.fetch_add(1, Ordering::SeqCst); / hits.load(Ordering::SeqCst)"
+   },
+   {
+    "file": "E:\\code\\CF-Scanner\\src\\warpgen.rs",
+    "lines": "959, 988",
+    "severity": "nit",
+    "category": "atomic-ordering",
+    "title": "SeqCst used where Relaxed suffices in test counter (5xx test)",
+    "description": "In `warp_register_maps_5xx_to_server_with_sanitized_detail_and_retries`, `hits.fetch_add(1, Ordering::SeqCst)` (line 959) and `hits.load(Ordering::SeqCst)` (line 988). Same analysis: simple hit counter, async synchronization via await, `Relaxed` sufficient. Test-only.",
+    "trigger": "hits.fetch_add(1, Ordering::SeqCst); / hits.load(Ordering::SeqCst)"
+   },
+   {
+    "file": "E:\\code\\CF-Scanner\\src\\warpgen.rs",
+    "lines": "1001, 1020",
+    "severity": "nit",
+    "category": "atomic-ordering",
+    "title": "SeqCst used where Relaxed suffices in test counter (4xx test)",
+    "description": "In `warp_register_maps_4xx_other_to_server_immediate`, `hits.fetch_add(1, Ordering::SeqCst)` (line 1001) and `hits.load(Ordering::SeqCst)` (line 1020). Same pattern as the other three tests. `Relaxed` sufficient. Test-only.",
+    "trigger": "hits.fetch_add(1, Ordering::SeqCst); / hits.load(Ordering::SeqCst)"
+   }
+  ]
+ },
+ {
+  "findings": [
+   {
+    "file": "E:/code/CF-Scanner/src/ranges/http.rs",
+    "lines": "53-69",
+    "severity": "major",
+    "category": "SSRF validation / encoding assumption",
+    "title": "Hex-domain character check produces false positives on legitimate hostnames",
+    "description": "The domain-path SSRF check uses a broad character-class test: decoded chars must all be in [0-9a-fA-FxX.] and at least one digit must be present. This catches hex/decimal IP literals (0x7f.0.0.1, 2130706433) which is the intent, but it also blocks any real domain name that happens to look hex-like and contains a digit, e.g. d0ad.beef, cafe0.bad, b00.cafe, face0.dead. The validation is applied to every URL the tool fetches including user-supplied subscription URLs (configs.rs:216). A legitimate subscription URL on a hex-looking domain would be silently rejected with a non-obvious 'refusing fetch from non-routable host' error. Fix: replace the broad regex with an explicit check — try parsing the decoded domain as a numeric IP (decimal, hex with 0x prefix, dotted-decimal) and block only those, rather than blocking all hex-looking strings.",
+    "trigger": "decoded.chars().all(|c| matches!(c, '0'..='9' | 'a'..='f' | 'A'..='F' | 'x' | 'X' | '.'))"
+   },
+   {
+    "file": "E:/code/CF-Scanner/src/ranges/http.rs",
+    "lines": "53-69",
+    "severity": "minor",
+    "category": "SSRF validation / missing edge case",
+    "title": "Hex-domain check does not block IPv4-mapped IPv4-in-IPv6 dotted-decimal bypasses in domain form",
+    "description": "The IPv6 branch correctly catches [::ffff:127.0.0.1] via to_ipv4_mapped(), and the IPv4 branch catches standard IPs. However, if an attacker crafts a URL where the host is a domain that, after percent-decoding, equals a dotted-decimal IP with a trailing dot or unusual formatting that the url crate keeps as Host::Domain rather than Host::Ipv4, the hex-check would catch it because dots and digits are in the allowed set. In practice the url crate normalizes these to Host::Ipv4, so this is not exploitable today, but it relies on url-crate normalization behavior that could change. A defense-in-depth improvement would be to try parsing the decoded domain through std::net::Ipv4Addr::from_str and Ipv6Addr::from_str before falling through to the broad regex.",
+    "trigger": "Host::Domain branch"
+   },
+   {
+    "file": "E:/code/CF-Scanner/src/ranges/http.rs",
+    "lines": "95, 104",
+    "severity": "minor",
+    "category": "encoding assumption",
+    "title": "from_utf8_lossy silently replaces invalid bytes in response bodies",
+    "description": "fetch_tls_with_headers (line 95) and fetch_tls (line 104) both convert the response bytes via String::from_utf8_lossy(). This silently replaces any invalid UTF-8 sequences with U+FFFD (the replacement character) without raising an error. For the subscription fetch path (configs.rs:216), subscription data is typically base64-encoded text, but a corrupted or non-UTF-8 response would be accepted with silently garbled content, making debugging difficult. A safer approach: attempt from_utf8 first, fall back to lossy only when the caller explicitly expects non-UTF-8, or at minimum log when lossy replacement occurs.",
+    "trigger": "String::from_utf8_lossy(&body).into_owned()"
+   },
+   {
+    "file": "E:/code/CF-Scanner/src/ranges/http.rs",
+    "lines": "107-133",
+    "severity": "minor",
+    "category": "string handling / header injection",
+    "title": "Extra headers parsed from freeform string without CRLF injection guard",
+    "description": "fetch_tls_inner parses extra_headers by splitting on '\\n' and extracting name:value pairs. The code validates name/value via reqwest's HeaderName/HeaderValue::from_bytes which rejects control characters (\\r, \\n), so raw CRLF injection is blocked. However, the trust boundary is fragile: the function accepts any &str, and callers construct the string with format! (configs.rs:216). If a SUB_UA constant or future caller ever contained a newline, the split would silently produce extra headers. A safer design would accept a typed header map or Vec<(name, value)> instead of a freeform string that needs re-parsing.",
+    "trigger": "extra_headers.split('\\n')"
+   },
+   {
+    "file": "E:/code/CF-Scanner/src/ranges/http.rs",
+    "lines": "27-73",
+    "severity": "nit",
+    "category": "SSRF validation / TOCTOU",
+    "title": "URL validation is TOCTOU with respect to DNS resolution",
+    "description": "validate_fetch_url checks the scheme and host of the URL string, but DNS resolution and TCP connection happen later inside reqwest. Between the validation check and the actual connection, DNS could be rebound (DNS rebinding attack) to point a validated domain at 127.0.0.1 or another private IP. This is inherent to the architecture and extremely difficult to mitigate without IP pinning (resolving DNS first, then connecting to the resolved IP directly). The current design is reasonable defense-in-depth for a CLI tool, but worth documenting as a known limitation.",
+    "trigger": "validate_fetch_url(url)?; ... request.send().await"
+   },
+   {
+    "file": "E:/code/CF-Scanner/src/ranges/http.rs",
+    "lines": "196-210",
+    "severity": "minor",
+    "category": "test coverage gap",
+    "title": "No test for percent-encoded host bypass of SSRF check",
+    "description": "The test suite covers hex IPs, decimal IPs, loopback, link-local, and multicast, but does not test percent-encoded host bypasses. For example, https://%31%32%37.0.0.1/ should be blocked (after percent_decode the host becomes 127.0.0.1), and https://%30%78%37%66.0.0.1/ should be blocked (becomes 0x7f.0.0.1). Adding these assertions would verify that the percent_decode layer works correctly and prevent regressions if the decode logic changes.",
+    "trigger": "test function fetch_url_guard_extended_ssrf_cases"
+   }
+  ]
+ },
+ {
+  "findings": [
+   {
+    "file": "src/engine/phase2.rs",
+    "lines": "248-260",
+    "severity": "major",
+    "category": "race condition",
+    "title": "Concurrent colo rejection can delete a good verdict via remove_verdict",
+    "description": "When two workers probe the same IP concurrently with different configs, Worker A may pass with a kept colo (e.g. DFW) and call update_verdict_phase2 to store the verdict + insert into the passed set. Worker B may pass with a rejected colo (e.g. FRA) and call remove_verdict. If Worker B's remove_verdict acquires the store lock after Worker A's update_verdict_phase2 releases it, the good verdict is deleted from the store entirely — including the phase-1 latency/country data. The passed HashSet still contains the IP (Worker A inserted it), so the loop exits satisfied, but the store has no verdict row for this IP. In practice this requires different colos for the same IP across configs (unlikely since colo is CDN-edge-determined, not config-determined), but the code has no mutual exclusion between the two branches across workers.",
+    "trigger": "Two concurrent workers probing the same IP; one passes with kept colo, other passes with rejected colo"
+   },
+   {
+    "file": "src/engine/phase2.rs",
+    "lines": "213-216",
+    "severity": "major",
+    "category": "missing counter increment / silent error drop",
+    "title": "Error probes break without incrementing errored or setting first_error when stop_found already met",
+    "description": "In the Err branch (line 213), if passed.len() >= stop_found the worker breaks immediately BEFORE incrementing the errored counter or recording the error in first_error. This means: (1) the errored atomic undercounts actual probe errors, (2) first_error may remain None even though probes did error, and (3) the done = completed + errored sum used for the terminal progress check (done == total) will never reach total if multiple errors are dropped this way. While the post-loop code always sends a final progress event, the in-loop terminal check may never fire, meaning terminal_sent stays false and the post-loop sends a progress event with done < total — which is semantically correct but inconsistent with the loop's own contract. More importantly, if ALL probes error but the first error is dropped this way AND passed somehow reaches stop_found (impossible in current code since passed only grows from Ok results, but fragile if the code evolves), first_error would be None and the wrong bail branch fires.",
+    "trigger": "Worker A passes for an IP (inserting into passed), then Worker B's probe for a different IP errors after passed.len() >= stop_found"
+   },
+   {
+    "file": "src/engine/phase2.rs",
+    "lines": "253-259",
+    "severity": "minor",
+    "category": "dead code / unreachable branch",
+    "title": "The None branch of first_error when attempts > 0 && completed == 0 is unreachable",
+    "description": "The bail block at lines 253-259 has two match arms for first_error: Some(reason) and None. The None arm claims 'every verification attempt completed but none passed' — but this state is unreachable. Here is why: completed == 0 means no probe returned Ok, which means the passed HashSet was never populated (insertion only happens in the Ok branch when result.passed && colo_kept). If passed is empty, passed.len() >= stop_found is always false (stop_found >= 1 by validation), so the error-branch early-break at line 214 can never trigger. Therefore every error IS counted (errored incremented, first_error set). The only way completed == 0 && attempts > 0 is if every probe errored, which guarantees first_error is Some. The None arm is dead code.",
+    "trigger": "completed == 0 && attempts > 0 requires all probes to have errored, which always sets first_error"
+   },
+   {
+    "file": "src/engine/phase2.rs",
+    "lines": "254",
+    "severity": "nit",
+    "category": "misleading error message",
+    "title": "Error message says 'before a probe ran' but the errors are from probes that actually ran",
+    "description": "The bail message at line 254 reads: 'phase 2: every attempt failed before a probe ran: {reason}'. The {reason} comes from first_error, which is populated from the Err branch of probe_result — meaning the probe DID run and returned an error (connection refused, timeout, etc.). The phrase 'before a probe ran' misleadingly suggests the probe never executed. Should say something like 'every probe attempt failed' or 'all verification probes returned errors'.",
+    "trigger": "All phase-2 probes error out"
+   },
+   {
+    "file": "src/engine/phase2.rs",
+    "lines": "182-183",
+    "severity": "minor",
+    "category": "over-aggressive removal",
+    "title": "remove_verdict drops the entire phase-1 verdict row, not just the phase-2 part",
+    "description": "When !colo_kept, the code calls remove_verdict(&store, ip, port, &pos_index) which removes the ENTIRE Verdict from the store — including phase-1 data (latency_ms, country, colo, sent/received stats). If a future phase or consumer needs the phase-1 data for colo-rejected endpoints, it is gone. The test at line 521 confirms this is intentional ('rejected candidates must not keep a phase-2 verdict row'), but it is an aggressive design choice: the IP completely disappears from results rather than just having its phase-2 verdict cleared. If the intent is only to suppress phase-2 data, update_verdict_phase2 could set phase2 to None instead of removing the whole row.",
+    "trigger": "Phase-2 probe passes but colo is not in the filter list"
+   },
+   {
+    "file": "src/engine/phase2.rs",
+    "lines": "170-190",
+    "severity": "nit",
+    "category": "performance / redundant lock acquisitions",
+    "title": "Three separate Mutex lock acquisitions on the passed HashSet in the Ok branch",
+    "description": "The Ok branch (lines 170-190) acquires lock(&passed) three separate times: (1) line 178 for .insert(), (2) line 180 for .len() check, (3) line 182 for overshoot check. Each acquisition is a separate Mutex::lock() call. Between each, the set could change under another worker. While functionally correct (each read sees the latest state), a single lock guard would be more efficient and make the atomicity guarantees explicit. The current pattern also means the overshoot decision at line 182 may see a different len() than the break check at line 180, which is benign but makes reasoning about the combined state harder.",
+    "trigger": "Every Ok probe result in the worker loop"
+   },
+   {
+    "file": "src/engine/phase2.rs",
+    "lines": "176-181",
+    "severity": "nit",
+    "category": "redundant check / dead code path",
+    "title": "The !result.passed guard on the break is redundant with the loop's top-of-iteration check",
+    "description": "Lines 180-181: 'if lock(&passed).len() >= stop_found && !result.passed { break; }'. The !result.passed condition is intended as a performance shortcut: if the quota is met and this probe didn't help, stop early. However, the very next iteration's top-of-loop check (line 93) already does 'lock(&passed).len() >= stop_found' and breaks. The only scenario where this inner break saves work is when result.passed is false and passed.len() >= stop_found — but the top-of-loop check would catch it on the very next iteration anyway (one wasted iteration at most). The condition is not dead code (it does trigger), but its value is marginal and adds complexity to an already dense block.",
+    "trigger": "A probe fails (result.passed == false) while passed.len() >= stop_found"
+   }
+  ]
+ },
+ {
+  "findings": [
+   {
+    "file": "E:/code/CF-Scanner/src/geo.rs",
+    "lines": "37",
+    "severity": "minor",
+    "category": "validation-too-loose",
+    "title": "is_ascii_alphanumeric() allows numeric-only colo values",
+    "description": "Cloudflare colo codes are always alphabetic IATA airport codes (e.g., LHR, SFO, NRT). Using is_ascii_alphanumeric() permits purely numeric values like \"123\" or \"456\" to pass validation. Should use is_ascii_alphabetic() for defense-in-depth correctness. A numeric-only string would survive this check and propagate as a colo code, which would never appear in real Cloudflare trace output.",
+    "trigger": "value.bytes().all(|b| b.is_ascii_alphanumeric())"
+   },
+   {
+    "file": "E:/code/CF-Scanner/src/geo.rs",
+    "lines": "22-28",
+    "severity": "nit",
+    "category": "missing-edge-case-guard",
+    "title": "No empty-string guard on iso_code from MMDB",
+    "description": "The chain country.country.iso_code.map(str::to_owned) returns Some(\"\") if a corrupt or unusual MMDB contains an empty-string ISO code. While maxminddb's serde attributes (skip_serializing_if = \"Option::is_none\") default missing fields to None, there is no guarantee an MMDB file can't contain an explicitly empty string. A one-liner .filter(|s| !s.is_empty()) after map would be more defensive. In practice this is extremely unlikely with a valid embedded MMDB.",
+    "trigger": "country.country.iso_code.map(str::to_owned)"
+   },
+   {
+    "file": "E:/code/CF-Scanner/src/geo.rs",
+    "lines": "22-28",
+    "severity": "nit",
+    "category": "error-suppression",
+    "title": "Silent error conflation in country() via chained ?? on .ok()",
+    "description": "The pattern .ok()?? conflates three distinct outcomes into None: (1) IP not in database (correct), (2) MMDB decode error (data corruption), and (3) IO/parse error from lookup. Callers cannot distinguish 'IP genuinely absent' from 'database is broken'. This is an intentional design choice consistent with the Option<String> return type and the graceful-degradation pattern of the embedded() constructor, but a tracing::debug! on the Err paths would aid troubleshooting in the field.",
+    "trigger": "record.decode::<Country>().ok()??"
+   }
+  ]
+ },
+ {
+  "findings": [
+   {
+    "category": "resource leak (fragile cleanup path)",
+    "description": "In speed_test_phase (line 184), each spawned task wraps measure_through_tunnel in a tokio::select! against cancelled_signal. If cancellation wins while the speed download is in-flight, the measure_through_tunnel future is dropped at its .await point. The OpenedTunnel (defined in verify.rs:128) has no Drop impl -- its cleanup is a boxed future stored in a field (verify.rs:136). When the outer future is dropped, the boxed future is dropped, which drops the captured TunnelSession by value. This triggers TrialDirGuard::Drop (verify.rs:333) which spawns a blocking removal, and XrayProcess's kill_on_drop(true) kills the child (xray.rs:194). So cleanup does happen via the Drop chain, but it is indirect and fragile: (a) TrialDirGuard::Drop depends on tokio::runtime::Handle::try_current() succeeding to spawn the blocking removal -- if the runtime is shutting down, the trial directory leaks on disk; (b) there is no compile-time guarantee that a future refactor to OpenedTunnel or TunnelSession preserves this Drop-based cleanup; (c) the explicit tunnel.cleanup().await path in the happy path is the only documented cleanup contract, and the Drop-based fallback is accidental. A dedicated Drop impl on OpenedTunnel that calls cleanup (or a scopeguard pattern) would make the guarantee explicit.",
+    "file": "src/engine/speed.rs",
+    "lines": "183-198",
+    "severity": "major",
+    "title": "OpenedTunnel cleanup relies on implicit Drop chain rather than explicit guard",
+    "trigger": "Cancel signal fires during speed test download; or runtime shutdown during cleanup"
+   },
+   {
+    "category": "resource leak (trail directory)",
+    "description": "Each speed-test tunnel creates a trial directory (via XrayTunnelProbe::open_tunnel_session in verify.rs:95) containing config.json with proxy credentials. When the task is cancelled mid-download, the xray process is killed by kill_on_drop but the trial directory removal depends on TrialDirGuard::Drop successfully spawning a blocking task. If the runtime handle is unavailable at drop time (edge case during shutdown), or if the spawned_blocking task fails, the directory persists on disk until the stale sweep (1 hour, STALE_TRIAL_AGE in verify.rs:317). Under repeated cancellations (e.g., user repeatedly Ctrl+C during speed tests), up to SPEED_TEST_CONCURRENCY * num_chunks trial directories could accumulate before the sweep runs.",
+    "file": "src/engine/speed.rs",
+    "lines": "222-240",
+    "severity": "minor",
+    "title": "Trial directories can accumulate if Drop-based cleanup fails at runtime shutdown",
+    "trigger": "Repeated scan cancellations during speed test phase"
+   },
+   {
+    "category": "efficiency",
+    "description": "count_download (socks.rs:314) reads HTTP response headers one byte at a time using read_exact into a 1-byte buffer, checking for the \\r\\n\\r\\n terminator on each iteration. With MAX_HEADER_BYTES = 64 KiB, this performs up to 64K individual read_exact calls in the worst case, each involving an async I/O poll. The cap at MAX_HEADER_BYTES prevents unbounded growth, so this is not a leak, but the byte-at-a-time pattern is significantly slower than reading into a larger buffer and scanning for the terminator. For a speed test measuring throughput, the header parsing overhead is negligible relative to the 8 MiB download, but it is gratuitously slow for a hot path.",
+    "file": "src/socks.rs",
+    "lines": "314-325",
+    "severity": "nit",
+    "title": "Byte-at-a-time HTTP header parsing is O(n^2) in worst case",
+    "trigger": "Speed test or any socks download call"
+   },
+   {
+    "category": "latency",
+    "description": "speed_test_phase processes entries in chunks of SPEED_TEST_CONCURRENCY (4) and waits for all tasks in a chunk to complete before starting the next (lines 186-198). This creates a barrier: if one endpoint takes the full SPEED_TEST_TIMEOUT (30s), all remaining endpoints in that chunk must wait, and subsequent chunks cannot start. With N candidates, worst-case wall time is ceil(N/4) * 30s. A fully pipelined approach (feeding new tasks into the JoinSet as slots free) would reduce this to roughly N/4 * avg_latency + 30s, a significant improvement for large candidate sets.",
+    "file": "src/engine/speed.rs",
+    "lines": "186-198",
+    "severity": "minor",
+    "title": "Chunk-based concurrency barrier creates unnecessary serialization",
+    "trigger": "Many phase-2 passing endpoints with varied latency"
+   },
+   {
+    "category": "silent failure",
+    "description": "line 196: let _ = events.send(ScanEvent::Result(Box::new(updated))) silently discards the SendError if the broadcast channel is full or all receivers have been dropped. Per the v0.8.0 invariants, the broadcast capacity is 4096, which is unlikely to fill from speed-test results alone. However, if the event consumer (TUI or JSON printer) is slow or disconnected, speed-test verdicts are lost with no logging. This is not a resource leak but means the caller has no visibility into dropped results.",
+    "file": "src/engine/speed.rs",
+    "lines": "196",
+    "severity": "nit",
+    "title": "Broadcast channel send errors silently discarded",
+    "trigger": "Slow or disconnected event consumer during speed test"
+   }
+  ]
+ },
+ {
+  "findings": [
+   {
+    "file": "E:/code/CF-Scanner/src/retry.rs",
+    "lines": "30-35",
+    "severity": "major",
+    "category": "Missing post-deserialization validation",
+    "title": "load_config deserializes but never validates the config",
+    "description": "load_config returns a ScanConfig from serde_json::from_str without calling cfg.validate(). A manually edited or partially corrupted last-scan.json can deserialize successfully (correct JSON types, all required fields present) but contain semantically invalid values — concurrency=0, timeout_ms=5, mode=Warp with phase2, etc. — which are then handed to ScanController. The serde layer only guarantees structural correctness; semantic validity requires the existing validate() call."
+   },
+   {
+    "file": "E:/code/CF-Scanner/src/api/types.rs",
+    "lines": "167-177",
+    "severity": "major",
+    "category": "deny_unknown_fields with additive evolution",
+    "title": "ScanConfig deny_unknown_fields locks the persisted config format across versions",
+    "description": "ScanConfig carries #[serde(deny_unknown_fields)] (line 167) and is the root type saved by save_config and loaded by load_config for --retry-last. If any field is ever removed, renamed, or the JSON is manually edited with an extra key, deserialization fails with a cryptic serde error. For a persisted config format that intentionally outlives a single version, deny_unknown_fields is the wrong choice — it locks the schema to the exact field set at save time. Additionally, the error message 'saved scan config is corrupt' gives no actionable information about a version mismatch."
+   },
+   {
+    "file": "E:/code/CF-Scanner/src/api/types.rs",
+    "lines": "168-177",
+    "severity": "major",
+    "category": "Missing default attributes on fields",
+    "title": "Core ScanConfig fields lack #[serde(default)], blocking schema evolution",
+    "description": "The following fields lack #[serde(default)]: mode (line 169), target (line 170), ports (line 171), stop (line 172), exclude (line 173), custom_cidrs (line 174), concurrency (line 176), timeout_ms (line 177). These are original fields always present in current code, so no bug manifests today. But for the retry.rs persisted-config use case, if a future version ever restructures any of these (e.g., renames timeout_ms and adds the new name with #[serde(default)]), the old saved JSON fails because the old key has no default and the new key is missing. The newer fields (include_v6, phase2_only, idle_hold_ms, etc.) correctly carry #[serde(default)], establishing a pattern the original fields should follow."
+   },
+   {
+    "file": "E:/code/CF-Scanner/src/api/types.rs",
+    "lines": "184-192",
+    "severity": "minor",
+    "category": "deny_unknown_fields with additive evolution + missing defaults",
+    "title": "WarpConfig has deny_unknown_fields AND zero #[serde(default)] attributes",
+    "description": "WarpConfig has deny_unknown_fields and none of its four fields (custom_endpoints, probes_per_endpoint, wgconf, verify_with_wgconf) carry #[serde(default)]. Unlike Phase2Config (stripped before save), WarpConfig IS persisted inside ScanConfig.warp. A saved config including a warp block fails to deserialize if a future version adds a fifth field (no default for old JSON) or removes any existing field (deny_unknown_fields). This is a double fragility — no forward evolution AND no backward evolution."
+   },
+   {
+    "file": "E:/code/CF-Scanner/src/api/types.rs",
+    "lines": "66-70",
+    "severity": "minor",
+    "category": "deny_unknown_fields with additive evolution",
+    "title": "StopCondition deny_unknown_fields locks a nested persisted type",
+    "description": "StopCondition carries deny_unknown_fields and neither field (found: u32, cap: Option<u32>) has #[serde(default)]. StopCondition is always serialized inside ScanConfig.stop. If StopCondition ever gains a new field (e.g., min_match_rate) or cap is renamed, old saved configs break. The found field in particular lacks #[serde(default)], so a restructured stop condition that makes found optional in a future version would break deserialization."
+   },
+   {
+    "file": "E:/code/CF-Scanner/src/api/types.rs",
+    "lines": "113-121",
+    "severity": "nit",
+    "category": "deny_unknown_fields with additive evolution + missing defaults",
+    "title": "Phase2Config has deny_unknown_fields + missing defaults (mitigated by stripping)",
+    "description": "Phase2Config has deny_unknown_fields and five of its seven fields lack #[serde(default)] (configs, fragment, custom_fragment, snis, concurrency). This is mitigated because save_config sets phase2 = None before writing, so the phase2 block is never in the saved JSON. However, the serde attribute is still wrong in principle — if the stripping logic were ever bypassed or phase2 were intentionally persisted, every version-to-version schema change to Phase2Config would break deserialization."
+   },
+   {
+    "file": "E:/code/CF-Scanner/src/retry.rs",
+    "lines": "22-23",
+    "severity": "minor",
+    "category": "Sensitive field not skipped during serialization",
+    "title": "wgconf (WireGuard private keys) persisted to disk without sanitization",
+    "description": "save_config strips phase2 (which contains proxy credentials) but does NOT strip warp.wgconf, which can contain a full WireGuard configuration including private keys. The WarpConfig.wgconf: Option<String> field is serialized to last-scan.json in plaintext. This is a serialization-side bug that creates a deserialization-side risk: the config is loaded back with credentials intact. The fix would be to also strip wgconf before writing, or use #[serde(skip_serializing)] on the field (though the latter would break round-trip for other consumers)."
+   }
+  ]
+ }
+]

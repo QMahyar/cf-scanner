@@ -226,29 +226,49 @@ fn decompose(mut base: u128, mut len: u128, bits: u32, out: &mut Vec<Cidr>) {
     }
 }
 
-pub fn base_pool(runtime_refreshed: Option<&str>) -> Result<CidrPool> {
+/// Bundled pool, or the refreshed text when it parses. The caller receives a
+/// fallback warning (if any) so a corrupt refresh file degrades LOUDLY
+/// instead of silently: the engine logs every warning to stderr.
+pub fn base_pool(runtime_refreshed: Option<&str>) -> Result<(CidrPool, Option<String>)> {
     match runtime_refreshed {
-        Some(text) => match CidrPool::parse(text).ok().filter(|p| !p.ranges.is_empty()) {
-            Some(pool) => Ok(pool),
-            _ => {
-                tracing::warn!("refreshed IPv4 ranges failed to parse; using the bundled list");
-                Ok(CidrPool::bundled())
-            }
+        Some(text) => match CidrPool::parse(text) {
+            Ok(pool) if !pool.ranges.is_empty() => Ok((pool, None)),
+            Ok(_) => Ok((
+                CidrPool::bundled(),
+                Some(
+                    "refreshed IPv4 ranges parsed to zero ranges; using bundled ranges".to_owned(),
+                ),
+            )),
+            Err(e) => Ok((
+                CidrPool::bundled(),
+                Some(format!(
+                    "refreshed IPv4 ranges unusable ({e}); using bundled ranges"
+                )),
+            )),
         },
-        None => Ok(CidrPool::bundled()),
+        None => Ok((CidrPool::bundled(), None)),
     }
 }
 
-pub fn base_pool_v6(runtime_refreshed: Option<&str>) -> Result<CidrPool> {
+/// Bundled v6 pool, or the refreshed text when it parses (see [`base_pool`]).
+pub fn base_pool_v6(runtime_refreshed: Option<&str>) -> Result<(CidrPool, Option<String>)> {
     match runtime_refreshed {
-        Some(text) => match CidrPool::parse(text).ok().filter(|p| !p.ranges.is_empty()) {
-            Some(pool) => Ok(pool),
-            _ => {
-                tracing::warn!("refreshed IPv6 ranges failed to parse; using the bundled list");
-                Ok(CidrPool::bundled_v6())
-            }
+        Some(text) => match CidrPool::parse(text) {
+            Ok(pool) if !pool.ranges.is_empty() => Ok((pool, None)),
+            Ok(_) => Ok((
+                CidrPool::bundled_v6(),
+                Some(
+                    "refreshed IPv6 ranges parsed to zero ranges; using bundled ranges".to_owned(),
+                ),
+            )),
+            Err(e) => Ok((
+                CidrPool::bundled_v6(),
+                Some(format!(
+                    "refreshed IPv6 ranges unusable ({e}); using bundled ranges"
+                )),
+            )),
         },
-        None => Ok(CidrPool::bundled_v6()),
+        None => Ok((CidrPool::bundled_v6(), None)),
     }
 }
 
@@ -258,14 +278,19 @@ pub fn effective_pool_from(
     include_v6: bool,
     refreshed_v4: Option<&str>,
     refreshed_v6: Option<&str>,
-) -> Result<CidrPool> {
+) -> Result<(CidrPool, Vec<String>)> {
+    let mut warnings = Vec::new();
     let mut pool = if custom_cidrs.is_empty() {
-        base_pool(refreshed_v4)?
+        let (p, w) = base_pool(refreshed_v4)?;
+        warnings.extend(w);
+        p
     } else {
         CidrPool { ranges: Vec::new() }
     };
     if include_v6 && custom_cidrs.is_empty() {
-        pool.extend(base_pool_v6(refreshed_v6)?.ranges);
+        let (p6, w6) = base_pool_v6(refreshed_v6)?;
+        warnings.extend(w6);
+        pool.extend(p6.ranges);
     }
     let customs: Vec<Cidr> = custom_cidrs
         .iter()
@@ -276,33 +301,58 @@ pub fn effective_pool_from(
         .iter()
         .map(|s| parse_cidr(s))
         .collect::<Result<_>>()?;
-    Ok(pool.excluding(&excluded))
+    Ok((pool.excluding(&excluded), warnings))
 }
 
+/// Effective scan pool plus fallback warnings. A missing refresh file is the
+/// normal fresh-install state and stays silent; unreadable files and parse
+/// failures produce warnings the engine logs to stderr.
 pub async fn effective_pool(
     custom_cidrs: &[String],
     exclude: &[String],
     include_v6: bool,
-) -> Result<CidrPool> {
-    let runtime_v4 = match paths::refreshed_ranges_path() {
-        Ok(p) => tokio::fs::read_to_string(p).await.ok(),
-        Err(_) => None,
-    };
-    let runtime_v6 = if include_v6 {
-        match paths::refreshed_ranges_v6_path() {
-            Ok(p) => tokio::fs::read_to_string(p).await.ok(),
-            Err(_) => None,
+) -> Result<(CidrPool, Vec<String>)> {
+    async fn read_refresh(
+        path: Result<std::path::PathBuf, anyhow::Error>,
+        what: &str,
+    ) -> (Option<String>, Option<String>) {
+        match path {
+            Ok(p) => match tokio::fs::read_to_string(&p).await {
+                Ok(text) => (Some(text), None),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => (None, None),
+                Err(e) => (
+                    None,
+                    Some(format!(
+                        "refreshed {what} ranges unreadable ({}: {e}); using bundled ranges",
+                        p.display()
+                    )),
+                ),
+            },
+            Err(e) => (
+                None,
+                Some(format!(
+                    "refreshed {what} ranges path unresolvable ({e}); using bundled ranges"
+                )),
+            ),
         }
+    }
+    let (runtime_v4, w4) = read_refresh(paths::refreshed_ranges_path(), "IPv4").await;
+    let mut warnings: Vec<String> = w4.into_iter().collect();
+    let (runtime_v6, w6) = if include_v6 {
+        read_refresh(paths::refreshed_ranges_v6_path(), "IPv6").await
     } else {
-        None
+        (None, None)
     };
-    effective_pool_from(
+    warnings.extend(w6);
+    let (pool, mut parse_warnings) = effective_pool_from(
         custom_cidrs,
         exclude,
         include_v6,
         runtime_v4.as_deref(),
         runtime_v6.as_deref(),
-    )
+    )?;
+    warnings.append(&mut parse_warnings);
+    Ok((pool, warnings))
 }
 
 pub const LAST_UPDATED_PREFIX: &str = "# last-updated: ";
@@ -1067,7 +1117,7 @@ mod tests {
 
     #[test]
     fn effective_pool_applies_custom_and_exclude() {
-        let pool = effective_pool_from(
+        let (pool, warnings) = effective_pool_from(
             &["10.0.0.0/24".to_owned()],
             &["10.0.0.0/25".to_owned()],
             false,
@@ -1075,17 +1125,19 @@ mod tests {
             None,
         )
         .unwrap();
+        assert!(warnings.is_empty(), "clean input warns nothing");
         assert_eq!(pool.host_count(), 128);
     }
 
     #[test]
     fn effective_pool_includes_v6_only_when_requested() {
-        let v4 = effective_pool_from(&[], &[], false, None, None).unwrap();
+        let (v4, warnings) = effective_pool_from(&[], &[], false, None, None).unwrap();
+        assert!(warnings.is_empty());
         assert!(
             v4.ranges().iter().all(|c| c.addr.is_ipv4()),
             "default pool must stay IPv4-only"
         );
-        let v6 = effective_pool_from(&[], &[], true, None, None).unwrap();
+        let (v6, _) = effective_pool_from(&[], &[], true, None, None).unwrap();
         assert!(v6.ranges().iter().any(|c| c.addr.is_ipv6()));
         assert!(
             v6.ranges().iter().any(|c| c.addr.is_ipv4()),
@@ -1095,16 +1147,19 @@ mod tests {
 
     #[test]
     fn custom_v6_cidrs_are_honored_without_the_flag() {
-        let pool =
+        let (pool, _) =
             effective_pool_from(&["2606:4700::/32".to_owned()], &[], false, None, None).unwrap();
         assert!(pool.ranges().iter().all(|c| c.addr.is_ipv6()));
     }
 
     #[test]
     fn effective_pool_prefers_refreshed_v6_when_included() {
-        let pool = effective_pool_from(&[], &[], true, None, Some("2606:4700::/32\n")).unwrap();
+        let (pool, warnings) =
+            effective_pool_from(&[], &[], true, None, Some("2606:4700::/32\n")).unwrap();
         assert_eq!(pool.ranges().iter().filter(|c| c.addr.is_ipv6()).count(), 1);
-        let pool = effective_pool_from(&[], &[], false, None, Some("2606:4700::/32\n")).unwrap();
+        assert!(warnings.is_empty());
+        let (pool, _) =
+            effective_pool_from(&[], &[], false, None, Some("2606:4700::/32\n")).unwrap();
         assert!(
             pool.ranges().iter().all(|c| c.addr.is_ipv4()),
             "refreshed v6 must be ignored when include_v6 is off"
@@ -1113,27 +1168,41 @@ mod tests {
 
     #[test]
     fn base_pool_prefers_runtime_refresh() {
-        let live = base_pool(Some("10.0.0.0/24\n")).unwrap();
+        let (live, warnings) = base_pool(Some("10.0.0.0/24\n")).unwrap();
+        assert!(warnings.is_none());
         assert_eq!(live.host_count(), 256);
-        assert!(base_pool(None).unwrap().host_count() > 1_000_000);
-        let live6 = base_pool_v6(Some("2606:4700::/32\n")).unwrap();
+        assert!(base_pool(None).unwrap().0.host_count() > 1_000_000);
+        let (live6, _) = base_pool_v6(Some("2606:4700::/32\n")).unwrap();
         assert_eq!(live6.ranges().len(), 1);
-        assert!(base_pool_v6(None).unwrap().ranges().len() >= 5);
+        assert!(base_pool_v6(None).unwrap().0.ranges().len() >= 5);
     }
 
     #[test]
     fn base_pool_falls_back_to_bundled_when_refresh_is_corrupt() {
-        let pool = base_pool(Some("not a cidr\n10.0.0.0/8\n")).unwrap();
+        let (pool, warning) = base_pool(Some("not a cidr\n10.0.0.0/8\n")).unwrap();
         assert_eq!(pool, CidrPool::bundled());
-        let pool6 = base_pool_v6(Some("2606:4700::/32\nbroken")).unwrap();
+        let warning = warning.expect("corrupt refresh must warn");
+        assert!(
+            warning.contains("bundled") && warning.contains("unusable"),
+            "warning must name the fallback and the cause: {warning}"
+        );
+        let (pool6, warning6) = base_pool_v6(Some("2606:4700::/32\nbroken")).unwrap();
         assert_eq!(pool6, CidrPool::bundled_v6());
+        assert!(warning6.is_some(), "v6 corrupt refresh must warn");
     }
 
     #[test]
     fn effective_pool_survives_a_corrupt_refreshed_file() {
-        let pool = effective_pool_from(&[], &[], false, Some("garbage\n"), None).unwrap();
+        let (pool, warnings) =
+            effective_pool_from(&[], &[], false, Some("garbage\n"), None).unwrap();
         assert_eq!(pool, CidrPool::bundled());
-        let pool =
+        assert_eq!(
+            warnings.len(),
+            1,
+            "exactly one fallback warning expected: {warnings:?}"
+        );
+        assert!(warnings[0].contains("garbage") || warnings[0].contains("unusable"));
+        let (pool, warnings) =
             effective_pool_from(&[], &[], true, Some("garbage\n"), Some("garbage\n")).unwrap();
         assert!(
             pool.ranges().iter().any(|c| c.addr.is_ipv4()),
@@ -1142,6 +1211,11 @@ mod tests {
         assert!(
             pool.ranges().iter().any(|c| c.addr.is_ipv6()),
             "v6 half must survive a corrupt refresh"
+        );
+        assert_eq!(
+            warnings.len(),
+            2,
+            "both halves warn independently: {warnings:?}"
         );
     }
 
@@ -1185,7 +1259,7 @@ mod tests {
         let text = "# last-updated: 2025-01-01T12:34:56Z\n2606:4700::/32\n2400:cb00::/32\n";
         let pool = CidrPool::parse(text).unwrap();
         assert_eq!(pool.ranges().len(), 2);
-        assert_eq!(base_pool_v6(Some(text)).unwrap().ranges().len(), 2);
+        assert_eq!(base_pool_v6(Some(text)).unwrap().0.ranges().len(), 2);
     }
 
     #[test]
@@ -1246,10 +1320,120 @@ mod tests {
     #[test]
     fn base_pool_falls_back_when_refresh_is_parseable_but_empty() {
         let header_only = format!("{LAST_UPDATED_PREFIX}2025-01-01T00:00:00Z\n");
-        assert_eq!(base_pool(Some(&header_only)).unwrap(), CidrPool::bundled());
+        let (pool, warning) = base_pool(Some(&header_only)).unwrap();
+        assert_eq!(pool, CidrPool::bundled());
+        assert!(
+            warning.is_some_and(|w| w.contains("zero ranges")),
+            "empty refresh must warn distinctly from corrupt"
+        );
         assert_eq!(
-            base_pool_v6(Some(&header_only)).unwrap(),
+            base_pool_v6(Some(&header_only)).unwrap().0,
             CidrPool::bundled_v6()
         );
+    }
+
+    #[tokio::test]
+    async fn effective_pool_warns_on_unreadable_refresh_file() {
+        use crate::paths::test_env::{DATA_DIR_LOCK, IsolatedDataDir};
+        let _guard = DATA_DIR_LOCK.lock().await;
+        let _isolated = IsolatedDataDir::new();
+        // Missing file is the fresh-install normal: silent bundled fallback.
+        let (pool, warnings) = effective_pool(&[], &[], false).await.unwrap();
+        assert_eq!(pool, CidrPool::bundled());
+        assert!(
+            warnings.is_empty(),
+            "a missing refresh file must stay silent: {warnings:?}"
+        );
+        // Corrupt file: loud fallback naming the cause.
+        let path = crate::paths::refreshed_ranges_path().unwrap();
+        std::fs::write(&path, "garbage\n").unwrap();
+        let (pool, warnings) = effective_pool(&[], &[], false).await.unwrap();
+        assert_eq!(pool, CidrPool::bundled());
+        assert_eq!(warnings.len(), 1, "exactly one warning: {warnings:?}");
+        assert!(
+            warnings[0].contains("unusable") && warnings[0].contains("bundled"),
+            "warning must name cause and fallback: {}",
+            warnings[0]
+        );
+    }
+
+    #[test]
+    fn slash_zero_v4_boundary_and_comments_in_parse() {
+        // v4 /0: the whole space as a single range.
+        let all = parse_cidr("0.0.0.0/0").unwrap();
+        assert_eq!(all.host_count(), 1u128 << 32);
+        assert_eq!(all.addr, "0.0.0.0".parse::<IpAddr>().unwrap());
+        // Pool host_count saturates across mixed families.
+        let pool = CidrPool::parse(
+            "0.0.0.0/0
+",
+        )
+        .unwrap();
+        assert_eq!(pool.host_count(), 1u128 << 32);
+
+        // '#' full-line comments are skipped; inline text after a CIDR is not.
+        let pool = CidrPool::parse(
+            "# header
+
+10.0.0.0/8
+  # indented comment
+",
+        )
+        .unwrap();
+        assert_eq!(pool.ranges().len(), 1);
+        assert!(CidrPool::parse("10.0.0.0/8 trailing").is_err());
+    }
+
+    #[test]
+    fn overlapping_exclusions_are_subtracted_exactly() {
+        let pool = CidrPool::parse(
+            "10.0.0.0/16
+",
+        )
+        .unwrap();
+        // Two overlapping excludes inside the block.
+        let ex = vec![
+            parse_cidr("10.0.10.0/24").unwrap(),
+            parse_cidr("10.0.11.0/24").unwrap(),
+        ];
+        let result = pool.excluding(&ex);
+        let count: u128 = result.ranges().iter().map(|c| c.host_count()).sum();
+        assert_eq!(count, (1u128 << 16) - 2 * (1u128 << 8));
+        // An exclude fully containing the range removes everything.
+        let ex = vec![parse_cidr("10.0.0.0/8").unwrap()];
+        assert!(pool.excluding(&ex).ranges().is_empty());
+        // Excluding twice with the same range is idempotent.
+        let ex = vec![parse_cidr("10.0.0.0/20").unwrap()];
+        let once = pool.excluding(&ex);
+        let twice = once.excluding(&ex);
+        assert_eq!(once.ranges(), twice.ranges());
+    }
+    #[test]
+    fn large_prefix_v6_exclusion_is_exact() {
+        // A /127 and a single-host /128 inside a /120: split math must stay
+        // exact at the tiny end (regression guard for the decompose path).
+        let pool = CidrPool::parse(
+            "2001:db8::/120
+",
+        )
+        .unwrap();
+        assert_eq!(pool.host_count(), 256);
+        let ex = vec![parse_cidr("2001:db8::1/128").unwrap()];
+        let after_one = pool.excluding(&ex);
+        let count: u128 = after_one.ranges().iter().map(|c| c.host_count()).sum();
+        assert_eq!(count, 255);
+        let ex = vec![
+            parse_cidr("2001:db8::1/128").unwrap(),
+            parse_cidr("2001:db8::2/127").unwrap(),
+        ];
+        let after_two = pool.excluding(&ex);
+        let count: u128 = after_two.ranges().iter().map(|c| c.host_count()).sum();
+        assert_eq!(
+            count, 253,
+            "1 (from the /128) + 2 (from the /127) hosts removed"
+        );
+        // Excluding the whole /120 leaves nothing.
+        let ex = vec![parse_cidr("2001:db8::/120").unwrap()];
+        assert!(pool.excluding(&ex).ranges().is_empty());
     }
 }

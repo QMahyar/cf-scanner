@@ -1,6 +1,7 @@
 #![allow(clippy::collapsible_if)]
 
 pub mod api;
+pub mod check_sub;
 pub mod cli_wizard;
 pub mod configs;
 pub mod dgst;

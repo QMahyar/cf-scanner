@@ -61,11 +61,7 @@ pub fn validate_fetch_url(url: &str) -> Result<()> {
                 let lower = decoded.to_ascii_lowercase();
                 lower == "localhost"
                     || lower.ends_with(".localhost")
-                    || (!decoded.is_empty()
-                        && decoded.chars().all(
-                            |c| matches!(c, '0'..='9' | 'a'..='f' | 'A'..='F' | 'x' | 'X' | '.'),
-                        )
-                        && decoded.chars().any(|c| c.is_ascii_digit()))
+                    || looks_like_ip_literal(&decoded)
             }
         };
         if unroutable {
@@ -73,6 +69,60 @@ pub fn validate_fetch_url(url: &str) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// True when a Domain-arm hostname is really an obscured IP literal that OS
+/// resolvers (inet_aton) accept but the URL parser left as a name: hex/octal/
+/// decimal alternative forms (`0x7f.0.0.1`, `0177.0.0.1`, `2130706433`),
+/// percent-encoded-dot evasions (decoded before this check), and trailing-dot
+/// FQDNs (`127.0.0.1.`). Real hostnames that merely look hex-plausible
+/// (`d0ad.beef`, `cafe0.bad`) return false: every dotted part must be a valid
+/// inet_aton numeric, and single labels only count as decimal or 0x-hex.
+fn looks_like_ip_literal(host: &str) -> bool {
+    let bare = host.strip_suffix('.').unwrap_or(host);
+    if bare.is_empty() {
+        return false;
+    }
+    if bare.chars().all(|c| c.is_ascii_digit()) {
+        return true;
+    }
+    if is_hex_literal(bare) {
+        return true;
+    }
+    let parts: Vec<&str> = bare.split('.').collect();
+    if parts.len() < 2 {
+        return false;
+    }
+    // All-decimal dotted names cannot exist in public DNS (numeric TLDs are
+    // invalid) but always resolve as IPs where resolvers accept them.
+    if parts
+        .iter()
+        .all(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()))
+    {
+        return true;
+    }
+    parts.len() <= 4 && parts.iter().all(|p| is_inet_aton_part(p))
+}
+
+fn is_hex_literal(s: &str) -> bool {
+    let hex = s
+        .strip_prefix("0x")
+        .or_else(|| s.strip_prefix("0X"))
+        .unwrap_or("");
+    !hex.is_empty() && hex.chars().all(|c| c.is_ascii_hexdigit())
+}
+
+fn is_inet_aton_part(part: &str) -> bool {
+    if part.is_empty() {
+        return false;
+    }
+    if is_hex_literal(part) {
+        return true;
+    }
+    if part.len() > 1 && part.starts_with('0') {
+        return part.chars().all(|c| matches!(c, '0'..='7'));
+    }
+    part.chars().all(|c| c.is_ascii_digit())
 }
 
 fn sanitize_url_for_error(url: &str) -> String {
@@ -194,6 +244,30 @@ mod tests {
     }
 
     #[test]
+    fn fetch_url_guard_allows_hex_plausible_hostnames() {
+        // F-10: these are real hostname shapes, not IP literals.
+        assert!(validate_fetch_url("https://d0ad.beef/x").is_ok());
+        assert!(validate_fetch_url("https://cafe0.bad/x").is_ok());
+        assert!(validate_fetch_url("https://b00.cafe/x").is_ok());
+        assert!(validate_fetch_url("https://face0.dead/x").is_ok());
+        assert!(validate_fetch_url("https://dead1/x").is_ok());
+        assert!(validate_fetch_url("https://deadbeef/x").is_ok());
+    }
+
+    #[test]
+    fn fetch_url_guard_still_blocks_obscured_ip_literals() {
+        assert!(validate_fetch_url("https://0x7f.0.0.1/x").is_err());
+        assert!(validate_fetch_url("https://0X7F.0.0.1/x").is_err());
+        assert!(validate_fetch_url("https://0x7f000001/x").is_err());
+        assert!(validate_fetch_url("https://0177.0.0.1/x").is_err());
+        assert!(validate_fetch_url("https://2130706433/x").is_err());
+        assert!(validate_fetch_url("https://127.0.0.1./x").is_err());
+        assert!(validate_fetch_url("https://0x7f.0.0.1./x").is_err());
+        assert!(validate_fetch_url("https://1.2.3.4.5/x").is_err());
+        assert!(validate_fetch_url("https://0x7f%2e0%2e0%2e1/x").is_err());
+    }
+
+    #[test]
     fn fetch_url_guard_extended_ssrf_cases() {
         assert!(validate_fetch_url("https://[::127.0.0.1]/x").is_err());
         assert!(validate_fetch_url("https://[::ffff:127.0.0.1]/x").is_err());
@@ -207,5 +281,65 @@ mod tests {
         assert!(validate_fetch_url("https://10.0.0.1/x").is_ok());
         assert!(validate_fetch_url("https://example.com/x").is_ok());
         assert!(validate_fetch_url("https://www.cloudflare.com/ips-v4/").is_ok());
+    }
+
+    #[test]
+    fn sanitize_url_for_error_masks_credentials_and_drops_query() {
+        assert_eq!(
+            sanitize_url_for_error("https://user:secret@example.com/p?q=1#frag"),
+            "https://***:***@example.com/p"
+        );
+        assert_eq!(
+            sanitize_url_for_error("https://example.com/p?token=abc"),
+            "https://example.com/p"
+        );
+        // Only-user and only-password forms both mask.
+        assert_eq!(
+            sanitize_url_for_error("https://user@example.com/"),
+            "https://***:***@example.com/"
+        );
+        assert_eq!(
+            sanitize_url_for_error("https://:pw@example.com/"),
+            "https://***:***@example.com/"
+        );
+        // Unparseable input passes through untouched (nothing to leak).
+        assert_eq!(sanitize_url_for_error("::not a url::"), "::not a url::");
+    }
+
+    #[tokio::test]
+    async fn fetchers_enforce_the_ssrf_guard_before_any_network_io() {
+        // The guard runs first, so these fail offline and deterministically;
+        // they also prove the error text never carries the guarded URL.
+        for url in [
+            "http://example.com/x",
+            "https://127.0.0.1/x",
+            "https://localhost/x",
+            "not a url",
+        ] {
+            let err = fetch_bytes(url).await.unwrap_err().to_string();
+            assert!(
+                err.contains("refusing") || err.contains("https") || err.contains("bad URL"),
+                "{url}: {err}"
+            );
+        }
+        let err = fetch_tls_with_headers("https://localhost/", "X-Test: y")
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("non-routable"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn fetch_tls_inner_skips_unparseable_extra_headers() {
+        // Malformed header lines are skipped client-side; the guard still
+        // fires before anything is sent, so this stays offline.
+        let err = fetch_tls_inner(
+            "https://localhost/",
+            "bad-line-without-colon\n\nX-Good: ok\n:empty-name\nX-Empty: \n",
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("non-routable"), "{err}");
     }
 }

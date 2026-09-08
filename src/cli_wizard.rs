@@ -18,10 +18,14 @@ use crate::warpgen;
 use anyhow::{Context as _, Result, anyhow, bail};
 use dialoguer::{Confirm, Input, Select};
 
+fn clamp_pool_host_count(host_count: u128) -> u32 {
+    u32::try_from(host_count)
+        .unwrap_or(u32::MAX)
+        .min(MAX_SCAN_COUNT)
+}
+
 fn prompt_warp() -> Result<ScanConfig> {
-    let all_pools = u32::try_from(warp::bundled_pool().host_count())
-        .unwrap_or(MAX_SCAN_COUNT)
-        .min(MAX_SCAN_COUNT);
+    let all_pools = clamp_pool_host_count(warp::bundled_pool().host_count());
     let count: u32 = Input::new()
         .with_prompt(format!(
             "Candidate endpoints (1-{all_pools}; {all_pools} = all pools)"
@@ -1035,6 +1039,21 @@ fn parse_ports(s: &str) -> Result<Vec<Port>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pool_host_count_clamps_huge_pools_to_the_cap() {
+        assert_eq!(clamp_pool_host_count(7), 7);
+        assert_eq!(
+            clamp_pool_host_count(u128::from(MAX_SCAN_COUNT)),
+            MAX_SCAN_COUNT
+        );
+        assert_eq!(clamp_pool_host_count(u128::from(u32::MAX)), MAX_SCAN_COUNT);
+        assert_eq!(
+            clamp_pool_host_count(u128::from(u32::MAX) + 1),
+            MAX_SCAN_COUNT,
+            "pools beyond u32 range must saturate to the cap, not substitute blindly"
+        );
+    }
 
     #[test]
     fn parses_comma_ports() {

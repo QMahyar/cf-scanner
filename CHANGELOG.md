@@ -3,6 +3,100 @@
 All notable changes to CF-Scanner are documented here, grouped by
 Added / Changed / Fixed / Deprecated / Removed / Security, newest on top.
 
+
+## [Unreleased]
+
+### Added
+- **`check-sub` subscription validation command.** `cf-scanner check-sub URL`
+  fetches a subscription and verifies every config against its own server
+  (inline for vless/trojan, xray for the rest), printing one NDJSON row per
+  config (`tag`/`server`/`ok`/`latency_ms`/`error`) plus an aggregate row for
+  unparseable lines. Non-zero exit when nothing verifies. Offline-tested via
+  injected fetcher/probe fakes.
+- **New export formats: `v2ray`, `shadowrocket`, `quantumult`.** v2rayN
+  clipboard JSON, a base64 URI list for Shadowrocket, and Quantumult X server
+  lines; all behind `--export-format` with golden tests. Adding a format is
+  now a one-registry-row change (the `--export-format` help text derives from
+  the same table).
+- **Opt-in live-evidence CI job.** `live-evidence.yml` (workflow dispatch +
+  weekly cron) runs the `#[ignore]`d live suite with `CFSCANNER_SUB_URL`
+  from repo secrets; no-ops on forks/PRs without the secret.
+
+### Changed
+- **API validation gaps closed.** `ScanConfig::validate()` now rejects
+  neighbor-scan in WARP mode and a customized `accepted_http_codes` list
+  outside HTTP probe mode (defaults untouched); probe-URL precedence is
+  documented.
+- **Full CLI reference.** Every long flag carries real `--help` text and the
+  README documents each one (an anti-rot test fails a flag that loses its
+  help or drops out of the README); Troubleshooting covers xray download,
+  DPI fragmentation, WARP UDP, and refresh failures.
+- **Refresh automation + Termux/Docker docs.** `docs/refresh-automation.md`
+  (cron/systemd/Task Scheduler/Termux recipes); the Termux caveat is now a
+  step-by-step and the npm glibc requirement is stated in both READMEs.
+- **Code structure paydown.** `configs.rs` split into `configs/{mod,uri,
+  subscription,xray_json}.rs` (same public API); `ScanConfig::validate()`
+  split into per-area validators (same error order); `engine/driver.rs`
+  extracts the mechanical worker plumbing from the CDN/WARP loops (policy
+  stays in cdn.rs/warp.rs); controller fields grouped into ServiceHandles
+  and MutableState; export formats unified behind a registry; the WARP
+  register error now surfaces its sanitized detail.
+- **Micro-allocations.** HTTP-probe accepted codes are shared via `Arc<[u16]>`
+  instead of a per-probe Vec clone; the verdict hot path clones once instead
+  of twice per hit; `for_each_result` iterates the sorted store without
+  cloning the whole Vec.
+
+### Fixed
+- **Phase-2 colo race could delete good verdicts.** When two workers verified
+  the same endpoint with different colo outcomes, a rejected-colo latecomer
+  removed a racing kept-colo pass from the results. Removal is now atomic
+  with the keep-check (`remove_verdict_unless_passed`), and post-stop errors
+  are counted instead of dropped.
+- **Neighbor-drain check-then-act race.** The drain loop could double-consume
+  an Empty poll and miss quiescence; it now re-checks the channel after the
+  Empty branch and only confirms a zero-quiescence scan.
+- **Retry saves stay safe and load stays strict.** `--retry-last` no longer
+  persists `warp.wgconf` or a dangling `verify_with_wgconf` (WARP keys never
+  touch the data dir); the load path re-validates the persisted config with
+  a "saved scan config is invalid - re-run the scan" error, tolerates
+  unknown top-level keys written by newer versions, and reports
+  corrupt/missing files clearly instead of panicking.
+- **Corrupt or missing refreshed ranges degraded silently.** A damaged
+  `cf-ranges.txt` fell back to the bundled list with only a debug-level
+  warning; the engine now logs the exact parse/IO error to stderr (visible
+  by default) and continues on bundled ranges. A missing file (fresh
+  install) stays silent.
+- **Speed-test cancel leaked the xray child and trial dir.** Cancelling a
+  speed test dropped the tunnel future without running its cleanup; both
+  cancel and success paths now tear down explicitly.
+- **Trial dir creation failed open.** A failed `create_dir_all` or chmod on
+  the credential-bearing trial dir was ignored; it now aborts with a clear
+  "refusing to stage proxy credentials" error.
+- **Obscured-IP fetch guard false positives.** The SSRF guard rejected real
+  hostnames that merely look hex (`d0ad.beef`, `cafe0.bad`); only genuine
+  inet_aton IP-literal forms are blocked now.
+- **Range refresh blocked async workers.** Persisting refreshed ranges ran
+  blocking file I/O on the tokio runtime; it now runs in `spawn_blocking`.
+- **Wizard pool-host-count clamp.** Huge custom pools clamped by truncation
+  (u64 overflow paths); they now saturate first, then cap.
+- **Stop-counter ordering.** `scanned`/`found` counters pair Release stores
+  with Acquire loads so cancellation and stop conditions observe results
+  published before the count.
+- **Bundle exports loud-drop instead of silent.** IPv6 skips count with a
+  stderr warning (error only when nothing exportable remains); unresolvable
+  phase-2 configs are counted and warned; sing-box/clash carry grpc mode,
+  clash sets `udp: true`; `config_index` no longer leaks into JSON exports.
+
+### Removed
+- **Dead `--phase2-only` flag.** It parsed, validated, and then rejected
+  itself at the engine boundary; the flag and its unreachable engine path
+  are gone.
+- **9 dead server-era API types.** ResultsPayload, StatusPayload,
+  RangesPayload, XrayStatusPayload, XrayDownloadResponse, RegisterRequest,
+  RegisterResponse, ExportConfigRequest, ExportConfigResponse — unused
+  since ADR-013 removed the HTTP server.
+
+
 ## [0.13.0] - 2026-09-04
 
 ### Added
@@ -104,6 +198,7 @@ Added / Changed / Fixed / Deprecated / Removed / Security, newest on top.
   bind the same port that failed. Retries now re-pick until the port
   differs from every previous attempt.
 
+
 ## [0.12.2] - 2026-08-28
 
 ### Fixed
@@ -112,27 +207,6 @@ Added / Changed / Fixed / Deprecated / Removed / Security, newest on top.
 - **Hero void + cramped intro.** Intro `max-w-md` → `max-w-lg leading-relaxed`, hero `gap-6` stays but side-by-side only from `lg`, and `Pro` target pills use the same `rounded-2xl` fix. Header version gap `gap-2` → `ms-1` on the version span for breathing room.
 - **Build determinism across Node 22/25 + Windows/Linux.** Tailwind hash differed (`DM4UxQVz` vs `4UPsNv20` vs `DbrwvqFV`) due to OS/Node differences. Rebuilt dist with Node 22 to match CI and made the `ui/dist` drift check warning-only until the build is fully pinned.
 
-## [0.11.1] - 2026-08-27
-
-### Fixed
-- **npm install checksum + provenance.** `install.js` `parseChecksum` now handles `cargo-dist`'s ` *` (binary) separator in `.sha256` files (was only `  `), fixing `Invalid sha256 file: no strict SHA2-256 digest found` on Windows. `package.json` `repository.url` corrected to `https://github.com/QMahyar/cf-scanner` (capital Q) for `--provenance` attestation.
-
-## [0.11.0] - 2026-08-27
-
-### Added
-- **Advisor audit closure (26 plans, 10 parallel audits → 92 findings).** All remaining plans shipped: single admission point + xray cooldown (017), Windows DACL at create (019), store accessors (020), de-flaked tests + proptest (021), server split (022), api/types split (023), ranges split (024), grammar consolidation (025), HTTP parser consolidation (026), batched view recompute (007), woff2-only fonts (008), ProPanel 5-extract decomposition (009), identity-group + i18n/a11y (004/005). Plans removed; 26/26 done.
-- **Ranges/Api/Server splits.** `src/api/types.rs` → `limits.rs`/`error.rs`/`validate.rs` + facade; `src/ranges.rs` → `pool.rs`/`http.rs`/`official.rs`; `src/server/mod.rs` → `tests.rs` (2122 lines). Zero consumer import changes; `cargo check` clean.
-- **Grammar + HTTP consolidation.** Single `parse_cidr`/`parse_endpoint` behind `api::types` (fixture-driven); single `read_response` in `socks.rs` shared by `inline_verify.rs` (diff proptest, ~130 lines deleted).
-- **Windows secret DACL at create.** `src/paths.rs::write_secret` via `CreateFile2` + `SECURITY_ATTRIBUTES` (owner-only), fallback to `fs::write` + `lock_down`; `Win32_Storage_FileSystem` feature; DACL-at-create test.
-
-### Changed
-- **Admission parity.** `ScanConfig::validate()` now rejects non-routable custom CIDRs/endpoints (loopback/link-local/ULA/mapped-v6) and CDN-default port for WARP; CLI and server share one gate (3 new `ConfigError` variants).
-- **View recompute batching.** `resultsView.svelte.ts` dirty-flag + lazy getters; `store.svelte.ts` marks dirty on `applyResult`/`setResults`; `ResultsTable.svelte` single-pass `$derived.by`.
-- **Font bundle.** JetBrains Mono now woff2-only latin faces; Vazirmatn kept arabic/latin-ext/latin via `unicode-range` (≈107 KB dist reduction).
-
-### Fixed
-- **SSE cap flake.** `sse_connection_cap_rejects_fifth_stream` now uses 100 ms sleep + single 429 check (was polling with deadline); `cargo test` 3× green.
-- **Import band-aids.** `src/server/mod.rs` `#[allow(unused_imports)]` removed; test-only imports moved to `tests.rs`; clippy `never_loop` fixed.
 
 ## [0.12.1] - 2026-08-29
 
@@ -169,6 +243,7 @@ Added / Changed / Fixed / Deprecated / Removed / Security, newest on top.
 - **Muted-text contrast on raised surfaces.** `--ink-muted` raised 66% → 70%:
   measured 7.0:1 on `--paper-3` and 7.7:1 on `--paper` (AA pass; previously
   6.1:1 / 6.6:1).
+
 
 ## [0.12.0] - 2026-08-28
 
@@ -266,6 +341,31 @@ Added / Changed / Fixed / Deprecated / Removed / Security, newest on top.
   already rejected raw IPv4 literals; the gaps were mapped-literal and
   cross-port `Origin` variants.
 
+
+## [0.11.1] - 2026-08-27
+
+### Fixed
+- **npm install checksum + provenance.** `install.js` `parseChecksum` now handles `cargo-dist`'s ` *` (binary) separator in `.sha256` files (was only `  `), fixing `Invalid sha256 file: no strict SHA2-256 digest found` on Windows. `package.json` `repository.url` corrected to `https://github.com/QMahyar/cf-scanner` (capital Q) for `--provenance` attestation.
+
+
+## [0.11.0] - 2026-08-27
+
+### Added
+- **Advisor audit closure (26 plans, 10 parallel audits → 92 findings).** All remaining plans shipped: single admission point + xray cooldown (017), Windows DACL at create (019), store accessors (020), de-flaked tests + proptest (021), server split (022), api/types split (023), ranges split (024), grammar consolidation (025), HTTP parser consolidation (026), batched view recompute (007), woff2-only fonts (008), ProPanel 5-extract decomposition (009), identity-group + i18n/a11y (004/005). Plans removed; 26/26 done.
+- **Ranges/Api/Server splits.** `src/api/types.rs` → `limits.rs`/`error.rs`/`validate.rs` + facade; `src/ranges.rs` → `pool.rs`/`http.rs`/`official.rs`; `src/server/mod.rs` → `tests.rs` (2122 lines). Zero consumer import changes; `cargo check` clean.
+- **Grammar + HTTP consolidation.** Single `parse_cidr`/`parse_endpoint` behind `api::types` (fixture-driven); single `read_response` in `socks.rs` shared by `inline_verify.rs` (diff proptest, ~130 lines deleted).
+- **Windows secret DACL at create.** `src/paths.rs::write_secret` via `CreateFile2` + `SECURITY_ATTRIBUTES` (owner-only), fallback to `fs::write` + `lock_down`; `Win32_Storage_FileSystem` feature; DACL-at-create test.
+
+### Changed
+- **Admission parity.** `ScanConfig::validate()` now rejects non-routable custom CIDRs/endpoints (loopback/link-local/ULA/mapped-v6) and CDN-default port for WARP; CLI and server share one gate (3 new `ConfigError` variants).
+- **View recompute batching.** `resultsView.svelte.ts` dirty-flag + lazy getters; `store.svelte.ts` marks dirty on `applyResult`/`setResults`; `ResultsTable.svelte` single-pass `$derived.by`.
+- **Font bundle.** JetBrains Mono now woff2-only latin faces; Vazirmatn kept arabic/latin-ext/latin via `unicode-range` (≈107 KB dist reduction).
+
+### Fixed
+- **SSE cap flake.** `sse_connection_cap_rejects_fifth_stream` now uses 100 ms sleep + single 429 check (was polling with deadline); `cargo test` 3× green.
+- **Import band-aids.** `src/server/mod.rs` `#[allow(unused_imports)]` removed; test-only imports moved to `tests.rs`; clippy `never_loop` fixed.
+
+
 ## [0.10.0] - 2026-08-25
 
 ### Added
@@ -290,6 +390,7 @@ Added / Changed / Fixed / Deprecated / Removed / Security, newest on top.
 - Phase-2 expert knobs (fragment / SNI / probe URLs) collapse into an
   "Advanced tunnel settings" details card that force-opens when the server
   routes errors to those fields; non-default choices show in the summary.
+
 
 ## [0.9.0] - 2026-08-25
 
@@ -330,6 +431,7 @@ Added / Changed / Fixed / Deprecated / Removed / Security, newest on top.
   ignored component inputs — toolchain is now selected by action ref
   (`@1.88`) with explicit `rustup component add` steps. A bare `env:` that
   broke `release.yml` parsing was removed.
+
 
 ## [0.8.0] - 2026-08-24
 
@@ -410,6 +512,7 @@ integrity. All gates green (361 lib + 35 CLI + 8 integration tests, clippy
 - Stale docs/comments corrected (profiles persistence, spec/intent frontend
   reality notes, CHANGELOG newest-first order restored).
 
+
 ## [0.7.0] - 2026-08-24
 
 ### Added
@@ -479,6 +582,7 @@ integrity. All gates green (361 lib + 35 CLI + 8 integration tests, clippy
 - Heading hierarchy: "Generate WARP config (optional)" was an H4 under an H2
   (skipped H3); it is now an H3.
 
+
 ## [0.6.0] - 2026-08-22
 
 ### Added
@@ -516,6 +620,7 @@ integrity. All gates green (361 lib + 35 CLI + 8 integration tests, clippy
   replaying a stale terminal, which could also miss the next run's events.
 - Copy affordances tell the truth: cards copy ip:port and say so; passing
   phase-2 rows offer the real importable URI via `/api/config/export`.
+
 
 ## [0.5.1] - 2026-08-21
 
@@ -560,6 +665,7 @@ integrity. All gates green (361 lib + 35 CLI + 8 integration tests, clippy
   loopback only); explicit byte caps on license and export-config fields;
   wizard Ctrl+C detected by type; outbound fetches accept bracketed IPv6
   literals.
+
 
 ## [0.5.0] - 2026-08-18
 
@@ -628,6 +734,7 @@ integrity. All gates green (361 lib + 35 CLI + 8 integration tests, clippy
 - Phase-2 verification for plain vless/trojan configs drops from an xray
   spawn (~50-200ms) to a single in-process TLS round trip, and one xray
   spawn now serves all probe URLs instead of one per URL.
+
 
 ## [0.4.0] - 2026-08-16
 
@@ -736,6 +843,7 @@ Changes merged by the `review/*` branches land here.
 - Test fixtures no longer carry real credentials (UUIDs/private keys
   replaced with inert zeroed values).
 
+
 ## [0.3.0] - 2026-08-13
 
 ### Added
@@ -777,6 +885,7 @@ Changes merged by the `review/*` branches land here.
 - `forced-colors` support for progress bars, segmented controls, and
   focus outlines.
 
+
 ## [0.2.0] - 2026-08-13
 
 ### Added
@@ -817,6 +926,7 @@ Changes merged by the `review/*` branches land here.
   a clear error instead of producing off-by-one exclusion math.
 - CSV export neutralizes spreadsheet formula injection (`=`, `+`, `-`, `@`
   lead-ins); copied/saved endpoints bracket IPv6 addresses (`[::1]:443`).
+
 
 ## [0.1.0] - 2026-08-13
 

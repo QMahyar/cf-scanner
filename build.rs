@@ -249,7 +249,11 @@ fn ensure_placeholder(path: &std::path::Path) {
 
 fn read_all<R: Read>(entry: &mut R) -> Vec<u8> {
     let mut buf = Vec::new();
-    let _ = entry.read_to_end(&mut buf);
+    if let Err(err) = entry.read_to_end(&mut buf) {
+        // A swallowed error here would stamp a partial xray binary as bundled.
+        eprintln!("error: reading xray zip entry: {err}");
+        std::process::exit(1);
+    }
     buf
 }
 

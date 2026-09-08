@@ -70,6 +70,7 @@ fn clear_ticker_line() {
 async fn run(cli: Cli) -> Result<()> {
     match cli.command {
         Command::Scan { args } => run_scan(*args, cli.verbose).await,
+        Command::CheckSub { url, timeout_ms } => run_check_sub(&url, timeout_ms).await,
         Command::Wizard => match cli_wizard::run().await {
             Ok(()) => Ok(()),
             Err(err) if err.is::<cli_wizard::WizardInterrupted>() => Ok(()),
@@ -129,6 +130,38 @@ async fn run(cli: Cli) -> Result<()> {
             }
         },
     }
+}
+
+async fn run_check_sub(url: &str, timeout_ms: u64) -> Result<()> {
+    use cf_scanner::check_sub;
+    use cf_scanner::verify::HybridTunnelProbe;
+
+    let rows = check_sub::check_subscription(
+        url,
+        &cf_scanner::configs::RealSubFetch,
+        &HybridTunnelProbe::new(Arc::new(cf_scanner::verify::XrayTunnelProbe)),
+        timeout_ms,
+    )
+    .await?;
+    let mut ok = 0usize;
+    for row in &rows {
+        if row.ok {
+            ok += 1;
+        }
+        let entry = serde_json::json!({
+            "tag": row.tag,
+            "server": row.server,
+            "ok": row.ok,
+            "latency_ms": row.latency_ms,
+            "error": row.error,
+        });
+        println!("{entry}");
+    }
+    eprintln!("check-sub: {ok}/{} config(s) verified", rows.len());
+    if ok == 0 && !rows.is_empty() {
+        anyhow::bail!("no subscription config verified");
+    }
+    Ok(())
 }
 
 async fn run_scan(args: ScanArgs, verbose: bool) -> Result<()> {

@@ -8,9 +8,15 @@ locally here should be exercised before pushing.
 
 - Rust edition 2024. `rust-toolchain.toml` pins the toolchain to 1.88, the
   same version CI uses. Any rustup-installed toolchain resolves to it on
-  first build. `Cargo.toml` keeps the MSRV floor at 1.85.
+  first build. `Cargo.toml` keeps the MSRV floor at 1.88 (the pin and the
+  floor agree; the version-parity CI job fails a release that drifts).
 - Put `curl` on PATH. build.rs uses it to fetch the GeoIP mmdb, and in dist
-  builds only, the pinned xray binary.
+  builds only, the pinned xray binary. A missing `curl` surfaces as
+  `db-ip download failed` on the first build (see the troubleshooting table
+  below).
+- **Nightly CI.** `checks.yml` also runs on a nightly cron (06:00 UTC) so
+  dependency drift and flaky tests surface between commits; a nightly
+  failure needs no action unless it reproduces locally on `main`.
 - The first build needs network access for the db-ip download. build.rs pins
   the mmdb by SHA-256, so a failed download or checksum mismatch fails the
   build; there is no empty-database fallback. The validated download is
@@ -59,6 +65,33 @@ git restore data/bundled/xray data/bundled/xray.exe
 The placeholders are git-tracked; the dist build overwrites one of them with
 the real binary. Never commit the real binary (see ADR-001).
 
+## Live QA runbook
+
+Some tests hit the real network and are `#[ignore]`d: the subscription
+endpoint test, a live CDN dial, and the live tiny scan
+(`tests/live_smoke.rs`, `tests/cli_scan_agent.rs`). They exist to attach
+evidence to a release, not to run in normal CI.
+
+**Locally:**
+
+```sh
+export CFSCANNER_SUB_URL="https://your-sub.example/token"   # a credential
+cargo test --test live_smoke -- --ignored --nocapture
+cargo test --test cli_scan_agent -- --ignored --nocapture
+```
+
+**In CI:** run the `Live evidence` workflow from the Actions tab
+(`workflow_dispatch`) or let the weekly cron fire it. Jobs no-op unless
+the `CFSCANNER_SUB_URL` repository secret is set, so forks never touch
+it. The workflow masks nothing by itself — the secret only ever reaches
+the test process via the environment, and the test output redacts keys
+(same sanitizer as production errors). Attach the artifact (and/or the
+job log) to the release PR.
+
+**Secrets hygiene:** the subscription URL authenticates your account —
+it is a credential. Store it only as a repo secret; never paste it in
+PRs, issues, or logs.
+
 ## Known local-only limitations
 
 - **MSI build fails locally** (`candle` not found) unless WiX Toolset is
@@ -97,3 +130,6 @@ signing and notarization.
 | `xray checksum mismatch` | The pinned tag in `data/xray-version.txt` was re-released. Re-verify the `.dgst` and pin the new tag. |
 | `dist: command not found` | `~/.cargo/bin` is not on PATH. Call `dist.exe` by full path. |
 | MSI step error (`candle`) | Local only: WiX is missing. See Local-only limitations. |
+
+Keeping the bundled Cloudflare ranges current (cron, systemd timers,
+Task Scheduler, Termux) is documented in `docs/refresh-automation.md`.

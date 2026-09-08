@@ -25,10 +25,12 @@ cf-scanner scan --mode cdn --preset quick --export results.csv
 
 ## Supported Platforms
 
+Requires Node >= 14.14 (enforced by `engines` in `package.json`).
+
 | OS | Arch | Status |
 |----|------|--------|
-| Linux | x64 | ✅ Supported |
-| Linux | arm64 | ✅ Supported |
+| Linux | x64 | ✅ Supported (glibc; musl/Alpine is NOT supported by the npm binary — use a glibc container or the standalone archives) |
+| Linux | arm64 | ✅ Supported (glibc; same musl caveat) |
 | Windows | x64 | ✅ Supported |
 | macOS | any | ❌ Not supported (unsigned binaries) |
 

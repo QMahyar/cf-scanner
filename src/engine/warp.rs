@@ -9,7 +9,7 @@ use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 
 use super::plan::plan_hosts_iter;
-use super::{BATCH_FLUSH, ProbeContext, ScanController, merge_sorted, progress_cadence};
+use super::{ProbeContext, ScanController, merge_sorted, progress_cadence};
 use crate::api::types::{
     ScanConfig, ScanEvent, ScanProgress, ScanSummary, ScanTarget, Verdict, WarpConfig,
 };
@@ -73,8 +73,8 @@ impl ScanController {
             last_milestone: AtomicU64::new(0),
             cadence,
             total,
-            store: self.store.clone(),
-            dirty: self.store_dirty.clone(),
+            store: self.progress.store.clone(),
+            dirty: self.progress.store_dirty.clone(),
             events: self.events.clone(),
             geo: self.geo.clone(),
             colo_filter: Arc::new(Vec::new()),
@@ -172,28 +172,27 @@ impl ScanController {
                     if cancelled {
                         break;
                     }
-                    ctx.scanned.fetch_add(1, Ordering::Relaxed);
+                    // Release pairs with the Acquire reads in should_stop (see cdn.rs).
+                    ctx.scanned.fetch_add(1, Ordering::Release);
                     if let Some(latency) = latency_ms.filter(|_| failed == 0) {
-                        ctx.found.fetch_add(1, Ordering::Relaxed);
-                        let verdict = Box::new(Verdict {
-                            ip: task.ip,
-                            port: task.port,
-                            latency_ms: Some(latency),
-                            country: ctx.geo.country(task.ip),
-                            colo: None,
-                            phase2: None,
-                            sent,
-                            received,
-                            loss_pct: Some(0),
-                            fail_reason: None,
-                            asn: None,
-                            isp: None,
-                        });
-                        let _ = ctx.events.send(ScanEvent::Result(verdict.clone()));
-                        batch.push(*verdict);
-                        if batch.len() >= BATCH_FLUSH {
-                            merge_sorted(&ctx.store, &ctx.dirty, std::mem::take(&mut batch));
-                        }
+                        super::driver::record_and_batch(
+                            &ctx,
+                            &mut batch,
+                            Verdict {
+                                ip: task.ip,
+                                port: task.port,
+                                latency_ms: Some(latency),
+                                country: ctx.geo.country(task.ip),
+                                colo: None,
+                                phase2: None,
+                                sent,
+                                received,
+                                loss_pct: Some(0),
+                                fail_reason: None,
+                                asn: None,
+                                isp: None,
+                            },
+                        );
                     }
                     let scanned = ctx.scanned.load(Ordering::Relaxed);
                     if ctx.milestone_due(scanned) {
@@ -204,16 +203,7 @@ impl ScanController {
             });
         }
 
-        while let Some(res) = workers.join_next().await {
-            if let Err(join_err) = res {
-                producer.abort();
-                self.cancel();
-                return Err(anyhow!("WARP probe worker panicked: {join_err}"));
-            }
-        }
-        producer
-            .await
-            .map_err(|e| anyhow!("WARP probe producer panicked: {e}"))?;
+        super::driver::drain_workers(workers, producer, || self.cancel(), "WARP").await?;
 
         Ok(self.finish(
             started,

@@ -299,6 +299,32 @@ fn http_mode_rejects_empty_accepted_codes() {
 }
 
 #[test]
+fn rejects_neighbor_scan_in_warp_mode() {
+    let mut c = valid_config();
+    c.mode = Mode::Warp;
+    c.ports = vec![Port::new(2408)];
+    c.neighbor_count = 4;
+    assert_eq!(c.validate(), Err(ConfigError::NeighborWrongMode));
+    c.neighbor_count = 0;
+    assert_eq!(c.validate(), Ok(()));
+}
+
+#[test]
+fn rejects_custom_http_codes_without_http_probe() {
+    let mut c = valid_config();
+    c.probe_mode = ProbeMode::Tcp;
+    c.accepted_http_codes = vec![200];
+    assert_eq!(c.validate(), Err(ConfigError::HttpCodesNeedHttpProbe));
+    c.probe_mode = ProbeMode::Tls;
+    assert_eq!(c.validate(), Err(ConfigError::HttpCodesNeedHttpProbe));
+    c.accepted_http_codes = default_accepted_http_codes();
+    assert_eq!(c.validate(), Ok(()), "untouched defaults stay valid");
+    c.probe_mode = ProbeMode::Http;
+    c.accepted_http_codes = vec![200];
+    assert_eq!(c.validate(), Ok(()));
+}
+
+#[test]
 fn rejects_non_tls_probe_mode_in_warp() {
     let mut c = valid_config();
     c.mode = Mode::Warp;
@@ -1362,4 +1388,203 @@ fn rejects_default_warp_port_in_warp_mode() {
 fn default_warp_port_not_rejected_in_cdn_mode() {
     let c = valid_config();
     assert_eq!(c.validate(), Ok(()));
+}
+
+#[test]
+fn rejects_phase2_concurrency_out_of_range() {
+    let mut p2 = Phase2Config {
+        configs: vec!["vless://uuid@example.com:443".to_owned()],
+        ..Phase2Config::default()
+    };
+    p2.concurrency = 0;
+    assert_eq!(
+        valid_config_with(p2.clone()),
+        Err(ConfigError::InvalidPhase2Concurrency(0))
+    );
+    p2.concurrency = 9;
+    assert_eq!(
+        valid_config_with(p2.clone()),
+        Err(ConfigError::InvalidPhase2Concurrency(9))
+    );
+    p2.concurrency = 1;
+    assert_eq!(valid_config_with(p2.clone()), Ok(()));
+    p2.concurrency = 8;
+    assert_eq!(valid_config_with(p2), Ok(()));
+}
+
+#[test]
+fn rejects_overlong_phase2_config_entry() {
+    let mut c = valid_config();
+    c.phase2 = Some(Phase2Config {
+        configs: vec!["x".repeat(MAX_CONFIG_ENTRY_BYTES + 1)],
+        ..Phase2Config::default()
+    });
+    assert_eq!(
+        c.validate(),
+        Err(ConfigError::ConfigEntryTooLong(MAX_CONFIG_ENTRY_BYTES))
+    );
+}
+
+#[test]
+fn rejects_overlong_sni() {
+    let p2 = Phase2Config {
+        configs: vec!["vless://uuid@example.com:443".to_owned()],
+        snis: vec!["y".repeat(MAX_SNI_BYTES + 1)],
+        ..Phase2Config::default()
+    };
+    assert_eq!(
+        valid_config_with(p2),
+        Err(ConfigError::SniTooLong(MAX_SNI_BYTES))
+    );
+}
+
+#[test]
+fn rejects_overlong_wgconf() {
+    let mut c = valid_config();
+    c.mode = Mode::Warp;
+    c.ports = vec![Port::new(2408)];
+    c.warp = Some(WarpConfig {
+        wgconf: Some("k".repeat(MAX_WGCONF_BYTES + 1)),
+        ..WarpConfig::default()
+    });
+    assert_eq!(
+        c.validate(),
+        Err(ConfigError::WgconfTooLong(MAX_WGCONF_BYTES))
+    );
+}
+
+#[test]
+fn rejects_preset_target_in_warp_mode() {
+    let mut c = valid_config();
+    c.mode = Mode::Warp;
+    c.ports = vec![Port::new(2408)];
+    c.target = ScanTarget::Preset(CdnPreset::Quick);
+    assert_eq!(c.validate(), Err(ConfigError::WarpPresetNotAllowed));
+}
+
+#[test]
+fn rejects_custom_cidrs_in_warp_mode() {
+    let mut c = valid_config();
+    c.mode = Mode::Warp;
+    c.ports = vec![Port::new(2408)];
+    c.custom_cidrs = vec!["8.8.8.0/24".to_owned()];
+    assert_eq!(c.validate(), Err(ConfigError::WarpCidrsNotAllowed));
+}
+
+#[test]
+fn rejects_too_many_warp_endpoints() {
+    let mut c = valid_config();
+    c.mode = Mode::Warp;
+    c.ports = vec![Port::new(2408)];
+    c.warp = Some(WarpConfig {
+        custom_endpoints: vec!["1.2.3.4:2408".to_owned(); MAX_ENDPOINTS + 1],
+        ..WarpConfig::default()
+    });
+    assert_eq!(
+        c.validate(),
+        Err(ConfigError::TooManyEndpoints(MAX_ENDPOINTS + 1))
+    );
+}
+
+#[test]
+fn boundary_values_at_caps_are_accepted() {
+    let mut c = valid_config();
+    c.concurrency = 1;
+    assert_eq!(c.validate(), Ok(()));
+    c.concurrency = 1000;
+    assert_eq!(c.validate(), Ok(()));
+    c.timeout_ms = 100;
+    assert_eq!(c.validate(), Ok(()));
+    c.timeout_ms = 30_000;
+    assert_eq!(c.validate(), Ok(()));
+    c.ports = (1..=64u16).map(Port::new).collect();
+    assert_eq!(c.validate(), Ok(()), "64 unique ports is the cap");
+    c.stop = StopCondition {
+        found: MAX_STOP_VALUE,
+        cap: Some(MAX_STOP_VALUE),
+    };
+    assert_eq!(c.validate(), Ok(()));
+    c.stop = StopCondition::unlimited(20);
+    c.probe_mode = ProbeMode::Http;
+    c.accepted_http_codes = vec![100, 599];
+    assert_eq!(c.validate(), Ok(()), "boundary status codes pass");
+    let mut w = valid_config();
+    w.mode = Mode::Warp;
+    w.ports = vec![Port::new(2408)];
+    w.warp = Some(WarpConfig {
+        probes_per_endpoint: 1,
+        ..WarpConfig::default()
+    });
+    assert_eq!(w.validate(), Ok(()));
+    w.warp.as_mut().unwrap().probes_per_endpoint = 10;
+    assert_eq!(w.validate(), Ok(()));
+}
+
+#[test]
+fn remaining_scan_event_variants_round_trip() {
+    for ev in [
+        ScanEvent::Phase2Progress(Phase2Progress { done: 3, total: 9 }),
+        ScanEvent::Failed(FailedPayload {
+            reason: "boom".to_owned(),
+        }),
+    ] {
+        let back: ScanEvent = serde_json::from_str(&serde_json::to_string(&ev).unwrap()).unwrap();
+        assert_eq!(back, ev);
+    }
+}
+
+#[test]
+fn fully_populated_verdict_round_trips() {
+    let v = Verdict {
+        ip: "203.0.113.7".parse().unwrap(),
+        port: 443,
+        latency_ms: Some(12),
+        country: Some("US".to_owned()),
+        colo: Some("LAX".to_owned()),
+        phase2: Some(Phase2Verdict {
+            passed: true,
+            fragment: FragmentPreset::Medium,
+            sni: "example.com".to_owned(),
+            latency_ms: Some(40),
+            error: None,
+            config_index: Some(2),
+            verifier: Some(Verifier::Xray),
+            speed_test_mbps: Some(3.5),
+        }),
+        sent: 4,
+        received: 3,
+        loss_pct: Some(25),
+        fail_reason: None,
+        asn: Some(13335),
+        isp: Some("CLOUDFLARENET".to_owned()),
+    };
+    let back: Verdict = serde_json::from_str(&serde_json::to_string(&v).unwrap()).unwrap();
+    assert_eq!(back, v);
+}
+
+#[test]
+fn warp_and_full_phase2_configs_round_trip() {
+    let w = WarpConfig {
+        custom_endpoints: vec!["1.2.3.4:2408".to_owned()],
+        probes_per_endpoint: 5,
+        wgconf: Some("[Interface]".to_owned()),
+        verify_with_wgconf: true,
+    };
+    let back: WarpConfig = serde_json::from_str(&serde_json::to_string(&w).unwrap()).unwrap();
+    assert_eq!(back, w);
+    let p2 = Phase2Config {
+        configs: vec!["vless://uuid@example.com:443".to_owned()],
+        fragment: FragmentPreset::Heavy,
+        custom_fragment: Some(CustomFragment {
+            packets: "tlshello".to_owned(),
+            length: "10-300".to_owned(),
+            interval: "5-50".to_owned(),
+        }),
+        snis: vec!["example.com".to_owned()],
+        probe_url: "https://example.com/".to_owned(),
+        probe_urls: vec!["https://example.com/".to_owned()],
+        concurrency: 4,
+    };
+    let back: Phase2Config = serde_json::from_str(&serde_json::to_string(&p2).unwrap()).unwrap();
+    assert_eq!(back, p2);
 }

@@ -12,6 +12,16 @@ pub const DEFAULT_WARP_PORTS: &[Port] = &[
 ];
 pub const DEFAULT_CONCURRENCY: u16 = 64;
 pub const DEFAULT_TIMEOUT_MS: u64 = 3_000;
+pub const DEFAULT_PROBES_PER_ENDPOINT: u8 = 3;
+pub const DEFAULT_PHASE2_CONCURRENCY: u8 = 3;
+
+pub fn default_probes_per_endpoint() -> u8 {
+    DEFAULT_PROBES_PER_ENDPOINT
+}
+
+pub fn default_phase2_concurrency() -> u8 {
+    DEFAULT_PHASE2_CONCURRENCY
+}
 pub const DEFAULT_PROBE_URL: &str = "https://www.google.com/robots.txt";
 
 pub fn default_probe_url() -> String {

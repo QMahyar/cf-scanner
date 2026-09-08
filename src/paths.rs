@@ -482,4 +482,26 @@ mod tests {
         let _guard = DATA_DIR_LOCK.blocking_lock();
         assert!(data_dir().unwrap().is_absolute());
     }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_secret_unix_sets_owner_only_file_and_dir_modes() {
+        let dir = std::env::temp_dir().join(format!("cf-scanner-secret-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let file = dir.join("sub").join("secret.txt");
+        write_secret(&file, b"payload").expect("write_secret must succeed");
+        use std::os::unix::fs::PermissionsExt as _;
+        let file_mode = std::fs::metadata(&file).unwrap().permissions().mode();
+        assert_eq!(file_mode & 0o777, 0o600, "secret file must be owner-only");
+        // The created parent is best-effort 0700.
+        let parent = file.parent().unwrap();
+        let parent_mode = std::fs::metadata(parent).unwrap().permissions().mode();
+        assert_eq!(parent_mode & 0o777, 0o700, "parent dir must be owner-only");
+        // Overwrite keeps content and mode.
+        write_secret(&file, b"second").unwrap();
+        assert_eq!(std::fs::read(&file).unwrap(), b"second");
+        let file_mode = std::fs::metadata(&file).unwrap().permissions().mode();
+        assert_eq!(file_mode & 0o777, 0o600);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

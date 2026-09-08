@@ -35,6 +35,12 @@ pub struct ProbeRequest<'a> {
 }
 
 pub trait TunnelProbe: Send + Sync {
+    /// One-shot verification of a single candidate: build a tunnel through
+    /// `req`, run the probe URLs through it, return pass/fail + latency +
+    /// colo. Implementors: `InlineTunnelProbe` (in-process, vless/trojan),
+    /// `XrayTunnelProbe` (xray subprocess, all transports/fragments),
+    /// `HybridTunnelProbe` (routes per-config between the two). Session
+    /// lifecycle (spawn/cleanup) is internal to each call.
     fn probe(
         &self,
         req: ProbeRequest<'_>,
@@ -144,6 +150,11 @@ impl OpenedTunnel {
 }
 
 pub trait TunnelOpener: Send + Sync {
+    /// Long-lived session for the speed test: open a tunnel once, hand back
+    /// its socks address plus a deferred cleanup future. Distinct from
+    /// [`TunnelProbe`]: one session is reused across a whole download, not
+    /// one call per candidate. Implementors: `RealTunnelOpener` (xray),
+    /// plus test fakes.
     fn open(
         &self,
         spec: &OutboundSpec,
@@ -292,7 +303,7 @@ impl TunnelProbe for XrayTunnelProbe {
     }
 }
 
-fn fresh_trial_dir(work_dir: &Path) -> PathBuf {
+fn fresh_trial_dir(work_dir: &Path) -> std::io::Result<PathBuf> {
     use rand_core::RngCore;
     let salt = rand_core::OsRng.next_u32();
     let dir = work_dir.join(format!(
@@ -300,21 +311,32 @@ fn fresh_trial_dir(work_dir: &Path) -> PathBuf {
         next_trial_id(),
         std::process::id()
     ));
-    let _ = std::fs::create_dir_all(&dir);
+    std::fs::create_dir_all(&dir)?;
     #[cfg(unix)]
     {
-        // Trial dirs hold xray config.json with proxy credentials: owner-only listing.
+        // Trial dirs hold xray config.json with proxy credentials: fail closed
+        // when owner-only listing cannot be applied.
         use std::os::unix::fs::PermissionsExt as _;
-        let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))?;
     }
-    dir
+    Ok(dir)
 }
 
 async fn make_trial_dir(work_dir: &Path) -> Result<PathBuf> {
     let work_dir = work_dir.to_path_buf();
-    let dir = tokio::task::spawn_blocking(move || -> std::io::Result<PathBuf> {
-        std::fs::create_dir_all(&work_dir)?;
-        Ok(fresh_trial_dir(&work_dir))
+    let dir = tokio::task::spawn_blocking(move || -> Result<PathBuf> {
+        std::fs::create_dir_all(&work_dir).with_context(|| {
+            format!(
+                "refusing to stage proxy credentials under {}",
+                work_dir.display()
+            )
+        })?;
+        fresh_trial_dir(&work_dir).map_err(|e| {
+            anyhow!(
+                "refusing to stage proxy credentials under {}: {e}",
+                work_dir.display()
+            )
+        })
     })
     .await
     .context("trial dir creation task failed")??;
@@ -555,12 +577,30 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn trial_dir_creation_fails_closed_when_blocked() {
+        // A regular file where the work dir should be: create_dir_all fails
+        // deterministically on every platform (no permission tricks needed).
+        let file =
+            std::env::temp_dir().join(format!("cf-scanner-verify-block-{}", std::process::id()));
+        std::fs::write(&file, b"blocker").unwrap();
+        let err = make_trial_dir(&file.join("trial-root"))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("refusing to stage proxy credentials"),
+            "must fail closed with a clear error, got: {err}"
+        );
+        let _ = std::fs::remove_file(&file);
+    }
+
     #[test]
     fn trial_dirs_are_unique() {
         let dir = std::env::temp_dir().join("cf-scanner-verify-unique-test");
         let _ = std::fs::create_dir_all(&dir);
-        let a = fresh_trial_dir(&dir);
-        let b = fresh_trial_dir(&dir);
+        let a = fresh_trial_dir(&dir).unwrap();
+        let b = fresh_trial_dir(&dir).unwrap();
         assert_ne!(a, b, "concurrent trials must never share a config dir");
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -573,7 +613,7 @@ mod tests {
             std::env::temp_dir().join(format!("cf-scanner-verify-perms-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        let trial = fresh_trial_dir(&dir);
+        let trial = fresh_trial_dir(&dir).unwrap();
         let mode = std::fs::metadata(&trial).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o700, "trial dir must be owner-only");
         let _ = std::fs::remove_dir_all(&dir);
@@ -685,5 +725,97 @@ mod tests {
             "context must name the retry limit: {err}"
         );
         assert!(err.chain().any(|e| e.to_string().contains("boom")));
+    }
+
+    #[tokio::test]
+    async fn require_xray_binary_reflects_the_data_dir_seam() {
+        use crate::paths::test_env::{DATA_DIR_LOCK, IsolatedDataDir};
+        let _guard = DATA_DIR_LOCK.lock().await;
+        let _isolated = IsolatedDataDir::new();
+        // The target/debug/deps test dir has no bundled xray, so resolution
+        // falls through to the data dir.
+        if crate::xray::find_bundled().is_none() {
+            assert!(
+                require_xray_binary().is_err(),
+                "empty data dir must yield the actionable error"
+            );
+            let bin = crate::paths::xray_binary_path().unwrap();
+            std::fs::write(&bin, vec![0u8; 1 << 20]).unwrap();
+            let found = require_xray_binary().unwrap();
+            assert_eq!(found, bin);
+        }
+    }
+
+    #[tokio::test]
+    async fn stale_trial_sweep_cas_runs_once_per_hour_then_gates() {
+        let dir =
+            std::env::temp_dir().join(format!("cf-scanner-verify-cas-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // First sweep: CAS from 0 advances the gate.
+        LAST_SWEEP_SECS.store(0, std::sync::atomic::Ordering::Relaxed);
+        sweep_stale_trial_dirs_async(&dir).await;
+        let stamped = LAST_SWEEP_SECS.load(std::sync::atomic::Ordering::Relaxed);
+        assert!(stamped > 0, "first sweep must stamp the rate gate");
+
+        // Concurrent second sweep within the hour: the CAS loses, no re-stamp,
+        // no sweep work.
+        #[cfg(unix)]
+        {
+            use std::time::Duration;
+            let stale = dir.join("trial-stale");
+            std::fs::create_dir_all(&stale).unwrap();
+            let old = std::time::SystemTime::now() - Duration::from_secs(2 * 60 * 60);
+            let f = std::fs::File::open(&stale).unwrap();
+            f.set_times(std::fs::FileTimes::new().set_modified(old))
+                .unwrap();
+            drop(f);
+            sweep_stale_trial_dirs_async(&dir).await;
+            assert!(
+                stale.exists(),
+                "gated sweep must not remove dirs between CAS stamps"
+            );
+        }
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        LAST_SWEEP_SECS.store(now, std::sync::atomic::Ordering::Relaxed);
+        sweep_stale_trial_dirs_async(&dir).await;
+        assert_eq!(
+            LAST_SWEEP_SECS.load(std::sync::atomic::Ordering::Relaxed),
+            now,
+            "a gated sweep must not re-stamp"
+        );
+
+        // A reset gate allows the sweep again (unix: stale dir now removed).
+        LAST_SWEEP_SECS.store(0, std::sync::atomic::Ordering::Relaxed);
+        sweep_stale_trial_dirs_async(&dir).await;
+        #[cfg(unix)]
+        assert!(
+            !dir.join("trial-stale").exists(),
+            "an ungated sweep removes dirs older than the age cap"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn opened_tunnel_cleanup_deferred_future_stops_the_process() {
+        use std::sync::atomic::AtomicUsize;
+        static CLEANUPS: AtomicUsize = AtomicUsize::new(0);
+        let tunnel = OpenedTunnel::new(
+            SocketAddr::from(([127, 0, 0, 1], 1)),
+            Box::pin(async {
+                CLEANUPS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }),
+        );
+        assert_eq!(CLEANUPS.load(std::sync::atomic::Ordering::SeqCst), 0);
+        tunnel.cleanup().await;
+        assert_eq!(
+            CLEANUPS.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "cleanup runs exactly once, only when awaited"
+        );
     }
 }

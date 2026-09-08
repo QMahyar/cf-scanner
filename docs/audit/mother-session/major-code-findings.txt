@@ -1,0 +1,135 @@
+### u128-to-u32 silent truncation with misleading fallback
+File: src/cli_wizard.rs | Lines: 23 | Cat: Integer truncation / incorrect fallback
+warp::bundled_pool().host_count() returns u128. u32::try_from(...).unwrap_or(MAX_SCAN_COUNT) silently substitutes 100,000 if the value exceeds u32::MAX. A huge pool (billions of hosts) would be treated as exactly MAX_SCAN_COUNT rather than being capped. The correct pattern is .try_from(...).unwrap_or(u32::MAX).min(MAX_SCAN_COUNT) — clamp to u32 range first, then cap at the limit.
+Trigger: u32::try_from(warp::bundled_pool().host_count())
+
+### Poisoned Mutex Silently Swallowed
+File: E:/code/CF-Scanner/src/engine/store.rs | Lines: 13-14 | Cat: swallowed error / silent data corruption
+lock() uses unwrap_or_else(|e| e.into_inner()) to recover from mutex poison. When a thread panics mid-mutation, the inner data is in an undefined state, but every subsequent store operation proceeds on that corrupted data with no log, warning, or metric. This converts a hard crash into silent data corruption that is extremely difficult to diagnose. In a pure-CLI context with no crash-recovery, the
+Trigger: lock(m: &Mutex<T>) -> MutexGuard<'_, T>
+
+### Nested Lock Acquisition Without Documented Ordering
+File: E:/code/CF-Scanner/src/engine/store.rs | Lines: 32,34 | Cat: concurrency / deadlock risk
+update_verdict_phase2 acquires store then pos_index. remove_verdict also acquires store then pos_index (same order, safe today). However the pattern is fragile: if any future call site starts from pos_index first, a classic ABBA deadlock occurs. Because the lock() helper silently recovers from poison, a deadlock would manifest as a hung process with no diagnostic output. Line 40 re-acquires pos_in
+Trigger: lock(store) on line 32, then lock(pos_index) on line 34
+
+### WarpConfig.verify_with_wgconf missing #[serde(default)] breaks backward-compatible deserialization
+File: E:\code\CF-Scanner\src\api\types.rs | Lines: 171-187 | Cat: Missing #[serde(default)] on deny_unknown_fields struct
+WarpConfig has #[serde(deny_unknown_fields)] and its Default impl sets verify_with_wgconf to false, confirming it is an opt-in flag. However, the field declaration `pub verify_with_wgconf: bool` lacks #[serde(default)]. Because deny_unknown_fields is active, any WarpConfig JSON produced by an older version (before this field existed) that omits verify_with_wgconf will fail to deserialize with "mis
+Trigger: deny_unknown_fields + bool without default on an opt-in field
+
+### scanned incremented with Relaxed, read with Acquire in stop-check
+File: E:/code/CF-Scanner/src/engine/cdn.rs | Lines: 326 | Cat: Atomic ordering
+Workers write ctx.scanned.fetch_add(1, Ordering::Relaxed) but ProbeContext::should_stop() reads it with Ordering::Acquire. Relaxed stores do not establish a happens-before relationship with any other thread. On weakly-ordered architectures (AArch64/ARM), the producer can read a stale scanned value for an unbounded number of poll iterations and overshoot the cap stop condition. The test cap_oversho
+Trigger: ctx.scanned.fetch_add(1, Ordering::Relaxed)
+
+### found incremented with Relaxed, read with Acquire in stop-check
+File: E:/code/CF-Scanner/src/engine/cdn.rs | Lines: 328 | Cat: Atomic ordering
+Same pattern as the scanned issue. Workers do ctx.found.fetch_add(1, Ordering::Relaxed) and should_stop() reads it with Ordering::Acquire. On weakly-ordered architectures the producer can miss the found-stop threshold entirely for a non-trivial window, causing unnecessary probes to be dispatched even after enough results exist. Should be Ordering::Release on the write side.
+Trigger: ctx.found.fetch_add(1, Ordering::Relaxed)
+
+### side_rx drain exits on inflight==0, silently dropping undrained neighbor tasks
+File: E:/code/CF-Scanner/src/engine/cdn.rs | Lines: 218-230 | Cat: TOCTOU race / data loss
+After the main producer loop, the final drain loop breaks when inflight==0. Between a worker decrementing inflight and the producer checking it, a previously-completed worker can enqueue a new neighbor task into side_rx. The producer sees inflight==0 and drops the channel. Those orphaned tasks are never forwarded to any worker, never probed, and never counted in scanned or found. The data loss is 
+Trigger: Err(mpsc::error::TryRecvError::Empty) => { if inflight.load(Ordering::Acquire) == 0 { break; } }
+
+### fresh_trial_dir silently ignores create_dir_all failure
+File: E:\code\CF-Scanner\src\verify.rs | Lines: 303 | Cat: silent error swallowing
+`let _ = std::fs::create_dir_all(&dir)` discards the Result. If directory creation fails (disk full, permissions, read-only filesystem), the function returns a PathBuf pointing to a nonexistent directory. Downstream callers (make_trial_dir, the probe, xray::spawn) will fail later with confusing errors that do not point back to this root cause. The function signature returns `PathBuf` with no `Resu
+Trigger: Disk full, read-only data directory, or OS-level permission denial in the data dir.
+
+### fresh_trial_dir silently ignores chmod 0700 on Unix
+File: E:\code\CF-Scanner\src\verify.rs | Lines: 307-308 | Cat: security — credential exposure
+`let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))` silently swallows the error. The comment explicitly states 'Trial dirs hold xray config.json with proxy credentials: owner-only listing.' If this fails, the trial directory (containing proxy credentials and xray config) remains world-readable. On a shared system, other users could read the SOCKS proxy credentials from
+Trigger: Unusual filesystem that does not honor POSIX permissions (e.g., FAT32, certain FUSE mounts), or ACL interference on Linux.
+
+### --phase2-only is unconditionally rejected and unreachable in the scan subcommand
+File: E:\code\CF-Scanner\src\cli\scan_args.rs | Lines: 195-198 | Cat: dead code / unreachable branch
+validate_phase2_flags always rejects phase2_only=true, but the flag is declared on ScanArgs (cli.rs:224), clap requires --phase2-configs, and the engine code (engine/cdn.rs:115) actually handles it. No user-provided flag combination can succeed. The wizard also never sets it. The flag is exposed in --help but always fails.
+Trigger: if args.phase2_only { return Err(anyhow!("--phase2-only needs phase-1 results from a running scan; one-shot scans cannot use it")); }
+
+### save_config does NOT strip warp.wgconf despite help text claiming WARP keys are never saved
+File: E:\code\CF-Scanner\src\retry.rs | Lines: 16-23 | Cat: security inconsistency / incorrect behavior
+The --retry-last long help (cli.rs:308-312) states 'Phase-2 configs and WARP keys are never saved', but save_config only drops phase2 (sanitized.phase2 = None). The WarpConfig.wgconf field containing a WireGuard private key is serialized to last-scan.json via write_secret. Either the save function should also drop warp.wgconf (security bug) or the help text is factually wrong.
+Trigger: sanitized.phase2 = None; // warp.wgconf is NOT stripped
+
+### base_pool discards refresh parse error via .ok()
+File: src/ranges/pool.rs | Lines: 161-168 | Cat: swallowed error
+In base_pool, CidrPool::parse(text).ok() silently discards the parse error when refreshed IPv4 ranges fail to parse or yield an empty pool. The function falls back to bundled() and returns Ok with no way for the caller to distinguish 'refresh succeeded' from 'refresh was garbage, silently fell back'. The error should propagate with context, or the caller should receive a richer signal than Ok(bund
+Trigger: CidrPool::parse(text).ok().filter(|p| !p.ranges.is_empty())
+
+### base_pool_v6 discards refresh parse error via .ok() (same pattern)
+File: src/ranges/pool.rs | Lines: 170-177 | Cat: swallowed error
+base_pool_v6 mirrors the same issue for IPv6 ranges. CidrPool::parse(text).ok() silently drops the parse error and falls back to bundled_v6() with only a tracing::warn. No mechanism for the caller to detect the fallback occurred.
+Trigger: CidrPool::parse(text).ok().filter(|p| !p.ranges.is_empty())
+
+### effective_pool silently swallows I/O and path errors on v4 refresh read
+File: src/ranges/pool.rs | Lines: 197-201 | Cat: swallowed error
+tokio::fs::read_to_string(p).await.ok() silently swallows I/O errors (permission denied, file locked, disk error) when reading the refreshed v4 ranges file. The paths::refreshed_ranges_path() error is also silently consumed into None via Err(_) => None. If the file exists but is unreadable, the user gets bundled ranges with no error, no warning log, and no way to diagnose the issue.
+Trigger: Ok(p) => tokio::fs::read_to_string(p).await.ok(), Err(_) => None
+
+### effective_pool silently swallows I/O and path errors on v6 refresh read
+File: src/ranges/pool.rs | Lines: 202-207 | Cat: swallowed error
+The v6 path has the identical silent .ok() on read_to_string and silent Err(_) => None on path resolution. Both swallow I/O failures without logging. This is the same bug repeated for the v6 refresh path.
+Trigger: Ok(p) => tokio::fs::read_to_string(p).await.ok(), Err(_) => None
+
+### refresh_to_disk calls blocking I/O and std::sync::Mutex from async fn without spawn_blocking
+File: src/ranges/official.rs | Lines: 18-26 | Cat: blocking the runtime
+refresh_to_disk is an async fn that awaits the HTTP fetch then calls write_pool_to synchronously. write_pool_to (pool.rs:310-327) performs fs::create_dir_all, fs::write, fs::rename, and fs::remove_file — all blocking syscalls — while holding a std::sync::Mutex guard (data_write_guard). Because no tokio::task::spawn_blocking wraps this work, the blocking I/O and the mutex acquisition run directly o
+Trigger: refresh_to_disk calls write_pool_to synchronously within an async context
+
+### refresh_v6_to_disk has the same blocking I/O + std::sync::Mutex under async fn issue
+File: src/ranges/official.rs | Lines: 28-40 | Cat: blocking the runtime
+Identical to refresh_to_disk: the async fn calls write_pool_to synchronously, which performs blocking filesystem operations while holding a std::sync::Mutex. The fix is the same: wrap the write_pool_to call in tokio::task::spawn_blocking (or make write_pool_to async with tokio::fs equivalents), and convert the std::sync::Mutex to a tokio::sync::Mutex if the guard needs to cross await points in the
+Trigger: refresh_v6_to_disk calls write_pool_to synchronously within an async context
+
+### PoisonError silently recovered without diagnostics
+File: src/paths.rs | Lines: 9 | Cat: Swallowed error / silent data corruption risk
+data_write_guard() recovers from PoisonError via unwrap_or_else(|e| e.into_inner()). A PoisonError means a previous lock holder panicked while holding the gate, implying broken invariants. Silently recovering lets subsequent code proceed on potentially corrupted state with no trace, log, or metric emitted.
+Trigger: Any thread panic while holding WRITE_GATE
+
+### build_owner_dacl error discarded in Windows write_secret fallback
+File: src/paths.rs | Lines: 193-197 | Cat: Swallowed error — security degradation hidden
+The Err(_) arm discards the original io::Error from build_owner_dacl() and silently falls back to plain File::create + lock_down_to_owner. The caller never learns the preferred DACL path failed. If the fallback itself fails, the root cause is lost entirely.
+Trigger: build_owner_dacl() failure inside write_secret on Windows
+
+### CreateFile2 error discarded in Windows write_secret fallback
+File: src/paths.rs | Lines: 225-230 | Cat: Swallowed error — typed information lost
+The Err(_) arm discards the windows::core::Error from CreateFile2 (which carries the Win32 error code: access denied, path not found, sharing violation, etc.) and falls back to a plain File::create with no DACL. The original error context is gone, and the security downgrade is invisible.
+Trigger: CreateFile2 failure inside write_secret on Windows
+
+### Hex-domain character check produces false positives on legitimate hostnames
+File: E:/code/CF-Scanner/src/ranges/http.rs | Lines: 53-69 | Cat: SSRF validation / encoding assumption
+The domain-path SSRF check uses a broad character-class test: decoded chars must all be in [0-9a-fA-FxX.] and at least one digit must be present. This catches hex/decimal IP literals (0x7f.0.0.1, 2130706433) which is the intent, but it also blocks any real domain name that happens to look hex-like and contains a digit, e.g. d0ad.beef, cafe0.bad, b00.cafe, face0.dead. The validation is applied to e
+Trigger: decoded.chars().all(|c| matches!(c, '0'..='9' | 'a'..='f' | 'A'..='F' | 'x' | 'X' | '.'))
+
+### Concurrent colo rejection can delete a good verdict via remove_verdict
+File: src/engine/phase2.rs | Lines: 248-260 | Cat: race condition
+When two workers probe the same IP concurrently with different configs, Worker A may pass with a kept colo (e.g. DFW) and call update_verdict_phase2 to store the verdict + insert into the passed set. Worker B may pass with a rejected colo (e.g. FRA) and call remove_verdict. If Worker B's remove_verdict acquires the store lock after Worker A's update_verdict_phase2 releases it, the good verdict is 
+Trigger: Two concurrent workers probing the same IP; one passes with kept colo, other passes with rejected colo
+
+### Error probes break without incrementing errored or setting first_error when stop_found already met
+File: src/engine/phase2.rs | Lines: 213-216 | Cat: missing counter increment / silent error drop
+In the Err branch (line 213), if passed.len() >= stop_found the worker breaks immediately BEFORE incrementing the errored counter or recording the error in first_error. This means: (1) the errored atomic undercounts actual probe errors, (2) first_error may remain None even though probes did error, and (3) the done = completed + errored sum used for the terminal progress check (done == total) will 
+Trigger: Worker A passes for an IP (inserting into passed), then Worker B's probe for a different IP errors after passed.len() >= stop_found
+
+### OpenedTunnel cleanup relies on implicit Drop chain rather than explicit guard
+File: src/engine/speed.rs | Lines: 183-198 | Cat: resource leak (fragile cleanup path)
+In speed_test_phase (line 184), each spawned task wraps measure_through_tunnel in a tokio::select! against cancelled_signal. If cancellation wins while the speed download is in-flight, the measure_through_tunnel future is dropped at its .await point. The OpenedTunnel (defined in verify.rs:128) has no Drop impl -- its cleanup is a boxed future stored in a field (verify.rs:136). When the outer futur
+Trigger: Cancel signal fires during speed test download; or runtime shutdown during cleanup
+
+### load_config deserializes but never validates the config
+File: E:/code/CF-Scanner/src/retry.rs | Lines: 30-35 | Cat: Missing post-deserialization validation
+load_config returns a ScanConfig from serde_json::from_str without calling cfg.validate(). A manually edited or partially corrupted last-scan.json can deserialize successfully (correct JSON types, all required fields present) but contain semantically invalid values — concurrency=0, timeout_ms=5, mode=Warp with phase2, etc. — which are then handed to ScanController. The serde layer only guarantees 
+Trigger: 
+
+### ScanConfig deny_unknown_fields locks the persisted config format across versions
+File: E:/code/CF-Scanner/src/api/types.rs | Lines: 167-177 | Cat: deny_unknown_fields with additive evolution
+ScanConfig carries #[serde(deny_unknown_fields)] (line 167) and is the root type saved by save_config and loaded by load_config for --retry-last. If any field is ever removed, renamed, or the JSON is manually edited with an extra key, deserialization fails with a cryptic serde error. For a persisted config format that intentionally outlives a single version, deny_unknown_fields is the wrong choice
+Trigger: 
+
+### Core ScanConfig fields lack #[serde(default)], blocking schema evolution
+File: E:/code/CF-Scanner/src/api/types.rs | Lines: 168-177 | Cat: Missing default attributes on fields
+The following fields lack #[serde(default)]: mode (line 169), target (line 170), ports (line 171), stop (line 172), exclude (line 173), custom_cidrs (line 174), concurrency (line 176), timeout_ms (line 177). These are original fields always present in current code, so no bug manifests today. But for the retry.rs persisted-config use case, if a future version ever restructures any of these (e.g., r
+Trigger: 
+

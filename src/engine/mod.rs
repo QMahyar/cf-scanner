@@ -1,9 +1,15 @@
 mod cdn;
+mod driver;
 mod neighbor;
 mod phase2;
 mod plan;
 mod speed;
 mod store;
+
+#[cfg(test)]
+pub(crate) fn store_seed(c: &Arc<ScanController>, batch: Vec<crate::api::types::Verdict>) {
+    merge_sorted(&c.progress.store, &c.progress.store_dirty, batch);
+}
 #[cfg(test)]
 mod test_helpers;
 mod warp;
@@ -68,12 +74,27 @@ pub struct ScanController {
     transport: Arc<dyn Transport>,
     warp_transport: Arc<dyn Transport>,
     warp_cache: Option<Arc<crate::warp::SocketCache>>,
+    /// Swappable service handles (subscription fetch, tunnel probing,
+    /// speed testing, session opening) — the test seams live here.
+    handles: ServiceHandles,
+    geo: Arc<Geo>,
+    events: broadcast::Sender<ScanEvent>,
+    /// Mutable scan state: verdict store, summary, cancellation, liveness.
+    progress: MutableState,
+}
+
+/// The injectable service seams of the controller. Phase-1 transport and
+/// the WARP transport stay top-level fields (they are fixed at
+/// construction); everything a test or wizard can swap at runtime is here.
+struct ServiceHandles {
     sub_fetch: Arc<dyn SubFetch>,
     tunnel_probe: Arc<dyn TunnelProbe>,
     speed_tester: Mutex<Arc<dyn SpeedTester>>,
     session_opener: Mutex<Arc<dyn TunnelOpener>>,
-    geo: Arc<Geo>,
-    events: broadcast::Sender<ScanEvent>,
+}
+
+/// Last-scan mutable state owned by the controller.
+struct MutableState {
     store: Store,
     store_dirty: Arc<AtomicBool>,
     summary: Mutex<Option<ScanSummary>>,
@@ -103,18 +124,22 @@ impl ScanController {
             transport,
             warp_transport,
             warp_cache: None,
-            sub_fetch: Arc::new(RealSubFetch),
-            tunnel_probe: Arc::new(HybridTunnelProbe::new(Arc::new(XrayTunnelProbe))),
-            speed_tester: Mutex::new(Arc::new(RealSpeedTester)),
-            session_opener: Mutex::new(Arc::new(RealTunnelOpener)),
+            handles: ServiceHandles {
+                sub_fetch: Arc::new(RealSubFetch),
+                tunnel_probe: Arc::new(HybridTunnelProbe::new(Arc::new(XrayTunnelProbe))),
+                speed_tester: Mutex::new(Arc::new(RealSpeedTester)),
+                session_opener: Mutex::new(Arc::new(RealTunnelOpener)),
+            },
             geo: Arc::new(Geo::embedded()),
             events,
-            store: Arc::new(Mutex::new(Vec::new())),
-            store_dirty: Arc::new(AtomicBool::new(false)),
-            summary: Mutex::new(None),
-            cancel_tx: Mutex::new(None),
-            running: Mutex::new(false),
-            last_phase2_configs: Mutex::new(Vec::new()),
+            progress: MutableState {
+                store: Arc::new(Mutex::new(Vec::new())),
+                store_dirty: Arc::new(AtomicBool::new(false)),
+                summary: Mutex::new(None),
+                cancel_tx: Mutex::new(None),
+                running: Mutex::new(false),
+                last_phase2_configs: Mutex::new(Vec::new()),
+            },
         }
     }
 
@@ -124,17 +149,17 @@ impl ScanController {
         tunnel_probe: Arc<dyn TunnelProbe>,
     ) -> Self {
         let mut controller = Self::with_transports(transport.clone(), transport);
-        controller.sub_fetch = sub_fetch;
-        controller.tunnel_probe = tunnel_probe;
+        controller.handles.sub_fetch = sub_fetch;
+        controller.handles.tunnel_probe = tunnel_probe;
         controller
     }
 
     pub fn set_speed_tester(&self, tester: Arc<dyn SpeedTester>) {
-        *lock(&self.speed_tester) = tester;
+        *lock(&self.handles.speed_tester) = tester;
     }
 
     pub fn set_tunnel_opener(&self, opener: Arc<dyn TunnelOpener>) {
-        *lock(&self.session_opener) = opener;
+        *lock(&self.handles.session_opener) = opener;
     }
 
     pub fn subscribe(&self) -> broadcast::Receiver<ScanEvent> {
@@ -142,7 +167,7 @@ impl ScanController {
     }
 
     pub fn summary(&self) -> Option<ScanSummary> {
-        lock(&self.summary).clone()
+        lock(&self.progress.summary).clone()
     }
 
     pub fn results(&self) -> Vec<Verdict> {
@@ -150,19 +175,23 @@ impl ScanController {
     }
 
     pub fn has_results(&self) -> bool {
-        !lock(&self.store).is_empty()
+        !lock(&self.progress.store).is_empty()
     }
 
     pub fn for_each_result(&self, mut f: impl FnMut(&Verdict)) {
-        let snapshot = self.snapshot_sorted();
-        for v in &snapshot {
-            f(v);
-        }
+        self.with_sorted_snapshot(&mut |results| {
+            for v in results {
+                f(v);
+            }
+        });
     }
 
-    fn snapshot_sorted(&self) -> Vec<Verdict> {
-        let mut guard = lock(&self.store);
-        if self.store_dirty.swap(false, Ordering::AcqRel) {
+    /// Runs `f` against the sorted store without cloning the whole Vec: the
+    /// lock is held (and possibly sorted in place) for the callback's
+    /// duration. Same visible ordering as `results()`.
+    fn with_sorted_snapshot(&self, f: &mut dyn FnMut(&[Verdict])) {
+        let mut guard = lock(&self.progress.store);
+        if self.progress.store_dirty.swap(false, Ordering::AcqRel) {
             guard.sort_unstable_by(|a, b| {
                 a.latency_ms
                     .is_none()
@@ -172,18 +201,17 @@ impl ScanController {
                     .then_with(|| a.port.cmp(&b.port))
             });
         }
-        guard.clone()
+        f(&guard);
     }
 
-    fn phase2_passed(&self) -> u64 {
-        lock(&self.store)
-            .iter()
-            .filter(|v| v.phase2.as_ref().is_some_and(|p| p.passed))
-            .count() as u64
+    fn snapshot_sorted(&self) -> Vec<Verdict> {
+        let mut out = Vec::new();
+        self.with_sorted_snapshot(&mut |results| out.extend_from_slice(results));
+        out
     }
 
     fn working_found(&self) -> u64 {
-        lock(&self.store)
+        lock(&self.progress.store)
             .iter()
             .filter(|v| v.latency_ms.is_some())
             .filter(|v| v.phase2.as_ref().is_none_or(|p| p.passed))
@@ -191,11 +219,11 @@ impl ScanController {
     }
 
     pub fn is_running(&self) -> bool {
-        *lock(&self.running)
+        *lock(&self.progress.running)
     }
 
     pub fn reset(&self) {
-        let running = lock(&self.running);
+        let running = lock(&self.progress.running);
         if *running {
             return;
         }
@@ -204,19 +232,19 @@ impl ScanController {
     }
 
     fn clear_store(&self) {
-        lock(&self.store).clear();
-        self.store_dirty.store(false, Ordering::Relaxed);
-        lock(&self.summary).take();
+        lock(&self.progress.store).clear();
+        self.progress.store_dirty.store(false, Ordering::Relaxed);
+        lock(&self.progress.summary).take();
     }
 
     pub fn cancel(&self) {
-        if let Some(tx) = lock(&self.cancel_tx).as_ref() {
+        if let Some(tx) = lock(&self.progress.cancel_tx).as_ref() {
             let _ = tx.send(true);
         }
     }
 
     fn cancel_signal(&self) -> watch::Receiver<bool> {
-        let mut slot = lock(&self.cancel_tx);
+        let mut slot = lock(&self.progress.cancel_tx);
         if let Some(tx) = slot.as_ref() {
             return tx.subscribe();
         }
@@ -324,7 +352,7 @@ impl ScanController {
     }
 
     pub fn reserve(&self) -> Result<(), AlreadyRunning> {
-        let mut running = lock(&self.running);
+        let mut running = lock(&self.progress.running);
         if *running {
             return Err(AlreadyRunning);
         }
@@ -334,8 +362,8 @@ impl ScanController {
 
     fn reset_guard(&self) -> ResetGuard<'_> {
         ResetGuard {
-            running: &self.running,
-            cancel_tx: &self.cancel_tx,
+            running: &self.progress.running,
+            cancel_tx: &self.progress.cancel_tx,
         }
     }
 
@@ -362,7 +390,11 @@ impl ScanController {
     }
 
     async fn run_seeded_unguarded(&self, cfg: ScanConfig, seed: u64) -> Result<ScanSummary> {
-        let pool = ranges::effective_pool(&cfg.custom_cidrs, &cfg.exclude, cfg.include_v6).await?;
+        let (pool, warnings) =
+            ranges::effective_pool(&cfg.custom_cidrs, &cfg.exclude, cfg.include_v6).await?;
+        for warning in warnings {
+            tracing::error!("{warning}");
+        }
         self.run_seeded_with_pool(cfg, seed, pool).await
     }
 
@@ -386,15 +418,15 @@ impl ScanController {
             .as_ref()
             .map(|p| p.configs.clone())
             .unwrap_or_default();
-        *lock(&self.last_phase2_configs) = configs;
+        *lock(&self.progress.last_phase2_configs) = configs;
     }
 
     pub fn phase2_configs(&self) -> Vec<String> {
-        lock(&self.last_phase2_configs).clone()
+        lock(&self.progress.last_phase2_configs).clone()
     }
 
     pub fn set_asn(&self, ip: IpAddr, port: u16, asn: u32, isp: &str) -> bool {
-        store::set_asn(&self.store, ip, port, asn, isp)
+        store::set_asn(&self.progress.store, ip, port, asn, isp)
     }
 
     fn finish(&self, started: Instant, scanned: u64, found: u64) -> ScanSummary {
@@ -406,11 +438,11 @@ impl ScanController {
     /// Records the summary without emitting Finished — used by multi-pass
     /// runs where only the last pass is terminal.
     fn finish_quiet(&self, started: Instant, scanned: u64, found: u64) -> ScanSummary {
-        let cancelled = lock(&self.cancel_tx)
+        let cancelled = lock(&self.progress.cancel_tx)
             .as_ref()
             .map(|tx| *tx.subscribe().borrow())
             .unwrap_or(false);
-        let mut last = lock(&self.summary);
+        let mut last = lock(&self.progress.summary);
         let summary = ScanSummary {
             scanned,
             found,
@@ -427,7 +459,7 @@ impl ScanController {
     }
 }
 
-const BATCH_FLUSH: usize = 256;
+pub(super) const BATCH_FLUSH: usize = 256;
 
 fn claim_milestone(last: &AtomicU64, observed: u64, cadence: u64) -> bool {
     let threshold = observed / cadence;
@@ -760,7 +792,7 @@ mod tests {
         assert_eq!(summary.found, 1);
         assert!(!c.is_running(), "guard must reset the busy flag");
         assert!(
-            lock(&c.cancel_tx).is_none(),
+            lock(&c.progress.cancel_tx).is_none(),
             "guard must clear the cancel slot"
         );
     }
@@ -769,7 +801,7 @@ mod tests {
     fn poisoned_locks_do_not_wedge_the_controller() {
         let c = Arc::new(ScanController::new(Arc::new(FakeTransport::new())));
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let _guard = c.running.lock().unwrap();
+            let _guard = c.progress.running.lock().unwrap();
             panic!("poison running");
         }));
         assert!(
@@ -781,7 +813,7 @@ mod tests {
         assert!(!c.is_running());
 
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let _guard = c.store.lock().unwrap();
+            let _guard = c.progress.store.lock().unwrap();
             panic!("poison store");
         }));
         assert!(c.results().is_empty());
@@ -965,8 +997,8 @@ mod tests {
             isp: None,
         };
         merge_sorted(
-            &c.store,
-            &c.store_dirty,
+            &c.progress.store,
+            &c.progress.store_dirty,
             vec![v1.clone(), v2.clone(), v3.clone()],
         );
         let results = c.results();
@@ -990,7 +1022,7 @@ mod tests {
             asn: None,
             isp: None,
         };
-        merge_sorted(&c.store, &c.store_dirty, vec![v4.clone()]);
+        merge_sorted(&c.progress.store, &c.progress.store_dirty, vec![v4.clone()]);
         let results2 = c.results();
         assert_eq!(results2.len(), 4);
         assert_eq!(results2[0].latency_ms, Some(5));
@@ -1042,7 +1074,11 @@ mod tests {
             asn: None,
             isp: None,
         };
-        merge_sorted(&c.store, &c.store_dirty, vec![dead_b, slow.clone(), dead_a]);
+        merge_sorted(
+            &c.progress.store,
+            &c.progress.store_dirty,
+            vec![dead_b, slow.clone(), dead_a],
+        );
         let results = c.results();
         assert_eq!(results.len(), 3);
         assert_eq!(results[0].latency_ms, Some(90));
@@ -1099,8 +1135,8 @@ mod tests {
             isp: None,
         };
         merge_sorted(
-            &c.store,
-            &c.store_dirty,
+            &c.progress.store,
+            &c.progress.store_dirty,
             vec![v1.clone(), v2.clone(), v3.clone()],
         );
 

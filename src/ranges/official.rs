@@ -17,12 +17,15 @@ pub async fn fetch_official(http: &impl HttpGet) -> Result<CidrPool> {
 
 pub async fn refresh_to_disk(http: &impl HttpGet) -> Result<usize> {
     let pool = fetch_official(http).await?;
-    write_pool_to(
-        &paths::refreshed_ranges_path()?,
-        &pool,
-        &rfc3339_utc(unix_now()),
-    )?;
-    Ok(pool.ranges().len())
+    let path = paths::refreshed_ranges_path()?;
+    let stamp = rfc3339_utc(unix_now());
+    let count = pool.ranges().len();
+    // write_pool_to does blocking fs I/O under a std Mutex: keep it off the
+    // async worker (blocking here stalls every concurrent probe task).
+    tokio::task::spawn_blocking(move || write_pool_to(&path, &pool, &stamp))
+        .await
+        .context("ranges persist task failed")??;
+    Ok(count)
 }
 
 pub async fn refresh_v6_to_disk(http: &impl HttpGet) -> Result<usize> {
@@ -35,12 +38,14 @@ pub async fn refresh_v6_to_disk(http: &impl HttpGet) -> Result<usize> {
         bail!("{OFFICIAL_IPS_V6_URL} returned no IPv6 CIDRs; keeping the last-good list");
     }
     let pool = CidrPool::from_ranges(cidrs);
-    write_pool_to(
-        &paths::refreshed_ranges_v6_path()?,
-        &pool,
-        &rfc3339_utc(unix_now()),
-    )?;
-    Ok(pool.ranges().len())
+    let path = paths::refreshed_ranges_v6_path()?;
+    let stamp = rfc3339_utc(unix_now());
+    let count = pool.ranges().len();
+    // See refresh_to_disk: blocking persist must not run on async workers.
+    tokio::task::spawn_blocking(move || write_pool_to(&path, &pool, &stamp))
+        .await
+        .context("ranges persist task failed")??;
+    Ok(count)
 }
 
 #[derive(Deserialize)]
@@ -114,6 +119,23 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn concurrent_refreshes_serialize_without_panic_or_tear() {
+        let _guard = DATA_DIR_LOCK.lock().await;
+        let _isolated = IsolatedDataDir::new();
+        let body = r#"{"success":true,"result":{"ipv4_cidrs":["10.0.0.0/8"]},"errors":[]}"#;
+        let http = FakeHttp(body);
+        let (a, b) = tokio::join!(refresh_to_disk(&http), refresh_to_disk(&http));
+        assert_eq!(a.unwrap(), 1);
+        assert_eq!(b.unwrap(), 1);
+        let written = fs::read_to_string(paths::refreshed_ranges_path().unwrap()).unwrap();
+        assert!(
+            written.ends_with("10.0.0.0/8\n"),
+            "one winner, valid file, no torn write: {written}"
+        );
+        assert_eq!(CidrPool::parse(&written).unwrap().host_count(), 1 << 24);
+    }
+
+    #[tokio::test]
     async fn refresh_to_disk_round_trips() {
         let _guard = DATA_DIR_LOCK.lock().await;
         let _isolated = IsolatedDataDir::new();
@@ -181,5 +203,36 @@ mod tests {
             before,
             "a degenerate v6 refresh must not clobber the last-good list"
         );
+    }
+
+    #[tokio::test]
+    async fn malformed_official_bodies_are_rejected_not_partial_parsed() {
+        // Truncated JSON, wrong shape, success=false with no errors array.
+        for body in [
+            "{\"success\":true,\"result\":",
+            "{\"success\":true}",
+            "{\"success\":true,\"result\":{\"ipv4_cidrs\":[]},\"errors\":[]}",
+            "[]",
+        ] {
+            let http = FakeHttp(body);
+            assert!(refresh_to_disk(&http).await.is_err(), "must reject: {body}");
+        }
+        // The v6 text endpoint rejects whitespace-only bodies as empty.
+        let http = FakeHttp(
+            "   
+
+",
+        );
+        assert!(refresh_v6_to_disk(&http).await.is_err());
+    }
+
+    #[test]
+    fn whitespace_and_duplicate_entries_are_normalized() {
+        let body = r#"{"success":true,"result":{"ipv4_cidrs":["  10.0.0.0/8  ","10.0.0.0/8"]},"errors":[]}"#;
+        let cidrs = parse_official(body).unwrap();
+        assert_eq!(cidrs.len(), 2, "whitespace-padded entry must parse");
+        assert_eq!(cidrs[0], cidrs[1], "both entries parse identically");
+        let pool = CidrPool::from_ranges(cidrs);
+        assert_eq!(pool.ranges().len(), 1, "exact duplicates are deduped");
     }
 }

@@ -73,6 +73,7 @@ mod tests {
     use super::*;
     use std::collections::HashSet;
     use std::net::IpAddr;
+    use std::sync::Arc;
 
     #[test]
     fn neighbor_candidates_walk_outward_and_respect_bounds() {
@@ -148,5 +149,59 @@ mod tests {
             limited.len(),
             "even at the /24 edge the walk must not repeat or overflow"
         );
+    }
+
+    #[test]
+    fn enqueue_on_a_full_channel_rolls_back_seen_and_never_panics() {
+        // Pre-fill the 1-slot channel so every candidate's try_send fails and
+        // seen must roll back (a later consumer could otherwise never see it).
+        let (tx, _rx) = mpsc::channel(1);
+        tx.try_send(ProbeTask {
+            ip: "198.51.100.1".parse().unwrap(),
+            port: 1,
+        })
+        .unwrap();
+        let hub = NeighborHub::new(4, tx);
+        let ctx = ProbeContext {
+            cancel: tokio::sync::watch::channel(false).1,
+            stop: crate::api::types::StopCondition::unlimited(1),
+            scanned: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            found: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            last_milestone: std::sync::atomic::AtomicU64::new(0),
+            cadence: 100,
+            total: 1,
+            store: Arc::new(Mutex::new(Vec::new())),
+            dirty: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            events: tokio::sync::broadcast::channel(4).0,
+            geo: Arc::new(crate::geo::Geo::embedded()),
+            colo_filter: Arc::new(Vec::new()),
+            colo_warned: std::sync::atomic::AtomicBool::new(false),
+        };
+        hub.enqueue("203.0.113.10".parse().unwrap(), 443, &ctx);
+        // Seen keeps only the hit itself; all candidates rolled back.
+        assert_eq!(lock(&hub.seen).len(), 1);
+    }
+
+    #[test]
+    fn enqueue_dedupes_across_hits_and_honors_stop() {
+        let (tx, rx) = mpsc::channel(64);
+        let hub = NeighborHub::new(4, tx);
+        let ctx = ProbeContext {
+            cancel: tokio::sync::watch::channel(false).1,
+            stop: crate::api::types::StopCondition::unlimited(1),
+            scanned: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            found: Arc::new(std::sync::atomic::AtomicU64::new(4)),
+            last_milestone: std::sync::atomic::AtomicU64::new(0),
+            cadence: 100,
+            total: 1,
+            store: Arc::new(Mutex::new(Vec::new())),
+            dirty: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            events: tokio::sync::broadcast::channel(4).0,
+            geo: Arc::new(crate::geo::Geo::embedded()),
+            colo_filter: Arc::new(Vec::new()),
+            colo_warned: std::sync::atomic::AtomicBool::new(false),
+        };
+        hub.enqueue("203.0.113.10".parse().unwrap(), 443, &ctx);
+        assert!(rx.is_empty(), "stop condition met: nothing enqueued");
     }
 }

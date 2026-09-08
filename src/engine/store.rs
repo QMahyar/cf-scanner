@@ -78,13 +78,24 @@ pub(super) fn set_asn(store: &Store, ip: IpAddr, port: u16, asn: u32, isp: &str)
     }
 }
 
-/// Drops a stored verdict and invalidates the cached position index.
-pub(super) fn remove_verdict(store: &Store, ip: Ipv4Addr, port: u16, pos_index: &PosIndex) {
+/// Drops a stored verdict, unless it already holds a passing phase-2 result.
+/// A rejected-colo latecomer must never delete a kept-colo pass that a racing
+/// worker stored first (both ops are atomic under the store lock, so the
+/// check-and-remove closes the interleave).
+pub(super) fn remove_verdict_unless_passed(
+    store: &Store,
+    ip: Ipv4Addr,
+    port: u16,
+    pos_index: &PosIndex,
+) {
     let mut results = lock(store);
     if let Some(pos) = results
         .iter()
         .position(|v| v.ip == IpAddr::V4(ip) && v.port == port)
     {
+        if results[pos].phase2.as_ref().is_some_and(|p| p.passed) {
+            return;
+        }
         results.remove(pos);
         *lock(pos_index) = Arc::new(HashMap::new());
     }
@@ -93,6 +104,7 @@ pub(super) fn remove_verdict(store: &Store, ip: Ipv4Addr, port: u16, pos_index: 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::api::types::{FragmentPreset, Phase2Verdict};
 
     fn verdict(ip: &str, port: u16) -> Verdict {
         Verdict {
@@ -109,6 +121,48 @@ mod tests {
             asn: None,
             isp: None,
         }
+    }
+
+    fn passing(ip: &str, port: u16) -> Verdict {
+        let mut v = verdict(ip, port);
+        v.phase2 = Some(Phase2Verdict {
+            passed: true,
+            fragment: FragmentPreset::Off,
+            sni: String::new(),
+            latency_ms: Some(7),
+            error: None,
+            config_index: Some(0),
+            verifier: None,
+            speed_test_mbps: None,
+        });
+        v
+    }
+
+    #[test]
+    fn rejected_colo_removal_keeps_a_stored_pass() {
+        let store: Store = Arc::new(Mutex::new(vec![passing("1.2.3.4", 443)]));
+        let pos_index: PosIndex = Arc::new(Mutex::new(Arc::new(HashMap::new())));
+        remove_verdict_unless_passed(&store, "1.2.3.4".parse().unwrap(), 443, &pos_index);
+        assert_eq!(
+            lock(&store).len(),
+            1,
+            "a kept-colo pass must survive a racing rejected-colo removal"
+        );
+        assert!(
+            lock(&store)[0].phase2.as_ref().is_some_and(|p| p.passed),
+            "the surviving row must keep its passing verdict"
+        );
+    }
+
+    #[test]
+    fn rejected_colo_removal_drops_an_unverified_row() {
+        let store: Store = Arc::new(Mutex::new(vec![verdict("1.2.3.4", 443)]));
+        let pos_index: PosIndex = Arc::new(Mutex::new(Arc::new(HashMap::new())));
+        remove_verdict_unless_passed(&store, "1.2.3.4".parse().unwrap(), 443, &pos_index);
+        assert!(
+            lock(&store).is_empty(),
+            "all-rejected candidates must still be removed"
+        );
     }
 
     #[test]

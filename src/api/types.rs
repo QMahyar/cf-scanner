@@ -138,10 +138,15 @@ pub struct Phase2Config {
     pub probe_url: String,
     #[serde(default)]
     pub probe_urls: Vec<String>,
+    #[serde(default = "default_phase2_concurrency")]
     pub concurrency: u8,
 }
 
 impl Phase2Config {
+    /// Effective probe URLs: `probe_urls` wins when non-empty, otherwise the
+    /// legacy single `probe_url`, otherwise the built-in default. Both
+    /// supplied forms are validated; `probe_urls` and `probe_url` are never
+    /// merged.
     pub fn effective_probe_urls(&self) -> Vec<String> {
         if !self.probe_urls.is_empty() {
             self.probe_urls.clone()
@@ -162,7 +167,7 @@ impl Default for Phase2Config {
             snis: Vec::new(),
             probe_url: DEFAULT_PROBE_URL.to_owned(),
             probe_urls: Vec::new(),
-            concurrency: 3,
+            concurrency: DEFAULT_PHASE2_CONCURRENCY,
         }
     }
 }
@@ -170,9 +175,12 @@ impl Default for Phase2Config {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WarpConfig {
+    #[serde(default)]
     pub custom_endpoints: Vec<String>,
+    #[serde(default = "default_probes_per_endpoint")]
     pub probes_per_endpoint: u8,
     pub wgconf: Option<String>,
+    #[serde(default)]
     pub verify_with_wgconf: bool,
 }
 
@@ -180,15 +188,19 @@ impl Default for WarpConfig {
     fn default() -> Self {
         Self {
             custom_endpoints: Vec::new(),
-            probes_per_endpoint: 3,
+            probes_per_endpoint: DEFAULT_PROBES_PER_ENDPOINT,
             wgconf: None,
             verify_with_wgconf: false,
         }
     }
 }
 
+// NOTE: ScanConfig intentionally has NO deny_unknown_fields. It is the
+// persisted --retry-last root (serde JSON only ever happens in
+// retry::load_config; the CLI builds it programmatically from clap flags),
+// so unknown top-level keys must be ignored for forward compatibility.
+// Strictness is preserved on every nested type and by validate().
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct ScanConfig {
     pub mode: Mode,
     pub target: ScanTarget,
@@ -200,8 +212,6 @@ pub struct ScanConfig {
     pub include_v6: bool,
     pub concurrency: u16,
     pub timeout_ms: u64,
-    #[serde(default)]
-    pub phase2_only: bool,
     #[serde(default)]
     pub phase2: Option<Phase2Config>,
     #[serde(default)]
@@ -238,7 +248,6 @@ impl Default for ScanConfig {
             include_v6: false,
             concurrency: DEFAULT_CONCURRENCY,
             timeout_ms: DEFAULT_TIMEOUT_MS,
-            phase2_only: false,
             phase2: None,
             warp: None,
             loss_threshold: None,
@@ -329,198 +338,32 @@ pub enum ScanEvent {
     Failed(FailedPayload),
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ResultsPayload {
-    pub results: Vec<Verdict>,
-    pub summary: Option<ScanSummary>,
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct StatusPayload {
-    pub version: String,
-    pub is_running: bool,
-    pub has_candidates: bool,
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct RangesPayload {
-    pub host_count: u64,
-    pub last_updated: Option<String>,
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct XrayStatusPayload {
-    pub found: bool,
-    pub path: Option<String>,
-    pub data_dir: String,
-    pub version: String,
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct XrayDownloadResponse {
-    pub success: bool,
-    pub path: Option<String>,
-    pub error: Option<String>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct RegisterRequest {
-    #[serde(default)]
-    pub license: Option<String>,
-    #[serde(default)]
-    pub overwrite: bool,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct RegisterResponse {
-    pub wgconf: String,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ExportConfigRequest {
-    pub config: String,
-    pub ip: String,
-    pub port: u16,
-    #[serde(default)]
-    pub sni: Option<String>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ExportConfigResponse {
-    pub uri: String,
-}
-
 impl ScanConfig {
     pub fn validate(&self) -> Result<(), ConfigError> {
         let result = (|| -> Result<(), ConfigError> {
+            // Order is user-visible (first error wins): do not reorder the
+            // area validators without pinning the change.
             validate_ports(&self.ports)?;
-            if let ScanTarget::Count(n) = self.target {
-                if n == 0 {
-                    return Err(ConfigError::InvalidCount(0));
-                }
-                if n > MAX_SCAN_COUNT {
-                    return Err(ConfigError::InvalidCount(n));
-                }
-            }
-            if self.stop.found == 0 {
-                return Err(ConfigError::InvalidFound(0));
-            }
-            if self.stop.found > MAX_STOP_VALUE {
-                return Err(ConfigError::InvalidFoundUpper(self.stop.found));
-            }
-            if let Some(cap) = self.stop.cap {
-                if cap == 0 || cap > MAX_STOP_VALUE {
-                    return Err(ConfigError::InvalidCap(cap));
-                }
-            }
-            if self.exclude.len() > MAX_CIDRS {
-                return Err(ConfigError::TooManyExcludes(self.exclude.len()));
-            }
-            if self.custom_cidrs.len() > MAX_CIDRS {
-                return Err(ConfigError::TooManyCidrs(self.custom_cidrs.len()));
-            }
-            if !(1..=1000).contains(&self.concurrency) {
-                return Err(ConfigError::InvalidConcurrency(self.concurrency));
-            }
-            if !(100..=30_000).contains(&self.timeout_ms) {
-                return Err(ConfigError::InvalidTimeout(self.timeout_ms));
-            }
-            if let Some(t) = self.loss_threshold
-                && t > 100
-            {
-                return Err(ConfigError::InvalidLossThreshold(t));
-            }
-            if let Some(t) = self.min_latency_ms
-                && !(1..=MAX_MIN_LATENCY_MS).contains(&t)
-            {
-                return Err(ConfigError::InvalidMinLatency(t));
-            }
-            if self.idle_hold_ms > MAX_IDLE_HOLD_MS {
-                return Err(ConfigError::InvalidIdleHold(self.idle_hold_ms));
-            }
-            if self.colo_filter.len() > MAX_COLO_CODES {
-                return Err(ConfigError::TooManyColos(self.colo_filter.len()));
-            }
-            for code in &self.colo_filter {
-                let valid =
-                    (3..=5).contains(&code.len()) && code.bytes().all(|b| b.is_ascii_alphabetic());
-                if !valid {
-                    return Err(ConfigError::InvalidColo(code.clone()));
-                }
-            }
-            for code in &self.accepted_http_codes {
-                if !(100..=599).contains(code) {
-                    return Err(ConfigError::InvalidHttpStatusCode(*code));
-                }
-            }
-            if self.probe_mode == ProbeMode::Http && self.accepted_http_codes.is_empty() {
-                return Err(ConfigError::EmptyHttpCodes);
-            }
-            if let Some(min) = self.min_speed_mbps {
-                if !self.speed_test {
-                    return Err(ConfigError::MinSpeedNeedsSpeedTest);
-                }
-                if !min.is_finite() || min <= 0.0 {
-                    return Err(ConfigError::InvalidMinSpeed);
-                }
-            }
-            if self.neighbor_count > MAX_NEIGHBORS {
-                return Err(ConfigError::InvalidNeighbor(self.neighbor_count));
-            }
-            for cidr in self.exclude.iter().chain(self.custom_cidrs.iter()) {
-                parse_cidr(cidr)?;
-            }
-            match self.mode {
-                Mode::Cdn => {
-                    if self.warp.is_some() {
-                        return Err(ConfigError::WarpWrongMode);
-                    }
-                    if self.phase2_only && self.phase2.is_none() {
-                        return Err(ConfigError::Phase2OnlyNeedsConfigs);
-                    }
-                    if self.speed_test && self.phase2.is_none() {
-                        return Err(ConfigError::SpeedTestNeedsConfigs);
-                    }
-                    if let Some(p2) = &self.phase2 {
-                        validate_phase2(p2)?;
-                    }
-                }
-                Mode::Warp => {
-                    if self.probe_mode != ProbeMode::Tls {
-                        return Err(ConfigError::ProbeWrongMode);
-                    }
-                    if self.phase2_only {
-                        return Err(ConfigError::Phase2OnlyWrongMode);
-                    }
-                    if self.phase2.is_some() {
-                        return Err(ConfigError::Phase2WrongMode);
-                    }
-                    if !self.colo_filter.is_empty() {
-                        return Err(ConfigError::ColoWrongMode);
-                    }
-                    if self.speed_test {
-                        return Err(ConfigError::SpeedTestWrongMode);
-                    }
-                    if let ScanTarget::Preset(_) = self.target {
-                        return Err(ConfigError::WarpPresetNotAllowed);
-                    }
-                    if !self.custom_cidrs.is_empty() {
-                        return Err(ConfigError::WarpCidrsNotAllowed);
-                    }
-                    if let Some(w) = &self.warp {
-                        w.validate()?;
-                    }
-                }
-            }
+            validate_count(&self.target)?;
+            validate_stop(&self.stop)?;
+            validate_ranges(&self.exclude, &self.custom_cidrs)?;
+            validate_tuning(
+                self.concurrency,
+                self.timeout_ms,
+                self.loss_threshold,
+                self.min_latency_ms,
+                self.idle_hold_ms,
+            )?;
+            validate_filters(
+                &self.colo_filter,
+                self.probe_mode,
+                &self.accepted_http_codes,
+                self.min_speed_mbps,
+                self.speed_test,
+                self.neighbor_count,
+            )?;
+            parse_configured_cidrs(&self.exclude, &self.custom_cidrs)?;
+            validate_mode_gates(self)?;
             reject_default_warp_ports(self)?;
             reject_non_routable(self)?;
             Ok(())
@@ -558,6 +401,172 @@ impl ScanConfig {
             }
         })
     }
+}
+
+/// Count target bounds. (Was inline in validate; split per F-27.2.)
+fn validate_count(target: &ScanTarget) -> Result<(), ConfigError> {
+    if let ScanTarget::Count(n) = *target {
+        if n == 0 {
+            return Err(ConfigError::InvalidCount(0));
+        }
+        if n > MAX_SCAN_COUNT {
+            return Err(ConfigError::InvalidCount(n));
+        }
+    }
+    Ok(())
+}
+
+fn validate_stop(stop: &StopCondition) -> Result<(), ConfigError> {
+    if stop.found == 0 {
+        return Err(ConfigError::InvalidFound(0));
+    }
+    if stop.found > MAX_STOP_VALUE {
+        return Err(ConfigError::InvalidFoundUpper(stop.found));
+    }
+    if let Some(cap) = stop.cap {
+        if cap == 0 || cap > MAX_STOP_VALUE {
+            return Err(ConfigError::InvalidCap(cap));
+        }
+    }
+    Ok(())
+}
+
+fn validate_ranges(exclude: &[String], custom_cidrs: &[String]) -> Result<(), ConfigError> {
+    if exclude.len() > MAX_CIDRS {
+        return Err(ConfigError::TooManyExcludes(exclude.len()));
+    }
+    if custom_cidrs.len() > MAX_CIDRS {
+        return Err(ConfigError::TooManyCidrs(custom_cidrs.len()));
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn validate_tuning(
+    concurrency: u16,
+    timeout_ms: u64,
+    loss_threshold: Option<u32>,
+    min_latency_ms: Option<u32>,
+    idle_hold_ms: u64,
+) -> Result<(), ConfigError> {
+    if !(1..=1000).contains(&concurrency) {
+        return Err(ConfigError::InvalidConcurrency(concurrency));
+    }
+    if !(100..=30_000).contains(&timeout_ms) {
+        return Err(ConfigError::InvalidTimeout(timeout_ms));
+    }
+    if let Some(t) = loss_threshold
+        && t > 100
+    {
+        return Err(ConfigError::InvalidLossThreshold(t));
+    }
+    if let Some(t) = min_latency_ms
+        && !(1..=MAX_MIN_LATENCY_MS).contains(&t)
+    {
+        return Err(ConfigError::InvalidMinLatency(t));
+    }
+    if idle_hold_ms > MAX_IDLE_HOLD_MS {
+        return Err(ConfigError::InvalidIdleHold(idle_hold_ms));
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn validate_filters(
+    colo_filter: &[String],
+    probe_mode: ProbeMode,
+    accepted_http_codes: &[u16],
+    min_speed_mbps: Option<f32>,
+    speed_test: bool,
+    neighbor_count: u32,
+) -> Result<(), ConfigError> {
+    if colo_filter.len() > MAX_COLO_CODES {
+        return Err(ConfigError::TooManyColos(colo_filter.len()));
+    }
+    for code in colo_filter {
+        let valid = (3..=5).contains(&code.len()) && code.bytes().all(|b| b.is_ascii_alphabetic());
+        if !valid {
+            return Err(ConfigError::InvalidColo(code.clone()));
+        }
+    }
+    for code in accepted_http_codes {
+        if !(100..=599).contains(code) {
+            return Err(ConfigError::InvalidHttpStatusCode(*code));
+        }
+    }
+    if probe_mode == ProbeMode::Http && accepted_http_codes.is_empty() {
+        return Err(ConfigError::EmptyHttpCodes);
+    }
+    // Empty means unset (ignored outside Http, per pinned behavior);
+    // a customized list outside Http mode signals confused intent.
+    if probe_mode != ProbeMode::Http
+        && !accepted_http_codes.is_empty()
+        && accepted_http_codes != default_accepted_http_codes()
+    {
+        return Err(ConfigError::HttpCodesNeedHttpProbe);
+    }
+    if let Some(min) = min_speed_mbps {
+        if !speed_test {
+            return Err(ConfigError::MinSpeedNeedsSpeedTest);
+        }
+        if !min.is_finite() || min <= 0.0 {
+            return Err(ConfigError::InvalidMinSpeed);
+        }
+    }
+    if neighbor_count > MAX_NEIGHBORS {
+        return Err(ConfigError::InvalidNeighbor(neighbor_count));
+    }
+    Ok(())
+}
+
+fn parse_configured_cidrs(exclude: &[String], custom_cidrs: &[String]) -> Result<(), ConfigError> {
+    for cidr in exclude.iter().chain(custom_cidrs.iter()) {
+        parse_cidr(cidr)?;
+    }
+    Ok(())
+}
+
+fn validate_mode_gates(cfg: &ScanConfig) -> Result<(), ConfigError> {
+    match cfg.mode {
+        Mode::Cdn => {
+            if cfg.warp.is_some() {
+                return Err(ConfigError::WarpWrongMode);
+            }
+            if cfg.speed_test && cfg.phase2.is_none() {
+                return Err(ConfigError::SpeedTestNeedsConfigs);
+            }
+            if let Some(p2) = &cfg.phase2 {
+                validate_phase2(p2)?;
+            }
+        }
+        Mode::Warp => {
+            if cfg.probe_mode != ProbeMode::Tls {
+                return Err(ConfigError::ProbeWrongMode);
+            }
+            if cfg.phase2.is_some() {
+                return Err(ConfigError::Phase2WrongMode);
+            }
+            if !cfg.colo_filter.is_empty() {
+                return Err(ConfigError::ColoWrongMode);
+            }
+            if cfg.speed_test {
+                return Err(ConfigError::SpeedTestWrongMode);
+            }
+            if cfg.neighbor_count > 0 {
+                return Err(ConfigError::NeighborWrongMode);
+            }
+            if let ScanTarget::Preset(_) = cfg.target {
+                return Err(ConfigError::WarpPresetNotAllowed);
+            }
+            if !cfg.custom_cidrs.is_empty() {
+                return Err(ConfigError::WarpCidrsNotAllowed);
+            }
+            if let Some(w) = &cfg.warp {
+                w.validate()?;
+            }
+        }
+    }
+    Ok(())
 }
 
 impl WarpConfig {

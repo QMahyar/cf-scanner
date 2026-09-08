@@ -22,7 +22,6 @@ fn args() -> ScanArgs {
         colo: vec![],
         ipv6: false,
         phase2_configs: vec![],
-        phase2_only: false,
         phase2_fragment: None,
         phase2_custom: None,
         phase2_snis: vec![],
@@ -145,14 +144,6 @@ fn colo_flag_round_trips_validate() {
     let cfg = build_scan_config(&a).unwrap();
     cfg.validate()
         .expect("a CLI-built colo filter must pass ScanConfig::validate");
-}
-
-#[test]
-fn phase2_only_is_rejected_in_one_shot_scans() {
-    let mut a = args();
-    a.phase2_only = true;
-    let err = build_scan_config(&a).unwrap_err();
-    assert!(err.to_string().contains("--phase2-only"), "{err:#}");
 }
 
 #[test]

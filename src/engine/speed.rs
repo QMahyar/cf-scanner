@@ -6,12 +6,13 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{Result, bail};
 
 use super::{ScanController, Store, cancelled_signal, lock};
 use crate::api::types::{FragmentPreset, Phase2Config, ScanConfig, ScanEvent, Verdict};
 use crate::configs::OutboundSpec;
 use crate::verify::TunnelOpener;
+use tokio::sync::watch;
 
 /// 8 MiB download cap per endpoint.
 pub const SPEED_TEST_BYTES: usize = 8 * 1024 * 1024;
@@ -155,14 +156,14 @@ impl ScanController {
             return Ok(());
         }
         let min_speed = cfg.min_speed_mbps;
-        let candidates = lock(&self.store).clone();
+        let candidates = lock(&self.progress.store).clone();
         let index = build_passing_index(&candidates, specs);
         if index.is_empty() {
             tracing::info!("speed test: no phase-2 passing endpoints to measure");
             return Ok(());
         }
-        let tester: Arc<dyn SpeedTester> = lock(&self.speed_tester).clone();
-        let opener: Arc<dyn TunnelOpener> = lock(&self.session_opener).clone();
+        let tester: Arc<dyn SpeedTester> = lock(&self.handles.speed_tester).clone();
+        let opener: Arc<dyn TunnelOpener> = lock(&self.handles.session_opener).clone();
         let cancel_rx = self.cancel_signal();
         tracing::info!(
             count = index.len(),
@@ -178,7 +179,7 @@ impl ScanController {
             for ((ip, port), entry) in chunk {
                 let tester = tester.clone();
                 let opener = opener.clone();
-                let store = self.store.clone();
+                let store = self.progress.store.clone();
                 let events = self.events.clone();
                 let cancel = cancel_rx.clone();
                 let measured = measured.clone();
@@ -190,10 +191,20 @@ impl ScanController {
                     if *cancel.borrow() {
                         return;
                     }
-                    let outcome = tokio::select! {
-                        r = measure_through_tunnel(&opener, &tester, &entry, custom.as_ref(), ip) => r,
-                        _ = cancelled_signal(cancel.clone()) => return,
-                    };
+                    let outcome = measure_through_tunnel(
+                        &opener,
+                        &tester,
+                        &entry,
+                        custom.as_ref(),
+                        ip,
+                        &cancel,
+                    )
+                    .await;
+                    if *cancel.borrow() {
+                        // Cancelled mid-download: the tunnel was already torn
+                        // down inside; record nothing (as before).
+                        return;
+                    }
                     measured.fetch_add(1, Ordering::Relaxed);
                     if let Some(updated) = apply_speed_result(&store, ip, port, &outcome, min_speed)
                     {
@@ -221,6 +232,7 @@ async fn measure_through_tunnel(
     entry: &PassingSpec,
     custom: Option<&crate::api::types::CustomFragment>,
     ip: Ipv4Addr,
+    cancel: &watch::Receiver<bool>,
 ) -> Result<f32> {
     let tunnel = opener
         .open(
@@ -231,9 +243,22 @@ async fn measure_through_tunnel(
             ip,
         )
         .await?;
-    let result = measure_endpoint(tester.as_ref(), tunnel.socks_addr).await;
-    tunnel.cleanup().await;
-    result
+    // The select lives INSIDE so every path awaits tunnel.cleanup():
+    // dropping this future mid-download (the old caller-side select) leaked
+    // the xray child and its credential-bearing trial dir.
+    let download = measure_endpoint(tester.as_ref(), tunnel.socks_addr);
+    tokio::select! {
+        biased;
+        _ = cancelled_signal(cancel.clone()) => {
+            tunnel.cleanup().await;
+            bail!("speed test cancelled");
+        }
+        result = download => {
+            let result = result;
+            tunnel.cleanup().await;
+            result
+        }
+    }
 }
 
 #[cfg(test)]
@@ -445,6 +470,133 @@ mod tests {
         }
     }
 
+    /// Opener that counts opens and cleanups so tests can prove teardown runs.
+    struct CountingOpener {
+        opens: Arc<AtomicU64>,
+        cleanups: Arc<AtomicU64>,
+    }
+
+    impl CountingOpener {
+        fn new() -> Self {
+            Self {
+                opens: Arc::new(AtomicU64::new(0)),
+                cleanups: Arc::new(AtomicU64::new(0)),
+            }
+        }
+    }
+
+    impl crate::verify::TunnelOpener for CountingOpener {
+        fn open(
+            &self,
+            _spec: &OutboundSpec,
+            _preset: &FragmentPreset,
+            _custom: Option<&crate::api::types::CustomFragment>,
+            _sni: Option<&str>,
+            _dial_ip: Ipv4Addr,
+        ) -> Pin<Box<dyn Future<Output = Result<crate::verify::OpenedTunnel>> + Send + '_>>
+        {
+            self.opens.fetch_add(1, Ordering::Relaxed);
+            let cleanups = self.cleanups.clone();
+            Box::pin(async move {
+                Ok(crate::verify::OpenedTunnel::new(
+                    SocketAddr::new(std::net::Ipv4Addr::LOCALHOST.into(), 1),
+                    Box::pin(async move {
+                        cleanups.fetch_add(1, Ordering::Relaxed);
+                    }),
+                ))
+            })
+        }
+    }
+
+    /// Tester whose download never resolves, so cancel always wins the race.
+    struct HangingTester;
+
+    impl SpeedTester for HangingTester {
+        fn download<'a>(
+            &'a self,
+            _url: &'a str,
+            _socks: SocketAddr,
+            _max_bytes: usize,
+            _timeout: Duration,
+        ) -> SpeedDownload<'a> {
+            Box::pin(async { std::future::pending::<Result<(u64, f64)>>().await })
+        }
+    }
+
+    #[tokio::test]
+    async fn cancelled_download_still_runs_tunnel_cleanup() {
+        let opener = Arc::new(CountingOpener::new());
+        let opener_dyn: Arc<dyn TunnelOpener> = opener.clone();
+        let tester: Arc<dyn SpeedTester> = Arc::new(HangingTester);
+        let spec =
+            crate::configs::parse_uri("vless://aaaaaaaa-bbbb-cccc-dddd-eeeeffff0000@1.2.3.4:443")
+                .unwrap();
+        let entry = PassingSpec {
+            spec,
+            fragment: FragmentPreset::Off,
+            sni: None,
+        };
+        let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
+        let ip: Ipv4Addr = "203.0.113.1".parse().unwrap();
+        let handle = tokio::spawn({
+            let opener_dyn = opener_dyn.clone();
+            let tester = tester.clone();
+            let entry = entry.clone();
+            let cancel_rx = cancel_rx.clone();
+            async move {
+                measure_through_tunnel(&opener_dyn, &tester, &entry, None, ip, &cancel_rx).await
+            }
+        });
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while opener.opens.load(Ordering::Relaxed) == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the tunnel must open before cancel fires");
+        cancel_tx.send(true).unwrap();
+        let outcome = tokio::time::timeout(Duration::from_secs(10), handle)
+            .await
+            .expect("cancelled download must resolve")
+            .expect("task panicked");
+        assert!(outcome.is_err(), "cancel must surface as an error");
+        assert_eq!(
+            opener.cleanups.load(Ordering::Relaxed),
+            1,
+            "the tunnel must be torn down even when cancel wins mid-download"
+        );
+    }
+
+    #[tokio::test]
+    async fn successful_download_runs_tunnel_cleanup_exactly_once() {
+        let opener = Arc::new(CountingOpener::new());
+        let opener_dyn: Arc<dyn TunnelOpener> = opener.clone();
+        let tester: Arc<dyn SpeedTester> = Arc::new(FakeTester {
+            bytes: 1024,
+            seconds: 1.0,
+            fail: false,
+        });
+        let spec =
+            crate::configs::parse_uri("vless://aaaaaaaa-bbbb-cccc-dddd-eeeeffff0000@1.2.3.4:443")
+                .unwrap();
+        let entry = PassingSpec {
+            spec,
+            fragment: FragmentPreset::Off,
+            sni: None,
+        };
+        let (_cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
+        let ip: Ipv4Addr = "203.0.113.1".parse().unwrap();
+        measure_through_tunnel(&opener_dyn, &tester, &entry, None, ip, &cancel_rx)
+            .await
+            .unwrap();
+        assert_eq!(opener.opens.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            opener.cleanups.load(Ordering::Relaxed),
+            1,
+            "success path must also tear down exactly once"
+        );
+    }
+
     #[tokio::test]
     async fn measure_endpoint_computes_mbps_from_the_sample() {
         let tester = FakeTester {
@@ -624,5 +776,91 @@ mod tests {
             "top-up rounds must have run: {summary:?}"
         );
         assert!(fast >= 1, "at least one fast endpoint was banked");
+    }
+
+    /// Opener whose open() always fails (xray missing / spawn exhausted).
+    struct FailingOpener;
+
+    impl crate::verify::TunnelOpener for FailingOpener {
+        fn open(
+            &self,
+            _spec: &OutboundSpec,
+            _preset: &FragmentPreset,
+            _custom: Option<&crate::api::types::CustomFragment>,
+            _sni: Option<&str>,
+            _dial_ip: Ipv4Addr,
+        ) -> Pin<Box<dyn Future<Output = Result<crate::verify::OpenedTunnel>> + Send + '_>>
+        {
+            Box::pin(async { Err(anyhow::anyhow!("no verified xray binary")) })
+        }
+    }
+
+    fn speed_cfg() -> ScanConfig {
+        ScanConfig {
+            speed_test: true,
+            ..ScanConfig::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn opener_failure_records_a_sanitized_error_and_keeps_going() {
+        let c = Arc::new(ScanController::new(Arc::new(
+            crate::probe::FakeTransport::new(),
+        )));
+        crate::engine::store_seed(&c, vec![passing("203.0.113.1".parse().unwrap(), 443, 0)]);
+        c.set_tunnel_opener(Arc::new(FailingOpener));
+        let cfg = speed_cfg();
+        let p2 = Phase2Config::default();
+        let spec =
+            crate::configs::parse_uri("vless://aaaaaaaa-bbbb-cccc-dddd-eeeeffff0000@1.2.3.4:443")
+                .unwrap();
+        c.speed_test_phase(&cfg, &p2, &[(spec, 0)]).await.unwrap();
+        let results = c.results();
+        assert_eq!(results.len(), 1);
+        let p2v = results[0].phase2.as_ref().unwrap();
+        assert!(
+            p2v.error
+                .as_deref()
+                .is_some_and(|e| e.contains("xray binary")),
+            "opener failure must be recorded on the verdict: {:?}",
+            p2v.error
+        );
+        assert_eq!(p2v.speed_test_mbps, None, "no measurement was possible");
+    }
+
+    #[tokio::test]
+    async fn speed_test_with_no_passing_endpoints_is_a_clean_noop() {
+        let c = Arc::new(ScanController::new(Arc::new(
+            crate::probe::FakeTransport::new(),
+        )));
+        // No stored verdicts at all: the empty-index path.
+        c.set_tunnel_opener(Arc::new(FailingOpener));
+        let cfg = speed_cfg();
+        let p2 = Phase2Config::default();
+        c.speed_test_phase(&cfg, &p2, &[]).await.unwrap();
+        assert!(c.results().is_empty());
+    }
+
+    #[test]
+    fn nan_min_speed_never_flips_a_verdict_and_nan_mbps_is_not_recorded() {
+        let c = Arc::new(ScanController::new(Arc::new(
+            crate::probe::FakeTransport::new(),
+        )));
+        crate::engine::store_seed(&c, vec![passing("203.0.113.5".parse().unwrap(), 443, 0)]);
+        // mbps() rejects a non-finite/zero duration: None, so no measurement.
+        assert_eq!(mbps(1000, 0.0), None);
+        assert_eq!(mbps(1000, f64::NAN), None);
+        // min_speed = NaN: comparison is false, verdict stays passed.
+        let updated = apply_speed_result(
+            &c.progress.store,
+            "203.0.113.5".parse().unwrap(),
+            443,
+            &Ok(0.5),
+            Some(f32::NAN),
+        )
+        .unwrap();
+        let p2v = updated.phase2.as_ref().unwrap();
+        assert_eq!(p2v.speed_test_mbps, Some(0.5));
+        assert!(p2v.passed, "NaN threshold must not fail the endpoint");
     }
 }
