@@ -3,8 +3,12 @@
 All notable changes to CF-Scanner are documented here, grouped by
 Added / Changed / Fixed / Deprecated / Removed / Security, newest on top.
 
-
 ## [Unreleased]
+
+(nothing yet)
+
+
+## [0.14.0] - 2026-09-08
 
 ### Added
 - **`check-sub` subscription validation command.** `cf-scanner check-sub URL`
