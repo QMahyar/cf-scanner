@@ -157,6 +157,7 @@ scan; results up to that point are kept.
 |---------|-------------|
 | `cf-scanner wizard` | Interactive wizard over the same engine |
 | `cf-scanner ranges refresh [--ipv6]` | Refresh the bundled Cloudflare range lists over a verified HTTPS fetch (`--ipv6` includes the v6 pool) |
+| `cf-scanner check-sub URL [--timeout-ms MS]` | Fetch a subscription and verify every config against its own server; one NDJSON row per config (`ok`/`latency_ms`/`error`), a summary on stderr, non-zero exit when nothing verifies |
 | `cf-scanner warp-config generate [--license KEY] [--endpoint HOST:PORT] [--out FILE]` | Opt-in WARP registration through the v0a884 API, then wgconf build. Without `--out` the wgconf prints to stdout; a `.conf` path is written with owner-only permissions |
 | `cf-scanner warp-config export [--endpoint HOST:PORT] [--out FILE]` | Export the registered WARP config as text or a .conf file |
 | `cf-scanner export-config --config URI --ip IP --port PORT [--sni SNI]` | Re-render a vless/vmess/trojan/ss link against a scanned endpoint; `--sni` overrides the TLS SNI in the output |

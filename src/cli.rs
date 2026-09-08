@@ -86,6 +86,21 @@ pub(crate) enum Command {
         action: WarpConfigAction,
     },
     #[command(
+        about = "Fetch a subscription URL and verify every config against its own server (NDJSON report)"
+    )]
+    CheckSub {
+        #[arg(
+            help = "Subscription URL (https); every parsed config is probed against its own server"
+        )]
+        url: String,
+        #[arg(
+            long,
+            default_value_t = 8000,
+            help = "Per-config verification timeout in milliseconds"
+        )]
+        timeout_ms: u64,
+    },
+    #[command(
         about = "Render one config into a shareable URI with a verified IP:port override",
         long_about = "Re-render a vless/vmess/trojan/ss share link so it dials the given \nendpoint instead of its original host. Use it to turn a phase-2 \nverified scan result into a ready-to-import config."
     )]
