@@ -83,7 +83,7 @@ jobs:
           submodules: recursive
       - uses: dtolnay/rust-toolchain@1.88
       - name: Add cross-targets
-        run: rustup target add aarch64-unknown-linux-gnu x86_64-pc-windows-msvc
+        run: rustup target add aarch64-unknown-linux-gnu
       - uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
@@ -93,8 +93,11 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y gcc-aarch64-linux-gnu
       - name: Check aarch64 linux
         run: cargo check --locked --all-features --target aarch64-unknown-linux-gnu
-      - name: Check windows msvc
-        run: cargo check --locked --all-features --target x86_64-pc-windows-msvc
+      # No msvc cross-leg here: checking x86_64-pc-windows-msvc from linux
+      # needs an MSVC toolchain (lib.exe) + NASM for ring/aws-lc-sys, which
+      # ubuntu runners do not ship. Windows coverage is real elsewhere: the
+      # Checks matrix runs test+clippy+all-features on windows-latest, and
+      # dist builds the msvc artifact on a windows runner.
 
   build-local-artifacts:
     name: build-local-artifacts (${{ join(matrix.targets, ', ') }})
