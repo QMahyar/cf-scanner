@@ -1417,4 +1417,34 @@ mod tests {
         }
         assert!(render_bundle("v2rayn", &[], &[]).is_err());
     }
+    #[test]
+    fn v6_endpoints_never_silently_enter_bundle_formats() {
+        // T-36: the v6 half of the loud-drop decision. IPv6 verdicts never
+        // produce URIs (export_config_uri dials v4); mixed sets keep only
+        // the v4 rows, and nothing reaches the JSON bodies half-bracketed.
+        let v6 = passing("2001:db8::1", 443, Some(0));
+        let v4 = passing("1.2.3.4", 443, Some(0));
+        let configs = [VLESS.to_owned()];
+        for fmt in ["singbox", "clash", "v2ray"] {
+            let body = render_bundle(fmt, &[v4.clone(), v6.clone()], &configs).unwrap();
+            // v2ray is a bare array; singbox/clash wrap the list in a key.
+            let (arr, addr_key) = match fmt {
+                "clash" => (
+                    serde_json::from_str::<serde_json::Value>(&body).unwrap()["proxies"].take(),
+                    "server",
+                ),
+                "singbox" => (
+                    serde_json::from_str::<serde_json::Value>(&body).unwrap()["outbounds"].take(),
+                    "server",
+                ),
+                _ => (
+                    serde_json::from_str::<serde_json::Value>(&body).unwrap(),
+                    "add",
+                ),
+            };
+            let arr = arr.as_array().unwrap();
+            assert_eq!(arr.len(), 1, "{fmt}: only the v4 endpoint exports");
+            assert_eq!(arr[0][addr_key].as_str().unwrap(), "1.2.3.4", "{fmt}");
+        }
+    }
 }

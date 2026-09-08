@@ -1408,4 +1408,32 @@ mod tests {
         let twice = once.excluding(&ex);
         assert_eq!(once.ranges(), twice.ranges());
     }
+    #[test]
+    fn large_prefix_v6_exclusion_is_exact() {
+        // A /127 and a single-host /128 inside a /120: split math must stay
+        // exact at the tiny end (regression guard for the decompose path).
+        let pool = CidrPool::parse(
+            "2001:db8::/120
+",
+        )
+        .unwrap();
+        assert_eq!(pool.host_count(), 256);
+        let ex = vec![parse_cidr("2001:db8::1/128").unwrap()];
+        let after_one = pool.excluding(&ex);
+        let count: u128 = after_one.ranges().iter().map(|c| c.host_count()).sum();
+        assert_eq!(count, 255);
+        let ex = vec![
+            parse_cidr("2001:db8::1/128").unwrap(),
+            parse_cidr("2001:db8::2/127").unwrap(),
+        ];
+        let after_two = pool.excluding(&ex);
+        let count: u128 = after_two.ranges().iter().map(|c| c.host_count()).sum();
+        assert_eq!(
+            count, 253,
+            "1 (from the /128) + 2 (from the /127) hosts removed"
+        );
+        // Excluding the whole /120 leaves nothing.
+        let ex = vec![parse_cidr("2001:db8::/120").unwrap()];
+        assert!(pool.excluding(&ex).ranges().is_empty());
+    }
 }
