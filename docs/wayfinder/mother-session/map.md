@@ -30,6 +30,8 @@ P4 export/distribution → P5 architecture paydown → approved P6 capabilities.
 
 <!-- one line per closed ticket -->
 
+- ALL 37 TICKETS CLOSED (T-01..T-37) on branch `review/mother-session`;
+  T-35 shipped as the musl PROPOSAL doc only (implementation user-gated).
 - P0 complete (T-01..T-14, committed): wgconf stripped on retry save;
   phase-2 colo race closed; post-stop errors counted; neighbor drain
   double-checked; Release ordering on stop counters; retry load validates;
