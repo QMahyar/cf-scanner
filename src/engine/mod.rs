@@ -33,7 +33,7 @@ use tokio::sync::{broadcast, watch};
 use crate::api::types::{
     Mode, ScanConfig, ScanEvent, ScanProgress, ScanSummary, StopCondition, Verdict,
 };
-use crate::configs::{RealSubFetch, SubFetch};
+use crate::configs::{OutboundSpec, RealSubFetch, SubFetch};
 use crate::engine::speed::{RealSpeedTester, SpeedTester};
 use crate::geo::Geo;
 use crate::probe::Transport;
@@ -100,7 +100,20 @@ struct MutableState {
     summary: Mutex<Option<ScanSummary>>,
     cancel_tx: Mutex<Option<watch::Sender<bool>>>,
     running: Mutex<bool>,
-    last_phase2_configs: Mutex<Vec<String>>,
+    /// Last-scan phase-2 state: the raw config strings paired with their
+    /// parsed expansion (spec + raw entry index). Export rendering needs the
+    /// parsed form because subscription/file entries cannot be re-parsed into
+    /// share URIs after the scan. Held as ONE unit and written only through
+    /// the paired writer (`retain_phase2_state`) so the two sides can never
+    /// go stale relative to each other.
+    phase2_state: Mutex<Phase2State>,
+}
+
+/// Paired phase-2 retention: raw config strings + their parsed specs.
+#[derive(Default)]
+struct Phase2State {
+    configs: Vec<String>,
+    specs: Vec<(OutboundSpec, u32)>,
 }
 
 impl ScanController {
@@ -138,11 +151,14 @@ impl ScanController {
                 summary: Mutex::new(None),
                 cancel_tx: Mutex::new(None),
                 running: Mutex::new(false),
-                last_phase2_configs: Mutex::new(Vec::new()),
+                phase2_state: Mutex::new(Phase2State::default()),
             },
         }
     }
 
+    // Test-only constructor: fake-injection entry for unit tests, zero
+    // production callers — gated out of the release surface.
+    #[cfg(test)]
     pub fn with_probes(
         transport: Arc<dyn Transport>,
         sub_fetch: Arc<dyn SubFetch>,
@@ -154,10 +170,12 @@ impl ScanController {
         controller
     }
 
+    #[cfg(test)]
     pub fn set_speed_tester(&self, tester: Arc<dyn SpeedTester>) {
         *lock(&self.handles.speed_tester) = tester;
     }
 
+    #[cfg(test)]
     pub fn set_tunnel_opener(&self, opener: Arc<dyn TunnelOpener>) {
         *lock(&self.handles.session_opener) = opener;
     }
@@ -166,14 +184,11 @@ impl ScanController {
         self.events.subscribe()
     }
 
-    pub fn summary(&self) -> Option<ScanSummary> {
-        lock(&self.progress.summary).clone()
-    }
-
     pub fn results(&self) -> Vec<Verdict> {
         self.snapshot_sorted()
     }
 
+    #[cfg(test)]
     pub fn has_results(&self) -> bool {
         !lock(&self.progress.store).is_empty()
     }
@@ -218,10 +233,12 @@ impl ScanController {
             .count() as u64
     }
 
+    #[cfg(test)]
     pub fn is_running(&self) -> bool {
         *lock(&self.progress.running)
     }
 
+    #[cfg(test)]
     pub fn reset(&self) {
         let running = lock(&self.progress.running);
         if *running {
@@ -239,7 +256,11 @@ impl ScanController {
 
     pub fn cancel(&self) {
         if let Some(tx) = lock(&self.progress.cancel_tx).as_ref() {
-            let _ = tx.send(true);
+            // send_replace, not send: between reserve() and the first
+            // cancel_signal() subscriber the channel has zero receivers, and
+            // send() refuses to store into a closed watch channel — the cancel
+            // would vanish exactly in the window this slot exists to cover.
+            tx.send_replace(true);
         }
     }
 
@@ -253,6 +274,7 @@ impl ScanController {
         rx
     }
 
+    #[cfg(test)]
     pub async fn run(&self, cfg: ScanConfig) -> Result<ScanSummary> {
         self.run_seeded(cfg, OsRng.next_u64()).await
     }
@@ -278,6 +300,7 @@ impl ScanController {
         self.drive_run(handle, rx, on_event).await
     }
 
+    #[cfg(test)]
     pub async fn run_reserved_streaming(
         self: &Arc<Self>,
         cfg: ScanConfig,
@@ -304,8 +327,10 @@ impl ScanController {
             tokio::select! {
                 done = &mut handle => {
                     let result = done?;
+                    let mut finished: Option<ScanEvent> = None;
                     loop {
                         match rx.try_recv() {
+                            Ok(event @ ScanEvent::Finished(_)) => finished = Some(event),
                             Ok(event) => {
                                 if let ScanEvent::Result(verdict) = &event {
                                     seen.insert((verdict.ip, verdict.port, verdict.phase2.is_some()));
@@ -316,21 +341,28 @@ impl ScanController {
                             Err(TryRecvError::Lagged(_)) => continue,
                         }
                     }
+                    // Results must never trail the terminal event in the stream:
+                    // store-only verdicts (failures, lag-dropped successes) flush first.
                     self.for_each_result(|v| {
                         if seen.insert((v.ip, v.port, v.phase2.is_some())) {
                             on_event(ScanEvent::Result(Box::new(v.clone())));
                         }
                     });
+                    if let Some(event) = finished {
+                        on_event(event);
+                    }
                     return result;
                 }
                 recv = rx.recv() => match recv {
                     Ok(event @ ScanEvent::Finished(_)) => {
-                        on_event(event);
+                        // Same ordering contract as the done branch: flush
+                        // unseen Results before forwarding Finished.
                         self.for_each_result(|v| {
                             if seen.insert((v.ip, v.port, v.phase2.is_some())) {
                                 on_event(ScanEvent::Result(Box::new(v.clone())));
                             }
                         });
+                        on_event(event);
                         return handle.await?;
                     }
                     Ok(event) => {
@@ -357,6 +389,11 @@ impl ScanController {
             return Err(AlreadyRunning);
         }
         *running = true;
+        // Cancel must latch from reserve() onward: pool reads + validation run
+        // before the first cancel_signal() subscriber, and a pre-run Ctrl+C used
+        // to be silently dropped there. A fresh channel also keeps any pre-reserve
+        // cancel from leaking into this run.
+        *lock(&self.progress.cancel_tx) = Some(watch::channel(false).0);
         Ok(())
     }
 
@@ -405,24 +442,34 @@ impl ScanController {
         pool: ranges::CidrPool,
     ) -> Result<ScanSummary> {
         cfg.validate()?;
-        self.retain_phase2_configs(&cfg);
+        let p2_configs = cfg
+            .phase2
+            .as_ref()
+            .map(|p| p.configs.clone())
+            .unwrap_or_default();
+        // Paired reset at run start: raw configs plus empty specs. The specs
+        // side is filled by the parse-success path in `verify_phase`, so a
+        // cancelled/failed parse or a WARP run can never leave specs from a
+        // previous run dangling next to this run's configs.
+        self.retain_phase2_state(p2_configs, Vec::new());
         if cfg.mode == Mode::Warp {
             return self.run_warp(cfg, seed).await;
         }
         self.run_cdn(cfg, seed, pool).await
     }
 
-    fn retain_phase2_configs(&self, cfg: &ScanConfig) {
-        let configs = cfg
-            .phase2
-            .as_ref()
-            .map(|p| p.configs.clone())
-            .unwrap_or_default();
-        *lock(&self.progress.last_phase2_configs) = configs;
+    /// The single writer for the (configs, specs) pair — both sides always
+    /// move together so neither can go stale against the other.
+    fn retain_phase2_state(&self, configs: Vec<String>, specs: Vec<(OutboundSpec, u32)>) {
+        *lock(&self.progress.phase2_state) = Phase2State { configs, specs };
     }
 
     pub fn phase2_configs(&self) -> Vec<String> {
-        lock(&self.progress.last_phase2_configs).clone()
+        lock(&self.progress.phase2_state).configs.clone()
+    }
+
+    pub fn phase2_specs(&self) -> Vec<(OutboundSpec, u32)> {
+        lock(&self.progress.phase2_state).specs.clone()
     }
 
     pub fn set_asn(&self, ip: IpAddr, port: u16, asn: u32, isp: &str) -> bool {
@@ -504,6 +551,12 @@ struct ProbeContext {
 }
 
 impl ProbeContext {
+    /// Pure user-cancel read. Distinct from `should_stop`, which also fires
+    /// on found/cap: mid-endpoint aborts must not discard measured work.
+    fn is_cancelled(&self) -> bool {
+        *self.cancel.borrow()
+    }
+
     fn should_stop(&self) -> bool {
         *self.cancel.borrow()
             || self.found.load(Ordering::Acquire) >= u64::from(self.stop.found)
@@ -797,6 +850,140 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn cancel_between_reserve_and_run_is_not_dropped() {
+        let t = FakeTransport::new().ok_slow("203.0.113.1".parse().unwrap(), 443, 60, 200);
+        let c = Arc::new(ScanController::new(Arc::new(t)));
+        let mut cfg = ok_cfg(1, None);
+        cfg.custom_cidrs = vec!["203.0.113.0/29".to_owned()];
+        c.reserve().unwrap();
+        c.cancel();
+        let summary = c.run_reserved_streaming(cfg, |_| {}).await.unwrap();
+        assert!(summary.cancelled, "pre-run cancel must latch, not vanish");
+        assert_eq!(summary.scanned, 0, "a latched cancel must probe nothing");
+        assert!(!c.is_running(), "guard must reset the busy flag");
+    }
+
+    #[tokio::test]
+    async fn a_fresh_run_after_a_cancelled_run_starts_uncancelled() {
+        let t = FakeTransport::new().ok("203.0.113.1".parse().unwrap(), 443, 5);
+        let c = Arc::new(ScanController::new(Arc::new(t)));
+        let mut cfg = ok_cfg(1, None);
+        cfg.custom_cidrs = vec!["203.0.113.0/29".to_owned()];
+        c.reserve().unwrap();
+        c.cancel();
+        let first = c.run_reserved_streaming(cfg.clone(), |_| {}).await.unwrap();
+        assert!(first.cancelled);
+        let second = c.run_reserved_streaming(cfg, |_| {}).await.unwrap();
+        assert!(
+            !second.cancelled,
+            "the reset guard must hand the next run a fresh cancel channel"
+        );
+        assert_eq!(second.found, 1);
+    }
+
+    #[tokio::test]
+    async fn store_flushed_results_never_trail_finished() {
+        let t = FakeTransport::new()
+            .ok("203.0.113.1".parse().unwrap(), 443, 50)
+            .ok("203.0.113.2".parse().unwrap(), 443, 10)
+            .ok("203.0.113.3".parse().unwrap(), 443, 30);
+        let c = Arc::new(ScanController::new(Arc::new(t)));
+        let mut cfg = ok_cfg(8, None);
+        cfg.custom_cidrs = vec!["203.0.113.0/29".to_owned()];
+        let mut events = vec![];
+        c.run_streaming(cfg, |e| events.push(e)).await.unwrap();
+        let results = events
+            .iter()
+            .filter(|e| matches!(e, ScanEvent::Result(_)))
+            .count();
+        assert_eq!(
+            results, 8,
+            "all 8 verdicts (3 live + 5 store-only failures) must reach the stream exactly once: {events:?}"
+        );
+        let finished_at = events
+            .iter()
+            .position(|e| matches!(e, ScanEvent::Finished(_)))
+            .expect("terminal Finished expected");
+        let trailing = events[finished_at + 1..]
+            .iter()
+            .filter(|e| matches!(e, ScanEvent::Result(_)))
+            .count();
+        assert_eq!(trailing, 0, "no Result may follow Finished: {events:?}");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn lagged_consumer_still_gets_results_before_finished() {
+        let t = FakeTransport::new();
+        for i in 1..8190u32 {
+            t.insert(
+                format!("203.0.{}.{}", 96 + i / 256, i % 256)
+                    .parse()
+                    .unwrap(),
+                443,
+                Ok(1),
+            );
+        }
+        let c = Arc::new(ScanController::new(Arc::new(t)));
+        let mut cfg = ok_cfg(100_000_000, None);
+        cfg.custom_cidrs = vec!["203.0.96.0/19".to_owned()];
+        cfg.target = ScanTarget::Count(5000);
+        cfg.concurrency = 500;
+
+        let (release_tx, release_rx) = std::sync::mpsc::sync_channel::<()>(0);
+        let release_rx = Arc::new(std::sync::Mutex::new(release_rx));
+        let handle = tokio::spawn({
+            let c = c.clone();
+            let cfg = cfg.clone();
+            async move {
+                let mut parked = false;
+                let mut events = vec![];
+                let summary = c
+                    .run_streaming(cfg, |e| {
+                        if !parked && matches!(e, ScanEvent::Result(_)) {
+                            parked = true;
+                            let rx = lock(&release_rx);
+                            let _ = rx.recv();
+                        }
+                        events.push(e);
+                    })
+                    .await
+                    .unwrap();
+                (summary, events)
+            }
+        });
+        wait_until(Duration::from_secs(2), || !c.is_running()).await;
+        let _ = release_tx.send(());
+        let (summary, events) = handle.await.unwrap();
+        assert_eq!(summary.scanned, 5000);
+        // Total-count proof of the recovery path: the consumer is parked from
+        // the first Result, so the broadcast channel lags and drops most
+        // Results. Only the pre-Finished `for_each_result` flush can make the
+        // delivered count reach one-per-scanned-host again — delete the flush
+        // and this assertion fails.
+        let delivered = events
+            .iter()
+            .filter(|e| matches!(e, ScanEvent::Result(_)))
+            .count();
+        assert_eq!(
+            delivered, 5000,
+            "every scanned verdict must reach the consumer exactly once, \
+             lag-dropped ones recovered before Finished"
+        );
+        let finished_at = events
+            .iter()
+            .position(|e| matches!(e, ScanEvent::Finished(_)))
+            .expect("terminal Finished expected");
+        let trailing = events[finished_at + 1..]
+            .iter()
+            .filter(|e| matches!(e, ScanEvent::Result(_)))
+            .count();
+        assert_eq!(
+            trailing, 0,
+            "lag-dropped results must be recovered before Finished, not after"
+        );
+    }
+
     #[test]
     fn poisoned_locks_do_not_wedge_the_controller() {
         let c = Arc::new(ScanController::new(Arc::new(FakeTransport::new())));
@@ -822,7 +1009,7 @@ mod tests {
 
     #[tokio::test]
     async fn empty_pool_finishes_with_zero_summary() {
-        let (c, _) = controller(Arc::new(FakeTransport::new()));
+        let (c, mut rx) = controller(Arc::new(FakeTransport::new()));
         let pool = ranges::CidrPool::parse("203.0.113.0/29")
             .unwrap()
             .excluding(&[ranges::parse_cidr("203.0.113.0/29").unwrap()]);
@@ -833,6 +1020,16 @@ mod tests {
         assert_eq!(summary.scanned, 0);
         assert_eq!(summary.found, 0);
         assert!(!summary.cancelled);
+        let finished = rx
+            .try_recv()
+            .into_iter()
+            .chain(std::iter::from_fn(|| rx.try_recv().ok()))
+            .filter(|e| matches!(e, ScanEvent::Finished(_)))
+            .count();
+        assert_eq!(
+            finished, 1,
+            "an empty plan must emit exactly one terminal Finished"
+        );
     }
 
     #[tokio::test]

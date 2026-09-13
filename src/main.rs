@@ -132,6 +132,17 @@ async fn run(cli: Cli) -> Result<()> {
     }
 }
 
+fn check_row_json(row: &cf_scanner::check_sub::CheckRow) -> serde_json::Value {
+    serde_json::json!({
+        "config_index": row.config_index,
+        "tag": row.tag,
+        "server": row.server,
+        "ok": row.ok,
+        "latency_ms": row.latency_ms,
+        "error": row.error,
+    })
+}
+
 async fn run_check_sub(url: &str, timeout_ms: u64) -> Result<()> {
     use cf_scanner::check_sub;
     use cf_scanner::verify::HybridTunnelProbe;
@@ -148,13 +159,7 @@ async fn run_check_sub(url: &str, timeout_ms: u64) -> Result<()> {
         if row.ok {
             ok += 1;
         }
-        let entry = serde_json::json!({
-            "tag": row.tag,
-            "server": row.server,
-            "ok": row.ok,
-            "latency_ms": row.latency_ms,
-            "error": row.error,
-        });
+        let entry = check_row_json(row);
         println!("{entry}");
     }
     eprintln!("check-sub: {ok}/{} config(s) verified", rows.len());
@@ -171,9 +176,14 @@ async fn run_scan(args: ScanArgs, verbose: bool) -> Result<()> {
     let cancel_on_ctrl_c = {
         let controller = controller.clone();
         tokio::spawn(async move {
-            match tokio::signal::ctrl_c().await {
-                Ok(()) => controller.cancel(),
-                Err(err) => tracing::error!("could not listen for Ctrl+C: {err}"),
+            loop {
+                match tokio::signal::ctrl_c().await {
+                    Ok(()) => controller.cancel(),
+                    Err(err) => {
+                        tracing::error!("could not listen for Ctrl+C: {err}");
+                        break;
+                    }
+                }
             }
         })
     };
@@ -248,7 +258,7 @@ async fn run_scan(args: ScanArgs, verbose: bool) -> Result<()> {
         );
     }
     if let Err(err) = cf_scanner::retry::save_config(&cfg) {
-        tracing::debug!("could not save last-scan config: {err:#}");
+        tracing::warn!("could not save last-scan config; --retry-last will not repeat it: {err:#}");
     }
     if args.enrich_asn {
         let enriched = enrich::enrich_working(&controller).await;
@@ -365,6 +375,37 @@ mod tests {
         assert_eq!(env_filter(true, Some("")).to_string(), "info");
         assert_eq!(env_filter(false, Some("")).to_string(), "error");
         assert_eq!(env_filter(true, Some("  ")).to_string(), "info");
+    }
+
+    #[test]
+    fn check_sub_rows_emit_config_index_for_ndjson() {
+        // Contract guard for the check-sub NDJSON shape: config_index maps a
+        // row back to its config position (usize::MAX only for aggregate
+        // rows); no keys or subscription content are emitted.
+        let real_row = cf_scanner::check_sub::CheckRow {
+            config_index: 0,
+            tag: "a".to_owned(),
+            server: "1.2.3.4:443".to_owned(),
+            ok: true,
+            latency_ms: Some(42),
+            error: None,
+        };
+        let aggregate_row = cf_scanner::check_sub::CheckRow {
+            config_index: usize::MAX,
+            tag: "<unparseable lines>".to_owned(),
+            server: "-".to_owned(),
+            ok: false,
+            latency_ms: None,
+            error: Some("1 line(s) ignored, 0 parse error(s)".to_owned()),
+        };
+        let line = check_row_json(&real_row).to_string();
+        assert!(line.contains("\"config_index\":0"), "{line}");
+        assert!(line.contains("\"ok\":true"), "{line}");
+        let line = check_row_json(&aggregate_row).to_string();
+        assert!(
+            line.contains(&format!("\"config_index\":{}", usize::MAX)),
+            "{line}"
+        );
     }
 
     #[test]

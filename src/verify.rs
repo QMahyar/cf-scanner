@@ -83,6 +83,11 @@ impl XrayTunnelProbe {
         let work_dir = paths::data_dir().context("no data directory for trial configs")?;
         sweep_stale_trial_dirs_async(&work_dir).await;
         let trial_dir = make_trial_dir(&work_dir).await?;
+        // Guard before every fallible step below: ensure_binary and spawn
+        // failures (the latter after write_trial_config persisted a
+        // credential-bearing config.json) must remove the trial dir, matching
+        // XrayTunnelProbe::probe.
+        let guard = TrialDirGuard(trial_dir.clone());
 
         let fetch = xray::RealFetch;
         let xray_bin = xray::ensure_binary(&fetch).await.with_context(
@@ -110,8 +115,8 @@ impl XrayTunnelProbe {
         .await?;
         Ok(TunnelSession {
             proc,
-            trial_dir: trial_dir.clone(),
-            _guard: TrialDirGuard(trial_dir),
+            trial_dir,
+            _guard: guard,
         })
     }
 }
@@ -639,6 +644,132 @@ mod tests {
         drop(guard);
         std::thread::sleep(Duration::from_millis(20));
         assert!(!dir.exists());
+    }
+
+    /// Pins the ownership shape open_tunnel_session relies on: the session
+    /// owns the dir while a clone sits in the guard, and the dir survives
+    /// until the guard is dropped.
+    #[test]
+    fn trial_dir_guard_clone_keeps_the_dir_alive_until_dropped() {
+        let dir = std::env::temp_dir().join(format!(
+            "cf-scanner-verify-guard-alive-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let guard = TrialDirGuard(dir.clone());
+        assert!(
+            dir.exists(),
+            "a held guard (live session) must keep the trial dir"
+        );
+        drop(guard);
+        // Drop cleanup is fire-and-forget on the blocking pool: poll instead
+        // of a fixed sleep so a loaded test runner cannot flake.
+        let mut removed = false;
+        for _ in 0..250 {
+            if !dir.exists() {
+                removed = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(removed, "dropping the guard must remove the trial dir");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// F7 regression: open_tunnel_session must fail with the trial dir
+    /// already removed when spawn fails after write_trial_config persisted
+    /// config.json. A >=1 MiB garbage "cached binary" passes the cache size
+    /// gate but Command::spawn rejects it, deterministically failing after
+    /// the credential write.
+    #[tokio::test]
+    // IDENTITY_LOCK is a std mutex held across awaits: sound here because
+    // each #[tokio::test] runs on its own thread/runtime, so contention only
+    // parks a sibling test thread — there is no same-executor re-entrancy.
+    #[allow(clippy::await_holding_lock)]
+    async fn open_tunnel_session_failure_after_config_write_removes_the_trial_dir() {
+        use crate::dgst::hex_lower;
+        use sha2::{Digest as _, Sha256};
+        // Same precondition as require_xray_binary_reflects_the_data_dir_seam:
+        // a bundled binary next to the test exe would win over the planted
+        // cache and actually spawn.
+        if crate::xray::find_bundled().is_none() {
+            // Both locks, taken in the project-wide test order: IDENTITY_LOCK
+            // before DATA_DIR_LOCK (see both lock definitions). DATA_DIR_LOCK
+            // serializes with the other data-dir tests; IDENTITY_LOCK stops
+            // the warp/warpgen tests from re-pointing CF_SCANNER_DATA_DIR
+            // mid-test (an env race here once let ensure_binary resolve the
+            // developer's real cached xray, which then spawned instead of
+            // failing). The reversed order once risked an ABBA deadlock
+            // against the warp/warpgen tests.
+            let _identity = crate::warpgen::tests::IDENTITY_LOCK
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            let _data = crate::paths::test_env::DATA_DIR_LOCK.lock().await;
+            let _isolated = crate::paths::test_env::IsolatedDataDir::new();
+            // The memo may hold a path resolved by an earlier test (e.g. the
+            // developer's real cached xray); a hit would bypass the planted
+            // cache and spawn a working binary.
+            crate::xray::reset_binary_state_for_tests().await;
+            let bin = crate::paths::xray_binary_path().unwrap();
+            let payload = vec![0u8; 1 << 20];
+            std::fs::write(&bin, &payload).unwrap();
+            let digest = hex_lower(&Sha256::digest(&payload));
+            std::fs::write(bin.with_extension("dgst"), format!("SHA2-256= {digest}\n")).unwrap();
+
+            let spec = OutboundSpec {
+                protocol: Protocol::Vless,
+                server: "1.2.3.4".to_owned(),
+                port: 443,
+                user_id: "aaaaaaaa-bbbb-cccc-dddd-eeeeffff0000".to_owned(),
+                method: None,
+                security: "tls".to_owned(),
+                tls_server_name: None,
+                fingerprint: None,
+                ws: None,
+                grpc: None,
+                xhttp: None,
+                tag: None,
+                alter_id: 0,
+                vmess_security: None,
+            };
+            let err = match XrayTunnelProbe::open_tunnel_session(
+                &spec,
+                &FragmentPreset::Off,
+                None,
+                None,
+                "203.0.113.1".parse().unwrap(),
+            )
+            .await
+            {
+                Ok(_) => panic!("a non-executable cached binary must fail the spawn"),
+                Err(err) => err,
+            };
+            let chain = format!("{err:#}");
+            assert!(
+                chain.contains("failed to spawn xray"),
+                "failure must be the post-config-write spawn, got: {chain}"
+            );
+
+            let work_dir = paths::data_dir().unwrap();
+            let mut removed = false;
+            for _ in 0..250 {
+                let residue = std::fs::read_dir(&work_dir)
+                    .expect("isolated data dir must exist")
+                    .flatten()
+                    .any(|e| e.file_name().to_string_lossy().starts_with("trial-"));
+                if !residue {
+                    removed = true;
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            assert!(
+                removed,
+                "a failed open_tunnel_session must not leave a trial-* dir under {}",
+                work_dir.display()
+            );
+        }
     }
 
     #[test]

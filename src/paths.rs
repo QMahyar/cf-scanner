@@ -2,6 +2,7 @@ use std::path::PathBuf;
 use std::sync::{Mutex, MutexGuard};
 
 use anyhow::{Result, anyhow};
+use rand_core::{OsRng, RngCore};
 
 pub fn data_write_guard() -> MutexGuard<'static, ()> {
     static WRITE_GATE: Mutex<()> = Mutex::new(());
@@ -305,11 +306,43 @@ pub fn write_secret(path: &std::path::Path, data: &[u8]) -> std::io::Result<()> 
     }
 }
 
+fn random_u32() -> u32 {
+    RngCore::next_u32(&mut OsRng)
+}
+
+// WHY: the temp name carries ONLY an OsRng salt — a predictable pid/counter
+// name would let a local attacker pre-place a symlink (the same
+// predictability concern export.rs closed) — and the temp file is removed on
+// failure so secret bytes never linger under a .tmp- sibling.
+fn secret_temp_name(name: &str, salt: u32) -> String {
+    format!("{name}.tmp-{salt:08x}")
+}
+
+pub fn write_secret_atomic(dest: &std::path::Path, data: &[u8]) -> Result<()> {
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let name = dest
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "out".to_owned());
+    let tmp = dest.with_file_name(secret_temp_name(&name, random_u32()));
+    let result = write_secret(&tmp, data).and_then(|()| std::fs::rename(&tmp, dest));
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    result.map_err(anyhow::Error::from)
+}
+
 #[cfg(test)]
 pub(crate) mod test_env {
 
     use std::path::{Path, PathBuf};
 
+    // WHY: serializes CF_SCANNER_DATA_DIR mutation across data-dir tests.
+    // Lock-order convention, everywhere: take IDENTITY_LOCK (warpgen::tests)
+    // before DATA_DIR_LOCK — the reverse order once risked an ABBA deadlock
+    // between the verify and warp/warpgen tests.
     pub(crate) static DATA_DIR_LOCK: std::sync::LazyLock<tokio::sync::Mutex<()>> =
         std::sync::LazyLock::new(|| tokio::sync::Mutex::new(()));
 
@@ -503,5 +536,50 @@ mod tests {
         let file_mode = std::fs::metadata(&file).unwrap().permissions().mode();
         assert_eq!(file_mode & 0o777, 0o600);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn write_secret_atomic_replaces_content_and_leaves_no_tmp_remnant() {
+        let dir = std::env::temp_dir().join(format!("cf-scanner-atomic-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let dest = dir.join("secret.json");
+        write_secret_atomic(&dest, b"first").expect("atomic write must succeed");
+        write_secret_atomic(&dest, b"second").expect("atomic replace must succeed");
+        assert_eq!(std::fs::read(&dest).unwrap(), b"second");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mode = std::fs::metadata(&dest).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600, "atomic secret file must be owner-only");
+        }
+        let leftovers: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.contains(".tmp-"))
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "tmp files must be cleaned up, found {leftovers:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn secret_temp_name_is_osrng_salted_and_never_pid_derived() {
+        // A pid-derived temp name is predictable: a local attacker who knows
+        // the pid can pre-place a symlink at the path and win the rename.
+        // The name must carry only the OsRng salt.
+        let name = secret_temp_name("secret.json", 0xdeadbeef);
+        assert_eq!(name, "secret.json.tmp-deadbeef");
+        // "deadbeef" holds no decimal digits, so any pid containing one
+        // (i.e. every pid) cannot appear in this fixed-salt name.
+        let pid = std::process::id().to_string();
+        assert!(
+            !name.contains(&pid),
+            "temp name must not embed the pid ({pid}): {name}"
+        );
+        // The salt is zero-padded hex so names sort stably and have fixed shape.
+        assert_eq!(secret_temp_name("out", 1), "out.tmp-00000001");
     }
 }

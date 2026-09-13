@@ -226,7 +226,7 @@ pub(crate) struct ScanArgs {
         long,
         default_value_t = DEFAULT_CONCURRENCY,
         help_heading = "Tuning",
-        help = "Parallel probe workers (default 256, max 1000)"
+        help = "Parallel probe workers (max 1000)"
     )]
     pub(crate) concurrency: u16,
 
@@ -344,7 +344,7 @@ pub(crate) struct ScanArgs {
         long,
         requires = "phase2_configs",
         help_heading = "Phase 2 (xray verification)",
-        help = "Custom fragment as \"packets,length,interval\" (e.g. 1-3,10-20,10-20); requires --phase2-fragment custom"
+        help = "Custom fragment as \"length,interval\" (e.g. 10-20,10-20); requires --phase2-fragment custom"
     )]
     pub(crate) phase2_custom: Option<String>,
 
@@ -369,8 +369,16 @@ pub(crate) struct ScanArgs {
     #[arg(
         long,
         requires = "phase2_configs",
+        // clap_derive's default_value_t needs the field type to be Display
+        // (Option<u8> is not) and default_value only takes &'static str, so
+        // the default is spelled here as a literal. The single source of
+        // truth is api::DEFAULT_PHASE2_CONCURRENCY; the
+        // concurrency_help_matches_real_limits test pins the rendered
+        // "[default: N]" against that constant, so any change to it fails
+        // until this literal follows.
+        default_value = "3",
         help_heading = "Phase 2 (xray verification)",
-        help = "Parallel phase-2 verifications (default 4, max 8)"
+        help = "Parallel phase-2 verifications (max 8)"
     )]
     pub(crate) phase2_concurrency: Option<u8>,
 
@@ -655,5 +663,35 @@ mod tests {
                 "--{name} is documented in --help but missing from README.md's Commands reference"
             );
         }
+    }
+
+    #[test]
+    fn concurrency_help_matches_real_limits() {
+        let help = match Cli::try_parse_from(["cf-scanner", "scan", "--help"]) {
+            Err(e) => e.to_string(),
+            Ok(_) => panic!("--help must short-circuit as a parse error"),
+        };
+        // --concurrency's default is DEFAULT_CONCURRENCY via default_value_t and
+        // validate_tuning accepts 1..=1000; --phase2-concurrency's default is
+        // api::DEFAULT_PHASE2_CONCURRENCY via default_value_t and
+        // validate_phase2 accepts 1..=8. clap renders each default exactly
+        // once ("[default: N]") and the help strings carry only the enforced
+        // max, so the numbers are single-sourced and cannot drift again (F24).
+        assert!(
+            help.contains(&format!("[default: {DEFAULT_CONCURRENCY}]")),
+            "--concurrency lost clap's rendered default:\n{help}"
+        );
+        assert!(
+            help.contains("Parallel probe workers (max 1000)"),
+            "--concurrency help drifted from its real max (or re-added a hand-written default):\n{help}"
+        );
+        assert!(
+            help.contains(&format!("[default: {}]", api::DEFAULT_PHASE2_CONCURRENCY)),
+            "--phase2-concurrency lost clap's rendered default:\n{help}"
+        );
+        assert!(
+            help.contains("Parallel phase-2 verifications (max 8)"),
+            "--phase2-concurrency help drifted from its real max (or re-added a hand-written default):\n{help}"
+        );
     }
 }

@@ -48,7 +48,6 @@ rcgen = "0.13"
 
 [features]
 dist-bundle-xray = []
-test-helpers = []
 
 [build-dependencies]
 flate2 = "1"

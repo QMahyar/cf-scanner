@@ -1,11 +1,12 @@
 //! Mechanical plumbing shared by the CDN and WARP probe loops (F-27.3).
 //!
-//! Deliberately policy-free: the two loops keep their own producers (CDN
-//! dispatches non-blocking `try_send` with inflight accounting plus a
-//! neighbor side-channel; WARP uses backpressured `send().await`) and their
-//! own probe bodies. Only the parts that were byte-for-byte duplicated live
-//! here; a fuller "generic driver" would multiply mode-specific parameters
-//! and leak policy (see T-29 abort rationale).
+//! Deliberately policy-free: the two loops keep their own producers (both
+//! dispatch with backpressured, cancel-aware `send().await`; the CDN producer
+//! additionally tracks inflight counts and feeds the neighbor side-channel,
+//! whose enqueue is non-blocking `try_send`) and their own probe bodies. Only
+//! the parts that were byte-for-byte duplicated live here; a fuller "generic
+//! driver" would multiply mode-specific parameters and leak policy (see T-29
+//! abort rationale).
 
 use std::sync::Arc;
 use std::sync::atomic::Ordering;

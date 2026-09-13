@@ -427,6 +427,9 @@ mod tests {
     #[test]
     fn persisted_server_key_overrides_the_bundled_constant() {
         let _guard = crate::warpgen::tests::IDENTITY_LOCK.lock().unwrap();
+        // WHY: this test writes CF_SCANNER_DATA_DIR; every data-dir writer must
+        // hold DATA_DIR_LOCK or concurrent seam assertions (verify/paths) flake.
+        let _data_dir_lock = crate::paths::test_env::DATA_DIR_LOCK.blocking_lock();
         let dir = std::env::temp_dir().join("cf-scanner-warp-key-test");
         unsafe { std::env::set_var("CF_SCANNER_DATA_DIR", &dir) };
         let _ = std::fs::remove_dir_all(&dir);
@@ -444,6 +447,9 @@ mod tests {
     #[test]
     fn corrupt_persisted_server_key_falls_back_to_bundled() {
         let _guard = crate::warpgen::tests::IDENTITY_LOCK.lock().unwrap();
+        // WHY: this test writes CF_SCANNER_DATA_DIR; every data-dir writer must
+        // hold DATA_DIR_LOCK or concurrent seam assertions (verify/paths) flake.
+        let _data_dir_lock = crate::paths::test_env::DATA_DIR_LOCK.blocking_lock();
         let dir = std::env::temp_dir().join("cf-scanner-warp-key-corrupt-test");
         unsafe { std::env::set_var("CF_SCANNER_DATA_DIR", &dir) };
         let _ = std::fs::remove_dir_all(&dir);

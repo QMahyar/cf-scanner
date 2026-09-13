@@ -54,7 +54,7 @@ pub(crate) fn build_scan_config(args: &ScanArgs) -> Result<ScanConfig> {
     };
     let warp = (mode == Mode::Warp).then(|| api::types::WarpConfig {
         custom_endpoints: args.warp_endpoints.clone(),
-        probes_per_endpoint: args.warp_probes.unwrap_or(3),
+        probes_per_endpoint: args.warp_probes.unwrap_or(api::DEFAULT_PROBES_PER_ENDPOINT),
         wgconf,
         verify_with_wgconf: args.warp_verify,
     });
@@ -236,13 +236,17 @@ fn build_phase2(args: &ScanArgs) -> Result<Option<api::types::Phase2Config>> {
         .unwrap_or(api::types::FragmentPreset::Off);
     let custom_fragment = match args.phase2_custom.as_deref() {
         Some(values) => {
-            let (length, interval) = values
-                .split_once(',')
-                .ok_or_else(|| anyhow!("--phase2-custom must be \"length,interval\""))?;
+            let fields: Vec<&str> = values.split(',').collect();
+            if fields.len() != 2 {
+                bail!(
+                    "--phase2-custom takes exactly two comma-separated fields \"length,interval\" (packets is always \"tlshello\"), got {} field(s): {values:?}",
+                    fields.len()
+                );
+            }
             Some(api::types::CustomFragment {
                 packets: "tlshello".to_owned(),
-                length: length.trim().to_owned(),
-                interval: interval.trim().to_owned(),
+                length: fields[0].trim().to_owned(),
+                interval: fields[1].trim().to_owned(),
             })
         }
         None => None,
@@ -267,7 +271,9 @@ fn build_phase2(args: &ScanArgs) -> Result<Option<api::types::Phase2Config>> {
         snis: args.phase2_snis.clone(),
         probe_url: api::types::DEFAULT_PROBE_URL.to_owned(),
         probe_urls,
-        concurrency: args.phase2_concurrency.unwrap_or(3),
+        concurrency: args
+            .phase2_concurrency
+            .unwrap_or(api::DEFAULT_PHASE2_CONCURRENCY),
     }))
 }
 

@@ -490,6 +490,7 @@ mod tests {
         addr: SocketAddr,
         sent_cred: Arc<Mutex<Option<String>>>,
         connections: Arc<AtomicUsize>,
+        requests: Arc<AtomicUsize>,
         _rt: tokio::runtime::Runtime,
     }
 
@@ -528,13 +529,15 @@ mod tests {
             .enable_all()
             .build()
             .expect("test server runtime");
-        let (addr, sent_cred, connections) = rt.block_on(async {
+        let (addr, sent_cred, connections, requests) = rt.block_on(async {
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let addr = listener.local_addr().unwrap();
             let sent_cred: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
             let connections = Arc::new(AtomicUsize::new(0));
+            let requests = Arc::new(AtomicUsize::new(0));
             let sent_cred_task = sent_cred.clone();
             let connections_task = connections.clone();
+            let requests_task = requests.clone();
             tokio::spawn(async move {
                 loop {
                     let Ok((tcp, _)) = listener.accept().await else {
@@ -542,17 +545,20 @@ mod tests {
                     };
                     connections_task.fetch_add(1, Ordering::SeqCst);
                     let sent_cred = sent_cred_task.clone();
+                    let requests = requests_task.clone();
                     tokio::spawn(async move {
-                        let _ = serve_one(tcp, protocol, use_tls, behavior, sent_cred).await;
+                        let _ =
+                            serve_one(tcp, protocol, use_tls, behavior, sent_cred, requests).await;
                     });
                 }
             });
-            (addr, sent_cred, connections)
+            (addr, sent_cred, connections, requests)
         });
         FakeServer {
             addr,
             sent_cred,
             connections,
+            requests,
             _rt: rt,
         }
     }
@@ -563,6 +569,7 @@ mod tests {
         use_tls: bool,
         behavior: ServerBehavior,
         sent_cred: Arc<Mutex<Option<String>>>,
+        requests: Arc<AtomicUsize>,
     ) -> Result<()> {
         let mut conn: Box<dyn AsyncStream> = if use_tls {
             Box::new(
@@ -595,6 +602,7 @@ mod tests {
         let mut served = 0u32;
         loop {
             read_http_request(&mut *conn).await?;
+            requests.fetch_add(1, Ordering::SeqCst);
             let (status, body): (u16, &[u8]) = match behavior {
                 ServerBehavior::First200Then403 if served >= 1 => (403, b"no"),
                 _ => (200, b"ip=1.2.3.4\ncolo=AMS"),
@@ -876,6 +884,51 @@ mod tests {
         );
         assert!(!result.passed, "a 403 on any URL must fail the candidate");
         assert_eq!(result.verifier, Some("inline"));
+    }
+
+    #[test]
+    fn inline_probe_consumes_the_probe_url_list() {
+        // Consumer-half pin for check-sub's
+        // `every_parsed_config_is_probed_with_a_real_url` (which only proves
+        // the URL list is *threaded* into ProbeRequest): every URL handed in
+        // must produce a real HTTP exchange through the tunnel, and an empty
+        // list must be a zero-verdict fail that opens no tunnel at all. URLs
+        // are scheme-swapped stand-ins for check-sub's https default
+        // (DEFAULT_PROBE_URL): the fake server's self-signed cert cannot pass
+        // the inner TLS handshake's webpki verification.
+        let server = spawn_fake_server(Protocol::Vless, true, ServerBehavior::Pass);
+        let mut spec =
+            parse_uri(&format!("vless://{VLESS_UUID}@127.0.0.1:443?security=tls")).unwrap();
+        spec.port = server.addr.port();
+        let result = probe(
+            spec.clone(),
+            &["http://probe.test/one", "http://probe.test/two"],
+            2_000,
+        );
+        assert!(result.passed, "{result:?}");
+        let requests_after_urls = server.requests.load(Ordering::SeqCst);
+        let connections_after_urls = server.connections.load(Ordering::SeqCst);
+        assert_eq!(
+            requests_after_urls, 2,
+            "every probe URL must be exchanged through the tunnel"
+        );
+        assert_eq!(connections_after_urls, 1);
+
+        let empty = probe(spec, &[], 2_000);
+        assert!(
+            !empty.passed,
+            "an empty probe URL list must be a zero-verdict fail, not a vacuous pass"
+        );
+        assert_eq!(
+            server.requests.load(Ordering::SeqCst),
+            requests_after_urls,
+            "an empty probe URL list must not exchange anything"
+        );
+        assert_eq!(
+            server.connections.load(Ordering::SeqCst),
+            connections_after_urls,
+            "an empty probe URL list must not open any tunnel"
+        );
     }
 
     #[test]

@@ -295,10 +295,15 @@ pub struct Phase2Verdict {
     pub error: Option<String>,
     #[serde(default)]
     pub config_index: Option<u32>,
+    /// Position within the expanded phase-2 specs vec. config_index stays the
+    /// raw p2.configs entry index (bundle rendering resolves against it);
+    /// both are needed because subscription entries expand to many specs.
+    #[serde(default)]
+    pub spec_index: Option<u32>,
     #[serde(default)]
     pub verifier: Option<Verifier>,
     #[serde(default)]
-    pub speed_test_mbps: Option<f32>,
+    pub speed_test_mb_s: Option<f32>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

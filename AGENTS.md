@@ -112,8 +112,11 @@ npm publishing knowledge (AGENTS must know, condensed from `docs/release-process
   through `ranges::HTTP_CLIENT` whose redirect policy enforces
   `validate_fetch_url` per hop. The client has NO global timeout, so every
   call site MUST set `.timeout(...)`.
-- `ScanConfig`/`Phase2Config`/`WarpConfig` are `deny_unknown_fields`: any NEW
-  request field needs `#[serde(default)]`.
+- `Phase2Config`/`WarpConfig` are `deny_unknown_fields`: any NEW field needs
+  `#[serde(default)]`. `ScanConfig` deliberately has NO
+  `deny_unknown_fields` — it is the persisted --retry-last root, so unknown
+  top-level keys must be ignored for forward compatibility; strictness is
+  preserved on nested types and by validate().
 
 ## Code conventions
 

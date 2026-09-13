@@ -27,6 +27,10 @@ impl ScanController {
         if specs.is_empty() {
             bail!("phase 2: no usable configs (every entry failed to parse)");
         }
+        // Paired write: fill the specs side retained (empty) at run start. On
+        // failure/cancellation the run-start reset already guarantees the pair
+        // stays consistent (configs set, specs empty) — never stale.
+        self.retain_phase2_state(p2.configs.clone(), specs.clone());
         let snis: Vec<Option<String>> = if p2.snis.is_empty() {
             vec![None]
         } else {
@@ -147,8 +151,9 @@ impl ScanController {
                                 latency_ms: result.latency_ms,
                                 error: None,
                                 config_index: Some(*config_idx),
+                                spec_index: Some(si as u32),
                                 verifier: result.verifier.and_then(parse_verifier),
-                                speed_test_mbps: None,
+                                speed_test_mb_s: None,
                             };
                             if lock(&passed).len() >= stop_found && !result.passed {
                                 break;
@@ -196,8 +201,9 @@ impl ScanController {
                                 latency_ms: None,
                                 error: Some(msg),
                                 config_index: Some(*config_idx),
+                                spec_index: Some(si as u32),
                                 verifier: None,
-                                speed_test_mbps: None,
+                                speed_test_mb_s: None,
                             };
                             if lock(&passed).len() >= stop_found {
                                 break;
@@ -292,10 +298,12 @@ impl ScanController {
                     .map(|spec| vec![spec])
             } else {
                 let path = entry.to_owned();
-                let text = tokio::task::spawn_blocking(move || std::fs::read_to_string(&path))
-                    .await
-                    .unwrap_or_else(|e| Err(std::io::Error::other(e.to_string())))
-                    .with_context(|| format!("config file {} unreadable", redact_entry(entry)));
+                let text = tokio::task::spawn_blocking(move || {
+                    read_config_file(std::path::Path::new(&path))
+                })
+                .await
+                .unwrap_or_else(|e| Err(anyhow!("config file read task failed: {e}")))
+                .with_context(|| format!("config file {} unreadable", redact_entry(entry)));
                 text.and_then(|text| {
                     parse_xray_json(&text).with_context(|| {
                         format!("config file {} has no usable outbound", redact_entry(entry))
@@ -344,6 +352,24 @@ fn parse_verifier(tag: &str) -> Option<Verifier> {
         "xray" => Some(Verifier::Xray),
         _ => None,
     }
+}
+
+/// Mirrors cli/scan_args.rs load_wgconf_file: read at most one byte past the
+/// cap so an oversized or pathological file cannot balloon memory inside the
+/// blocking pool.
+fn read_config_file(path: &std::path::Path) -> Result<String> {
+    use std::io::Read as _;
+    let file = std::fs::File::open(path)?;
+    let mut buf = String::new();
+    file.take(crate::api::types::MAX_WGCONF_BYTES as u64 + 1)
+        .read_to_string(&mut buf)?;
+    if buf.len() > crate::api::types::MAX_WGCONF_BYTES {
+        bail!(
+            "config file exceeds {} bytes",
+            crate::api::types::MAX_WGCONF_BYTES
+        );
+    }
+    Ok(buf)
 }
 
 fn redact_entry(entry: &str) -> String {
@@ -1014,6 +1040,63 @@ mod tests {
     }
 
     #[test]
+    fn read_config_file_caps_at_max_wgconf_bytes() {
+        let dir =
+            std::env::temp_dir().join(format!("cf-scanner-p2-readcap-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let at_cap = dir.join("at-cap.json");
+        std::fs::write(&at_cap, vec![b' '; crate::api::types::MAX_WGCONF_BYTES]).unwrap();
+        assert!(
+            read_config_file(&at_cap).is_ok(),
+            "a file exactly at the cap must read fine"
+        );
+        let over = dir.join("over-cap.json");
+        std::fs::write(&over, vec![b' '; crate::api::types::MAX_WGCONF_BYTES + 1]).unwrap();
+        let err = read_config_file(&over).unwrap_err().to_string();
+        assert!(
+            err.contains(&format!(
+                "config file exceeds {} bytes",
+                crate::api::types::MAX_WGCONF_BYTES
+            )),
+            "{err}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// F11 regression: a valid-but-oversized config file must be rejected at
+    /// the read boundary, not parsed. Padded with whitespace so the JSON
+    /// itself is well-formed — only the size cap may refuse it.
+    #[tokio::test]
+    async fn phase2_config_file_over_the_byte_cap_is_rejected() {
+        let t = FakeTransport::new().ok("203.0.113.1".parse().unwrap(), 443, 50);
+        let probe = FakeTunnelProbe::new().pass("203.0.113.1".parse().unwrap());
+        let c = p2_controller(t, FakeSub(""), probe.clone());
+        let dir =
+            std::env::temp_dir().join(format!("cf-scanner-p2-overcap-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut body = r#"{"outbounds":[{"protocol":"vless","settings":{"vnext":[{"address":"1.2.3.4","port":443,"users":[{"id":"aaaaaaaa-bbbb-cccc-dddd-eeeeffff0000"}]}]}}]}"#
+            .to_owned();
+        body.push_str(&" ".repeat(crate::api::types::MAX_WGCONF_BYTES + 1 - body.len()));
+        let path = dir.join("padded.json");
+        std::fs::write(&path, &body).unwrap();
+        let mut cfg = ok_cfg(1, None);
+        cfg.phase2 = Some(p2_cfg(&[path.to_str().unwrap()], &[]));
+        let err = run_local(&c, cfg, 1).await.unwrap_err();
+        assert!(
+            err.to_string().contains("no usable configs"),
+            "an over-cap config file must be rejected, got: {err:#}"
+        );
+        assert_eq!(
+            probe.attempts.load(Ordering::Relaxed),
+            0,
+            "an over-cap config file must never reach probing"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn update_verdict_phase2_never_downgrades_a_pass() {
         let store: Store = Arc::new(Mutex::new(vec![Verdict {
             ip: "203.0.113.1".parse().unwrap(),
@@ -1028,8 +1111,9 @@ mod tests {
                 latency_ms: Some(42),
                 error: None,
                 config_index: Some(0),
+                spec_index: None,
                 verifier: Some(Verifier::Xray),
-                speed_test_mbps: None,
+                speed_test_mb_s: None,
             }),
             sent: 1,
             received: 1,
@@ -1045,8 +1129,9 @@ mod tests {
             latency_ms: None,
             error: Some("spawn failed".to_owned()),
             config_index: None,
+            spec_index: None,
             verifier: None,
-            speed_test_mbps: None,
+            speed_test_mb_s: None,
         };
         let index: PosIndex = PosIndex::new(Mutex::new(Arc::new(HashMap::from([(
             ("203.0.113.1".parse().unwrap(), 443),
@@ -1350,8 +1435,9 @@ mod tests {
                 latency_ms: Some(30),
                 error: None,
                 config_index: Some(0),
+                spec_index: None,
                 verifier: Some(Verifier::Xray),
-                speed_test_mbps: None,
+                speed_test_mb_s: None,
             }),
             sent: 1,
             received: 1,
@@ -1374,5 +1460,84 @@ mod tests {
         assert!(results[0].phase2.as_ref().unwrap().passed);
         assert!(!results[1].phase2.as_ref().unwrap().passed);
         assert!(results[1].phase2.as_ref().unwrap().error.is_some());
+    }
+
+    // --- retained parsed specs for export (F2) ---
+
+    #[tokio::test]
+    async fn successful_phase2_retains_parsed_specs_with_raw_entry_indexes() {
+        let sub_vless = "vless://11112222-3333-4444-5555-666677778888@origin.example.com:443?security=tls#sub-tag";
+        let sub_body: &'static str = Box::leak(format!("{sub_vless}\n").into_boxed_str());
+        let t = FakeTransport::new().ok("203.0.113.1".parse().unwrap(), 443, 10);
+        let probe = FakeTunnelProbe::new().pass("203.0.113.1".parse().unwrap());
+        let c = p2_controller(t, FakeSub(sub_body), probe);
+        let mut cfg = ok_cfg(2, None);
+        cfg.phase2 = Some(p2_cfg(&["https://sub.example.com/x", VLESS], &[]));
+        run_local(&c, cfg, 1).await.unwrap();
+        let specs = c.phase2_specs();
+        assert_eq!(specs.len(), 2, "subscription expands + direct URI");
+        assert_eq!(specs[0].1, 0, "expanded spec keeps its raw entry index");
+        assert_eq!(specs[1].1, 1);
+        assert_eq!(specs[0].0.tag.as_deref(), Some("sub-tag"));
+        assert_eq!(specs[1].0.user_id, "aaaaaaaa-bbbb-cccc-dddd-eeeeffff0000");
+        // The raw configs remain available for the direct-URI fast path.
+        assert_eq!(c.phase2_configs()[1], VLESS);
+    }
+
+    #[tokio::test]
+    async fn failed_parse_leaves_retained_specs_empty() {
+        let t = FakeTransport::new().ok("203.0.113.1".parse().unwrap(), 443, 10);
+        let probe = FakeTunnelProbe::new().pass("203.0.113.1".parse().unwrap());
+        let c = p2_controller(t, FakeSub("vless://bad"), probe);
+        let mut cfg = ok_cfg(2, None);
+        cfg.phase2 = Some(p2_cfg(&["https://sub.example.com/x"], &[]));
+        let err = run_local(&c, cfg, 1).await.unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("no usable configs") || msg.contains("no configs to verify with"),
+            "{err:#}"
+        );
+        assert!(
+            c.phase2_specs().is_empty(),
+            "failed parse must leave the paired state with empty specs, \
+             never specs retained from a previous run"
+        );
+        assert_eq!(
+            c.phase2_configs(),
+            vec!["https://sub.example.com/x".to_owned()],
+            "the raw configs side of the pair is still retained"
+        );
+    }
+
+    // The stale-pair regression: a successful phase-2 run retains specs, then
+    // a run whose parse fails (or a WARP run) must reset the pair — the old
+    // code wrote configs unconditionally but specs only on parse success, so
+    // run 1's specs dangled next to run 2's configs.
+    #[tokio::test]
+    async fn failed_parse_run_resets_specs_retained_by_a_previous_run() {
+        let sub_vless = "vless://11112222-3333-4444-5555-666677778888@origin.example.com:443?security=tls#sub-tag";
+        let sub_body: &'static str = Box::leak(format!("{sub_vless}\n").into_boxed_str());
+        let t = FakeTransport::new().ok("203.0.113.1".parse().unwrap(), 443, 10);
+        let probe = FakeTunnelProbe::new().pass("203.0.113.1".parse().unwrap());
+        let c = p2_controller(t, FakeSub(sub_body), probe);
+        // Run 1: parse succeeds, specs retained.
+        let mut cfg = ok_cfg(2, None);
+        cfg.phase2 = Some(p2_cfg(&["https://sub.example.com/x"], &[]));
+        run_local(&c, cfg, 1).await.unwrap();
+        assert_eq!(c.phase2_specs().len(), 1, "run 1 retains its parsed spec");
+        // Run 2: every entry fails to parse — specs must not survive.
+        let mut cfg2 = ok_cfg(2, None);
+        cfg2.phase2 = Some(p2_cfg(&["vless://bad"], &[]));
+        let err = run_local(&c, cfg2, 1).await.unwrap_err();
+        assert!(err.to_string().contains("no usable configs"), "{err:#}");
+        assert!(
+            c.phase2_specs().is_empty(),
+            "run 2 must reset the pair, not keep run 1's specs"
+        );
+        assert_eq!(
+            c.phase2_configs(),
+            vec!["vless://bad".to_owned()],
+            "run 2's raw configs are retained alongside the reset specs"
+        );
     }
 }

@@ -2,9 +2,10 @@ use std::net::IpAddr;
 use std::sync::Arc;
 
 use clap::ValueEnum;
+use rand_core::{OsRng, RngCore};
 
-use crate::api::types::{Verdict, Verifier};
-use crate::configs;
+use crate::api::types::{Phase2Verdict, Verdict, Verifier};
+use crate::configs::{self, OutboundSpec};
 use crate::engine::ScanController;
 
 fn human_reason(reason: &str) -> &str {
@@ -149,11 +150,12 @@ pub fn render_bundle(
     format: &str,
     verdicts: &[Verdict],
     configs: &[String],
+    specs: &[(OutboundSpec, u32)],
 ) -> Result<String, String> {
     let allowed = format_names(None);
     resolve_format(format, &allowed)
         .ok_or_else(|| unknown_format(format, &allowed))
-        .and_then(|fmt| bundle_body(fmt, verdicts, configs))
+        .and_then(|fmt| bundle_body(fmt, verdicts, configs, specs))
 }
 
 pub fn render_results(format: &str, verdicts: &[Verdict]) -> Result<String, String> {
@@ -201,7 +203,40 @@ fn unique_tag(tag: String, seen: &mut std::collections::HashMap<String, usize>) 
     }
 }
 
-fn rewrite_uris(non_null_ips: &[Verdict], configs: &[String]) -> (Vec<String>, usize, usize) {
+/// Resolves the passing verdict's phase-2 config for export. Direct-URI
+/// entries render from the raw string so SIP002 extras survive; subscription
+/// and file entries are not share URIs, so they render from the retained
+/// parsed specs, matched only by the verdict's `spec_index` (exact expanded
+/// spec, validated against the raw entry index). Verdicts that cannot resolve
+/// that way — e.g. legacy rows recorded before `spec_index` existed — count
+/// as malformed: guessing the first spec matching the raw entry index could
+/// render the wrong expanded spec's credentials on a multi-spec entry.
+enum ResolvedConfig<'a> {
+    Raw(&'a str),
+    Spec(&'a OutboundSpec),
+}
+
+fn resolve_config<'a>(
+    p2: &Phase2Verdict,
+    configs: &'a [String],
+    specs: &'a [(OutboundSpec, u32)],
+) -> Option<ResolvedConfig<'a>> {
+    let idx = p2.config_index?;
+    let raw = configs.get(idx as usize)?;
+    if configs::parse_uri(raw).is_ok() {
+        return Some(ResolvedConfig::Raw(raw));
+    }
+    p2.spec_index
+        .and_then(|i| specs.get(i as usize))
+        .filter(|(_, raw_idx)| *raw_idx == idx)
+        .map(|(spec, _)| ResolvedConfig::Spec(spec))
+}
+
+fn rewrite_uris(
+    non_null_ips: &[Verdict],
+    configs: &[String],
+    specs: &[(OutboundSpec, u32)],
+) -> (Vec<String>, usize, usize) {
     let mut uris = Vec::new();
     let mut v6_skipped = 0usize;
     let mut malformed = 0usize;
@@ -212,14 +247,6 @@ fn rewrite_uris(non_null_ips: &[Verdict], configs: &[String]) -> (Vec<String>, u
         if !p2.passed {
             continue;
         }
-        let Some(idx) = p2.config_index else {
-            malformed += 1;
-            continue;
-        };
-        let Some(cfg) = configs.get(idx as usize) else {
-            malformed += 1;
-            continue;
-        };
         let IpAddr::V4(ip) = v.ip else {
             v6_skipped += 1;
             continue;
@@ -230,9 +257,21 @@ fn rewrite_uris(non_null_ips: &[Verdict], configs: &[String]) -> (Vec<String>, u
             Some(p2.sni.as_str())
         };
         let remark = remark_for(v);
-        if let Ok(uri) =
-            configs::export_config_uri(cfg, ip, v.port, sni_override, remark.as_deref())
-        {
+        let rendered = match resolve_config(p2, configs, specs) {
+            Some(ResolvedConfig::Raw(cfg)) => {
+                configs::export_config_uri(cfg, ip, v.port, sni_override, remark.as_deref())
+            }
+            Some(ResolvedConfig::Spec(spec)) => {
+                // Same endpoint rule as the raw path: the share URI points at
+                // the endpoint the verdict is attached to, not the config's
+                // origin address; only the tunnel settings come from the spec.
+                let mut spec = spec.clone();
+                spec.port = v.port;
+                configs::render_uri(&spec, ip, sni_override, remark.as_deref())
+            }
+            None => Err(anyhow::anyhow!("no usable config for this endpoint")),
+        };
+        if let Ok(uri) = rendered {
             uris.push(uri);
         } else {
             malformed += 1;
@@ -245,11 +284,20 @@ fn bundle_body(
     format: &str,
     non_null_ips: &[Verdict],
     configs: &[String],
+    specs: &[(OutboundSpec, u32)],
 ) -> Result<String, String> {
-    let (uris, v6_skipped, malformed) = rewrite_uris(non_null_ips, configs);
+    let (uris, v6_skipped, malformed) = rewrite_uris(non_null_ips, configs, specs);
     if uris.is_empty() && v6_skipped > 0 {
         return Err(format!(
             "no exportable endpoints: {v6_skipped} passing endpoint(s) are IPv6 and bundle formats support IPv4 only"
+        ));
+    }
+    if uris.is_empty() && malformed > 0 {
+        // Never write an empty bundle when passing endpoints existed: the
+        // F2 failure mode (subscription configs retained unparsed) surfaced
+        // as exactly this silent-empty export.
+        return Err(format!(
+            "no exportable endpoints: {malformed} passing endpoint(s) whose phase-2 config no longer resolves"
         ));
     }
     if v6_skipped > 0 {
@@ -621,6 +669,7 @@ fn result_dump(format: &str, verdicts: &[Verdict]) -> String {
                     let mut val = serde_json::to_value(v).unwrap_or(serde_json::Value::Null);
                     if let Some(p2) = val.get_mut("phase2").and_then(|p| p.as_object_mut()) {
                         p2.remove("config_index");
+                        p2.remove("spec_index");
                     }
                     val
                 })
@@ -629,7 +678,7 @@ fn result_dump(format: &str, verdicts: &[Verdict]) -> String {
         }
         _ => {
             let mut out = String::from(
-                "ip,port,latency_ms,country,colo,phase2_passed,phase2_latency_ms,speed_test_mbps,sent,received,loss_pct,fail_reason,asn,isp\n",
+                "ip,port,latency_ms,country,colo,phase2_passed,phase2_latency_ms,speed_test_mb_s,sent,received,loss_pct,fail_reason,asn,isp\n",
             );
             for v in verdicts {
                 let p2 = v.phase2.as_ref();
@@ -645,7 +694,7 @@ fn result_dump(format: &str, verdicts: &[Verdict]) -> String {
                     p2.and_then(|p| p.latency_ms)
                         .map(|x| x.to_string())
                         .unwrap_or_default(),
-                    p2.and_then(|p| p.speed_test_mbps)
+                    p2.and_then(|p| p.speed_test_mb_s)
                         .map(|x| x.to_string())
                         .unwrap_or_default(),
                     v.sent.to_string(),
@@ -711,12 +760,15 @@ pub fn write_export(
         | ExportFormatArg::Shadowrocket
         | ExportFormatArg::Quantumult => {
             let configs = controller.phase2_configs();
-            render_bundle(format_name, &results, &configs)
+            let specs = controller.phase2_specs();
+            render_bundle(format_name, &results, &configs, &specs)
         }
     }
     .map_err(|e| anyhow::anyhow!("export failed: {e}"))?;
     if path.as_os_str() == "-" {
-        println!("{body}");
+        let mut out = std::io::stdout().lock();
+        emit_stdout(&body, &mut out)
+            .map_err(|e| anyhow::anyhow!("could not write export to stdout: {e}"))?;
     } else {
         atomic_write_file(path, body.as_bytes())
             .map_err(|e| anyhow::anyhow!("could not write {}: {e}", path.display()))?;
@@ -725,22 +777,53 @@ pub fn write_export(
     Ok(())
 }
 
+fn emit_stdout<W: std::io::Write>(body: &str, out: &mut W) -> std::io::Result<()> {
+    out.write_all(body.as_bytes())?;
+    out.write_all(b"\n")?;
+    out.flush()
+}
+
 static EXPORT_TMP_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
-fn atomic_write_file(dest: &std::path::Path, body: &[u8]) -> std::io::Result<()> {
-    use std::io::Write as _;
+// WHY: export files can hold credentials; the temp name must stay unpredictable
+// (OsRng salt) and the temp file must be created exclusively so a concurrent
+// writer or attacker pre-creating a predictable path can never win the race.
+fn next_tmp_name(dest: &std::path::Path) -> std::path::PathBuf {
     let name = dest
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| "out".to_owned());
     let uniq = EXPORT_TMP_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let tmp = dest.with_file_name(format!("{name}.tmp-{}-{uniq}", std::process::id()));
+    let salt = RngCore::next_u32(&mut OsRng);
+    dest.with_file_name(format!("{name}.tmp-{uniq}-{salt:08x}"))
+}
+
+fn create_tmp(dest: &std::path::Path) -> std::io::Result<(std::path::PathBuf, std::fs::File)> {
+    for _ in 0..3 {
+        let tmp = next_tmp_name(dest);
+        let mut opts = std::fs::OpenOptions::new();
+        opts.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            opts.mode(0o600);
+        }
+        match opts.open(&tmp) {
+            // salt collision (another writer drew the same random name);
+            // never touch a file we did not create — re-salt instead
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            other => return other.map(|f| (tmp, f)),
+        }
+    }
+    Err(std::io::Error::other(
+        "could not create a unique temp file next to the export destination",
+    ))
+}
+
+fn atomic_write_file(dest: &std::path::Path, body: &[u8]) -> std::io::Result<()> {
+    use std::io::Write as _;
+    let (tmp, mut f) = create_tmp(dest)?;
     let result = (|| {
-        let mut f = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .open(&tmp)?;
         f.write_all(body)?;
         f.sync_all()?;
         #[cfg(windows)]
@@ -778,8 +861,9 @@ mod tests {
                 latency_ms: Some(40),
                 error: None,
                 config_index: cfg,
+                spec_index: None,
                 verifier: None,
-                speed_test_mbps: None,
+                speed_test_mb_s: None,
             }),
             sent: 1,
             received: 1,
@@ -832,7 +916,7 @@ mod tests {
 
     #[test]
     fn render_results_csv_empty_and_unknown() {
-        let header = "ip,port,latency_ms,country,colo,phase2_passed,phase2_latency_ms,speed_test_mbps,sent,received,loss_pct,fail_reason,asn,isp\n";
+        let header = "ip,port,latency_ms,country,colo,phase2_passed,phase2_latency_ms,speed_test_mb_s,sent,received,loss_pct,fail_reason,asn,isp\n";
         assert_eq!(render_results("csv", &[]).unwrap(), header);
         let err = render_results("xml", &[]).unwrap_err();
         assert!(err.contains("csv|json"), "{err}");
@@ -840,7 +924,7 @@ mod tests {
 
     #[test]
     fn render_results_csv_header_schema() {
-        const EXPECTED: &str = "ip,port,latency_ms,country,colo,phase2_passed,phase2_latency_ms,speed_test_mbps,sent,received,loss_pct,fail_reason,asn,isp";
+        const EXPECTED: &str = "ip,port,latency_ms,country,colo,phase2_passed,phase2_latency_ms,speed_test_mb_s,sent,received,loss_pct,fail_reason,asn,isp";
         let out = render_results("csv", &[passing("1.2.3.4", 443, None)]).unwrap();
         let mut lines = out.lines();
         assert_eq!(lines.next(), Some(EXPECTED));
@@ -856,12 +940,12 @@ mod tests {
     #[test]
     fn render_results_csv_includes_speed_test_column_when_measured() {
         let mut measured = passing("1.2.3.4", 443, None);
-        measured.phase2.as_mut().unwrap().speed_test_mbps = Some(3.5);
+        measured.phase2.as_mut().unwrap().speed_test_mb_s = Some(3.5);
         let out = render_results("csv", &[measured]).unwrap();
         let row: Vec<&str> = out.lines().nth(1).unwrap().split(',').collect();
         assert_eq!(
             row[7], "3.5",
-            "speed_test_mbps column carries the measurement: {out}"
+            "speed_test_mb_s column carries the measurement: {out}"
         );
         let plain = passing("5.6.7.8", 443, None);
         let out = render_results("csv", &[plain]).unwrap();
@@ -899,14 +983,14 @@ mod tests {
 
     #[test]
     fn render_bundle_empty_inputs_are_valid() {
-        assert_eq!(render_bundle("raw", &[], &[]).unwrap(), "");
-        assert_eq!(render_bundle("base64", &[], &[]).unwrap(), "");
-        assert_eq!(render_bundle("sharelinks", &[], &[]).unwrap(), "");
+        assert_eq!(render_bundle("raw", &[], &[], &[]).unwrap(), "");
+        assert_eq!(render_bundle("base64", &[], &[], &[]).unwrap(), "");
+        assert_eq!(render_bundle("sharelinks", &[], &[], &[]).unwrap(), "");
         let sb: serde_json::Value =
-            serde_json::from_str(&render_bundle("singbox", &[], &[]).unwrap()).unwrap();
+            serde_json::from_str(&render_bundle("singbox", &[], &[], &[]).unwrap()).unwrap();
         assert_eq!(sb["outbounds"].as_array().unwrap().len(), 0);
         let cl: serde_json::Value =
-            serde_json::from_str(&render_bundle("clash", &[], &[]).unwrap()).unwrap();
+            serde_json::from_str(&render_bundle("clash", &[], &[], &[]).unwrap()).unwrap();
         assert_eq!(cl["proxies"].as_array().unwrap().len(), 0);
     }
 
@@ -915,7 +999,7 @@ mod tests {
         let v6 = passing("2001:db8::1", 443, Some(0));
         let configs = [VLESS.to_owned()];
         for fmt in format_names(None) {
-            let err = render_bundle(fmt, std::slice::from_ref(&v6), &configs).unwrap_err();
+            let err = render_bundle(fmt, std::slice::from_ref(&v6), &configs, &[]).unwrap_err();
             assert!(err.contains("IPv6"), "{fmt}: {err}");
         }
     }
@@ -926,7 +1010,7 @@ mod tests {
             passing("1.2.3.4", 2053, Some(0)),
             passing("2001:db8::1", 443, Some(0)),
         ];
-        let raw = render_bundle("raw", &verdicts, &[VLESS.to_owned()]).unwrap();
+        let raw = render_bundle("raw", &verdicts, &[VLESS.to_owned()], &[]).unwrap();
         assert_eq!(raw.lines().count(), 1);
         assert!(raw.contains("1.2.3.4:2053"));
         assert!(!raw.contains("2001:db8"));
@@ -939,8 +1023,8 @@ mod tests {
             passing("5.6.7.8", 8443, Some(1)),
         ];
         let configs = [VLESS.to_owned(), TROJAN.to_owned()];
-        let raw = render_bundle("raw", &verdicts, &configs).unwrap();
-        let b64 = render_bundle("base64", &verdicts, &configs).unwrap();
+        let raw = render_bundle("raw", &verdicts, &configs, &[]).unwrap();
+        let b64 = render_bundle("base64", &verdicts, &configs, &[]).unwrap();
         assert!(!b64.contains(['\n', '\r', ' ']));
         let decoded = base64::engine::general_purpose::STANDARD
             .decode(&b64)
@@ -954,6 +1038,7 @@ mod tests {
             "raw",
             &[passing("1.2.3.4", 2053, Some(0))],
             &[VLESS.to_owned()],
+            &[],
         )
         .unwrap();
         assert!(raw.contains("@1.2.3.4:2053"), "{raw}");
@@ -968,6 +1053,7 @@ mod tests {
             "sharelinks",
             &[passing("1.2.3.4", 2053, Some(0))],
             &[VLESS.to_owned()],
+            &[],
         )
         .unwrap();
         let lines: Vec<&str> = out.lines().collect();
@@ -981,13 +1067,139 @@ mod tests {
 
     #[test]
     fn render_bundle_rejects_bad_config_index() {
-        let raw = render_bundle(
+        // Out-of-range config index with no fallback specs: F2 escalation —
+        // a hard error, never an empty bundle with exit 0.
+        let err = render_bundle(
             "raw",
             &[passing("1.2.3.4", 2053, Some(9))],
             &[VLESS.to_owned()],
+            &[],
         )
-        .unwrap();
-        assert_eq!(raw, "");
+        .unwrap_err();
+        assert!(err.contains("no exportable"), "{err}");
+    }
+
+    const SUB_ENTRY: &str = "https://sub.example.com/x";
+    const FILE_ENTRY: &str = "outbounds.json";
+
+    fn passing_spec(ip: &str, port: u16, cfg: u32, spec: Option<u32>) -> Verdict {
+        let mut v = passing(ip, port, Some(cfg));
+        v.phase2.as_mut().unwrap().spec_index = spec;
+        v
+    }
+
+    fn vless_specs(raw_idx: u32) -> Vec<(OutboundSpec, u32)> {
+        vec![(configs::parse_uri(VLESS).unwrap(), raw_idx)]
+    }
+
+    fn assert_every_bundle_format_renders(
+        verdicts: &[Verdict],
+        configs: &[String],
+        specs: &[(OutboundSpec, u32)],
+    ) {
+        for fmt in [
+            "raw",
+            "sharelinks",
+            "base64",
+            "shadowrocket",
+            "singbox",
+            "clash",
+            "v2ray",
+            "quantumult",
+        ] {
+            let body = render_bundle(fmt, verdicts, configs, specs)
+                .unwrap_or_else(|e| panic!("{fmt}: {e}"));
+            match fmt {
+                "raw" | "sharelinks" | "quantumult" => {
+                    assert!(body.contains("@1.2.3.4:2053"), "{fmt}: {body}");
+                }
+                "base64" | "shadowrocket" => {
+                    let text = String::from_utf8(
+                        base64::engine::general_purpose::STANDARD
+                            .decode(&body)
+                            .unwrap(),
+                    )
+                    .unwrap();
+                    assert!(text.contains("@1.2.3.4:2053"), "{fmt}: {text}");
+                }
+                _ => {
+                    let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
+                    let arr = match fmt {
+                        "singbox" => parsed["outbounds"].clone(),
+                        "clash" => parsed["proxies"].clone(),
+                        _ => parsed,
+                    };
+                    let arr = arr.as_array().unwrap();
+                    assert_eq!(arr.len(), 1, "{fmt}: {body}");
+                    let addr_key = if fmt == "v2ray" { "add" } else { "server" };
+                    assert_eq!(arr[0][addr_key], "1.2.3.4", "{fmt}: {body}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn render_bundle_resolves_subscription_entries_via_retained_specs() {
+        let verdicts = [passing_spec("1.2.3.4", 2053, 0, Some(0))];
+        let configs = [SUB_ENTRY.to_owned()];
+        assert_every_bundle_format_renders(&verdicts, &configs, &vless_specs(0));
+    }
+
+    #[test]
+    fn render_bundle_resolves_file_path_entries_via_retained_specs() {
+        let verdicts = [passing_spec("1.2.3.4", 2053, 0, Some(0))];
+        let configs = [FILE_ENTRY.to_owned()];
+        assert_every_bundle_format_renders(&verdicts, &configs, &vless_specs(0));
+    }
+
+    #[test]
+    fn render_bundle_counts_legacy_specless_verdicts_as_malformed_not_first_spec() {
+        // Legacy verdicts (spec_index never stamped) used to fall back to the
+        // first spec matching the raw entry index; on a multi-spec entry that
+        // could render the WRONG expanded spec's credentials. They now count
+        // as malformed: skipped, and escalated to a hard error when nothing
+        // else remains exportable.
+        let configs = [SUB_ENTRY.to_owned()];
+        let specs = [
+            (configs::parse_uri(VLESS).unwrap(), 0),
+            (configs::parse_uri(TROJAN).unwrap(), 0),
+        ];
+        let verdicts = [passing_spec("1.2.3.4", 2053, 0, None)];
+        let err = render_bundle("raw", &verdicts, &configs, &specs).unwrap_err();
+        assert!(err.contains("no exportable"), "{err}");
+        assert!(err.contains("1 passing endpoint"), "{err}");
+    }
+
+    #[test]
+    fn render_bundle_hard_errors_when_no_passing_endpoint_resolves() {
+        let verdicts = [passing_spec("1.2.3.4", 2053, 0, None)];
+        let configs = [SUB_ENTRY.to_owned()];
+        for fmt in [
+            "raw",
+            "sharelinks",
+            "base64",
+            "shadowrocket",
+            "singbox",
+            "clash",
+            "v2ray",
+            "quantumult",
+        ] {
+            let err = render_bundle(fmt, &verdicts, &configs, &[]).unwrap_err();
+            assert!(err.contains("no exportable"), "{fmt}: {err}");
+        }
+    }
+
+    #[test]
+    fn render_bundle_prefers_raw_entry_render_when_it_parses() {
+        // Direct-URI scans: the raw entry carries SIP002 extras the parsed
+        // spec would drop, so the raw path must win even with spec_index set.
+        let direct = VLESS.replace("#orig", "&flow=xtls-rprx-vision#orig");
+        let verdicts = [passing_spec("1.2.3.4", 2053, 0, Some(0))];
+        let specs = [(configs::parse_uri(&direct).unwrap(), 0)];
+        let raw = render_bundle("raw", &verdicts, std::slice::from_ref(&direct), &specs).unwrap();
+        assert!(raw.contains("flow=xtls-rprx-vision"), "{raw}");
+        assert!(raw.contains("@1.2.3.4:2053"), "{raw}");
+        assert!(raw.contains("sni=cdn.example.com"), "{raw}");
     }
 
     fn vmess_uri() -> String {
@@ -1172,6 +1384,54 @@ mod tests {
     }
 
     #[test]
+    fn stdout_export_surfaces_write_errors_instead_of_panicking() {
+        struct AlwaysFails;
+        impl std::io::Write for AlwaysFails {
+            fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::ErrorKind::BrokenPipe.into())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Err(std::io::ErrorKind::BrokenPipe.into())
+            }
+        }
+        let err = emit_stdout("{\"summary\":true}", &mut AlwaysFails).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::BrokenPipe);
+
+        let mut sink: Vec<u8> = Vec::new();
+        emit_stdout("payload", &mut sink).unwrap();
+        assert_eq!(sink, b"payload\n");
+    }
+
+    #[test]
+    fn temp_names_are_unpredictable_and_pid_free() {
+        let dir = std::env::temp_dir().join(format!(
+            "cf-scanner-export-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let dest = dir.join("results.csv");
+        let first = next_tmp_name(&dest);
+        let second = next_tmp_name(&dest);
+        assert_ne!(first, second, "temp names must differ between calls");
+        let pid = std::process::id().to_string();
+        let first_name = first.file_name().unwrap().to_string_lossy().into_owned();
+        let second_name = second.file_name().unwrap().to_string_lossy().into_owned();
+        assert!(
+            !first_name.contains(&pid),
+            "temp name must not leak the pid: {first_name}"
+        );
+        assert!(
+            !second_name.contains(&pid),
+            "temp name must not leak the pid: {second_name}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn atomic_write_round_trips_and_leaves_no_tmp() {
         let dir = std::env::temp_dir().join(format!(
             "cf-scanner-export-test-{}-{}",
@@ -1193,6 +1453,73 @@ mod tests {
             .filter(|e| e.file_name().to_string_lossy().contains(".tmp-"))
             .collect();
         assert!(leftovers.is_empty(), "no tmp files must remain");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn atomic_write_file_concurrent_writers_agree_on_one_body_and_no_tmp() {
+        let dir = std::env::temp_dir().join(format!(
+            "cf-scanner-export-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let dest = dir.join("results.csv");
+        let first = {
+            let dest = dest.clone();
+            std::thread::spawn(move || atomic_write_file(&dest, b"writer-one\n"))
+        };
+        let second = {
+            let dest = dest.clone();
+            std::thread::spawn(move || atomic_write_file(&dest, b"writer-two\n"))
+        };
+        let first = first.join().unwrap();
+        let second = second.join().unwrap();
+        assert!(first.is_ok(), "first writer must succeed: {first:?}");
+        assert!(second.is_ok(), "second writer must succeed: {second:?}");
+        let final_body = std::fs::read(&dest).unwrap();
+        assert!(
+            final_body == b"writer-one\n" || final_body == b"writer-two\n",
+            "destination must hold exactly one writer's body, got {:?}",
+            String::from_utf8_lossy(&final_body)
+        );
+        let leftovers: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().contains(".tmp-"))
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "no tmp files must remain: {leftovers:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_write_file_sets_owner_only_permissions() {
+        let dir = std::env::temp_dir().join(format!(
+            "cf-scanner-export-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let dest = dir.join("results.csv");
+        atomic_write_file(&dest, b"secret\n").unwrap();
+        use std::os::unix::fs::PermissionsExt as _;
+        let mode = std::fs::metadata(&dest).unwrap().permissions().mode();
+        assert_eq!(
+            mode & 0o777,
+            0o600,
+            "credential-bearing export must be owner-only, got {:o}",
+            mode & 0o777
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1375,8 +1702,9 @@ mod tests {
                 latency_ms: Some(9),
                 error: None,
                 config_index: Some(0),
+                spec_index: None,
                 verifier: None,
-                speed_test_mbps: None,
+                speed_test_mb_s: None,
             }),
             sent: 1,
             received: 1,
@@ -1386,18 +1714,21 @@ mod tests {
             isp: None,
         }];
         let err =
-            render_bundle("raw", &v6_only, &["vless://a@1.2.3.4:443".to_owned()]).unwrap_err();
+            render_bundle("raw", &v6_only, &["vless://a@1.2.3.4:443".to_owned()], &[]).unwrap_err();
         assert!(err.contains("IPv6"), "{err}");
         // Mixed: one v4 (exported) + one v6 (warned) → body keeps the v4 only.
         let mut mixed = v6_only;
         mixed.push(passing("1.2.3.4", 443, Some(0)));
-        let body = render_bundle("raw", &mixed, &["vless://a@1.2.3.4:443".to_owned()]).unwrap();
+        let body =
+            render_bundle("raw", &mixed, &["vless://a@1.2.3.4:443".to_owned()], &[]).unwrap();
         assert!(body.contains("1.2.3.4"), "{body}");
-        // Malformed skip: config_index pointing out of range is counted.
+        // Malformed skip: config_index pointing out of range is counted,
+        // and with nothing exportable at all it escalates to a hard error.
         let mut bad = passing("5.6.7.8", 443, Some(9));
         bad.ip = "5.6.7.8".parse().unwrap();
-        let body = render_bundle("raw", &[bad], &["vless://a@1.2.3.4:443".to_owned()]).unwrap();
-        assert_eq!(body, "", "out-of-range index yields no URI");
+        let err =
+            render_bundle("raw", &[bad], &["vless://a@1.2.3.4:443".to_owned()], &[]).unwrap_err();
+        assert!(err.contains("no exportable"), "{err}");
     }
 
     #[test]
@@ -1413,9 +1744,12 @@ mod tests {
     #[test]
     fn new_bundle_formats_resolve_and_reject_unknown() {
         for fmt in ["v2ray", "shadowrocket", "quantumult"] {
-            assert!(render_bundle(fmt, &[], &[]).is_ok(), "{fmt} must resolve");
+            assert!(
+                render_bundle(fmt, &[], &[], &[]).is_ok(),
+                "{fmt} must resolve"
+            );
         }
-        assert!(render_bundle("v2rayn", &[], &[]).is_err());
+        assert!(render_bundle("v2rayn", &[], &[], &[]).is_err());
     }
     #[test]
     fn v6_endpoints_never_silently_enter_bundle_formats() {
@@ -1426,7 +1760,7 @@ mod tests {
         let v4 = passing("1.2.3.4", 443, Some(0));
         let configs = [VLESS.to_owned()];
         for fmt in ["singbox", "clash", "v2ray"] {
-            let body = render_bundle(fmt, &[v4.clone(), v6.clone()], &configs).unwrap();
+            let body = render_bundle(fmt, &[v4.clone(), v6.clone()], &configs, &[]).unwrap();
             // v2ray is a bare array; singbox/clash wrap the list in a key.
             let (arr, addr_key) = match fmt {
                 "clash" => (

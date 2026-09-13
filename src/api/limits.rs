@@ -42,7 +42,6 @@ pub const MAX_CONFIG_ENTRY_BYTES: usize = 8 * 1024;
 pub const MAX_SNI_BYTES: usize = 256;
 pub const MAX_PROBE_URL_BYTES: usize = 2 * 1024;
 pub const MAX_WGCONF_BYTES: usize = 64 * 1024;
-pub const MAX_LICENSE_BYTES: usize = 256;
 pub const MAX_EXPORT_CONFIG_BYTES: usize = 64 * 1024;
 pub const MAX_STOP_VALUE: u32 = 100_000_000;
 pub const MAX_IDLE_HOLD_MS: u64 = 60_000;

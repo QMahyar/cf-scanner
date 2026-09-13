@@ -31,7 +31,7 @@ on ISP-restricted networks. Two modes:
   fragmentation + SNI variants. Each `Phase2Verdict.verifier` reports
   `inline` vs `xray` so the UI can surface the path. Opt-in `--speed-test`
   pulls a capped 8 MiB sample through each passing endpoint and records
-  `speed_test_mbps` (`--min-speed` gates the working set).
+  `speed_test_mb_s` (`--min-speed` gates the working set).
 - **WARP mode** — UDP endpoint discovery over known Cloudflare WARP pools using
   a real WireGuard handshake probe; optional verification with the user's own
   WireGuard/AmneziaWG config; opt-in full config generation via Cloudflare's
@@ -319,7 +319,7 @@ opt-in additions; default scan behavior is unchanged. Work tracked in
    warning; enforced where colo becomes known (phase 2, or phase 1 http).
 3. **Phase-1 failure reasons** — `Verdict.fail_reason`; failures stored with
    `latency_ms: null`, sorted last, never counted as found.
-4. **Richer CSV** — `...,phase2_latency_ms,speed_test_mbps,sent,received,
+4. **Richer CSV** — `...,phase2_latency_ms,speed_test_mb_s,sent,received,
    loss_pct,fail_reason` (appended; old columns keep order).
 5. **HTTPing probe mode** — `--probe tcp|tls|http`, `--http-status-code`;
    phase-1 colo capture.

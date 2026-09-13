@@ -132,8 +132,9 @@ mod tests {
             latency_ms: Some(7),
             error: None,
             config_index: Some(0),
+            spec_index: None,
             verifier: None,
-            speed_test_mbps: None,
+            speed_test_mb_s: None,
         });
         v
     }

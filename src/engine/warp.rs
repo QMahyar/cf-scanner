@@ -142,7 +142,10 @@ impl ScanController {
                     let mut failed: u32 = 0;
                     let mut cancelled = false;
                     for _ in 0..probes_per_endpoint {
-                        if ctx.should_stop() {
+                        // Only a real cancel aborts mid-endpoint: a found/cap
+                        // stop lets the in-flight endpoint finish so its work
+                        // is counted and recorded, matching the CDN drain.
+                        if ctx.is_cancelled() {
                             cancelled = true;
                             break;
                         }
@@ -405,6 +408,31 @@ mod tests {
         );
         assert_eq!(summary.found, 1);
         assert_eq!(c.results()[0].ip, "203.0.113.2".parse::<IpAddr>().unwrap());
+    }
+
+    #[tokio::test]
+    async fn warp_found_stop_lets_the_in_flight_endpoint_finish() {
+        let t = FakeTransport::new()
+            .ok_slow("203.0.113.1".parse().unwrap(), 2408, 5, 30)
+            .ok_slow("203.0.113.2".parse().unwrap(), 2408, 7, 150);
+        let (c, _) = warp_controller(t);
+        let mut cfg = warp_cfg(2, &["203.0.113.1", "203.0.113.2"]);
+        cfg.stop = StopCondition {
+            found: 1,
+            cap: None,
+        };
+        cfg.concurrency = 2;
+        let summary = run_local(&c, cfg, 1).await.unwrap();
+        assert_eq!(
+            summary.scanned, 2,
+            "the endpoint mid-flight at the found stop must still be counted"
+        );
+        assert_eq!(summary.found, 2);
+        let ips: HashSet<IpAddr> = c.results().iter().map(|v| v.ip).collect();
+        assert!(
+            ips.contains(&"203.0.113.2".parse::<IpAddr>().unwrap()),
+            "the in-flight endpoint must be recorded, got {ips:?}"
+        );
     }
 
     #[tokio::test]

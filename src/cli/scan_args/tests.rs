@@ -1,4 +1,4 @@
-use super::super::{Cli, Command, ModeArg, PresetArg, ProbeArg, ScanArgs};
+use super::super::{Cli, Command, FragmentArg, ModeArg, PresetArg, ProbeArg, ScanArgs};
 use super::{build_scan_config, cap_warning};
 use cf_scanner::api;
 use cf_scanner::api::types::{
@@ -641,6 +641,36 @@ fn phase2_custom_fragment_values_parse() {
     let c = p2.custom_fragment.unwrap();
     assert_eq!(c.length, "100-200");
     assert_eq!(c.interval, "10-20");
+    assert_eq!(c.packets, "tlshello");
+}
+
+#[test]
+fn phase2_custom_rejects_three_field_grammar() {
+    let mut a = args();
+    a.phase2_configs = vec!["vless://a@1.2.3.4:443".to_owned()];
+    a.phase2_fragment = Some(FragmentArg::Custom);
+    a.phase2_custom = Some("1-3,10-20,10-20".to_owned());
+    let err = build_scan_config(&a).unwrap_err();
+    let msg = err.to_string();
+    assert!(msg.contains("--phase2-custom"), "{err:#}");
+    assert!(msg.contains("length,interval"), "{err:#}");
+
+    let argv = [
+        "cf-scanner",
+        "scan",
+        "--phase2-configs",
+        "vless://a@1.2.3.4:443",
+        "--phase2-fragment",
+        "custom",
+        "--phase2-custom",
+        "1-3,10-20,10-20",
+    ];
+    let a = match Cli::try_parse_from(argv).unwrap().command {
+        Command::Scan { args } => *args,
+        _ => unreachable!(),
+    };
+    let err = build_scan_config(&a).unwrap_err();
+    assert!(err.to_string().contains("length,interval"), "{err:#}");
 }
 
 #[test]

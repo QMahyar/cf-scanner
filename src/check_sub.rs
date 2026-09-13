@@ -3,19 +3,25 @@
 //!
 //! Thin wrapper, not a second engine: it composes the existing subscription
 //! fetch (`configs`), the existing tunnel probe trait (`verify`), and the
-//! existing redaction (`configs::sanitize_error_text`). Caps and timeouts
-//! are enforced per config; keys never reach output.
+//! existing redaction (`configs::sanitize_error_text`). Caps are enforced at
+//! the subscription level and per config; keys never reach output.
 
 use std::net::Ipv4Addr;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
 
-use crate::api::types::{CustomFragment, FragmentPreset};
+use crate::api::types::{
+    CustomFragment, DEFAULT_PROBE_URL, FragmentPreset, MAX_SUBSCRIPTION_SPECS,
+};
 use crate::configs::{OutboundSpec, SubFetch};
 use crate::verify::{ProbeRequest, TunnelProbe};
 
 /// One NDJSON row of the report.
+///
+/// `config_index` is the row's config position in the parsed subscription
+/// spec list; aggregate rows (unparseable lines, which have no single
+/// config) carry the `usize::MAX` sentinel.
 #[derive(Debug)]
 pub struct CheckRow {
     pub config_index: usize,
@@ -40,16 +46,26 @@ pub async fn check_subscription(
         .await
         .with_context(|| "subscription fetch failed")?;
     let parsed = crate::configs::parse_subscription(&body);
+    if parsed.specs.len() > MAX_SUBSCRIPTION_SPECS {
+        anyhow::bail!(
+            "subscription expands to more than {} configs",
+            MAX_SUBSCRIPTION_SPECS
+        );
+    }
+    // The engine's default probe URL, so a check-sub verdict means the same
+    // thing as a phase-2 pass (InlineTunnelProbe refuses to open a tunnel
+    // and XrayTunnelProbe passes vacuously without at least one URL).
+    let probe_urls = [DEFAULT_PROBE_URL.to_owned()];
 
     let mut rows = Vec::new();
-    for spec in &parsed.specs {
-        rows.push(check_one(spec, probe, timeout_ms).await);
+    for (config_index, spec) in parsed.specs.iter().enumerate() {
+        rows.push(check_one(config_index, spec, &probe_urls, probe, timeout_ms).await);
     }
     // Unparseable lines are reported as one aggregate row (they carry no
     // per-line identity to report).
     if parsed.ignored > 0 || !parsed.errors.is_empty() {
         rows.push(CheckRow {
-            config_index: parsed.specs.len(),
+            config_index: usize::MAX,
             tag: "<unparseable lines>".to_owned(),
             server: "-".to_owned(),
             ok: false,
@@ -64,12 +80,18 @@ pub async fn check_subscription(
     Ok(rows)
 }
 
-async fn check_one(spec: &OutboundSpec, probe: &dyn TunnelProbe, timeout_ms: u64) -> CheckRow {
+async fn check_one(
+    config_index: usize,
+    spec: &OutboundSpec,
+    probe_urls: &[String],
+    probe: &dyn TunnelProbe,
+    timeout_ms: u64,
+) -> CheckRow {
     let tag = spec.tag.clone().unwrap_or_else(|| "untitled".to_owned());
     let server = format!("{}:{}", spec.server, spec.port);
     let Ok(dial_ip) = spec.server.parse::<Ipv4Addr>() else {
         return CheckRow {
-            config_index: usize::MAX,
+            config_index,
             tag,
             server,
             ok: false,
@@ -83,14 +105,14 @@ async fn check_one(spec: &OutboundSpec, probe: &dyn TunnelProbe, timeout_ms: u64
         preset: &FragmentPreset::Off,
         custom: None::<&CustomFragment>,
         sni: None,
-        probe_urls: &[],
+        probe_urls,
         timeout_ms,
     };
     let result =
         tokio::time::timeout(Duration::from_millis(timeout_ms + 1_000), probe.probe(req)).await;
     match result {
         Err(_) => CheckRow {
-            config_index: usize::MAX,
+            config_index,
             tag,
             server,
             ok: false,
@@ -100,7 +122,7 @@ async fn check_one(spec: &OutboundSpec, probe: &dyn TunnelProbe, timeout_ms: u64
         Ok(Ok(res)) => {
             if res.passed {
                 CheckRow {
-                    config_index: usize::MAX,
+                    config_index,
                     tag,
                     server,
                     ok: true,
@@ -109,7 +131,7 @@ async fn check_one(spec: &OutboundSpec, probe: &dyn TunnelProbe, timeout_ms: u64
                 }
             } else {
                 CheckRow {
-                    config_index: usize::MAX,
+                    config_index,
                     tag,
                     server,
                     ok: false,
@@ -121,7 +143,7 @@ async fn check_one(spec: &OutboundSpec, probe: &dyn TunnelProbe, timeout_ms: u64
         Ok(Err(err)) => {
             // The probe errors carry sanitized text already; belt and braces.
             CheckRow {
-                config_index: usize::MAX,
+                config_index,
                 tag,
                 server,
                 ok: false,
@@ -137,6 +159,7 @@ mod tests {
     use super::*;
     use crate::configs::{SubscriptionParse, parse_uri};
     use std::pin::Pin;
+    use std::sync::Mutex;
 
     /// Returns a canned subscription body (real parse path, no network).
     struct FakeSub(String);
@@ -163,6 +186,33 @@ mod tests {
                     latency_ms: ok.then_some(42),
                     colo: None,
                     verifier: Some("inline"),
+                })
+            })
+        }
+    }
+
+    /// Records the probe_urls of every call; a probe implementation only
+    /// opens a tunnel when at least one URL is supplied, so an empty list
+    /// means the config was never really verified.
+    struct RecordingProbe {
+        ok: bool,
+        calls: Mutex<Vec<Vec<String>>>,
+    }
+
+    impl TunnelProbe for RecordingProbe {
+        fn probe(
+            &self,
+            req: ProbeRequest<'_>,
+        ) -> Pin<Box<dyn Future<Output = Result<crate::verify::TunnelResult>> + Send + '_>>
+        {
+            self.calls.lock().unwrap().push(req.probe_urls.to_vec());
+            let ok = self.ok;
+            Box::pin(async move {
+                Ok(crate::verify::TunnelResult {
+                    passed: ok,
+                    latency_ms: ok.then_some(42),
+                    colo: None,
+                    verifier: Some("recording"),
                 })
             })
         }
@@ -222,7 +272,7 @@ trojan://pw@1.2.3.5:443#b
     async fn probe_failures_become_error_rows_not_panics() {
         let spec =
             parse_uri("vless://11111111-2222-3333-4444-555555555555@1.2.3.4:443#tag").unwrap();
-        let row = check_one(&spec, &FakeProbe(false), 1_000).await;
+        let row = check_one(0, &spec, &[], &FakeProbe(false), 1_000).await;
         assert!(!row.ok);
         assert!(row.error.is_some(), "{row:?}");
         assert_eq!(row.server, "1.2.3.4:443");
@@ -233,9 +283,80 @@ trojan://pw@1.2.3.5:443#b
         let mut spec =
             parse_uri("vless://11111111-2222-3333-4444-555555555555@1.2.3.4:443#v4").unwrap();
         spec.server = "example.invalid".to_owned();
-        let row = check_one(&spec, &FakeProbe(true), 1_000).await;
+        let row = check_one(0, &spec, &[], &FakeProbe(true), 1_000).await;
         assert!(!row.ok);
         assert!(row.error.as_deref().is_some_and(|e| e.contains("non-IPv4")));
+    }
+
+    #[tokio::test]
+    async fn every_parsed_config_is_probed_with_a_real_url() {
+        let body = "vless://11111111-2222-3333-4444-555555555555@1.2.3.4:443#a\ntrojan://pw@1.2.3.5:443#b\n";
+        let probe = RecordingProbe {
+            ok: true,
+            calls: Mutex::new(Vec::new()),
+        };
+        let rows = check_subscription(
+            "https://sub.example/x",
+            &FakeSub(body.to_owned()),
+            &probe,
+            1_000,
+        )
+        .await
+        .unwrap();
+        assert_eq!(rows.len(), 2);
+        let calls = probe.calls.lock().unwrap();
+        assert_eq!(calls.len(), 2, "every parsed config is probed: {calls:?}");
+        // InlineTunnelProbe only opens a tunnel when probe_urls is non-empty;
+        // an empty list silently failed inline-routed rows.
+        assert!(
+            calls
+                .iter()
+                .all(|urls| !urls.is_empty() && urls.iter().all(|u| u.starts_with("https://"))),
+            "probes must receive real URLs: {calls:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn oversized_subscriptions_are_capped_not_probed() {
+        let body: String = (0..2049)
+            .map(|i| format!("vless://11111111-2222-3333-4444-555555555555@1.2.3.4:443#c{i}\n"))
+            .collect();
+        let probe = RecordingProbe {
+            ok: true,
+            calls: Mutex::new(Vec::new()),
+        };
+        let err = check_subscription("https://sub.example/x", &FakeSub(body), &probe, 1_000)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("more than 2048"), "{err}");
+        assert!(
+            probe.calls.lock().unwrap().is_empty(),
+            "no config may be probed once the cap is exceeded"
+        );
+    }
+
+    #[tokio::test]
+    async fn rows_carry_their_config_index() {
+        let body = "vless://11111111-2222-3333-4444-555555555555@1.2.3.4:443#a\nnot-a-uri\nvless://11111111-2222-3333-4444-555555555555@1.2.3.5:443#b\n";
+        let rows = check_subscription(
+            "https://sub.example/x",
+            &FakeSub(body.to_owned()),
+            &FakeProbe(true),
+            1_000,
+        )
+        .await
+        .unwrap();
+        assert_eq!(rows.len(), 3, "two config rows + one aggregate");
+        assert_eq!(rows[0].tag, "a");
+        assert_eq!(rows[0].config_index, 0, "{rows:?}");
+        assert_eq!(rows[1].tag, "b");
+        assert_eq!(rows[1].config_index, 1, "{rows:?}");
+        assert_eq!(rows[2].tag, "<unparseable lines>");
+        assert_eq!(
+            rows[2].config_index,
+            usize::MAX,
+            "aggregate rows keep the documented sentinel"
+        );
     }
 
     #[test]

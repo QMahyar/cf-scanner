@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context as _, Result, anyhow, bail};
 use reqwest::redirect::Policy;
 use std::sync::LazyLock;
 
@@ -125,7 +125,30 @@ fn is_inet_aton_part(part: &str) -> bool {
     part.chars().all(|c| c.is_ascii_digit())
 }
 
-fn sanitize_url_for_error(url: &str) -> String {
+// WHY: reqwest's Display embeds ` for url (<raw url>)` — userinfo/query and all —
+// so a propagated source chain would leak credentials through `{err:#}` printing.
+// Strip that group by EXACT match against reqwest's own URL serialization
+// (`e.url()`): the url crate does NOT percent-encode ')', so a first-')' cut
+// would break on a raw paren in the userinfo/query and leak the rest of the URL.
+// If the exact suffix is absent but the marker is present (Display format drift),
+// truncate at the marker and drop the rest — losing error detail is acceptable,
+// leaking it is not. Callers build FRESH errors that drop the original source
+// entirely.
+pub(crate) fn reqwest_msg_without_url(e: &reqwest::Error) -> String {
+    let msg = e.to_string();
+    if let Some(url) = e.url() {
+        let suffix = format!(" for url ({url})");
+        if let Some(head) = msg.strip_suffix(&suffix) {
+            return head.trim_end().to_owned();
+        }
+    }
+    match msg.find(" for url (") {
+        Some(pos) => msg[..pos].trim_end().to_owned(),
+        None => msg,
+    }
+}
+
+pub(crate) fn sanitize_url_for_error(url: &str) -> String {
     match url::Url::parse(url) {
         Ok(mut parsed) => {
             if !parsed.username().is_empty() || parsed.password().is_some() {
@@ -143,10 +166,6 @@ fn sanitize_url_for_error(url: &str) -> String {
 pub async fn fetch_tls_with_headers(url: &str, extra_headers: &str) -> Result<String> {
     let body = fetch_tls_inner(url, extra_headers).await?;
     Ok(String::from_utf8_lossy(&body).into_owned())
-}
-
-pub async fn fetch_bytes(url: &str) -> Result<Vec<u8>> {
-    fetch_tls_inner(url, "Accept: */*").await
 }
 
 async fn fetch_tls(url: &str) -> Result<String> {
@@ -180,10 +199,13 @@ async fn fetch_tls_inner(url: &str, extra_headers: &str) -> Result<Vec<u8>> {
         }
         request = request.header(name, value);
     }
-    let mut response = request
-        .send()
-        .await
-        .with_context(|| format!("fetch failed for {}", sanitize_url_for_error(url)))?;
+    let mut response = request.send().await.map_err(|e| {
+        anyhow!(
+            "fetch failed for {}: {}",
+            sanitize_url_for_error(url),
+            reqwest_msg_without_url(&e)
+        )
+    })?;
     const MAX_BODY_BYTES: usize = 64 * 1024 * 1024;
     if let Some(len) = response.content_length()
         && len > MAX_BODY_BYTES as u64
@@ -191,10 +213,11 @@ async fn fetch_tls_inner(url: &str, extra_headers: &str) -> Result<Vec<u8>> {
         bail!("response body exceeds the {MAX_BODY_BYTES} byte cap (Content-Length {len})");
     }
     let mut bytes = Vec::new();
-    while let Some(chunk) = response.chunk().await.with_context(|| {
-        format!(
-            "failed to read response body of {}",
-            sanitize_url_for_error(url)
+    while let Some(chunk) = response.chunk().await.map_err(|e| {
+        anyhow!(
+            "failed to read response body of {}: {}",
+            sanitize_url_for_error(url),
+            reqwest_msg_without_url(&e)
         )
     })? {
         if bytes.len().saturating_add(chunk.len()) > MAX_BODY_BYTES {
@@ -304,6 +327,56 @@ mod tests {
         );
         // Unparseable input passes through untouched (nothing to leak).
         assert_eq!(sanitize_url_for_error("::not a url::"), "::not a url::");
+        // A raw ')' survives url-crate parsing (it is in no encode set) and
+        // must be masked like any other credential-bearing URL.
+        assert_eq!(
+            sanitize_url_for_error("https://u:p)w@example.com/p?token=a)b"),
+            "https://***:***@example.com/p"
+        );
+    }
+
+    #[tokio::test]
+    async fn fetch_send_error_chain_never_carries_the_raw_url() {
+        // `.invalid` fails DNS fast on- and offline, so the send genuinely
+        // fails without touching a real host. The chain main.rs prints
+        // (`{err:#}`) must carry neither reqwest's ` for url (...)` suffix
+        // nor the userinfo/query of the original URL; scheme+host stay for
+        // debuggability.
+        let err = fetch_tls_with_headers(
+            "https://leaky-user:leaky-pass@scrub-test.invalid/sub?token=leaky-token",
+            "Accept: application/json",
+        )
+        .await
+        .unwrap_err();
+        let rendered = format!("{err:#}");
+        assert!(
+            rendered.contains("scrub-test.invalid"),
+            "scheme+host must survive for debugging: {rendered}"
+        );
+        assert!(!rendered.contains(" for url ("), "{rendered}");
+        assert!(!rendered.contains("leaky"), "{rendered}");
+    }
+
+    #[tokio::test]
+    async fn fetch_send_error_chain_survives_raw_paren_in_url() {
+        // ')' is in no WHATWG percent-encode set, so it stays raw in the
+        // query — exactly where a first-')' cut would snap and leak the rest
+        // of the URL. The exact-match strip must hold: neither credentials
+        // nor the ` for url (` group may reach the `{err:#}` chain main.rs
+        // prints; scheme+host stay for debuggability.
+        let err = fetch_tls_with_headers(
+            "https://leaky-user:leaky)pass@scrub-test.invalid/sub?token=leaky)token",
+            "Accept: application/json",
+        )
+        .await
+        .unwrap_err();
+        let rendered = format!("{err:#}");
+        assert!(
+            rendered.contains("scrub-test.invalid"),
+            "scheme+host must survive for debugging: {rendered}"
+        );
+        assert!(!rendered.contains(" for url ("), "{rendered}");
+        assert!(!rendered.contains("leaky"), "{rendered}");
     }
 
     #[tokio::test]
@@ -316,7 +389,10 @@ mod tests {
             "https://localhost/x",
             "not a url",
         ] {
-            let err = fetch_bytes(url).await.unwrap_err().to_string();
+            let err = fetch_tls_with_headers(url, "Accept: */*")
+                .await
+                .unwrap_err()
+                .to_string();
             assert!(
                 err.contains("refusing") || err.contains("https") || err.contains("bad URL"),
                 "{url}: {err}"

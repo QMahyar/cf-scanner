@@ -373,7 +373,7 @@ impl ServerCertVerifier for NoVerify {
     }
 }
 
-#[cfg(any(test, feature = "test-helpers"))]
+#[cfg(test)]
 #[derive(Clone)]
 struct Scripted {
     outcome: Result<ProbeOutcome, ProbeError>,
@@ -382,20 +382,20 @@ struct Scripted {
     sequence: std::collections::VecDeque<Result<ProbeOutcome, ProbeError>>,
 }
 
-#[cfg(any(test, feature = "test-helpers"))]
+#[cfg(test)]
 pub struct FakeTransport {
     script: std::sync::Mutex<std::collections::HashMap<(IpAddr, u16), Scripted>>,
     pub rendezvous: Option<std::sync::Arc<tokio::sync::Barrier>>,
 }
 
-#[cfg(any(test, feature = "test-helpers"))]
+#[cfg(test)]
 impl Default for FakeTransport {
     fn default() -> Self {
         Self::new()
     }
 }
 
-#[cfg(any(test, feature = "test-helpers"))]
+#[cfg(test)]
 impl FakeTransport {
     pub fn new() -> Self {
         Self {
@@ -503,7 +503,7 @@ impl FakeTransport {
     }
 }
 
-#[cfg(any(test, feature = "test-helpers"))]
+#[cfg(test)]
 impl Transport for FakeTransport {
     fn probe(&self, ip: IpAddr, port: u16, _timeout_ms: u64, idle_hold_ms: u64) -> ProbeFuture<'_> {
         let scripted = {

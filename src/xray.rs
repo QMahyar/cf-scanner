@@ -431,6 +431,14 @@ fn dgst_path(bin: &Path) -> PathBuf {
 static BINARY_STATE: OnceLock<tokio::sync::Mutex<Option<Result<PathBuf, String>>>> =
     OnceLock::new();
 
+/// Test-only: clears the memoized binary path so a test with an isolated
+/// data dir gets a fresh resolution instead of a stale cross-test hit.
+#[cfg(test)]
+pub(crate) async fn reset_binary_state_for_tests() {
+    let state = BINARY_STATE.get_or_init(|| tokio::sync::Mutex::new(None));
+    *state.lock().await = None;
+}
+
 pub async fn ensure_binary(fetch: &impl BinaryFetch) -> Result<PathBuf> {
     let state = BINARY_STATE.get_or_init(|| tokio::sync::Mutex::new(None));
     let cached_ok = |path: &PathBuf| {
@@ -622,15 +630,33 @@ impl BinaryFetch for RealFetch {
             .timeout(Duration::from_secs(60))
             .send()
             .await
-            .context("failed to start download")?
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "failed to start download from {}: {}",
+                    crate::ranges::sanitize_url_for_error(url),
+                    crate::ranges::reqwest_msg_without_url(&e)
+                )
+            })?
             .error_for_status()
-            .context("download returned an error")?;
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "download returned an error from {}: {}",
+                    crate::ranges::sanitize_url_for_error(url),
+                    crate::ranges::reqwest_msg_without_url(&e)
+                )
+            })?;
         if let Some(len) = resp.content_length()
             && len > MAX_BODY_BYTES
         {
             bail!("response body too large: {len} bytes exceeds 64 MiB cap");
         }
-        let bytes = resp.bytes().await.context("failed to read download body")?;
+        let bytes = resp.bytes().await.map_err(|e| {
+            anyhow::anyhow!(
+                "failed to read download body of {}: {}",
+                crate::ranges::sanitize_url_for_error(url),
+                crate::ranges::reqwest_msg_without_url(&e)
+            )
+        })?;
         if bytes.len() as u64 > MAX_BODY_BYTES {
             bail!(
                 "response body too large: {} bytes exceeds 64 MiB cap",
@@ -1020,8 +1046,7 @@ mod tests {
     }
 
     async fn reset_binary_state() {
-        let state = BINARY_STATE.get_or_init(|| tokio::sync::Mutex::new(None));
-        *state.lock().await = None;
+        super::reset_binary_state_for_tests().await;
     }
 
     struct SeamDir(PathBuf);
@@ -1149,6 +1174,23 @@ mod tests {
         assert!(err.to_string().contains("non-routable"), "{err:#}");
         let err = RealFetch.bytes("not a url").await.unwrap_err();
         assert!(err.to_string().contains("bad URL"), "{err:#}");
+    }
+
+    #[tokio::test]
+    async fn download_error_chain_never_carries_the_raw_url() {
+        // Same leak contract as the central fetch path: RealFetch builds its
+        // own reqwest errors, so it must scrub them too.
+        let err = RealFetch
+            .bytes("https://leaky-user:leaky-pass@scrub-test.invalid/xray.zip?token=leaky-token")
+            .await
+            .unwrap_err();
+        let rendered = format!("{err:#}");
+        assert!(
+            rendered.contains("scrub-test.invalid"),
+            "scheme+host must survive for debugging: {rendered}"
+        );
+        assert!(!rendered.contains(" for url ("), "{rendered}");
+        assert!(!rendered.contains("leaky"), "{rendered}");
     }
 
     #[tokio::test]

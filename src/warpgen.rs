@@ -5,7 +5,7 @@ use std::time::Duration;
 use anyhow::{Context as _, Result, anyhow};
 use base64::Engine as _;
 use boringtun::x25519::{PublicKey, StaticSecret};
-use rand_core::{OsRng, RngCore};
+use rand_core::OsRng;
 use serde::{Deserialize, Serialize};
 
 use crate::paths;
@@ -313,17 +313,14 @@ fn save_identity(identity: &Identity) -> Result<()> {
     let path = identity_path()?;
     let json = serde_json::to_string_pretty(identity)?;
     let _gate = crate::paths::data_write_guard();
-    write_private_replace(&path, &json).with_context(|| format!("writing {}", path.display()))
+    paths::write_secret_atomic(&path, json.as_bytes())
+        .with_context(|| format!("writing {}", path.display()))
 }
 
 fn load_identity() -> Result<Identity> {
     let json = fs::read_to_string(identity_path()?)?;
     serde_json::from_str(&json).context("corrupt identity file")
 }
-pub fn has_identity() -> bool {
-    load_identity().is_ok()
-}
-
 pub fn persisted_server_public_key() -> Option<String> {
     let identity = match load_identity() {
         Ok(identity) => identity,
@@ -348,52 +345,6 @@ pub fn persisted_server_public_key() -> Option<String> {
             None
         }
     }
-}
-
-fn write_private(path: &Path, text: &str) -> std::io::Result<()> {
-    #[cfg(unix)]
-    {
-        use std::io::Write as _;
-        use std::os::unix::fs::OpenOptionsExt as _;
-        use std::os::unix::fs::PermissionsExt as _;
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(path)?;
-        file.write_all(text.as_bytes())?;
-        let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o600));
-    }
-    #[cfg(not(unix))]
-    {
-        crate::paths::write_secret(path, text.as_bytes())?;
-    }
-    Ok(())
-}
-
-fn write_private_replace(dest: &Path, text: &str) -> Result<()> {
-    if let Some(parent) = dest.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    let name = dest
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "out".to_owned());
-    let tmp = dest.with_file_name(format!(
-        "{name}.tmp-{}-{:08x}",
-        std::process::id(),
-        random_u32()
-    ));
-    let result = write_private(&tmp, text).and_then(|()| fs::rename(&tmp, dest));
-    if result.is_err() {
-        let _ = fs::remove_file(&tmp);
-    }
-    result.map_err(anyhow::Error::from)
-}
-
-fn random_u32() -> u32 {
-    RngCore::next_u32(&mut OsRng)
 }
 
 fn build_wgconf(
@@ -516,7 +467,8 @@ pub async fn export(out: Option<&Path>, endpoint_override: Option<&str>) -> Resu
 fn write_out(out: Option<&Path>, text: &str) -> Result<()> {
     match out {
         Some(path) => {
-            write_private(path, text).with_context(|| format!("writing {}", path.display()))?;
+            paths::write_secret(path, text.as_bytes())
+                .with_context(|| format!("writing {}", path.display()))?;
         }
         None => write_stdout(text),
     }
@@ -724,20 +676,36 @@ pub(crate) mod tests {
         assert!(text.contains("AllowedIPs"));
     }
 
+    // WHY: serializes identity dir / env mutation in warp/warpgen/verify tests.
+    // Lock-order convention, everywhere: take IDENTITY_LOCK first, then
+    // DATA_DIR_LOCK (paths::test_env) — the reverse order risks an ABBA deadlock.
     pub(crate) static IDENTITY_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-    fn isolated_identity_dir() -> std::path::PathBuf {
+    // WHY: CF_SCANNER_DATA_DIR is process-global state shared with every
+    // data-dir test (verify/paths/xray serialize on DATA_DIR_LOCK); env writes
+    // here must hold that lock too or require_xray_binary-style seam
+    // assertions flake under test parallelism.
+    struct IsolatedIdentityDir {
+        _data_dir_lock: tokio::sync::MutexGuard<'static, ()>,
+        dir: std::path::PathBuf,
+    }
+
+    fn isolated_identity_dir() -> IsolatedIdentityDir {
         let dir = std::env::temp_dir().join("cf-scanner-warpgen-tests");
+        let _data_dir_lock = crate::paths::test_env::DATA_DIR_LOCK.blocking_lock();
         unsafe { std::env::set_var("CF_SCANNER_DATA_DIR", &dir) };
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
-        dir
+        IsolatedIdentityDir {
+            _data_dir_lock,
+            dir,
+        }
     }
 
     #[test]
     fn identity_round_trips_through_the_data_dir() {
         let _guard = IDENTITY_LOCK.lock().unwrap();
-        isolated_identity_dir();
+        let _isolated = isolated_identity_dir();
         let (secret, _) = keygen();
         let identity = Identity {
             id: "id-1".into(),
@@ -759,7 +727,7 @@ pub(crate) mod tests {
     #[test]
     fn export_without_an_identity_fails_fast() {
         let _guard = IDENTITY_LOCK.lock().unwrap();
-        isolated_identity_dir();
+        let _isolated = isolated_identity_dir();
         let err = tokio::runtime::Runtime::new()
             .unwrap()
             .block_on(export(None, None))
@@ -770,7 +738,7 @@ pub(crate) mod tests {
     #[test]
     fn corrupt_persisted_public_key_degrades_to_none() {
         let _guard = IDENTITY_LOCK.lock().unwrap();
-        isolated_identity_dir();
+        let _isolated = isolated_identity_dir();
         let enc = |b: &[u8]| base64::Engine::encode(&base64::engine::general_purpose::STANDARD, b);
         let short_key = enc(&[1u8; 16]);
         for bad in ["not-valid-base64!!!", short_key.as_str()] {
@@ -840,7 +808,7 @@ pub(crate) mod tests {
     #[test]
     fn register_returns_a_rendered_wgconf_and_persists_identity() {
         let _guard = IDENTITY_LOCK.lock().unwrap();
-        isolated_identity_dir();
+        let _isolated = isolated_identity_dir();
         tokio::runtime::Runtime::new().unwrap().block_on(async {
             let seen: MockSeen = Default::default();
             let app = mock_app(seen.clone());
@@ -1104,7 +1072,7 @@ pub(crate) mod tests {
     #[test]
     fn save_replaces_existing_identity() {
         let _guard = IDENTITY_LOCK.lock().unwrap();
-        isolated_identity_dir();
+        let _isolated = isolated_identity_dir();
         let enc = |b: &[u8]| base64::Engine::encode(&base64::engine::general_purpose::STANDARD, b);
         let identity = |id: &str, key: &[u8; 32]| Identity {
             id: id.into(),
@@ -1127,7 +1095,8 @@ pub(crate) mod tests {
     #[test]
     fn failed_private_replace_leaves_no_secret_tmp_remnant() {
         let _guard = IDENTITY_LOCK.lock().unwrap();
-        let dir = isolated_identity_dir();
+        let iso = isolated_identity_dir();
+        let dir = iso.dir.clone();
         let enc = |b: &[u8]| base64::Engine::encode(&base64::engine::general_purpose::STANDARD, b);
         let dest = dir.join("identity.json");
         fs::create_dir_all(&dest).unwrap();
@@ -1159,6 +1128,7 @@ pub(crate) mod tests {
     #[test]
     fn empty_cf_scanner_data_dir_env_falls_back_to_the_default_dir() {
         let _guard = IDENTITY_LOCK.lock().unwrap();
+        let _data_dir_lock = crate::paths::test_env::DATA_DIR_LOCK.blocking_lock();
         let previous = std::env::var("CF_SCANNER_DATA_DIR").ok();
         unsafe { std::env::set_var("CF_SCANNER_DATA_DIR", "   ") };
         let resolved = identity_path().unwrap();

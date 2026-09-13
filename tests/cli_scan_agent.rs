@@ -252,7 +252,7 @@ fn e2e_scan_writes_export_files_and_ndjson_stdout() {
     let header = csv_text.lines().next().unwrap();
     assert_eq!(
         header,
-        "ip,port,latency_ms,country,colo,phase2_passed,phase2_latency_ms,speed_test_mbps,sent,received,loss_pct,fail_reason,asn,isp",
+        "ip,port,latency_ms,country,colo,phase2_passed,phase2_latency_ms,speed_test_mb_s,sent,received,loss_pct,fail_reason,asn,isp",
         "CSV header pins the schema"
     );
 

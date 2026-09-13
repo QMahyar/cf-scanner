@@ -108,7 +108,7 @@ scan; results up to that point are kept.
 
 | Flag | Meaning |
 |------|---------|
-| `--concurrency N` | Parallel probe workers (default 256, max 1000) |
+| `--concurrency N` | Parallel probe workers (default 64, max 1000) |
 | `--timeout-ms MS` | Per-probe timeout (default 3000) |
 | `--probe tcp\|tls\|http` | Phase-1 protocol: connect only, TLS handshake (default), or GET `/cdn-cgi/trace` over TLS |
 | `--http-status-code 200,204` | HTTP probe mode: codes that count as working (default 200,301,302; requires `--probe http`) |
@@ -125,10 +125,10 @@ scan; results up to that point are kept.
 |------|---------|
 | `--phase2-configs URI,…` | Share URIs (vless/vmess/trojan/ss) to verify candidates against; enables phase 2 |
 | `--phase2-fragment off\|light\|medium\|heavy\|custom` | DPI-bypass fragmentation. Values are TLS-hello fragment length/interval: `light` 100-200/10-20, `medium` 50-200/10-40, `heavy` 10-300/5-50 |
-| `--phase2-custom packets,length,interval` | Custom fragment values, e.g. `1-3,10-20,10-20`; requires `--phase2-fragment custom` |
+| `--phase2-custom length,interval` | Custom fragment values, e.g. `10-20,10-20`; requires `--phase2-fragment custom` |
 | `--phase2-snis SNI,…` | SNI values to try per config (first that verifies wins) |
 | `--phase2-probe-urls URL,…` | HTTPS URLs fetched through the tunnel to confirm it works; default is the built-in trace check. When set, this list takes precedence over the built-in single URL |
-| `--phase2-concurrency N` | Parallel verifications (default 4, max 8) |
+| `--phase2-concurrency N` | Parallel verifications (default 3, max 8) |
 | `--speed-test` | After verification, download an 8 MiB sample through each verified endpoint and record MB/s (CDN only) |
 | `--min-speed MBPS` | Drop endpoints measuring below MB/s (requires `--speed-test`) |
 
@@ -157,7 +157,7 @@ scan; results up to that point are kept.
 |---------|-------------|
 | `cf-scanner wizard` | Interactive wizard over the same engine |
 | `cf-scanner ranges refresh [--ipv6]` | Refresh the bundled Cloudflare range lists over a verified HTTPS fetch (`--ipv6` includes the v6 pool) |
-| `cf-scanner check-sub URL [--timeout-ms MS]` | Fetch a subscription and verify every config against its own server; one NDJSON row per config (`ok`/`latency_ms`/`error`), a summary on stderr, non-zero exit when nothing verifies |
+| `cf-scanner check-sub URL [--timeout-ms MS]` | Fetch a subscription and verify every config against its own server with a real probe URL; one NDJSON row per config (`config_index`/`ok`/`latency_ms`/`error`), aggregate rows for unparseable lines carry the sentinel `config_index` 18446744073709551615 (`usize::MAX`) so scripts can filter them, a summary on stderr, non-zero exit when nothing verifies |
 | `cf-scanner warp-config generate [--license KEY] [--endpoint HOST:PORT] [--out FILE]` | Opt-in WARP registration through the v0a884 API, then wgconf build. Without `--out` the wgconf prints to stdout; a `.conf` path is written with owner-only permissions |
 | `cf-scanner warp-config export [--endpoint HOST:PORT] [--out FILE]` | Export the registered WARP config as text or a .conf file |
 | `cf-scanner export-config --config URI --ip IP --port PORT [--sni SNI]` | Re-render a vless/vmess/trojan/ss link against a scanned endpoint; `--sni` overrides the TLS SNI in the output |

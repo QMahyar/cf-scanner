@@ -16,7 +16,7 @@ use crate::ranges;
 
 const MAX_TOPUP_ROUNDS: usize = 5;
 
-type ProbedSet = Arc<std::collections::HashSet<std::net::IpAddr>>;
+type ProbedSet = Arc<std::collections::HashSet<(std::net::IpAddr, u16)>>;
 
 async fn forward_to_worker(
     task: ProbeTask,
@@ -27,7 +27,9 @@ async fn forward_to_worker(
     ctx: &ProbeContext,
     skip: &ProbedSet,
 ) -> bool {
-    if skip.contains(&task.ip) {
+    // Endpoint identity is (ip, port): skipping on ip alone would shrink
+    // multi-port top-up rounds to ports already probed on that ip.
+    if skip.contains(&(task.ip, task.port)) {
         return true;
     }
     if ctx.should_stop() {
@@ -106,7 +108,12 @@ impl ScanController {
         let skip: ProbedSet = if clear {
             Arc::new(std::collections::HashSet::new())
         } else {
-            Arc::new(lock(&self.progress.store).iter().map(|v| v.ip).collect())
+            Arc::new(
+                lock(&self.progress.store)
+                    .iter()
+                    .map(|v| (v.ip, v.port))
+                    .collect(),
+            )
         };
         let mut cfg = cfg.clone();
         let phase2 = cfg.phase2.take();
@@ -125,7 +132,8 @@ impl ScanController {
         }));
 
         if total == 0 {
-            return Ok(self.finish(started, 0, 0));
+            // Quiet: run_cdn's single terminal emit stays the only Finished.
+            return Ok(self.finish_quiet(started, 0, 0));
         }
 
         let cancel_rx = self.cancel_signal();
@@ -405,7 +413,7 @@ mod tests {
     use crate::probe::{FakeTransport, ProbeError, Transport};
     use std::collections::HashSet;
     use std::net::{IpAddr, Ipv4Addr};
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     #[tokio::test]
     async fn collects_verdicts_until_found_stop() {
@@ -863,6 +871,42 @@ mod tests {
             summary.found, 1,
             "with the idle hold off the same endpoint must pass"
         );
+    }
+
+    #[tokio::test]
+    async fn topup_skip_set_is_port_scoped() {
+        let t = FakeTransport::new()
+            .fail(
+                "203.0.113.1".parse().unwrap(),
+                443,
+                ProbeError::Refused("refused"),
+            )
+            .ok("203.0.113.1".parse().unwrap(), 8443, 10);
+        let (c, _) = controller(Arc::new(t));
+        let pool = ranges::CidrPool::parse("203.0.113.1/32").unwrap();
+        let started = Instant::now();
+        let mut pass1 = ok_cfg(5, None);
+        pass1.ports = vec![Port::new(443)];
+        let first = c
+            .run_cdn_pass(&pass1, 1, &pool, true, started)
+            .await
+            .unwrap();
+        assert_eq!(first.scanned, 1, "pass one probes (ip, 443)");
+        let mut pass2 = ok_cfg(5, None);
+        pass2.ports = vec![Port::new(8443)];
+        let second = c
+            .run_cdn_pass(&pass2, 2, &pool, false, started)
+            .await
+            .unwrap();
+        assert_eq!(
+            second.scanned, 1,
+            "a 443 failure must not skip 8443 in a top-up round"
+        );
+        let third = c
+            .run_cdn_pass(&pass1, 3, &pool, false, started)
+            .await
+            .unwrap();
+        assert_eq!(third.scanned, 0, "(ip, 443) must stay skipped");
     }
 
     #[tokio::test]

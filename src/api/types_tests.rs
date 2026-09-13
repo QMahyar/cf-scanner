@@ -527,8 +527,9 @@ fn phase2_verdict_config_index_defaults_to_none() {
         latency_ms: Some(7),
         error: None,
         config_index: Some(2),
+        spec_index: None,
         verifier: Some(Verifier::Inline),
-        speed_test_mbps: None,
+        speed_test_mb_s: None,
     })
     .unwrap();
     assert!(json.contains("\"config_index\":2"), "{json}");
@@ -538,7 +539,7 @@ fn phase2_verdict_config_index_defaults_to_none() {
 fn phase2_verdict_speed_defaults_to_none_and_round_trips() {
     let legacy = r#"{"passed":true,"fragment":"light","sni":"","latency_ms":42}"#;
     let v: Phase2Verdict = serde_json::from_str(legacy).unwrap();
-    assert_eq!(v.speed_test_mbps, None);
+    assert_eq!(v.speed_test_mb_s, None);
     let measured = Phase2Verdict {
         passed: true,
         fragment: FragmentPreset::Light,
@@ -546,13 +547,37 @@ fn phase2_verdict_speed_defaults_to_none_and_round_trips() {
         latency_ms: Some(7),
         error: None,
         config_index: Some(0),
+        spec_index: None,
         verifier: None,
-        speed_test_mbps: Some(12.5),
+        speed_test_mb_s: Some(12.5),
     };
     let json = serde_json::to_string(&measured).unwrap();
-    assert!(json.contains("\"speed_test_mbps\":12.5"), "{json}");
+    assert!(json.contains("\"speed_test_mb_s\":12.5"), "{json}");
     let back: Phase2Verdict = serde_json::from_str(&json).unwrap();
     assert_eq!(measured, back);
+}
+
+#[test]
+fn spec_index_defaults_to_none_and_round_trips() {
+    let legacy = r#"{"passed":true,"fragment":"light","sni":""}"#;
+    let v: Phase2Verdict = serde_json::from_str(legacy).unwrap();
+    assert_eq!(v.spec_index, None, "legacy payloads must deserialize");
+    let stamped = Phase2Verdict {
+        passed: true,
+        fragment: FragmentPreset::Light,
+        sni: "a.me".to_owned(),
+        latency_ms: Some(7),
+        error: None,
+        config_index: Some(2),
+        spec_index: Some(5),
+        verifier: Some(Verifier::Inline),
+        speed_test_mb_s: None,
+    };
+    let json = serde_json::to_string(&stamped).unwrap();
+    assert!(json.contains("\"spec_index\":5"), "{json}");
+    assert!(json.contains("\"config_index\":2"), "{json}");
+    let back: Phase2Verdict = serde_json::from_str(&json).unwrap();
+    assert_eq!(stamped, back);
 }
 
 #[test]
@@ -1548,8 +1573,9 @@ fn fully_populated_verdict_round_trips() {
             latency_ms: Some(40),
             error: None,
             config_index: Some(2),
+            spec_index: None,
             verifier: Some(Verifier::Xray),
-            speed_test_mbps: Some(3.5),
+            speed_test_mb_s: Some(3.5),
         }),
         sent: 4,
         received: 3,

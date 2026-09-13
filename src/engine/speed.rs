@@ -76,10 +76,11 @@ pub(crate) fn build_passing_index(
         let IpAddr::V4(ip) = v.ip else {
             continue;
         };
-        let Some(cfg_idx) = p2.config_index else {
-            continue;
-        };
-        let Some((spec, _)) = specs.get(cfg_idx as usize) else {
+        // spec_index is the position within the EXPANDED specs vec; config_index
+        // is the raw p2.configs entry index. Verdicts written before spec_index
+        // existed fall back to the raw index (exact for direct-URI entries).
+        let idx = p2.spec_index.or(p2.config_index);
+        let Some((spec, _)) = idx.and_then(|i| specs.get(i as usize)) else {
             continue;
         };
         index.insert(
@@ -98,7 +99,7 @@ pub(crate) fn build_passing_index(
     index
 }
 
-pub(crate) fn mbps(bytes: u64, seconds: f64) -> Option<f32> {
+pub(crate) fn mb_s(bytes: u64, seconds: f64) -> Option<f32> {
     if !seconds.is_finite() || seconds <= 0.0 {
         return None;
     }
@@ -121,7 +122,7 @@ pub(crate) fn apply_speed_result(
     let p2 = results[pos].phase2.as_mut()?;
     match outcome {
         Ok(m) => {
-            p2.speed_test_mbps = Some(*m);
+            p2.speed_test_mb_s = Some(*m);
             if let Some(min) = min_speed
                 && *m < min
             {
@@ -140,7 +141,7 @@ async fn measure_endpoint(tester: &dyn SpeedTester, socks: SocketAddr) -> Result
     let (bytes, seconds) = tester
         .download(SPEED_TEST_URL, socks, SPEED_TEST_BYTES, SPEED_TEST_TIMEOUT)
         .await?;
-    mbps(bytes, seconds).ok_or_else(|| anyhow::anyhow!("speed test returned an invalid duration"))
+    mb_s(bytes, seconds).ok_or_else(|| anyhow::anyhow!("speed test returned an invalid duration"))
 }
 
 impl ScanController {
@@ -280,8 +281,9 @@ mod tests {
                 latency_ms: Some(20),
                 error: None,
                 config_index: Some(cfg_idx),
+                spec_index: None,
                 verifier: Some(Verifier::Xray),
-                speed_test_mbps: None,
+                speed_test_mb_s: None,
             }),
             sent: 1,
             received: 1,
@@ -342,14 +344,105 @@ mod tests {
         assert_eq!(entry.fragment, FragmentPreset::Medium);
     }
 
+    /// Opener that records the (dial_ip, spec.user_id) of every open so tests
+    /// can assert each endpoint's speed test ran through its OWN spec.
+    struct RecordingOpener {
+        opened: Arc<std::sync::Mutex<Vec<(Ipv4Addr, String)>>>,
+    }
+
+    impl crate::verify::TunnelOpener for RecordingOpener {
+        fn open(
+            &self,
+            spec: &OutboundSpec,
+            _preset: &FragmentPreset,
+            _custom: Option<&crate::api::types::CustomFragment>,
+            _sni: Option<&str>,
+            dial_ip: Ipv4Addr,
+        ) -> Pin<Box<dyn Future<Output = Result<crate::verify::OpenedTunnel>> + Send + '_>>
+        {
+            lock(&self.opened).push((dial_ip, spec.user_id.clone()));
+            Box::pin(async {
+                Ok(crate::verify::OpenedTunnel::new(
+                    SocketAddr::new(std::net::Ipv4Addr::LOCALHOST.into(), 1),
+                    Box::pin(async {}),
+                ))
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn speed_test_opens_each_endpoints_own_expanded_spec() {
+        // One subscription entry expanding to two specs (same raw idx 0):
+        // endpoint .1 passed the spec at expanded position 1, .2 at position 0.
+        let specs = vec![(spec_for(0), 0u32), (spec_for(1), 0u32)];
+        let mut first = passing("203.0.113.1".parse().unwrap(), 443, 0);
+        first.phase2.as_mut().unwrap().spec_index = Some(1);
+        let second = passing("203.0.113.2".parse().unwrap(), 443, 0);
+        let c = Arc::new(ScanController::new(Arc::new(
+            crate::probe::FakeTransport::new(),
+        )));
+        crate::engine::store_seed(&c, vec![first, second]);
+        let opener = Arc::new(RecordingOpener {
+            opened: Arc::new(std::sync::Mutex::new(Vec::new())),
+        });
+        c.set_tunnel_opener(opener.clone());
+        c.set_speed_tester(Arc::new(FakeTester {
+            bytes: 1024,
+            seconds: 1.0,
+            fail: false,
+        }));
+        let cfg = speed_cfg();
+        let p2 = Phase2Config::default();
+        c.speed_test_phase(&cfg, &p2, &specs).await.unwrap();
+        let mut opened = lock(&opener.opened).clone();
+        opened.sort();
+        assert_eq!(
+            opened,
+            vec![
+                ("203.0.113.1".parse().unwrap(), "uuid-1".to_owned()),
+                ("203.0.113.2".parse().unwrap(), "uuid-0".to_owned()),
+            ],
+            "each endpoint's speed test must open its own expanded spec"
+        );
+    }
+
+    #[tokio::test]
+    async fn skipped_entry_does_not_drop_endpoints_from_the_speed_test() {
+        // Raw entries: [unparseable, valid URI]; the valid spec sits at raw
+        // idx 1 / expanded position 0. config_index (raw) must not be used to
+        // index the expanded vec — spec_index resolves the pass.
+        let specs = vec![(spec_for(0), 1u32)];
+        let mut v = passing("203.0.113.1".parse().unwrap(), 443, 1);
+        v.phase2.as_mut().unwrap().spec_index = Some(0);
+        let c = Arc::new(ScanController::new(Arc::new(
+            crate::probe::FakeTransport::new(),
+        )));
+        crate::engine::store_seed(&c, vec![v]);
+        let opener = Arc::new(CountingOpener::new());
+        c.set_tunnel_opener(opener.clone());
+        c.set_speed_tester(Arc::new(FakeTester {
+            bytes: 1024,
+            seconds: 1.0,
+            fail: false,
+        }));
+        let cfg = speed_cfg();
+        let p2 = Phase2Config::default();
+        c.speed_test_phase(&cfg, &p2, &specs).await.unwrap();
+        assert_eq!(
+            opener.opens.load(Ordering::Relaxed),
+            1,
+            "the pass behind a skipped entry must still be measured"
+        );
+    }
+
     #[test]
-    fn mbps_math_and_degenerate_inputs() {
-        let one_mib_per_sec = mbps(1024 * 1024, 1.0).unwrap();
+    fn mb_s_math_and_degenerate_inputs() {
+        let one_mib_per_sec = mb_s(1024 * 1024, 1.0).unwrap();
         assert!((one_mib_per_sec - 1.0).abs() < 1e-4, "{one_mib_per_sec}");
-        assert_eq!(mbps(8 * 1024 * 1024, 2.0), Some(4.0));
-        assert_eq!(mbps(1024, 0.0), None);
-        assert_eq!(mbps(1024, f64::NEG_INFINITY), None);
-        assert_eq!(mbps(1024, f64::NAN), None);
+        assert_eq!(mb_s(8 * 1024 * 1024, 2.0), Some(4.0));
+        assert_eq!(mb_s(1024, 0.0), None);
+        assert_eq!(mb_s(1024, f64::NEG_INFINITY), None);
+        assert_eq!(mb_s(1024, f64::NAN), None);
     }
 
     #[test]
@@ -362,7 +455,7 @@ mod tests {
         let ip = "203.0.113.1".parse().unwrap();
         let updated = apply_speed_result(&store, ip, 443, &Ok(7.5), None).unwrap();
         let p2 = updated.phase2.as_ref().unwrap();
-        assert_eq!(p2.speed_test_mbps, Some(7.5));
+        assert_eq!(p2.speed_test_mb_s, Some(7.5));
         assert!(p2.passed, "no threshold: the pass must stand");
     }
 
@@ -373,14 +466,14 @@ mod tests {
         let updated = apply_speed_result(&below, ip, 443, &Ok(1.0), Some(5.0)).unwrap();
         let p2 = updated.phase2.as_ref().unwrap();
         assert!(!p2.passed, "below the threshold must not stay passed");
-        assert_eq!(p2.speed_test_mbps, Some(1.0));
+        assert_eq!(p2.speed_test_mb_s, Some(1.0));
         assert!(p2.error.as_deref().unwrap().contains("--min-speed"));
 
         let above: Store = Arc::new(std::sync::Mutex::new(vec![passing(ip, 443, 0)]));
         let updated = apply_speed_result(&above, ip, 443, &Ok(6.0), Some(5.0)).unwrap();
         let p2 = updated.phase2.as_ref().unwrap();
         assert!(p2.passed, "above the threshold must keep the pass");
-        assert_eq!(p2.speed_test_mbps, Some(6.0));
+        assert_eq!(p2.speed_test_mb_s, Some(6.0));
         assert!(p2.error.is_none());
     }
 
@@ -397,7 +490,7 @@ mod tests {
         ));
         let updated = apply_speed_result(&store, ip, 443, &outcome, None).unwrap();
         let p2 = updated.phase2.as_ref().unwrap();
-        assert_eq!(p2.speed_test_mbps, None);
+        assert_eq!(p2.speed_test_mb_s, None);
         let err = p2.error.as_deref().unwrap();
         assert!(!err.contains("SecretPass123"), "{err}");
     }
@@ -598,7 +691,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn measure_endpoint_computes_mbps_from_the_sample() {
+    async fn measure_endpoint_computes_mb_s_from_the_sample() {
         let tester = FakeTester {
             bytes: 8 * 1024 * 1024,
             seconds: 4.0,
@@ -638,7 +731,7 @@ mod tests {
     use crate::engine::test_helpers::FakeSub;
 
     #[tokio::test]
-    async fn scan_with_speed_test_records_mbps_on_passing_verdicts() {
+    async fn scan_with_speed_test_records_mb_s_on_passing_verdicts() {
         let _ = rustls::crypto::ring::default_provider().install_default();
         use crate::api::types::Phase2Config;
         use crate::engine::tests::{ok_cfg, run_local};
@@ -667,7 +760,7 @@ mod tests {
         let p2 = results[0].phase2.as_ref().unwrap();
         assert!(p2.passed);
         assert!(
-            (p2.speed_test_mbps.unwrap() - 2.0).abs() < 1e-4,
+            (p2.speed_test_mb_s.unwrap() - 2.0).abs() < 1e-4,
             "the injected FakeTester measures 2 MB/s: {p2:?}"
         );
         assert!(
@@ -825,7 +918,7 @@ mod tests {
             "opener failure must be recorded on the verdict: {:?}",
             p2v.error
         );
-        assert_eq!(p2v.speed_test_mbps, None, "no measurement was possible");
+        assert_eq!(p2v.speed_test_mb_s, None, "no measurement was possible");
     }
 
     #[tokio::test]
@@ -842,14 +935,14 @@ mod tests {
     }
 
     #[test]
-    fn nan_min_speed_never_flips_a_verdict_and_nan_mbps_is_not_recorded() {
+    fn nan_min_speed_never_flips_a_verdict_and_nan_mb_s_is_not_recorded() {
         let c = Arc::new(ScanController::new(Arc::new(
             crate::probe::FakeTransport::new(),
         )));
         crate::engine::store_seed(&c, vec![passing("203.0.113.5".parse().unwrap(), 443, 0)]);
-        // mbps() rejects a non-finite/zero duration: None, so no measurement.
-        assert_eq!(mbps(1000, 0.0), None);
-        assert_eq!(mbps(1000, f64::NAN), None);
+        // mb_s() rejects a non-finite/zero duration: None, so no measurement.
+        assert_eq!(mb_s(1000, 0.0), None);
+        assert_eq!(mb_s(1000, f64::NAN), None);
         // min_speed = NaN: comparison is false, verdict stays passed.
         let updated = apply_speed_result(
             &c.progress.store,
@@ -860,7 +953,7 @@ mod tests {
         )
         .unwrap();
         let p2v = updated.phase2.as_ref().unwrap();
-        assert_eq!(p2v.speed_test_mbps, Some(0.5));
+        assert_eq!(p2v.speed_test_mb_s, Some(0.5));
         assert!(p2v.passed, "NaN threshold must not fail the endpoint");
     }
 }

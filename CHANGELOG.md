@@ -5,7 +5,48 @@ Added / Changed / Fixed / Deprecated / Removed / Security, newest on top.
 
 ## [Unreleased]
 
-(nothing yet)
+### Changed
+- **Honest speed-test field name.** The `speed_test_mbps` NDJSON/CSV field is
+  now `speed_test_mb_s` — it always reported MB/s.
+- **Strict `--phase2-custom` grammar.** The custom fragment preset now accepts
+  exactly `length,interval` (milliseconds); the legacy three-field form is
+  rejected with a clear error instead of being silently reinterpreted.
+- **check-sub NDJSON rows identify their config.** Every row now carries
+  `config_index`; aggregate rows for unparseable lines use the sentinel
+  `18446744073709551615` (`usize::MAX`) so scripts can filter them out.
+- **check-sub subscription cap.** Subscriptions expanding to more than 2048
+  configs are rejected, matching the scan engine's ingestion cap.
+- **Export temp files are exclusive and owner-only.** `--export` temp names
+  are randomized and created exclusively with `0600` permissions on Unix, so
+  concurrent exports cannot collide and the partial file is not readable by
+  other users.
+- **`scan --help` stops double-reporting defaults.** `--concurrency` and
+  `--phase2-concurrency` hand-wrote their defaults next to clap's
+  auto-rendered `[default: 64]` / `[default: 3]`; the help text now carries
+  only the enforced max (1000 / 8) and clap renders each default once.
+
+### Fixed
+- **check-sub verifies through every config.** xray-routed rows previously
+  passed without ever sending a probe, while inline rows always failed; each
+  config is now verified with a real URL through its own tunnel, so verdicts
+  reflect reachability and the exit code means what it says.
+- **Bundle exports no longer silently empty.** When phase-2 configs supplied
+  as a subscription or file resolve to nothing exportable, the export now
+  fails loudly instead of writing an empty bundle.
+- **Speed tests measure each endpoint's own config.** The post-scan speed
+  test could pull its sample through a tunnel built from a different config
+  than the measured endpoint's own; each endpoint is now measured through its
+  own expanded config.
+- **Ctrl+C during startup is honored.** A cancel signaled before the engine
+  is listening no longer gets dropped; it latches and stops the run.
+- **NDJSON streams stop at `finished`.** Result lines can no longer arrive
+  after the finished event.
+- **Phase-2 config file reads are capped at 64 KiB** before parse (OOM guard,
+  matching the other ingestion limits).
+- **Trial directories no longer leak when the xray binary fails to spawn.**
+- **Error chains no longer embed raw URLs.** Subscription-fetch and
+  xray-download failures strip the URL (userinfo and query included) so
+  tokens in subscription links never reach logs or NDJSON output.
 
 
 ## [0.14.0] - 2026-09-08
