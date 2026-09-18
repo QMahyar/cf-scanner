@@ -12,6 +12,7 @@ pub mod paths;
 pub mod probe;
 pub mod ranges;
 pub mod retry;
+pub mod tune;
 pub mod verify;
 pub mod warp;
 pub mod warpgen;

@@ -838,6 +838,42 @@ fn atomic_write_file(dest: &std::path::Path, body: &[u8]) -> std::io::Result<()>
     result
 }
 
+/// Crash-safe live NDJSON sink: one JSON row per result, flushed per row and
+/// fsynced on finish, so an interrupted scan stays parseable. Partial by
+/// design (unlike the atomic `write_export`); unlike stdout it survives a
+/// closed pipe. Opened truncated so a new scan never mixes with an old file.
+pub struct LiveExport {
+    file: std::fs::File,
+}
+
+impl LiveExport {
+    pub fn create(path: &std::path::Path) -> std::io::Result<Self> {
+        let mut opts = std::fs::OpenOptions::new();
+        opts.write(true).create(true).truncate(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            opts.mode(0o600);
+        }
+        Ok(Self {
+            file: opts.open(path)?,
+        })
+    }
+
+    pub fn push_line(&mut self, line: &str) -> std::io::Result<()> {
+        use std::io::Write as _;
+        self.file.write_all(line.as_bytes())?;
+        self.file.write_all(b"\n")?;
+        self.file.flush()
+    }
+
+    pub fn finish(&mut self) -> std::io::Result<()> {
+        use std::io::Write as _;
+        self.file.flush()?;
+        self.file.sync_all()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1518,6 +1554,84 @@ mod tests {
             mode & 0o777,
             0o600,
             "credential-bearing export must be owner-only, got {:o}",
+            mode & 0o777
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn live_test_dir(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "cf-scanner-live-export-test-{}-{}-{tag}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn live_export_appends_parseable_rows_and_fsyncs() {
+        let dir = live_test_dir("rows");
+        let dest = dir.join("live.jsonl");
+        let mut live = LiveExport::create(&dest).unwrap();
+        live.push_line(r#"{"ip":"1.2.3.4"}"#).unwrap();
+        live.push_line(r#"{"ip":"5.6.7.8"}"#).unwrap();
+        live.finish().unwrap();
+        let body = std::fs::read_to_string(&dest).unwrap();
+        assert_eq!(body, "{\"ip\":\"1.2.3.4\"}\n{\"ip\":\"5.6.7.8\"}\n");
+        for line in body.lines() {
+            let v: serde_json::Value = serde_json::from_str(line).unwrap();
+            assert!(v.get("ip").is_some(), "{line}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn live_export_partial_file_survives_without_finish() {
+        let dir = live_test_dir("partial");
+        let dest = dir.join("live.jsonl");
+        {
+            let mut live = LiveExport::create(&dest).unwrap();
+            live.push_line(r#"{"ip":"1.2.3.4"}"#).unwrap();
+            // Drop without finish(): simulates a killed scan.
+        }
+        let body = std::fs::read_to_string(&dest).unwrap();
+        assert_eq!(body, "{\"ip\":\"1.2.3.4\"}\n");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn live_export_truncates_previous_runs() {
+        let dir = live_test_dir("truncate");
+        let dest = dir.join("live.jsonl");
+        let mut live = LiveExport::create(&dest).unwrap();
+        live.push_line(r#"{"ip":"1.2.3.4"}"#).unwrap();
+        drop(live);
+        let mut live = LiveExport::create(&dest).unwrap();
+        live.push_line(r#"{"ip":"5.6.7.8"}"#).unwrap();
+        live.finish().unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&dest).unwrap(),
+            "{\"ip\":\"5.6.7.8\"}\n"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn live_export_sets_owner_only_permissions() {
+        let dir = live_test_dir("perms");
+        let dest = dir.join("live.jsonl");
+        let _live = LiveExport::create(&dest).unwrap();
+        use std::os::unix::fs::PermissionsExt as _;
+        let mode = std::fs::metadata(&dest).unwrap().permissions().mode();
+        assert_eq!(
+            mode & 0o777,
+            0o600,
+            "live export must be owner-only, got {:o}",
             mode & 0o777
         );
         let _ = std::fs::remove_dir_all(&dir);

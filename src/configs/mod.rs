@@ -202,6 +202,7 @@ pub(crate) fn finish_spec(spec: OutboundSpec) -> Result<OutboundSpec> {
         bail!("user id is empty");
     }
     check_len("user id", &spec.user_id, MAX_USER_ID_BYTES)?;
+    check_jwt_credential_shape(&spec.user_id)?;
     if spec.server.is_empty() {
         bail!("server is empty");
     }
@@ -276,6 +277,33 @@ pub(crate) fn query_map(url: &Url) -> BTreeMap<String, String> {
 pub(crate) fn reject_unsupported_security(security: &str) -> Result<()> {
     if security.eq_ignore_ascii_case("reality") {
         bail!("security 'reality' is not supported; use tls or none")
+    }
+    Ok(())
+}
+
+/// Shape-only sanity for JWT-like credentials (spec P0-4 row 8d). Every JWT
+/// header is JSON opening with `{"`, i.e. base64url `eyJ`, and truncation
+/// cuts the tail — so only `eyJ`-prefixed dotted ids are inspected, and
+/// UUIDs, passwords and opaque tokens pass through untouched. Arity must be
+/// 3 with every segment base64-decodable; anything else is an actionable
+/// import-time error instead of a downstream spawn/inline-UUID failure. No
+/// signature checks.
+pub(crate) fn check_jwt_credential_shape(user_id: &str) -> Result<()> {
+    if !(user_id.starts_with("eyJ") && user_id.contains('.')) {
+        return Ok(());
+    }
+    let segments: Vec<&str> = user_id.split('.').collect();
+    if segments.len() != 3 {
+        bail!(
+            "user id looks like a truncated JWT (expected 3 dot-separated segments, found {}); re-paste the full credential",
+            segments.len()
+        );
+    }
+    if segments
+        .iter()
+        .any(|s| s.is_empty() || base64_any(s).is_err())
+    {
+        bail!("user id looks like a JWT with an undecodable segment; re-paste the full credential");
     }
     Ok(())
 }
@@ -1195,6 +1223,160 @@ mod tests {
     fn parse_ss_rejects_empty_host() {
         let creds = base64::engine::general_purpose::STANDARD.encode("aes-128-gcm:pw");
         assert!(parse_uri(&format!("ss://{creds}@:8388")).is_err());
+    }
+
+    #[test]
+    fn sip002_recovers_missing_question_mark_ampersand_form() {
+        let spec = parse_uri(
+            "vless://aaaaaaaa-bbbb-cccc-dddd-eeeeffff0000@1.2.3.4:443&security=tls&sni=example.com",
+        )
+        .unwrap();
+        assert_eq!(spec.security, "tls");
+        assert_eq!(spec.tls_server_name.as_deref(), Some("example.com"));
+
+        let spec =
+            parse_uri("trojan://secret@example.com:443&security=tls&type=ws&path=/api").unwrap();
+        assert_eq!(spec.security, "tls");
+        assert_eq!(spec.ws.unwrap().path, "/api");
+
+        let spec = parse_uri(
+            "vless://aaaaaaaa-bbbb-cccc-dddd-eeeeffff0000@1.2.3.4:443&security=tls#my-remark",
+        )
+        .unwrap();
+        assert_eq!(spec.security, "tls");
+        assert_eq!(spec.tag.as_deref(), Some("my-remark"));
+    }
+
+    #[test]
+    fn sip002_recovers_missing_question_mark_path_equals_form() {
+        let spec = parse_uri(
+            "vless://aaaaaaaa-bbbb-cccc-dddd-eeeeffff0000@1.2.3.4:443/security=tls&sni=example.com&type=ws&path=/x&host=cdn.example.com",
+        )
+        .unwrap();
+        assert_eq!(spec.security, "tls");
+        assert_eq!(spec.tls_server_name.as_deref(), Some("example.com"));
+        let ws = spec.ws.unwrap();
+        assert_eq!(ws.path, "/x");
+        assert_eq!(ws.host.as_deref(), Some("cdn.example.com"));
+    }
+
+    #[test]
+    fn sip002_recovery_skips_ampersand_inside_userinfo() {
+        let spec = parse_uri("trojan://p&ss@example.com:443&security=tls").unwrap();
+        assert_eq!(spec.user_id, "p&ss");
+        assert_eq!(spec.security, "tls");
+    }
+
+    #[test]
+    fn sip002_missing_question_mark_leaves_ambiguous_input_alone() {
+        let err = parse_uri("vless://aaaaaaaa-bbbb-cccc-dddd-eeeeffff0000@1.2.3.4:443security=tls")
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("bad URL"),
+            "a port-glued key must still fail loudly, got: {err:?}"
+        );
+        // A valueless trailing segment reattaches harmlessly into defaults.
+        let spec =
+            parse_uri("vless://aaaaaaaa-bbbb-cccc-dddd-eeeeffff0000@1.2.3.4:443/a&b").unwrap();
+        assert_eq!(spec.security, "none");
+        assert!(spec.ws.is_none());
+    }
+
+    #[test]
+    fn sip002_question_mark_present_disables_recovery() {
+        // Row 8b: a real query is never merged with `&` path segments.
+        let spec = parse_uri("vless://u@1.2.3.4:443?type=ws&path=/x").unwrap();
+        assert_eq!(spec.ws.as_ref().unwrap().path, "/x");
+        // A first-`&` misfire would fold `path=/x` into the type value and
+        // drop the ws transport; the raw path `&` must stay out of the query.
+        let spec = parse_uri("vless://u@1.2.3.4:443/path&with-amp?type=ws&path=/x").unwrap();
+        assert_eq!(spec.ws.as_ref().unwrap().path, "/x");
+    }
+
+    #[test]
+    fn well_formed_sip002_links_bypass_recovery() {
+        for (uri, security, sni) in [
+            (
+                "vless://aaaaaaaa-bbbb-cccc-dddd-eeeeffff0000@1.2.3.4:443?security=tls&sni=example.com",
+                "tls",
+                Some("example.com"),
+            ),
+            (
+                "vless://aaaaaaaa-bbbb-cccc-dddd-eeeeffff0000@1.2.3.4:443",
+                "none",
+                None,
+            ),
+            (
+                "trojan://secret@example.com:443?type=ws&path=/api",
+                "tls",
+                None,
+            ),
+        ] {
+            let spec = parse_uri(uri).unwrap();
+            assert_eq!(spec.security, security, "{uri}");
+            assert_eq!(spec.tls_server_name.as_deref(), sni, "{uri}");
+        }
+    }
+
+    const JWT_HEADER: &str = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9";
+    const JWT_PAYLOAD: &str = "eyJzdWIiOiIxMjM0NTY3ODkwIn0";
+    const JWT_SIG: &str = "SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c";
+
+    #[test]
+    fn truncated_or_corrupt_jwt_credentials_are_rejected_pre_spawn() {
+        for (cred, want) in [
+            (format!("{JWT_HEADER}.{JWT_PAYLOAD}"), "found 2"),
+            (
+                format!("{JWT_HEADER}.{JWT_PAYLOAD}.{JWT_SIG}.extra"),
+                "found 4",
+            ),
+            (format!("{JWT_HEADER}..{JWT_SIG}"), "undecodable segment"),
+            (
+                format!("{JWT_HEADER}.{JWT_PAYLOAD}.!!!"),
+                "undecodable segment",
+            ),
+        ] {
+            let err = parse_uri(&format!("vless://{cred}@1.2.3.4:443?security=tls")).unwrap_err();
+            assert!(err.to_string().contains("JWT"), "{cred}: {err:?}");
+            assert!(err.to_string().contains(want), "{cred}: {err:?}");
+            assert!(err.to_string().contains("re-paste"), "{cred}: {err:?}");
+        }
+        // The shared finish_spec path also covers the id-query fallback and vmess.
+        let err = parse_uri(&format!(
+            "vless://1.2.3.4:443?id={JWT_HEADER}.{JWT_PAYLOAD}&security=none"
+        ))
+        .unwrap_err();
+        assert!(err.to_string().contains("JWT"), "{err:?}");
+        let json = format!(
+            r#"{{"add":"1.2.3.4","port":"443","id":"{JWT_HEADER}.{JWT_PAYLOAD}","net":"tcp"}}"#
+        );
+        let b64 = base64::engine::general_purpose::STANDARD.encode(json);
+        let err = parse_uri(&format!("vmess://{b64}")).unwrap_err();
+        assert!(err.to_string().contains("JWT"), "{err:?}");
+    }
+
+    #[test]
+    fn non_jwt_credentials_pass_shape_check() {
+        let full = format!("{JWT_HEADER}.{JWT_PAYLOAD}.{JWT_SIG}");
+        for uri in [
+            "vless://aaaaaaaa-bbbb-cccc-dddd-eeeeffff0000@1.2.3.4:443?security=tls".to_owned(),
+            "vless://not-a-uuid@1.2.3.4:443?security=tls".to_owned(),
+            "trojan://my.secret@example.com:443".to_owned(),
+            "trojan://p%40ss%3Aword@example.com:443".to_owned(),
+            format!("vless://{full}@1.2.3.4:443?security=tls"),
+        ] {
+            assert!(parse_uri(&uri).is_ok(), "{uri}");
+        }
+    }
+
+    #[test]
+    fn subscription_surfaces_jwt_shape_errors_as_ignored() {
+        let body = "vless://aaaaaaaa-bbbb-cccc-dddd-eeeeffff0000@1.2.3.4:443?security=tls\nvless://eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIx@1.2.3.4:443?security=tls\n";
+        let parsed = parse_subscription(body);
+        assert_eq!(parsed.specs.len(), 1);
+        assert_eq!(parsed.ignored, 1);
+        assert_eq!(parsed.errors.len(), 1);
+        assert!(parsed.errors[0].contains("JWT"), "{:?}", parsed.errors);
     }
 
     #[test]

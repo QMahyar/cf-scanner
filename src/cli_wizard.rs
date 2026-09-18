@@ -7,9 +7,9 @@ use crate::api::types::{
     DEFAULT_PORT, DEFAULT_PROBE_URL, DEFAULT_TIMEOUT_MS, DEFAULT_WARP_PORTS, FragmentPreset,
     MAX_CIDRS, MAX_COLO_CODES, MAX_CONFIG_ENTRY_BYTES, MAX_ENDPOINTS, MAX_IDLE_HOLD_MS,
     MAX_MIN_LATENCY_MS, MAX_NEIGHBORS, MAX_PHASE2_ENTRIES, MAX_PROBE_URL_BYTES, MAX_SCAN_COUNT,
-    MAX_SNI_BYTES, MAX_STOP_VALUE, MAX_WGCONF_BYTES, Mode, Phase2Config, Port, ProbeMode,
-    ScanConfig, ScanEvent, ScanSummary, ScanTarget, StopCondition, WarpConfig, parse_cidr,
-    parse_endpoint, validate_fragment, validate_sni,
+    MAX_SNI_BYTES, MAX_STOP_VALUE, MAX_WGCONF_BYTES, Mode, NetworkProfile, Phase2Config, Port,
+    ProbeMode, ScanConfig, ScanEvent, ScanSummary, ScanTarget, StopCondition, WarpConfig,
+    parse_cidr, parse_endpoint, validate_fragment, validate_sni,
 };
 use crate::engine::ScanController;
 use crate::probe;
@@ -24,7 +24,85 @@ fn clamp_pool_host_count(host_count: u128) -> u32 {
         .min(MAX_SCAN_COUNT)
 }
 
-fn prompt_warp() -> Result<ScanConfig> {
+// Wizard wording (spec §P0-7(b–c)). Prompt strings live here as pure
+// helpers so the recap tests pin the exact user-visible text without a TTY.
+fn profile_question() -> &'static str {
+    "Is the network fully blocked or just slow?"
+}
+
+fn profile_items() -> [&'static str; 3] {
+    [
+        "Normal network (today's defaults)",
+        "Fully blocked",
+        "Just slow",
+    ]
+}
+
+fn stop_prompt() -> &'static str {
+    "Stop after N working endpoints (unreachable = excluded, slow = kept — slowness is filtered by --min-speed, not here)"
+}
+
+fn warp_endpoints_prompt() -> &'static str {
+    "Custom endpoints ip or ip:port (IPv6 as [addr]:port, comma-separated; empty = bundled pools)"
+}
+
+fn phase2_configs_prompt() -> &'static str {
+    "Configs (vless/trojan/vmess/ss URIs, subscription URLs, or xray JSON paths; comma-separated; paste from v2ray format (v2rayN / v2rayNG / NekoBox clipboard JSON) or sing-box / clash / Shadowrocket / Quantumult)"
+}
+
+fn fragment_prompt() -> &'static str {
+    "Fragment — fully blocked (heavy) or just slow (light)?"
+}
+
+fn fragment_items() -> [&'static str; 5] {
+    [
+        "Off",
+        "Just slow (light — 100-200 bytes / 10-20 ms)",
+        "Medium (50-200 bytes / 10-40 ms)",
+        "Fully blocked (heavy — 10-300 bytes / 5-50 ms)",
+        "Custom",
+    ]
+}
+
+// The wizard maps the blocked-vs-slow answer onto the same knobs as
+// `--network-profile` (spec §P0-7(b)). The profile only moves the prompt
+// defaults below, so whatever the user types always wins.
+fn profile_timeout_default(profile: Option<NetworkProfile>) -> u64 {
+    match profile {
+        Some(NetworkProfile::Blocked) => 5000,
+        Some(NetworkProfile::Slow) => 8000,
+        None => DEFAULT_TIMEOUT_MS,
+    }
+}
+
+fn profile_concurrency_default(profile: Option<NetworkProfile>) -> u16 {
+    match profile {
+        Some(NetworkProfile::Slow) => DEFAULT_CONCURRENCY / 2,
+        _ => DEFAULT_CONCURRENCY,
+    }
+}
+
+fn profile_probes_default(profile: Option<NetworkProfile>) -> u8 {
+    match profile {
+        Some(NetworkProfile::Blocked) => 5,
+        _ => 3,
+    }
+}
+
+fn prompt_network_profile() -> Result<Option<NetworkProfile>> {
+    match Select::new()
+        .with_prompt(profile_question())
+        .items(profile_items().as_slice())
+        .default(0)
+        .interact()?
+    {
+        1 => Ok(Some(NetworkProfile::Blocked)),
+        2 => Ok(Some(NetworkProfile::Slow)),
+        _ => Ok(None),
+    }
+}
+
+fn prompt_warp(network_profile: Option<NetworkProfile>) -> Result<ScanConfig> {
     let all_pools = clamp_pool_host_count(warp::bundled_pool().host_count());
     let count: u32 = Input::new()
         .with_prompt(format!(
@@ -51,17 +129,16 @@ fn prompt_warp() -> Result<ScanConfig> {
             .interact()?,
     )?;
     let found: u32 = Input::new()
-        .with_prompt("Stop after N working endpoints")
+        .with_prompt(stop_prompt())
         .validate_with(validate_stop_value)
         .default(20)
         .interact()?;
     let probes: u8 = Input::new()
         .with_prompt("Handshake probes per endpoint (1-10; higher = stricter 'working' — any dropped probe excludes the endpoint)")
         .validate_with(|n: &u8| (1..=10).contains(n).then_some(()).ok_or("must be 1-10"))
-        .default(3)
+        .default(profile_probes_default(network_profile))
         .interact()?;
-    let custom =
-        parse_list("Custom endpoints ip or ip:port (comma-separated; empty = bundled pools)")?;
+    let custom = parse_list(warp_endpoints_prompt())?;
     check_entries(
         &custom,
         MAX_ENDPOINTS,
@@ -108,7 +185,7 @@ fn prompt_warp() -> Result<ScanConfig> {
                 .then_some(())
                 .ok_or("must be 100-30000")
         })
-        .default(DEFAULT_TIMEOUT_MS)
+        .default(profile_timeout_default(network_profile))
         .interact()?;
 
     let cfg = ScanConfig {
@@ -121,9 +198,11 @@ fn prompt_warp() -> Result<ScanConfig> {
             probes_per_endpoint: probes,
             wgconf,
             verify_with_wgconf: verify,
+            ..Default::default()
         }),
         concurrency,
         timeout_ms,
+        network_profile,
         ..ScanConfig::default()
     };
     cfg.validate().map_err(|e| anyhow!("invalid input: {e}"))?;
@@ -235,9 +314,12 @@ async fn run_wizard(
             eprintln!("aborted");
             return Ok(());
         }
+        let snis = probe::parse_probe_snis(&cfg.probe_snis)
+            .map_err(|e| anyhow!("invalid probe SNI: {e}"))?;
         let controller = Arc::new(ScanController::new(probe::transport_for(
             cfg.probe_mode,
             &cfg.accepted_http_codes,
+            &snis,
         )));
         *current.lock().unwrap_or_else(|e| e.into_inner()) = Some(Arc::clone(&controller));
         let summary = run_scan(&controller, &cfg, verbose).await?;
@@ -397,15 +479,16 @@ fn is_terminal_unusable(err: &anyhow::Error) -> bool {
 }
 
 fn prompt_config() -> Result<ScanConfig> {
-    if Select::new()
+    let warp_mode = Select::new()
         .with_prompt("Mode")
         .item("CDN / proxy (phase 1)")
         .item("WARP")
         .default(0)
         .interact()?
-        == 1
-    {
-        return prompt_warp();
+        == 1;
+    let network_profile = prompt_network_profile()?;
+    if warp_mode {
+        return prompt_warp(network_profile);
     }
 
     let preset = Select::new()
@@ -444,7 +527,7 @@ fn prompt_config() -> Result<ScanConfig> {
     )?;
 
     let found: u32 = Input::new()
-        .with_prompt("Stop after N working endpoints")
+        .with_prompt(stop_prompt())
         .validate_with(validate_stop_value)
         .default(20)
         .interact()?;
@@ -458,7 +541,7 @@ fn prompt_config() -> Result<ScanConfig> {
     let concurrency: u16 = Input::new()
         .with_prompt("Parallel probes (1-1000)")
         .validate_with(|n: &u16| (1..=1000).contains(n).then_some(()).ok_or("must be 1-1000"))
-        .default(DEFAULT_CONCURRENCY)
+        .default(profile_concurrency_default(network_profile))
         .interact()?;
     let timeout_ms: u64 = Input::new()
         .with_prompt("Probe timeout in ms (100-30000)")
@@ -468,7 +551,7 @@ fn prompt_config() -> Result<ScanConfig> {
                 .then_some(())
                 .ok_or("must be 100-30000")
         })
-        .default(DEFAULT_TIMEOUT_MS)
+        .default(profile_timeout_default(network_profile))
         .interact()?;
 
     let loss_threshold_raw: String = Input::new()
@@ -477,11 +560,22 @@ fn prompt_config() -> Result<ScanConfig> {
         .validate_with(|s: &String| parse_loss_threshold(s).map(|_| ()))
         .interact()?;
     let loss_threshold = parse_loss_threshold(&loss_threshold_raw).map_err(|e| anyhow!("{e}"))?;
-    let idle_hold_raw: String = Input::new()
-        .with_prompt("Idle-hold stability probe in ms (0-60000, empty = off)")
-        .allow_empty(true)
-        .validate_with(|s: &String| parse_idle_hold(s).map(|_| ()))
-        .interact()?;
+    // Blocked networks idle-drop connections, so the profile offers 2000 ms
+    // as the default while keeping an explicit 0 (or any typed value) intact.
+    let idle_hold_raw: String = if network_profile == Some(NetworkProfile::Blocked) {
+        Input::new()
+            .with_prompt("Idle-hold stability probe in ms (0-60000, empty = off)")
+            .allow_empty(true)
+            .validate_with(|s: &String| parse_idle_hold(s).map(|_| ()))
+            .default("2000".to_owned())
+            .interact()?
+    } else {
+        Input::new()
+            .with_prompt("Idle-hold stability probe in ms (0-60000, empty = off)")
+            .allow_empty(true)
+            .validate_with(|s: &String| parse_idle_hold(s).map(|_| ()))
+            .interact()?
+    };
     let idle_hold_ms = parse_idle_hold(&idle_hold_raw).map_err(|e| anyhow!("{e}"))?;
 
     let probe_mode = match Select::new()
@@ -608,6 +702,7 @@ fn prompt_config() -> Result<ScanConfig> {
         min_speed_mbps,
         neighbor_count,
         phase2,
+        network_profile,
         ..ScanConfig::default()
     };
     cfg.validate().map_err(|e| anyhow!("invalid input: {e}"))?;
@@ -615,9 +710,7 @@ fn prompt_config() -> Result<ScanConfig> {
 }
 
 fn prompt_phase2() -> Result<Phase2Config> {
-    let configs = parse_list(
-        "Configs (vless/trojan/vmess/ss URIs, subscription URLs, or xray JSON paths; comma-separated)",
-    )?;
+    let configs = parse_list(phase2_configs_prompt())?;
     check_entries(
         &configs,
         MAX_PHASE2_ENTRIES,
@@ -629,12 +722,8 @@ fn prompt_phase2() -> Result<Phase2Config> {
     }
 
     let fragment = match Select::new()
-        .with_prompt("Fragment preset")
-        .item("Off")
-        .item("Light (100-200 bytes / 10-20 ms)")
-        .item("Medium (50-200 bytes / 10-40 ms)")
-        .item("Heavy (10-300 bytes / 5-50 ms)")
-        .item("Custom")
+        .with_prompt(fragment_prompt())
+        .items(fragment_items().as_slice())
         .default(0)
         .interact()?
     {
@@ -714,6 +803,14 @@ fn config_recap(cfg: &ScanConfig) -> Vec<String> {
         .unwrap_or_else(|| "none".to_owned());
     let mut lines = vec![
         recap_line("mode", mode.to_owned()),
+        recap_line(
+            "profile",
+            match cfg.network_profile {
+                Some(NetworkProfile::Blocked) => "blocked".to_owned(),
+                Some(NetworkProfile::Slow) => "slow".to_owned(),
+                None => "default".to_owned(),
+            },
+        ),
         recap_line("target", target),
         recap_line("ports", ports),
         recap_line("stop", format!("found={}, cap={}", cfg.stop.found, cap)),
@@ -1287,6 +1384,7 @@ mod tests {
                 probes_per_endpoint: 3,
                 wgconf: Some("private-key = xyz".to_owned()),
                 verify_with_wgconf: true,
+                ..Default::default()
             }),
             ..ScanConfig::default()
         };
@@ -1327,5 +1425,106 @@ mod tests {
         assert!(recap.contains("colo        only HKG"));
         assert!(recap.contains("neighbors   4 per hit"));
         assert!(recap.contains("speed test  8 MiB sample, keep 2.5 MB/s and up"));
+    }
+
+    #[test]
+    fn wizard_strings_match_the_spec_wording() {
+        assert!(
+            profile_question().contains("fully blocked")
+                && profile_question().contains("just slow"),
+            "blocked-vs-slow question drifted: {}",
+            profile_question()
+        );
+        assert_eq!(profile_items().len(), 3);
+        assert_eq!(
+            stop_prompt(),
+            "Stop after N working endpoints (unreachable = excluded, slow = kept — slowness is filtered by --min-speed, not here)"
+        );
+        assert!(
+            warp_endpoints_prompt().contains("IPv6 as [addr]:port"),
+            "endpoint prompt lost the bracketed-IPv6 hint: {}",
+            warp_endpoints_prompt()
+        );
+        assert!(
+            phase2_configs_prompt()
+                .contains("v2ray format (v2rayN / v2rayNG / NekoBox clipboard JSON)"),
+            "configs prompt lost the v2ray client label: {}",
+            phase2_configs_prompt()
+        );
+        assert!(
+            phase2_configs_prompt().contains("sing-box / clash / Shadowrocket / Quantumult"),
+            "configs prompt lost the sing-box client label: {}",
+            phase2_configs_prompt()
+        );
+        assert!(
+            fragment_prompt().contains("fully blocked (heavy) or just slow (light)?"),
+            "fragment prompt lost the blocked-vs-slow framing: {}",
+            fragment_prompt()
+        );
+        let items = fragment_items();
+        assert!(items[2].starts_with("Medium"), "Medium kept: {items:?}");
+        assert_eq!(items[4], "Custom", "Custom kept: {items:?}");
+        assert!(
+            items[1].contains("slow") && items[1].contains("light"),
+            "light reframed as just-slow: {items:?}"
+        );
+        assert!(
+            items[3].contains("blocked") && items[3].contains("heavy"),
+            "heavy reframed as fully-blocked: {items:?}"
+        );
+    }
+
+    #[test]
+    fn profile_prompt_defaults_match_the_cli_preset() {
+        assert_eq!(profile_timeout_default(None), DEFAULT_TIMEOUT_MS);
+        assert_eq!(profile_timeout_default(Some(NetworkProfile::Blocked)), 5000);
+        assert_eq!(profile_timeout_default(Some(NetworkProfile::Slow)), 8000);
+        assert_eq!(profile_concurrency_default(None), DEFAULT_CONCURRENCY);
+        assert_eq!(
+            profile_concurrency_default(Some(NetworkProfile::Blocked)),
+            DEFAULT_CONCURRENCY,
+            "blocked leaves concurrency alone"
+        );
+        assert_eq!(
+            profile_concurrency_default(Some(NetworkProfile::Slow)),
+            DEFAULT_CONCURRENCY / 2,
+            "slow halves the default concurrency"
+        );
+        assert_eq!(profile_probes_default(None), 3);
+        assert_eq!(profile_probes_default(Some(NetworkProfile::Blocked)), 5);
+        assert_eq!(
+            profile_probes_default(Some(NetworkProfile::Slow)),
+            3,
+            "slow keeps the default probe budget"
+        );
+    }
+
+    #[test]
+    fn recap_shows_the_profile_without_leaking_payloads() {
+        for (profile, want) in [
+            (None, "profile     default"),
+            (Some(NetworkProfile::Blocked), "profile     blocked"),
+            (Some(NetworkProfile::Slow), "profile     slow"),
+        ] {
+            let cfg = ScanConfig {
+                mode: Mode::Cdn,
+                target: ScanTarget::Preset(CdnPreset::Quick),
+                network_profile: profile,
+                phase2: Some(Phase2Config {
+                    configs: vec!["vless://uuid@host:443?secret".to_owned()],
+                    fragment: FragmentPreset::Heavy,
+                    custom_fragment: None,
+                    snis: vec!["example.com".to_owned()],
+                    probe_url: DEFAULT_PROBE_URL.to_owned(),
+                    probe_urls: Vec::new(),
+                    concurrency: 3,
+                }),
+                ..ScanConfig::default()
+            };
+            let recap = config_recap(&cfg).join("\n");
+            assert!(recap.contains(want), "recap:\n{recap}");
+            assert!(!recap.contains("vless://"), "recap:\n{recap}");
+            assert!(!recap.contains("example.com"), "recap:\n{recap}");
+        }
     }
 }

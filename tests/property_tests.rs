@@ -250,6 +250,13 @@ fn random_wgconf(rng: &mut SplitMix64) -> WgConfig {
         }),
         mtu: Some(rng.below(2000) as u16 + 1000),
         amnezia,
+        reserved: (rng.below(2) == 0).then(|| {
+            [
+                rng.below(256) as u8,
+                rng.below(256) as u8,
+                rng.below(256) as u8,
+            ]
+        }),
         peer: WgPeer {
             public_key: random_key(rng),
             preshared_key: (rng.below(2) == 0).then(|| random_key(rng)),
@@ -428,6 +435,7 @@ proptest! {
             dns: (!dns.is_empty()).then(|| dns.to_owned()),
             mtu: Some(mtu),
             amnezia: AmneziaParams::default(),
+            reserved: None,
             peer: WgPeer {
                 public_key,
                 preshared_key: None,

@@ -227,7 +227,7 @@ async fn open_live_tunnel(
     let header = build_protocol_header(spec, &target.host, target.port)?;
     stream.write_all(&header).await?;
     if target.https {
-        let name = ServerName::try_from(target.host.clone())
+        let name = socks::server_name_for_host(&target.host)
             .context("probe host is not a valid TLS name")?;
         stream = Box::new(
             socks::tls_connector()
@@ -1299,6 +1299,26 @@ mod tests {
             .await
             .expect_err("an over-cap chunked body must fail explicitly");
         assert!(err.to_string().contains("exceeds"), "{err}");
+    }
+
+    #[test]
+    fn inner_handshake_server_name_repairs_bracketed_ipv6_without_changing_domains() {
+        // `parse_target` feeds the inner handshake: `Url::host_str` keeps the
+        // brackets on IPv6 literals, which the old inline
+        // `ServerName::try_from` constructor rejected. The shared helper must
+        // map them to `IpAddress` while domain hosts stay `DnsName`.
+        let target = parse_target("https://[::1]/cdn-cgi/trace").unwrap();
+        assert_eq!(target.host, "[::1]");
+        assert!(target.https, "the repair must apply on the inner-TLS path");
+        match crate::socks::server_name_for_host(&target.host) {
+            Ok(ServerName::IpAddress(_)) => {}
+            other => panic!("bracketed IPv6 must map to IpAddress, got {other:?}"),
+        }
+        let target = parse_target("https://probe.test/x").unwrap();
+        match crate::socks::server_name_for_host(&target.host) {
+            Ok(ServerName::DnsName(name)) => assert_eq!(name.as_ref(), "probe.test"),
+            other => panic!("domain hosts must stay DnsName, got {other:?}"),
+        }
     }
 
     #[test]

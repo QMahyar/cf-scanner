@@ -229,8 +229,8 @@ pub struct Verdict {
 - Live smoke tests (real xray phase 2, WARP handshake, ranges refresh) are
   gated behind `#[ignore]` and run manually with `CFSCANNER_SUB_URL` set (a
   live subscription URL); never run by default in CI.
-- Coverage bar: whole-project lines >= 70% enforced in CI
-  (`cargo llvm-cov --all-targets --fail-under-lines 70`); core engine modules
+- Coverage bar: whole-project lines >= 80% enforced in CI
+  (`cargo llvm-cov --all-targets --fail-under-lines 80`); core engine modules
   targeted at >= 85% and spot-checked during review (not CI-enforced).
 - All network tests use injected mock transports; never hit real
   Cloudflare/WARP endpoints in tests.
@@ -340,3 +340,31 @@ opt-in additions; default scan behavior is unchanged. Work tracked in
 
 Non-goals confirmed during the audit and left out: default speed tests,
 scan history, GUI/Android/Docker, WARP-mode changes.
+
+## 11. Amendment (2026-09-18): best-in-class execution
+
+Sixteen tickets from the best-in-class decision map
+(`docs/wayfinder/best-in-class/`, synthesis in `spec-best-in-class.md`
+there), shipped as opt-in additions; default scan behavior is unchanged
+except P0-2 (budget-split: identical ceilings and verdicts, only faster
+failures).
+
+1. **WARP pool 8 → 15 /24s** — seven probe-verified `8.x` ranges; CDN ranges stay official-only.
+2. **Budget-split timeouts** — TCP connect ≤¼, TLS handshake ≤½ of the budget; always-on, no flag.
+3. **SOCKS ServerName repair** — IP-literal dials presenting SNI certs verify.
+4. **Share-URL hardening** — missing-`?` recovery + truncated-credential shape check.
+5. **WARP DPI noise** — `--warp-junk-count/min/max` junk-send discovery + H/S/I1 honor in wgconf verify.
+6. **Torn-down signal** — export-only `fail_reason="torn_down"`, active only at `--warp-probes >= 4`.
+7. **Adaptive UX** — opt-in `--adaptive-retries` pre-flight, `--network-profile blocked|slow`, reframed wizard.
+8. **Config bind + Reserved** — `warp-config export --bind-best`, additive `Reserved` passthrough.
+9. **`tune` subcommand** — `tune junk|sni|fragment` threshold search printing reusable scan commands.
+10. **Phase-2 tier ladder** — engine-level fallback tiers on zero-pass results.
+11. **Opt-in SNI rotation** — `--probe-snis`, worker-index order, Host tracks SNI.
+12. **Opt-in port gate** — `--warp-port-gate`, 12-sample × primary ports with 50-port escalation.
+13. **Burst fallback** — parallel small-burst lower-bound records behind `--speed-test`.
+14. **Live export + show-link** — opt-in `--export-live FILE` (conflicts with `--export`); opt-in `--show-link` to stderr.
+
+Non-goals confirmed and left out: MASQUE/H2 transports, WARP-in-WARP
+nesting, ternary verdict states, default-on tuning, Docker/GUI/mobile,
+update phone-home (explicit-only `self-update` stays a design sketch),
+committed binaries.

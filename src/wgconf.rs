@@ -16,6 +16,9 @@ pub struct WgConfig {
     pub dns: Option<String>,
     pub mtu: Option<u16>,
     pub amnezia: AmneziaParams,
+    /// WireGuard reserved-field bytes (V2rayNG import parity). Additive
+    /// passthrough only: default-off, never synthesized, ignored by verify.
+    pub reserved: Option<[u8; 3]>,
     pub peer: WgPeer,
 }
 
@@ -151,6 +154,10 @@ fn parse_awg_uri(entry: &str) -> Result<WgConfig> {
             ("privatekey".to_owned(), required(&q, "private_key")?),
             ("address".to_owned(), address),
             ("mtu".to_owned(), q.get("mtu").cloned().unwrap_or_default()),
+            (
+                "reserved".to_owned(),
+                q.get("reserved").cloned().unwrap_or_default(),
+            ),
         ]
         .into_iter()
         .collect(),
@@ -223,6 +230,7 @@ fn build_wg_config(
 
     let mtu = optional_u16(iface, "mtu")?;
     let keepalive = optional_u16(peer_map, "persistentkeepalive")?;
+    let reserved = optional_reserved(iface, "reserved")?;
     let amnezia = AmneziaParams {
         jc: optional_u16(iface, "jc")?,
         jmin: optional_u16(iface, "jmin")?,
@@ -241,6 +249,7 @@ fn build_wg_config(
         dns: iface.get("dns").cloned().filter(|v| !v.is_empty()),
         mtu,
         amnezia,
+        reserved,
         peer: WgPeer {
             public_key: peer_public,
             preshared_key: peer_map
@@ -290,6 +299,9 @@ pub fn render_wgconf(wg: &WgConfig) -> String {
             out.push_str(&format!("{key} = {v}\n"));
         }
     }
+    if let Some([a, b, c]) = wg.reserved {
+        out.push_str(&format!("Reserved = {a}, {b}, {c}\n"));
+    }
     out.push('\n');
     out.push_str("[Peer]\n");
     out.push_str(&format!("PublicKey = {}\n", wg.peer.public_key));
@@ -309,6 +321,90 @@ pub fn render_wgconf(wg: &WgConfig) -> String {
         out.push_str(&format!("PersistentKeepalive = {ka}\n"));
     }
     out
+}
+
+/// Render the URI-carried subset of a config as a `wireguard://` share link
+/// (inverse of `parse_awg_uri`): endpoint authority plus the query fields the
+/// parser reads. DNS and AllowedIPs have no URI params, so they stay in the
+/// conf body only — the link is copy-pasteable, not lossless.
+pub fn render_awg_uri(wg: &WgConfig) -> Result<String> {
+    if wg.private_key.is_empty() {
+        bail!("cannot render a WireGuard link without a private key");
+    }
+    if wg.peer.public_key.is_empty() {
+        bail!("cannot render a WireGuard link without a peer public key");
+    }
+    let endpoint = wg
+        .peer
+        .endpoint
+        .as_deref()
+        .filter(|e| !e.is_empty())
+        .ok_or_else(|| anyhow!("cannot render a WireGuard link without an endpoint"))?;
+    let (host, port) = endpoint
+        .rsplit_once(':')
+        .ok_or_else(|| anyhow!("cannot render a WireGuard link without an endpoint port"))?;
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    if host.is_empty() {
+        bail!("cannot render a WireGuard link without an endpoint host");
+    }
+    let port: u16 = port
+        .parse()
+        .map_err(|_| anyhow!("cannot render a WireGuard link with an invalid endpoint port"))?;
+    let authority = if host.contains(':') {
+        format!("[{host}]:{port}")
+    } else {
+        format!("{host}:{port}")
+    };
+    let mut url = Url::parse(&format!("wireguard://{authority}"))
+        .map_err(|e| anyhow!("cannot render a WireGuard link: {e}"))?;
+    {
+        let mut q = url.query_pairs_mut();
+        q.append_pair("private_key", &wg.private_key);
+        q.append_pair("public_key", &wg.peer.public_key);
+        let local: Vec<&str> = wg
+            .address
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .collect();
+        if !local.is_empty() {
+            q.append_pair("local_address", &local.join("-"));
+        }
+        if let Some(mtu) = wg.mtu {
+            q.append_pair("mtu", &mtu.to_string());
+        }
+        if let Some([a, b, c]) = wg.reserved {
+            q.append_pair("reserved", &format!("{a},{b},{c}"));
+        }
+        if let Some(psk) = &wg.peer.preshared_key {
+            q.append_pair("preshared_key", psk);
+        }
+        if let Some(ka) = wg.peer.persistent_keepalive {
+            q.append_pair("persistent_keepalive", &ka.to_string());
+        }
+        for (key, value) in [
+            ("jc", wg.amnezia.jc),
+            ("jmin", wg.amnezia.jmin),
+            ("jmax", wg.amnezia.jmax),
+        ] {
+            if let Some(v) = value {
+                q.append_pair(key, &v.to_string());
+            }
+        }
+        for (key, value) in [
+            ("s1", wg.amnezia.s1),
+            ("s2", wg.amnezia.s2),
+            ("h1", wg.amnezia.h1),
+            ("h2", wg.amnezia.h2),
+            ("h3", wg.amnezia.h3),
+            ("h4", wg.amnezia.h4),
+        ] {
+            if let Some(v) = value {
+                q.append_pair(key, &v.to_string());
+            }
+        }
+    }
+    Ok(url.into())
 }
 
 pub fn decode_key(b64: &str) -> Result<[u8; 32]> {
@@ -346,6 +442,31 @@ fn optional_u8(map: &BTreeMap<String, String>, key: &str) -> Result<Option<u8>> 
             .map_err(|_| anyhow!("{key} is not a number: '{v}'")),
         None => Ok(None),
     }
+}
+
+/// WireGuard reserved-field bytes as `a,b,c` (three 0-255 values; the shape
+/// sing-box documents as `[0, 0, 0]` and WARP-ecosystem clients pass as
+/// `'1,2,3'`). Whitespace around values is tolerated like AllowedIPs;
+/// anything else (wrong count, non-numeric, overflow) is a hard reject.
+fn optional_reserved(map: &BTreeMap<String, String>, key: &str) -> Result<Option<[u8; 3]>> {
+    match map.get(key).filter(|v| !v.is_empty()) {
+        Some(v) => parse_reserved(v)
+            .ok_or_else(|| anyhow!("{key} must be three 0-255 byte values as 'a,b,c', got: '{v}'"))
+            .map(Some),
+        None => Ok(None),
+    }
+}
+
+fn parse_reserved(raw: &str) -> Option<[u8; 3]> {
+    let mut parts = raw.split(',');
+    let mut out = [0u8; 3];
+    for slot in &mut out {
+        *slot = parts.next()?.trim().parse().ok()?;
+    }
+    if parts.next().is_some() {
+        return None;
+    }
+    Some(out)
 }
 
 #[cfg(test)]
@@ -389,6 +510,7 @@ mod tests {
         assert_eq!(wg.peer.allowed_ips, vec!["0.0.0.0/0", "::/0"]);
         assert_eq!(wg.peer.endpoint.as_deref(), Some("8.6.112.31:4198"));
         assert_eq!(wg.peer.persistent_keepalive, Some(25));
+        assert_eq!(wg.reserved, None, "Reserved defaults off");
     }
 
     #[test]
@@ -610,6 +732,7 @@ mod tests {
             dns: None,
             mtu: None, // MTU boundary: absent stays absent
             amnezia: AmneziaParams::default(),
+            reserved: None,
             peer: WgPeer {
                 public_key: peer_key.to_owned(),
                 preshared_key: None, // no PSK line
@@ -625,6 +748,7 @@ mod tests {
         assert!(!rendered.contains("PresharedKey"));
         assert!(!rendered.contains("AllowedIPs"));
         assert!(!rendered.contains("Endpoint"));
+        assert!(!rendered.contains("Reserved"));
         assert!(!rendered.contains("Jc"));
         let reparsed = parse_wgconf(&rendered).unwrap();
         assert_eq!(wg, reparsed);
@@ -640,6 +764,7 @@ mod tests {
             dns: Some("1.1.1.1".to_owned()),
             mtu: Some(1280),
             amnezia: AmneziaParams::default(),
+            reserved: None,
             peer: WgPeer {
                 public_key: peer_key.to_owned(),
                 preshared_key: Some("cHFsc2VjcmV0cHFsc2VjcmV0cHFsc2VjcmV0MTIzNDU=".to_owned()),
@@ -665,5 +790,135 @@ mod tests {
     fn mtu_boundary_value_parses() {
         let text = INI_FIXTURE.replace("MTU = 1280", "MTU = 65535");
         assert_eq!(parse_wgconf(&text).unwrap().mtu, Some(65535));
+    }
+
+    #[test]
+    fn reserved_round_trips_through_conf_render() {
+        let text = INI_FIXTURE.replace("MTU = 1280", "MTU = 1280\nReserved = 1, 2, 3");
+        let wg = parse_wgconf(&text).unwrap();
+        assert_eq!(wg.reserved, Some([1, 2, 3]));
+        let rendered = render_wgconf(&wg);
+        assert!(rendered.contains("Reserved = 1, 2, 3"), "{rendered}");
+        assert_eq!(parse_wgconf(&rendered).unwrap(), wg);
+    }
+
+    #[test]
+    fn reserved_key_is_case_insensitive_and_space_tolerant() {
+        let text = "[interface]\nPrivateKey = AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\nreserved =  4,5,  6\n[Peer]\nPublicKey = bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=\n";
+        assert_eq!(parse_wgconf(text).unwrap().reserved, Some([4, 5, 6]));
+    }
+
+    #[test]
+    fn reserved_parses_from_awg_uri_query() {
+        let base = "wg://8.47.69.246:7103?private_key=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA%3D&public_key=bmXOC%2BF1FxEMF9dyiK2H5%2F1SUtzH0JuVo51h2wPfgyo%3D";
+        let wg = parse_wg_entry(&format!("{base}&reserved=7,8,9")).unwrap();
+        assert_eq!(wg.reserved, Some([7, 8, 9]));
+        let encoded = parse_wg_entry(&format!("{base}&reserved=7%2C8%2C9")).unwrap();
+        assert_eq!(encoded.reserved, Some([7, 8, 9]));
+        let rendered = render_wgconf(&wg);
+        assert!(rendered.contains("Reserved = 7, 8, 9"), "{rendered}");
+        assert_eq!(parse_wgconf(&rendered).unwrap(), wg);
+    }
+
+    #[test]
+    fn reserved_absent_in_uri_stays_off() {
+        let uri = "wg://8.47.69.246:7103?private_key=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA%3D&public_key=bmXOC%2BF1FxEMF9dyiK2H5%2F1SUtzH0JuVo51h2wPfgyo%3D";
+        assert_eq!(parse_wg_entry(uri).unwrap().reserved, None);
+    }
+
+    #[test]
+    fn reserved_rejects_malformed_values_in_both_forms() {
+        for bad in [
+            "1,2", "1,2,3,4", "a,b,c", "256,0,0", "-1,0,0", "1,,3", "1,2,3,", "0x1,2,3",
+        ] {
+            let conf = format!(
+                "[Interface]\nPrivateKey = AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\nReserved = {bad}\n[Peer]\nPublicKey = bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=\n"
+            );
+            assert!(
+                parse_wgconf(&conf).is_err(),
+                "conf must reject Reserved = {bad:?}"
+            );
+            let uri = format!(
+                "wg://8.47.69.246:7103?private_key=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA%3D&public_key=bmXOC%2BF1FxEMF9dyiK2H5%2F1SUtzH0JuVo51h2wPfgyo%3D&reserved={}",
+                bad.replace(',', "%2C")
+            );
+            assert!(
+                parse_wg_entry(&uri).is_err(),
+                "URI must reject reserved={bad:?}"
+            );
+        }
+    }
+
+    fn linkable_config() -> WgConfig {
+        WgConfig {
+            private_key: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=".to_owned(),
+            address: "172.16.0.2/32, 2606:4700:110:8d4a:ca6:b507:215:d04f/128".to_owned(),
+            dns: Some("1.1.1.1".to_owned()),
+            mtu: Some(1280),
+            amnezia: AmneziaParams {
+                jc: Some(5),
+                jmin: Some(50),
+                jmax: Some(100),
+                s1: Some(0),
+                s2: Some(0),
+                h1: Some(1),
+                h2: Some(2),
+                h3: Some(3),
+                h4: Some(4),
+            },
+            reserved: Some([7, 8, 9]),
+            peer: WgPeer {
+                public_key: "bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=".to_owned(),
+                preshared_key: None,
+                allowed_ips: vec!["0.0.0.0/0".to_owned(), "::/0".to_owned()],
+                endpoint: Some("8.47.69.246:7103".to_owned()),
+                persistent_keepalive: Some(25),
+            },
+        }
+    }
+
+    #[test]
+    fn awg_uri_renderer_round_trips_uri_carried_fields() {
+        let wg = linkable_config();
+        let uri = render_awg_uri(&wg).unwrap();
+        assert!(uri.starts_with("wireguard://8.47.69.246:7103?"), "{uri}");
+        let back = parse_wg_entry(&uri).unwrap();
+        assert_eq!(back.private_key, wg.private_key);
+        assert_eq!(back.peer.public_key, wg.peer.public_key);
+        assert_eq!(back.address, wg.address);
+        assert_eq!(back.mtu, wg.mtu);
+        assert_eq!(back.reserved, Some([7, 8, 9]));
+        assert_eq!(back.amnezia, wg.amnezia);
+        assert_eq!(back.peer.endpoint, wg.peer.endpoint);
+        assert_eq!(back.peer.persistent_keepalive, Some(25));
+    }
+
+    #[test]
+    fn awg_uri_renderer_brackets_ipv6_and_omits_empties() {
+        let mut wg = linkable_config();
+        wg.peer.endpoint = Some("[2001:db8::1]:51820".to_owned());
+        wg.mtu = None;
+        wg.reserved = None;
+        wg.amnezia = AmneziaParams::default();
+        wg.peer.persistent_keepalive = None;
+        let uri = render_awg_uri(&wg).unwrap();
+        assert!(uri.starts_with("wireguard://[2001:db8::1]:51820?"), "{uri}");
+        let back = parse_wg_entry(&uri).unwrap();
+        assert_eq!(back.peer.endpoint.as_deref(), Some("[2001:db8::1]:51820"));
+        assert_eq!(back.reserved, None, "absent Reserved stays off");
+        assert_eq!(back.amnezia, AmneziaParams::default());
+    }
+
+    #[test]
+    fn awg_uri_renderer_rejects_missing_identity_or_endpoint() {
+        let mut wg = linkable_config();
+        wg.peer.endpoint = None;
+        assert!(render_awg_uri(&wg).is_err());
+        let mut wg = linkable_config();
+        wg.peer.endpoint = Some("no-port-here".to_owned());
+        assert!(render_awg_uri(&wg).is_err());
+        let mut wg = linkable_config();
+        wg.private_key.clear();
+        assert!(render_awg_uri(&wg).is_err());
     }
 }

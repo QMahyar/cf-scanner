@@ -1,4 +1,6 @@
-use super::super::{Cli, Command, FragmentArg, ModeArg, PresetArg, ProbeArg, ScanArgs};
+use super::super::{
+    Cli, Command, FragmentArg, ModeArg, NetworkProfileArg, PresetArg, ProbeArg, ScanArgs,
+};
 use super::{build_scan_config, cap_warning};
 use cf_scanner::api;
 use cf_scanner::api::types::{
@@ -31,14 +33,22 @@ fn args() -> ScanArgs {
         warp_endpoints: vec![],
         warp_verify: false,
         warp_wgconf_file: None,
+        warp_junk_count: None,
+        warp_junk_min: None,
+        warp_junk_max: None,
+        adaptive_retries: false,
+        network_profile: None,
+        warp_port_gate: false,
         seed: None,
         export: None,
+        export_live: None,
         export_format: ExportFormatArg::Csv,
         loss_threshold: None,
         min_latency: None,
         idle_hold_ms: 0,
         probe: ProbeArg::Tls,
         http_status_code: None,
+        probe_snis: vec![],
         speed_test: false,
         min_speed: None,
         neighbor_scan: 0,
@@ -344,6 +354,59 @@ fn http_status_code_parses_comma_delimited_and_validates_range() {
         _ => unreachable!(),
     };
     assert!(build_scan_config(&a).is_err());
+}
+
+#[test]
+fn probe_snis_default_to_single_and_normalize() {
+    assert_eq!(
+        build_scan_config(&args()).unwrap().probe_snis,
+        vec!["cloudflare.com".to_owned()]
+    );
+    let mut a = args();
+    a.probe_snis = vec![
+        "  Speed.Cloudflare.COM ".to_owned(),
+        "a.example.com".to_owned(),
+    ];
+    let cfg = build_scan_config(&a).unwrap();
+    assert_eq!(
+        cfg.probe_snis,
+        vec!["speed.cloudflare.com", "a.example.com"]
+    );
+}
+
+#[test]
+fn probe_snis_reject_tcp_and_warp_and_bad_shapes() {
+    let mut a = args();
+    a.probe = ProbeArg::Tcp;
+    a.probe_snis = vec!["example.com".to_owned()];
+    let err = build_scan_config(&a).unwrap_err();
+    assert!(err.to_string().contains("--probe-snis"), "{err:#}");
+    let mut a = args();
+    a.mode = ModeArg::Warp;
+    a.probe_snis = vec!["example.com".to_owned()];
+    let err = build_scan_config(&a).unwrap_err();
+    assert!(err.to_string().contains("--probe-snis"), "{err:#}");
+    let mut a = args();
+    a.probe = ProbeArg::Http;
+    a.probe_snis = vec!["not a host!".to_owned()];
+    let err = build_scan_config(&a).unwrap_err();
+    assert!(err.to_string().contains("SNI"), "{err:#}");
+}
+
+#[test]
+fn probe_snis_parse_comma_delimited_from_cli() {
+    let argv = [
+        "cf-scanner",
+        "scan",
+        "--probe-snis",
+        "a.example.com,B.EXAMPLE.COM",
+    ];
+    let a = match Cli::try_parse_from(argv).unwrap().command {
+        Command::Scan { args } => *args,
+        _ => unreachable!(),
+    };
+    let cfg = build_scan_config(&a).unwrap();
+    assert_eq!(cfg.probe_snis, vec!["a.example.com", "b.example.com"]);
 }
 
 #[test]
@@ -818,4 +881,475 @@ fn cdn_mode_rejects_warp_probes_at_cli_parse_level() {
     };
     let err = build_scan_config(&a).unwrap_err();
     assert!(err.to_string().contains("--warp-probes"), "{err:#}");
+}
+
+#[test]
+fn warp_junk_flags_build_the_discovery_profile() {
+    let argv = [
+        "cf-scanner",
+        "scan",
+        "--mode",
+        "warp",
+        "--count",
+        "50",
+        "--warp-junk-count",
+        "4",
+        "--warp-junk-min",
+        "32",
+        "--warp-junk-max",
+        "64",
+    ];
+    let scan_args = match Cli::try_parse_from(argv).unwrap().command {
+        Command::Scan { args } => *args,
+        _ => unreachable!(),
+    };
+    let cfg = build_scan_config(&scan_args).unwrap();
+    let warp = cfg.warp.unwrap();
+    assert_eq!(warp.junk_count, 4);
+    assert_eq!(warp.junk_min, 32);
+    assert_eq!(warp.junk_max, 64);
+    let warp = build_scan_config(&{
+        let mut a = args();
+        a.mode = ModeArg::Warp;
+        a
+    })
+    .unwrap()
+    .warp
+    .unwrap();
+    assert_eq!(
+        (warp.junk_count, warp.junk_min, warp.junk_max),
+        (0, 0, 0),
+        "junk must default to off"
+    );
+}
+
+#[test]
+fn cdn_mode_rejects_warp_junk_flags() {
+    for flag in ["--warp-junk-count", "--warp-junk-min", "--warp-junk-max"] {
+        let argv = ["cf-scanner", "scan", flag, "4"];
+        let a = match Cli::try_parse_from(argv).unwrap().command {
+            Command::Scan { args } => *args,
+            _ => unreachable!(),
+        };
+        let err = build_scan_config(&a).unwrap_err();
+        assert!(err.to_string().contains(flag), "{err:#}");
+    }
+    let mut a = args();
+    a.warp_junk_count = Some(0);
+    let err = build_scan_config(&a).unwrap_err();
+    assert!(
+        err.to_string().contains("--warp-junk-count"),
+        "even the off value must not silently no-op: {err:#}"
+    );
+}
+
+#[test]
+fn warp_port_gate_builds_the_flag_and_requires_warp_mode() {
+    let argv = [
+        "cf-scanner",
+        "scan",
+        "--mode",
+        "warp",
+        "--count",
+        "50",
+        "--warp-port-gate",
+    ];
+    let scan_args = match Cli::try_parse_from(argv).unwrap().command {
+        Command::Scan { args } => *args,
+        _ => unreachable!(),
+    };
+    let cfg = build_scan_config(&scan_args).unwrap();
+    assert!(cfg.warp.unwrap().port_gate);
+    let warp = build_scan_config(&{
+        let mut a = args();
+        a.mode = ModeArg::Warp;
+        a
+    })
+    .unwrap()
+    .warp
+    .unwrap();
+    assert!(!warp.port_gate, "gate must default to off");
+    let argv = ["cf-scanner", "scan", "--warp-port-gate"];
+    let a = match Cli::try_parse_from(argv).unwrap().command {
+        Command::Scan { args } => *args,
+        _ => unreachable!(),
+    };
+    let err = build_scan_config(&a).unwrap_err();
+    assert!(err.to_string().contains("--warp-port-gate"), "{err:#}");
+}
+
+#[test]
+fn warp_junk_out_of_range_is_rejected() {
+    let mut a = args();
+    a.mode = ModeArg::Warp;
+    a.warp_junk_count = Some(api::types::MAX_WARP_JUNK_COUNT + 1);
+    let err = build_scan_config(&a).unwrap_err();
+    assert!(err.to_string().contains("junk"), "{err:#}");
+    let mut a = args();
+    a.mode = ModeArg::Warp;
+    a.warp_junk_count = Some(4);
+    a.warp_junk_min = Some(64);
+    a.warp_junk_max = Some(32);
+    let err = build_scan_config(&a).unwrap_err();
+    assert!(err.to_string().contains("junk"), "{err:#}");
+    let mut a = args();
+    a.mode = ModeArg::Warp;
+    a.warp_junk_count = Some(4);
+    a.warp_junk_min = Some(0);
+    a.warp_junk_max = Some(api::types::MAX_WARP_JUNK_SIZE + 1);
+    let err = build_scan_config(&a).unwrap_err();
+    assert!(err.to_string().contains("junk"), "{err:#}");
+    let mut a = args();
+    a.mode = ModeArg::Warp;
+    a.warp_junk_count = Some(4);
+    let err = build_scan_config(&a).unwrap_err();
+    assert!(
+        err.to_string().contains("junk"),
+        "an enabled count with zero sizes must fail: {err:#}"
+    );
+    let mut a = args();
+    a.mode = ModeArg::Warp;
+    a.warp_junk_count = Some(4);
+    a.warp_junk_min = Some(32);
+    a.warp_junk_max = Some(64);
+    let cfg = build_scan_config(&a).unwrap();
+    cfg.validate()
+        .expect("a CLI-built junk profile must pass ScanConfig::validate");
+}
+
+#[test]
+fn warp_config_junk_serde_defaults_and_stays_strict() {
+    let back: api::types::WarpConfig = serde_json::from_str("{}").unwrap();
+    assert_eq!(
+        (back.junk_count, back.junk_min, back.junk_max),
+        (0, 0, 0),
+        "missing junk keys must default to off for forward compatibility"
+    );
+    assert!(serde_json::from_str::<api::types::WarpConfig>("{\"bogus\":1}").is_err());
+}
+
+#[test]
+fn adaptive_retries_defaults_off_and_builds_in_warp_mode() {
+    assert!(
+        !build_scan_config(&args()).unwrap().adaptive_retries,
+        "the pre-flight must never be default-on"
+    );
+    let argv = ["cf-scanner", "scan", "--mode", "warp", "--adaptive-retries"];
+    let a = match Cli::try_parse_from(argv).unwrap().command {
+        Command::Scan { args } => *args,
+        _ => unreachable!(),
+    };
+    assert!(a.adaptive_retries);
+    let cfg = build_scan_config(&a).unwrap();
+    assert!(cfg.adaptive_retries);
+    assert_eq!(cfg.mode, Mode::Warp);
+}
+
+#[test]
+fn adaptive_retries_is_warp_only() {
+    let mut a = args();
+    a.adaptive_retries = true;
+    let err = build_scan_config(&a).unwrap_err();
+    assert!(err.to_string().contains("--adaptive-retries"), "{err:#}");
+    let argv = ["cf-scanner", "scan", "--adaptive-retries"];
+    let a = match Cli::try_parse_from(argv).unwrap().command {
+        Command::Scan { args } => *args,
+        _ => unreachable!(),
+    };
+    let err = build_scan_config(&a).unwrap_err();
+    assert!(err.to_string().contains("--adaptive-retries"), "{err:#}");
+}
+
+#[test]
+fn explicit_warp_probes_win_over_adaptive_retries() {
+    let mut a = args();
+    a.mode = ModeArg::Warp;
+    a.warp_probes = Some(5);
+    a.adaptive_retries = true;
+    let cfg = build_scan_config(&a).unwrap();
+    assert!(
+        !cfg.adaptive_retries,
+        "an explicit --warp-probes must switch the pre-flight off"
+    );
+    assert_eq!(cfg.warp.unwrap().probes_per_endpoint, 5);
+    let mut a = args();
+    a.mode = ModeArg::Warp;
+    a.adaptive_retries = true;
+    let cfg = build_scan_config(&a).unwrap();
+    assert!(
+        cfg.adaptive_retries,
+        "no explicit probes: pre-flight stays on"
+    );
+}
+
+#[test]
+fn adaptive_skip_note_wording_is_pinned() {
+    assert_eq!(
+        super::adaptive_skip_note(5),
+        "--adaptive-retries skipped (explicit --warp-probes 5 wins; pre-flight not run)"
+    );
+}
+
+#[test]
+fn adaptive_retries_serde_defaults_off_and_round_trips() {
+    let legacy = r#"{"mode":"Cdn","target":{"Count":10},"ports":[443],"stop":{"found":1,"cap":null},"exclude":[],"custom_cidrs":[],"concurrency":64,"timeout_ms":3000}"#;
+    let cfg: api::types::ScanConfig = serde_json::from_str(legacy).unwrap();
+    assert!(
+        !cfg.adaptive_retries,
+        "omitted field must deserialize as false for forward compatibility"
+    );
+    let mut c = build_scan_config(&args()).unwrap();
+    c.adaptive_retries = true;
+    let json = serde_json::to_string(&c).unwrap();
+    assert!(json.contains("\"adaptive_retries\":true"), "{json}");
+    let back: api::types::ScanConfig = serde_json::from_str(&json).unwrap();
+    assert_eq!(c, back);
+    let mut v: serde_json::Value = serde_json::from_str(&json).unwrap();
+    v.as_object_mut()
+        .unwrap()
+        .insert("future_flag".to_owned(), serde_json::Value::Bool(true));
+    serde_json::from_value::<api::types::ScanConfig>(v)
+        .expect("the root must stay non-strict around the new field");
+}
+
+#[test]
+fn network_profile_unset_keeps_today_defaults() {
+    let cfg = build_scan_config(&args()).unwrap();
+    assert_eq!(cfg.network_profile, None);
+    assert_eq!(cfg.timeout_ms, api::types::DEFAULT_TIMEOUT_MS);
+    assert_eq!(cfg.concurrency, api::types::DEFAULT_CONCURRENCY);
+    assert_eq!(cfg.idle_hold_ms, 0);
+    let mut a = args();
+    a.mode = ModeArg::Warp;
+    let cfg = build_scan_config(&a).unwrap();
+    assert_eq!(cfg.network_profile, None);
+    assert_eq!(cfg.timeout_ms, api::types::DEFAULT_TIMEOUT_MS);
+    assert_eq!(
+        cfg.warp.unwrap().probes_per_endpoint,
+        api::types::DEFAULT_PROBES_PER_ENDPOINT
+    );
+}
+
+#[test]
+fn network_profile_parses_blocked_and_slow() {
+    for (flag, want) in [
+        ("blocked", api::types::NetworkProfile::Blocked),
+        ("slow", api::types::NetworkProfile::Slow),
+    ] {
+        let argv = ["cf-scanner", "scan", "--network-profile", flag];
+        let a = match Cli::try_parse_from(argv).unwrap().command {
+            Command::Scan { args } => *args,
+            _ => unreachable!(),
+        };
+        assert_eq!(
+            a.network_profile,
+            Some(match want {
+                api::types::NetworkProfile::Blocked => NetworkProfileArg::Blocked,
+                api::types::NetworkProfile::Slow => NetworkProfileArg::Slow,
+            })
+        );
+        let cfg = build_scan_config(&a).unwrap();
+        assert_eq!(cfg.network_profile, Some(want));
+    }
+    assert!(
+        Cli::try_parse_from(["cf-scanner", "scan", "--network-profile", "turbo"]).is_err(),
+        "only blocked|slow are accepted"
+    );
+}
+
+#[test]
+fn cdn_blocked_profile_sets_timeout_and_idle_hold() {
+    let mut a = args();
+    a.network_profile = Some(NetworkProfileArg::Blocked);
+    let cfg = build_scan_config(&a).unwrap();
+    assert_eq!(
+        cfg.network_profile,
+        Some(api::types::NetworkProfile::Blocked)
+    );
+    assert_eq!(cfg.timeout_ms, super::PROFILE_BLOCKED_CDN_TIMEOUT_MS);
+    assert_eq!(cfg.idle_hold_ms, super::PROFILE_BLOCKED_CDN_IDLE_HOLD_MS);
+    assert_eq!(
+        cfg.concurrency,
+        api::types::DEFAULT_CONCURRENCY,
+        "blocked leaves concurrency alone"
+    );
+    cfg.validate()
+        .expect("a profile-built CDN config must validate");
+}
+
+#[test]
+fn cdn_slow_profile_sets_timeout_and_halves_concurrency() {
+    let mut a = args();
+    a.network_profile = Some(NetworkProfileArg::Slow);
+    let cfg = build_scan_config(&a).unwrap();
+    assert_eq!(cfg.network_profile, Some(api::types::NetworkProfile::Slow));
+    assert_eq!(cfg.timeout_ms, super::PROFILE_SLOW_TIMEOUT_MS);
+    assert_eq!(
+        cfg.concurrency,
+        api::types::DEFAULT_CONCURRENCY / 2,
+        "slow halves the default concurrency"
+    );
+    assert_eq!(cfg.idle_hold_ms, 0, "slow leaves idle-hold alone");
+    cfg.validate()
+        .expect("a profile-built CDN config must validate");
+}
+
+#[test]
+fn warp_blocked_profile_raises_probes() {
+    let mut a = args();
+    a.mode = ModeArg::Warp;
+    a.network_profile = Some(NetworkProfileArg::Blocked);
+    let cfg = build_scan_config(&a).unwrap();
+    assert_eq!(
+        cfg.network_profile,
+        Some(api::types::NetworkProfile::Blocked)
+    );
+    assert_eq!(
+        cfg.warp.unwrap().probes_per_endpoint,
+        super::PROFILE_BLOCKED_WARP_PROBES
+    );
+    assert_eq!(
+        cfg.timeout_ms,
+        api::types::DEFAULT_TIMEOUT_MS,
+        "blocked leaves the WARP timeout alone"
+    );
+}
+
+#[test]
+fn warp_slow_profile_sets_timeout_and_default_probes() {
+    let mut a = args();
+    a.mode = ModeArg::Warp;
+    a.network_profile = Some(NetworkProfileArg::Slow);
+    let cfg = build_scan_config(&a).unwrap();
+    assert_eq!(cfg.network_profile, Some(api::types::NetworkProfile::Slow));
+    assert_eq!(cfg.timeout_ms, super::PROFILE_SLOW_TIMEOUT_MS);
+    assert_eq!(
+        cfg.warp.unwrap().probes_per_endpoint,
+        super::PROFILE_SLOW_WARP_PROBES
+    );
+}
+
+#[test]
+fn explicit_flags_always_win_over_the_profile() {
+    let mut a = args();
+    a.network_profile = Some(NetworkProfileArg::Blocked);
+    a.timeout_ms = 1000;
+    a.idle_hold_ms = 500;
+    let cfg = build_scan_config(&a).unwrap();
+    assert_eq!(cfg.timeout_ms, 1000);
+    assert_eq!(cfg.idle_hold_ms, 500);
+    assert_eq!(
+        cfg.network_profile,
+        Some(api::types::NetworkProfile::Blocked)
+    );
+
+    let mut a = args();
+    a.network_profile = Some(NetworkProfileArg::Slow);
+    a.concurrency = 100;
+    a.timeout_ms = 1000;
+    let cfg = build_scan_config(&a).unwrap();
+    assert_eq!(cfg.concurrency, 100, "explicit concurrency is never halved");
+    assert_eq!(cfg.timeout_ms, 1000);
+
+    let mut a = args();
+    a.mode = ModeArg::Warp;
+    a.network_profile = Some(NetworkProfileArg::Blocked);
+    a.warp_probes = Some(7);
+    let cfg = build_scan_config(&a).unwrap();
+    assert_eq!(cfg.warp.unwrap().probes_per_endpoint, 7);
+
+    let mut a = args();
+    a.mode = ModeArg::Warp;
+    a.network_profile = Some(NetworkProfileArg::Slow);
+    a.timeout_ms = 1000;
+    let cfg = build_scan_config(&a).unwrap();
+    assert_eq!(cfg.timeout_ms, 1000);
+    assert_eq!(
+        cfg.warp.unwrap().probes_per_endpoint,
+        super::PROFILE_SLOW_WARP_PROBES
+    );
+}
+
+#[test]
+fn apply_profile_tuning_covers_the_full_matrix() {
+    use super::apply_profile_tuning;
+    use api::types::NetworkProfile::{Blocked, Slow};
+    use api::types::{DEFAULT_CONCURRENCY, DEFAULT_TIMEOUT_MS, Mode};
+    // (mode, profile, timeout, concurrency, idle, probes) -> expected.
+    let run = |mode: Mode,
+               profile: Option<api::types::NetworkProfile>,
+               timeout: u64,
+               concurrency: u16,
+               idle: u64,
+               probes: u8| {
+        let (mut t, mut c, mut i, mut p) = (timeout, concurrency, idle, probes);
+        apply_profile_tuning(
+            &mode,
+            profile,
+            t != DEFAULT_TIMEOUT_MS,
+            c != DEFAULT_CONCURRENCY,
+            i != 0,
+            probes != api::DEFAULT_PROBES_PER_ENDPOINT,
+            &mut t,
+            &mut c,
+            &mut i,
+            &mut p,
+        );
+        (t, c, i, p)
+    };
+    assert_eq!(
+        run(Mode::Cdn, None, 3000, 64, 0, 3),
+        (3000, 64, 0, 3),
+        "unset = today"
+    );
+    assert_eq!(
+        run(Mode::Cdn, Some(Blocked), 3000, 64, 0, 3),
+        (5000, 64, 2000, 3)
+    );
+    assert_eq!(run(Mode::Cdn, Some(Slow), 3000, 64, 0, 3), (8000, 32, 0, 3));
+    assert_eq!(
+        run(Mode::Warp, Some(Blocked), 3000, 64, 0, 3),
+        (3000, 64, 0, 5)
+    );
+    assert_eq!(
+        run(Mode::Warp, Some(Slow), 3000, 64, 0, 3),
+        (8000, 64, 0, 3)
+    );
+    assert_eq!(
+        run(Mode::Cdn, Some(Blocked), 1000, 100, 500, 3),
+        (1000, 100, 500, 3),
+        "every explicit knob survives"
+    );
+    assert_eq!(
+        run(Mode::Cdn, Some(Slow), 3000, 100, 0, 3),
+        (8000, 100, 0, 3),
+        "explicit concurrency is never halved"
+    );
+    assert_eq!(
+        run(Mode::Warp, Some(Blocked), 3000, 64, 0, 7),
+        (3000, 64, 0, 7),
+        "explicit probes survive"
+    );
+}
+
+#[test]
+fn network_profile_serde_defaults_unset_and_round_trips() {
+    let legacy = r#"{"mode":"Cdn","target":{"Count":10},"ports":[443],"stop":{"found":1,"cap":null},"exclude":[],"custom_cidrs":[],"concurrency":64,"timeout_ms":3000}"#;
+    let cfg: api::types::ScanConfig = serde_json::from_str(legacy).unwrap();
+    assert_eq!(
+        cfg.network_profile, None,
+        "omitted field must deserialize as unset for forward compatibility"
+    );
+    let mut c = build_scan_config(&args()).unwrap();
+    c.network_profile = Some(api::types::NetworkProfile::Blocked);
+    let json = serde_json::to_string(&c).unwrap();
+    assert!(json.contains("\"network_profile\":\"blocked\""), "{json}");
+    let back: api::types::ScanConfig = serde_json::from_str(&json).unwrap();
+    assert_eq!(c, back);
+    let mut v: serde_json::Value = serde_json::from_str(&json).unwrap();
+    v.as_object_mut()
+        .unwrap()
+        .insert("future_flag".to_owned(), serde_json::Value::Bool(true));
+    serde_json::from_value::<api::types::ScanConfig>(v)
+        .expect("the root must stay non-strict around the new field");
 }

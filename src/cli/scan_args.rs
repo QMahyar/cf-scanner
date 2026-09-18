@@ -1,7 +1,7 @@
 use anyhow::{Result, anyhow, bail};
 use cf_scanner::api;
 use cf_scanner::api::types::{
-    CdnPreset, Mode, Port, ProbeMode, ScanConfig, ScanTarget, StopCondition,
+    CdnPreset, Mode, NetworkProfile, Port, ProbeMode, ScanConfig, ScanTarget, StopCondition,
 };
 
 use super::{ModeArg, ProbeArg, ScanArgs};
@@ -16,6 +16,45 @@ pub(crate) fn build_scan_config(args: &ScanArgs) -> Result<ScanConfig> {
             let mut phase2 = cfg.phase2.take().unwrap_or_default();
             phase2.configs = args.phase2_configs.clone();
             cfg.phase2 = Some(phase2);
+        }
+        if args.adaptive_retries {
+            if cfg.mode != Mode::Warp {
+                bail!("--adaptive-retries requires --mode warp");
+            }
+            cfg.adaptive_retries = true;
+        }
+        if let Some(probes) = args.warp_probes
+            && cfg.adaptive_retries
+        {
+            eprintln!("note: {}", adaptive_skip_note(probes));
+            cfg.adaptive_retries = false;
+        }
+        // A --network-profile on a retry relabels the config and retunes
+        // whatever still sits at defaults; saved non-default values count as
+        // explicit and survive, mirroring the fresh-scan explicit-wins rule.
+        // Without the flag the saved profile (if any) simply persists.
+        if let Some(profile) = args.network_profile.map(NetworkProfile::from) {
+            cfg.network_profile = Some(profile);
+            let mut probes = cfg
+                .warp
+                .as_ref()
+                .map(|w| w.probes_per_endpoint)
+                .unwrap_or(api::DEFAULT_PROBES_PER_ENDPOINT);
+            apply_profile_tuning(
+                &cfg.mode,
+                Some(profile),
+                cfg.timeout_ms != api::types::DEFAULT_TIMEOUT_MS,
+                cfg.concurrency != api::types::DEFAULT_CONCURRENCY,
+                cfg.idle_hold_ms != 0,
+                probes != api::DEFAULT_PROBES_PER_ENDPOINT,
+                &mut cfg.timeout_ms,
+                &mut cfg.concurrency,
+                &mut cfg.idle_hold_ms,
+                &mut probes,
+            );
+            if let Some(warp) = cfg.warp.as_mut() {
+                warp.probes_per_endpoint = probes;
+            }
         }
         cfg.validate()
             .map_err(|e| anyhow!("saved scan config is no longer valid: {e}"))?;
@@ -33,6 +72,14 @@ pub(crate) fn build_scan_config(args: &ScanArgs) -> Result<ScanConfig> {
     if colo_filter.iter().any(|c| c.is_empty()) {
         return Err(anyhow!("--colo entries must be non-empty IATA codes"));
     }
+    // Canonical rotation list: trimmed + lowercased (DNS is case-insensitive,
+    // so Example.COM and example.com must not rotate as distinct names).
+    // Empty (flag absent) means unset; the config default fills it below.
+    let probe_snis: Vec<String> = args
+        .probe_snis
+        .iter()
+        .map(|s| s.trim().to_ascii_lowercase())
+        .collect();
     validate_phase2_flags(args)?;
     if let Some(warning) = cap_warning(args) {
         eprintln!("warning: {warning}");
@@ -52,12 +99,46 @@ pub(crate) fn build_scan_config(args: &ScanArgs) -> Result<ScanConfig> {
         Some(path) => Some(load_wgconf_file(path)?),
         None => None,
     };
+    // Restricted-network preset (spec §P0-7(b)). Unset = today's defaults.
+    // A knob the user set explicitly (any non-default value, or any
+    // --warp-probes at all) always wins over the preset.
+    let network_profile = args.network_profile.map(NetworkProfile::from);
+    let mut concurrency = args.concurrency;
+    let mut timeout_ms = args.timeout_ms;
+    let mut idle_hold_ms = args.idle_hold_ms;
+    let mut probes_per_endpoint = args.warp_probes.unwrap_or(api::DEFAULT_PROBES_PER_ENDPOINT);
+    apply_profile_tuning(
+        &mode,
+        network_profile,
+        timeout_ms != api::types::DEFAULT_TIMEOUT_MS,
+        concurrency != api::types::DEFAULT_CONCURRENCY,
+        idle_hold_ms != 0,
+        args.warp_probes.is_some(),
+        &mut timeout_ms,
+        &mut concurrency,
+        &mut idle_hold_ms,
+        &mut probes_per_endpoint,
+    );
     let warp = (mode == Mode::Warp).then(|| api::types::WarpConfig {
         custom_endpoints: args.warp_endpoints.clone(),
-        probes_per_endpoint: args.warp_probes.unwrap_or(api::DEFAULT_PROBES_PER_ENDPOINT),
+        probes_per_endpoint,
         wgconf,
         verify_with_wgconf: args.warp_verify,
+        junk_count: args.warp_junk_count.unwrap_or(0),
+        junk_min: args.warp_junk_min.unwrap_or(0),
+        junk_max: args.warp_junk_max.unwrap_or(0),
+        port_gate: args.warp_port_gate,
     });
+    // Explicit --warp-probes always wins: the pre-flight must never lower
+    // (or second-guess) a user-chosen budget, so it is switched off here
+    // with a stderr note and the engine never sees the combination.
+    let mut adaptive_retries = args.adaptive_retries;
+    if let Some(probes) = args.warp_probes
+        && adaptive_retries
+    {
+        eprintln!("note: {}", adaptive_skip_note(probes));
+        adaptive_retries = false;
+    }
     let cfg = ScanConfig {
         mode,
         target,
@@ -73,22 +154,29 @@ pub(crate) fn build_scan_config(args: &ScanArgs) -> Result<ScanConfig> {
         exclude: args.exclude.clone(),
         custom_cidrs: args.custom_cidrs.clone(),
         include_v6: args.ipv6,
-        concurrency: args.concurrency,
-        timeout_ms: args.timeout_ms,
+        concurrency,
+        timeout_ms,
         phase2,
         warp,
         loss_threshold: args.loss_threshold,
         min_latency_ms: args.min_latency,
-        idle_hold_ms: args.idle_hold_ms,
+        idle_hold_ms,
         colo_filter,
         probe_mode: ProbeMode::from(args.probe),
         accepted_http_codes: args
             .http_status_code
             .clone()
             .unwrap_or_else(api::types::default_accepted_http_codes),
+        probe_snis: if probe_snis.is_empty() {
+            api::types::default_probe_snis()
+        } else {
+            probe_snis
+        },
         speed_test: args.speed_test,
         min_speed_mbps: args.min_speed,
         neighbor_count: args.neighbor_scan,
+        adaptive_retries,
+        network_profile,
     };
     cfg.validate()
         .map_err(|e| anyhow!("invalid scan config: {e}"))?;
@@ -145,8 +233,20 @@ fn validate_mode_flags(args: &ScanArgs) -> Result<()> {
             "--probe is CDN-only; WARP uses WireGuard handshake probes"
         ));
     }
+    if mode == ModeArg::Warp && !args.probe_snis.is_empty() {
+        return Err(anyhow!(
+            "--probe-snis is CDN-only; WARP uses WireGuard handshake probes"
+        ));
+    }
     if mode == ModeArg::Cdn && args.http_status_code.is_some() && args.probe != ProbeArg::Http {
         return Err(anyhow!("--http-status-code requires --probe http"));
+    }
+    if mode == ModeArg::Cdn
+        && !args.probe_snis.is_empty()
+        && args.probe != ProbeArg::Tls
+        && args.probe != ProbeArg::Http
+    {
+        return Err(anyhow!("--probe-snis requires --probe tls|http"));
     }
     if mode == ModeArg::Warp && args.ipv6 {
         return Err(anyhow!("--ipv6 is CDN-only; WARP pools are IPv4"));
@@ -181,7 +281,87 @@ fn validate_warp_flags(args: &ScanArgs) -> Result<()> {
     if mode == ModeArg::Cdn && args.warp_probes.is_some() {
         return Err(anyhow!("--warp-probes requires --mode warp"));
     }
+    if mode == ModeArg::Cdn && args.warp_junk_count.is_some() {
+        return Err(anyhow!("--warp-junk-count requires --mode warp"));
+    }
+    if mode == ModeArg::Cdn && args.warp_junk_min.is_some() {
+        return Err(anyhow!("--warp-junk-min requires --mode warp"));
+    }
+    if mode == ModeArg::Cdn && args.warp_junk_max.is_some() {
+        return Err(anyhow!("--warp-junk-max requires --mode warp"));
+    }
+    if mode == ModeArg::Cdn && args.adaptive_retries {
+        return Err(anyhow!("--adaptive-retries requires --mode warp"));
+    }
+    if mode == ModeArg::Cdn && args.warp_port_gate {
+        return Err(anyhow!("--warp-port-gate requires --mode warp"));
+    }
     Ok(())
+}
+
+/// stderr note emitted when an explicit `--warp-probes` disables the
+/// adaptive pre-flight. Pure so the wording stays pinned by tests.
+pub(crate) fn adaptive_skip_note(probes: u8) -> String {
+    format!("--adaptive-retries skipped (explicit --warp-probes {probes} wins; pre-flight not run)")
+}
+
+/// `--network-profile` tuning presets (spec §P0-7(b)). Unset = today's
+/// defaults; any knob the user set explicitly keeps its value.
+pub(crate) const PROFILE_BLOCKED_CDN_TIMEOUT_MS: u64 = 5000;
+pub(crate) const PROFILE_BLOCKED_CDN_IDLE_HOLD_MS: u64 = 2000;
+pub(crate) const PROFILE_SLOW_TIMEOUT_MS: u64 = 8000;
+pub(crate) const PROFILE_BLOCKED_WARP_PROBES: u8 = 5;
+pub(crate) const PROFILE_SLOW_WARP_PROBES: u8 = 3;
+
+/// Apply the preset to already-resolved knob values. The `*_explicit` flags
+/// say whether the user set that knob (fresh path: non-default CLI value,
+/// or any `--warp-probes`; retry path: non-default saved value); explicit
+/// knobs are never overwritten.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn apply_profile_tuning(
+    mode: &Mode,
+    profile: Option<NetworkProfile>,
+    timeout_explicit: bool,
+    concurrency_explicit: bool,
+    idle_explicit: bool,
+    probes_explicit: bool,
+    timeout_ms: &mut u64,
+    concurrency: &mut u16,
+    idle_hold_ms: &mut u64,
+    probes_per_endpoint: &mut u8,
+) {
+    match (mode, profile) {
+        (Mode::Cdn, Some(NetworkProfile::Blocked)) => {
+            if !timeout_explicit {
+                *timeout_ms = PROFILE_BLOCKED_CDN_TIMEOUT_MS;
+            }
+            if !idle_explicit {
+                *idle_hold_ms = PROFILE_BLOCKED_CDN_IDLE_HOLD_MS;
+            }
+        }
+        (Mode::Cdn, Some(NetworkProfile::Slow)) => {
+            if !timeout_explicit {
+                *timeout_ms = PROFILE_SLOW_TIMEOUT_MS;
+            }
+            if !concurrency_explicit {
+                *concurrency = (*concurrency / 2).max(1);
+            }
+        }
+        (Mode::Warp, Some(NetworkProfile::Blocked)) => {
+            if !probes_explicit {
+                *probes_per_endpoint = PROFILE_BLOCKED_WARP_PROBES;
+            }
+        }
+        (Mode::Warp, Some(NetworkProfile::Slow)) => {
+            if !probes_explicit {
+                *probes_per_endpoint = PROFILE_SLOW_WARP_PROBES;
+            }
+            if !timeout_explicit {
+                *timeout_ms = PROFILE_SLOW_TIMEOUT_MS;
+            }
+        }
+        _ => {}
+    }
 }
 
 fn validate_phase2_flags(args: &ScanArgs) -> Result<()> {

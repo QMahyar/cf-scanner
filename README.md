@@ -112,11 +112,13 @@ scan; results up to that point are kept.
 | `--timeout-ms MS` | Per-probe timeout (default 3000) |
 | `--probe tcp\|tls\|http` | Phase-1 protocol: connect only, TLS handshake (default), or GET `/cdn-cgi/trace` over TLS |
 | `--http-status-code 200,204` | HTTP probe mode: codes that count as working (default 200,301,302; requires `--probe http`) |
+| `--probe-snis HOST,...` | TLS/HTTP probe mode: rotate these SNI hostnames across probes, one per probe (default cloudflare.com, max 8, DNS names only) |
 | `--loss-threshold PCT` | Drop results whose packet-loss rate exceeds PCT (0-100) |
 | `--min-latency MS` | Drop results whose handshake latency is *below* MS — throttled routes look fast but stall; use this to filter them, not to demand fast IPs |
 | `--idle-hold-ms MS` | After the TLS handshake, hold the connection idle for MS and fail the probe if it is reset (0 = off) |
 | `--neighbor-scan N` | After a hit, probe up to N neighboring IPs in the same /24 (0-64, CDN only) |
 | `--seed N` | Deterministic RNG for `--count` sampling and neighbor probes (same seed = same plan) |
+| `--network-profile blocked\|slow` | Preset tuning for restricted networks: `blocked` = longer timeouts + idle-hold (CDN) or more probes (WARP); `slow` = longer timeout + halved concurrency (CDN) or longer timeout (WARP). Explicit flags always win; unset = today's defaults |
 | `--enrich-asn` | After the scan, look up ASN/ISP per working endpoint via ipwho.is and annotate exported results (best-effort) |
 
 **Phase 2 (xray verification)**
@@ -140,13 +142,19 @@ scan; results up to that point are kept.
 | `--warp-probes N` | WireGuard handshake attempts per endpoint (default 3, max 10) |
 | `--warp-verify` | After discovery, complete a full WireGuard handshake using your config (proves usable, not just reachable; requires `--warp-wgconf-file`) |
 | `--warp-wgconf-file PATH` | WireGuard/AmneziaWG `.conf` used for `--warp-verify` (the file stays local; the key is never logged) |
+| `--warp-junk-count N` | Junk padding datagrams per handshake probe for DPI noise, sent around the Init without modifying it (0 = off, max 128) |
+| `--warp-junk-min BYTES` | Minimum junk datagram size in bytes (requires `--warp-junk-count`) |
+| `--warp-junk-max BYTES` | Maximum junk datagram size in bytes, at most 1280 (requires `--warp-junk-count`) |
+| `--adaptive-retries` | Sample 100 endpoints before the WARP scan and raise `--warp-probes` on lossy or slow networks (never lowers an explicit value) |
+| `--warp-port-gate` | Probe 12 sampled endpoints across WARP ports first and scan only answering ports (escalates to the extended list; skipped on explicit ports/endpoints) |
 
 **Export and misc**
 
 | Flag | Meaning |
 |------|---------|
-| `--export FILE` | Write results to this file when the scan ends (`-` = stdout) |
+| `--export FILE` | Write results to this file when the scan ends (`-` = stdout; bundles print after the final NDJSON summary and are not NDJSON-parseable — prefer a file) |
 | `--export-format FMT` | `csv`, `json`, `base64`, `raw`, `singbox`, `clash`, `sharelinks`, `v2ray`, `shadowrocket`, `quantumult` (default `csv`) |
+| `--export-live FILE` | Append NDJSON results to this file live as they arrive (crash-safe; conflicts with `--export`) |
 | `--retry-last` | Replay the last scan's saved configuration (saved after each scan; phase-2 configs and WARP keys are never saved — re-supply those) |
 | `--json-errors` | Print `{"error": …}` on stdout when the program fails (for scripts) |
 | `--verbose` | Per-IP diagnostics on stderr plus info logs |
@@ -158,9 +166,12 @@ scan; results up to that point are kept.
 | `cf-scanner wizard` | Interactive wizard over the same engine |
 | `cf-scanner ranges refresh [--ipv6]` | Refresh the bundled Cloudflare range lists over a verified HTTPS fetch (`--ipv6` includes the v6 pool) |
 | `cf-scanner check-sub URL [--timeout-ms MS]` | Fetch a subscription and verify every config against its own server with a real probe URL; one NDJSON row per config (`config_index`/`ok`/`latency_ms`/`error`), aggregate rows for unparseable lines carry the sentinel `config_index` 18446744073709551615 (`usize::MAX`) so scripts can filter them, a summary on stderr, non-zero exit when nothing verifies |
-| `cf-scanner warp-config generate [--license KEY] [--endpoint HOST:PORT] [--out FILE]` | Opt-in WARP registration through the v0a884 API, then wgconf build. Without `--out` the wgconf prints to stdout; a `.conf` path is written with owner-only permissions |
-| `cf-scanner warp-config export [--endpoint HOST:PORT] [--out FILE]` | Export the registered WARP config as text or a .conf file |
+| `cf-scanner warp-config generate [--license KEY] [--endpoint HOST:PORT] [--out FILE] [--show-link]` | Opt-in WARP registration through the v0a884 API, then wgconf build. Without `--out` the wgconf prints to stdout; a `.conf` path is written with owner-only permissions. `--show-link` also prints a `wireguard://` share link to stderr |
+| `cf-scanner warp-config export [--endpoint HOST:PORT] [--out FILE] [--bind-best] [--show-link]` | Export the registered WARP config as text or a .conf file; `--bind-best` stamps Endpoint with the lowest-latency working result from the last scan (explicit `--endpoint` wins, errors when the scan found nothing); `--show-link` also prints a `wireguard://` share link to stderr |
 | `cf-scanner export-config --config URI --ip IP --port PORT [--sni SNI]` | Re-render a vless/vmess/trojan/ss link against a scanned endpoint; `--sni` overrides the TLS SNI in the output |
+| `cf-scanner tune junk [--counts 8,32,64] [--candidates N] [--need-pct PCT]` | Try WARP junk counts head-to-head over small samples; prints a reusable `scan` command for the first value meeting the bar (else best-so-far) |
+| `cf-scanner tune sni --snis HOST,... [--candidates N] [--need-pct PCT]` | Compare candidate phase-1 SNIs head-to-head; prints a reusable `--probe-snis` scan command |
+| `cf-scanner tune fragment --config URI [--candidates N] [--need N]` | Verify one config through xray at light→medium→heavy over a small subset; prints a reusable `--phase2-fragment` scan command |
 | `cargo test` / `cargo clippy --all-targets -- -D warnings` / `cargo fmt --check` | Unit + integration tests, lint, format check |
 | `dist plan --tag=vX.Y.Z` | Release dry run (dist, formerly cargo-dist) |
 | `dist build --artifacts=local --target=<host-target>` | Local release smoke test |

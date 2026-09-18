@@ -2,6 +2,7 @@ use std::future::Future;
 use std::net::IpAddr;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
@@ -68,27 +69,100 @@ pub trait Transport: Send + Sync {
 pub fn transport_for(
     mode: crate::api::types::ProbeMode,
     accepted_codes: &[u16],
+    snis: &[ServerName<'static>],
 ) -> Arc<dyn Transport> {
     use crate::api::types::ProbeMode;
     match mode {
         ProbeMode::Tcp => Arc::new(TcpTransport),
-        ProbeMode::Tls => Arc::new(TlsTransport::new()),
-        ProbeMode::Http => Arc::new(HttpTransport::with_shared(Arc::from(accepted_codes))),
+        ProbeMode::Tls => Arc::new(TlsTransport::new().with_snis(snis.to_vec())),
+        ProbeMode::Http => {
+            Arc::new(HttpTransport::with_shared(Arc::from(accepted_codes)).with_snis(snis.to_vec()))
+        }
     }
+}
+
+/// Parse validated `--probe-snis` strings into handshake-ready names.
+/// Config validation guarantees DNS-only entries; this re-checks cheaply so a
+/// direct caller can never smuggle an IP literal into the SNI slot. Empty
+/// means unset and falls back to today's single probe SNI.
+pub fn parse_probe_snis(
+    raw: &[String],
+) -> Result<Vec<ServerName<'static>>, crate::api::types::ConfigError> {
+    use crate::api::types::ConfigError;
+    if raw.is_empty() {
+        return Ok(vec![default_probe_sni()]);
+    }
+    raw.iter()
+        .map(|s| {
+            let name = ServerName::try_from(s.clone()).map_err(|_| {
+                ConfigError::InvalidSni(s.clone(), "must be a DNS hostname".to_owned())
+            })?;
+            match name {
+                ServerName::DnsName(_) => Ok(name),
+                _ => Err(ConfigError::InvalidSni(
+                    s.clone(),
+                    "probe SNIs must be DNS hostnames, not IP addresses".to_owned(),
+                )),
+            }
+        })
+        .collect()
+}
+
+fn default_probe_sni() -> ServerName<'static> {
+    ServerName::try_from(PROBE_SNI.to_owned()).expect("static SNI is a valid hostname")
+}
+
+/// Pick the next SNI in rotation order. Sequential callers observe a strict
+/// round-robin; under concurrency the counter still spreads consecutive
+/// probes across names with no RNG and no extra dials. (True per-worker
+/// pinning would be unobservable anyway: task-to-worker assignment already
+/// races. The injectable-transport seam stays untouched by design, ADR-011.)
+fn pick_sni(
+    snis: &[ServerName<'static>],
+    hosts: &[String],
+    next: &AtomicUsize,
+) -> (ServerName<'static>, String) {
+    debug_assert!(!snis.is_empty() && snis.len() == hosts.len());
+    let i = next.fetch_add(1, Ordering::Relaxed) % snis.len();
+    (snis[i].clone(), hosts[i].clone())
 }
 
 pub struct TlsTransport {
     connector: TlsConnector,
-    server_name: ServerName<'static>,
+    snis: Arc<[ServerName<'static>]>,
+    sni_hosts: Arc<[String]>,
+    next_sni: AtomicUsize,
 }
 
 impl TlsTransport {
     pub fn new() -> Self {
         Self {
             connector: TlsConnector::from(Arc::new(no_verify_client_config())),
-            server_name: ServerName::try_from(PROBE_SNI.to_owned())
-                .expect("static SNI is a valid hostname"),
+            snis: Arc::from([default_probe_sni()]),
+            sni_hosts: Arc::from([PROBE_SNI.to_owned()]),
+            next_sni: AtomicUsize::new(0),
         }
+    }
+
+    /// Opt-in rotation set. Non-DNS entries are dropped (config validation
+    /// rejects them first); an empty survivors list keeps the default single.
+    pub fn with_snis(mut self, snis: Vec<ServerName<'static>>) -> Self {
+        let kept: Vec<(ServerName<'static>, String)> = snis
+            .into_iter()
+            .filter_map(|name| {
+                let host = match &name {
+                    ServerName::DnsName(dns) => dns.as_ref().to_owned(),
+                    _ => return None,
+                };
+                Some((name, host))
+            })
+            .collect();
+        if !kept.is_empty() {
+            let (names, hosts): (Vec<_>, Vec<_>) = kept.into_iter().unzip();
+            self.snis = Arc::from(names);
+            self.sni_hosts = Arc::from(hosts);
+        }
+        self
     }
 }
 
@@ -110,22 +184,31 @@ impl Default for TlsTransport {
 impl Transport for TlsTransport {
     fn probe(&self, ip: IpAddr, port: u16, timeout_ms: u64, idle_hold_ms: u64) -> ProbeFuture<'_> {
         let start = Instant::now();
-        let server_name = self.server_name.clone();
+        let (server_name, _host) = pick_sni(&self.snis, &self.sni_hosts, &self.next_sni);
+        let (connect_ms, tls_ms) = tls_budgets(timeout_ms);
         Box::pin(async move {
             let fut = async {
-                let stream = TcpStream::connect((ip, port)).await.map_err(|e| {
+                let stream = timeout(
+                    Duration::from_millis(connect_ms),
+                    TcpStream::connect((ip, port)),
+                )
+                .await
+                .map_err(|_| ProbeError::Timeout { timeout_ms })?
+                .map_err(|e| {
                     tracing::debug!(error = %e, "probe connect failed");
                     ProbeError::Refused("connection refused/closed")
                 })?;
                 let _ = stream.set_nodelay(true);
-                let mut tls = self
-                    .connector
-                    .connect(server_name, stream)
-                    .await
-                    .map_err(|e| {
-                        tracing::debug!(error = %e, "probe tls handshake failed");
-                        ProbeError::Tls("handshake failed")
-                    })?;
+                let mut tls = timeout(
+                    Duration::from_millis(tls_ms),
+                    self.connector.connect(server_name, stream),
+                )
+                .await
+                .map_err(|_| ProbeError::Timeout { timeout_ms })?
+                .map_err(|e| {
+                    tracing::debug!(error = %e, "probe tls handshake failed");
+                    ProbeError::Tls("handshake failed")
+                })?;
                 let _ = tls.shutdown().await;
                 let latency = start.elapsed().as_millis() as u32;
                 Ok((tls, latency))
@@ -159,9 +242,16 @@ pub struct TcpTransport;
 impl Transport for TcpTransport {
     fn probe(&self, ip: IpAddr, port: u16, timeout_ms: u64, idle_hold_ms: u64) -> ProbeFuture<'_> {
         let start = Instant::now();
+        let connect_ms = tcp_connect_budget(timeout_ms);
         Box::pin(async move {
             let fut = async {
-                let stream = TcpStream::connect((ip, port)).await.map_err(|e| {
+                let stream = timeout(
+                    Duration::from_millis(connect_ms),
+                    TcpStream::connect((ip, port)),
+                )
+                .await
+                .map_err(|_| ProbeError::Timeout { timeout_ms })?
+                .map_err(|e| {
                     tracing::debug!(error = %e, "probe connect failed");
                     ProbeError::Refused("connection refused/closed")
                 })?;
@@ -195,7 +285,9 @@ impl Transport for TcpTransport {
 
 pub struct HttpTransport {
     connector: TlsConnector,
-    server_name: ServerName<'static>,
+    snis: Arc<[ServerName<'static>]>,
+    sni_hosts: Arc<[String]>,
+    next_sni: AtomicUsize,
     accepted_codes: std::sync::Arc<[u16]>,
 }
 
@@ -208,11 +300,41 @@ impl HttpTransport {
     pub fn with_shared(accepted_codes: std::sync::Arc<[u16]>) -> Self {
         Self {
             connector: TlsConnector::from(Arc::new(no_verify_client_config())),
-            server_name: ServerName::try_from(PROBE_SNI.to_owned())
-                .expect("static SNI is a valid hostname"),
+            snis: Arc::from([default_probe_sni()]),
+            sni_hosts: Arc::from([PROBE_SNI.to_owned()]),
+            next_sni: AtomicUsize::new(0),
             accepted_codes,
         }
     }
+
+    /// Opt-in rotation set; same fallback rules as [`TlsTransport::with_snis`].
+    pub fn with_snis(mut self, snis: Vec<ServerName<'static>>) -> Self {
+        let kept: Vec<(ServerName<'static>, String)> = snis
+            .into_iter()
+            .filter_map(|name| {
+                let host = match &name {
+                    ServerName::DnsName(dns) => dns.as_ref().to_owned(),
+                    _ => return None,
+                };
+                Some((name, host))
+            })
+            .collect();
+        if !kept.is_empty() {
+            let (names, hosts): (Vec<_>, Vec<_>) = kept.into_iter().unzip();
+            self.snis = Arc::from(names);
+            self.sni_hosts = Arc::from(hosts);
+        }
+        self
+    }
+}
+
+/// Trace request bytes for one probe. The Host header tracks the rotated SNI
+/// so the handshake name and the request target never disagree.
+fn trace_request(host: &str) -> Vec<u8> {
+    format!(
+        "GET /cdn-cgi/trace HTTP/1.1\r\nHost: {host}\r\nUser-Agent: curl/8\r\nConnection: close\r\n\r\n"
+    )
+    .into_bytes()
 }
 
 fn step_budgets(timeout_ms: u64) -> (u64, u64, u64) {
@@ -222,10 +344,20 @@ fn step_budgets(timeout_ms: u64) -> (u64, u64, u64) {
     (connect_ms, tls_ms, rw_ms)
 }
 
+fn tcp_connect_budget(timeout_ms: u64) -> u64 {
+    (timeout_ms / 4).max(1)
+}
+
+fn tls_budgets(timeout_ms: u64) -> (u64, u64) {
+    let connect_ms = tcp_connect_budget(timeout_ms);
+    let tls_ms = (timeout_ms.saturating_sub(connect_ms) / 2).max(1);
+    (connect_ms, tls_ms)
+}
+
 impl Transport for HttpTransport {
     fn probe(&self, ip: IpAddr, port: u16, timeout_ms: u64, idle_hold_ms: u64) -> ProbeFuture<'_> {
         let start = Instant::now();
-        let server_name = self.server_name.clone();
+        let (server_name, host) = pick_sni(&self.snis, &self.sni_hosts, &self.next_sni);
         let connector = self.connector.clone();
         let accepted = self.accepted_codes.clone();
         let (connect_ms, tls_ms, rw_ms) = step_budgets(timeout_ms);
@@ -253,7 +385,7 @@ impl Transport for HttpTransport {
                     ProbeError::Tls("handshake failed")
                 })?;
                 let buf = timeout(Duration::from_millis(rw_ms), async {
-                    tls.write_all(b"GET /cdn-cgi/trace HTTP/1.1\r\nHost: cloudflare.com\r\nUser-Agent: curl/8\r\nConnection: close\r\n\r\n")
+                    tls.write_all(&trace_request(&host))
                         .await
                         .map_err(|_| ProbeError::Refused("request write failed"))?;
                     let mut buf = Vec::with_capacity(2048);
@@ -555,16 +687,81 @@ mod tests {
     fn transport_builds_its_server_name_once_at_construction() {
         let transport = TlsTransport::new();
         let expected = ServerName::try_from(PROBE_SNI.to_owned()).unwrap();
-        match (&transport.server_name, &expected) {
+        let (name, host) = pick_sni(&transport.snis, &transport.sni_hosts, &transport.next_sni);
+        match (&name, &expected) {
             (ServerName::DnsName(a), ServerName::DnsName(b)) => {
-                assert_eq!(a, b, "transport must use the documented probe SNI");
+                assert_eq!(
+                    a.as_ref(),
+                    b.as_ref(),
+                    "transport must use the documented probe SNI"
+                );
             }
-            _ => panic!(
-                "probe SNI must be a DNS name, got {:?}",
-                transport.server_name
-            ),
+            _ => panic!("probe SNI must be a DNS name, got {name:?}"),
         }
-        assert_eq!(transport.server_name.clone(), transport.server_name);
+        assert_eq!(host, PROBE_SNI);
+        assert_eq!(transport.snis.len(), 1);
+    }
+
+    #[test]
+    fn sni_rotation_cycles_in_order_and_falls_back_to_default() {
+        let names = ["a.example.com", "b.example.com", "c.example.com"]
+            .into_iter()
+            .map(|s| ServerName::try_from(s.to_owned()).unwrap())
+            .collect::<Vec<_>>();
+        let transport = TlsTransport::new().with_snis(names);
+        let hosts: Vec<String> = (0..4)
+            .map(|_| pick_sni(&transport.snis, &transport.sni_hosts, &transport.next_sni).1)
+            .collect();
+        assert_eq!(
+            hosts,
+            [
+                "a.example.com",
+                "b.example.com",
+                "c.example.com",
+                "a.example.com"
+            ]
+        );
+
+        let fallback = HttpTransport::with_shared(Arc::from([200u16])).with_snis(Vec::new());
+        let (_, host) = pick_sni(&fallback.snis, &fallback.sni_hosts, &fallback.next_sni);
+        assert_eq!(
+            host, PROBE_SNI,
+            "empty rotation set keeps the default single SNI"
+        );
+
+        let ip_only = HttpTransport::with_shared(Arc::from([200u16]))
+            .with_snis(vec![ServerName::try_from("1.2.3.4".to_owned()).unwrap()]);
+        let (_, host) = pick_sni(&ip_only.snis, &ip_only.sni_hosts, &ip_only.next_sni);
+        assert_eq!(
+            host, PROBE_SNI,
+            "non-DNS entries never enter the rotation set"
+        );
+    }
+
+    #[test]
+    fn trace_request_carries_the_rotated_host() {
+        let bytes = trace_request("speed.cloudflare.com");
+        let text = String::from_utf8(bytes).expect("request is ASCII");
+        assert!(text.starts_with("GET /cdn-cgi/trace HTTP/1.1\r\n"));
+        assert!(text.contains("\r\nHost: speed.cloudflare.com\r\n"));
+        let default = trace_request(PROBE_SNI);
+        assert!(
+            String::from_utf8(default)
+                .unwrap()
+                .contains("\r\nHost: cloudflare.com\r\n")
+        );
+    }
+
+    #[test]
+    fn parse_probe_snis_accepts_dns_and_rejects_ips_and_garbage() {
+        let input = ["example.com".to_owned(), "a.b-c.example".to_owned()];
+        let parsed = parse_probe_snis(&input).expect("valid DNS names parse");
+        assert_eq!(parsed.len(), 2);
+        assert!(parse_probe_snis(&[]).expect("empty means unset").len() == 1);
+        let ip = ["1.2.3.4".to_owned()];
+        assert!(parse_probe_snis(&ip).is_err());
+        let garbage = ["not a host!".to_owned()];
+        assert!(parse_probe_snis(&garbage).is_err());
     }
 
     #[tokio::test]
@@ -678,7 +875,12 @@ mod tests {
     fn tcp_and_http_transports_build_without_network() {
         let _ = TcpTransport;
         let _ = HttpTransport::new(vec![200, 301, 302]);
-        let _ = transport_for(crate::api::types::ProbeMode::Http, &[200]);
+        let _ = transport_for(crate::api::types::ProbeMode::Http, &[200], &[]);
+        let _ = transport_for(
+            crate::api::types::ProbeMode::Tls,
+            &[],
+            &parse_probe_snis(&["example.com".to_owned()]).unwrap(),
+        );
     }
 
     #[test]
@@ -708,6 +910,185 @@ mod tests {
         assert_eq!(c + t + r, 1000);
         let (c, t, r) = step_budgets(1);
         assert!(c >= 1 && t >= 1 && r >= 1);
+    }
+
+    #[test]
+    fn tcp_connect_budget_is_quarter_of_timeout() {
+        assert_eq!(tcp_connect_budget(4000), 1000);
+        assert_eq!(tcp_connect_budget(3000), 750);
+        assert_eq!(tcp_connect_budget(100), 25);
+        assert_eq!(tcp_connect_budget(4), 1);
+        assert_eq!(tcp_connect_budget(1), 1);
+    }
+
+    #[test]
+    fn tls_budgets_split_quarter_then_half_remainder() {
+        assert_eq!(tls_budgets(4000), (1000, 1500));
+        assert_eq!(tls_budgets(3000), (750, 1125));
+        assert_eq!(tls_budgets(100), (25, 37));
+        for timeout_ms in [2, 3, 4, 7, 100, 1000, 3000, 8000] {
+            let (connect_ms, tls_ms) = tls_budgets(timeout_ms);
+            assert_eq!(connect_ms, tcp_connect_budget(timeout_ms));
+            assert_eq!(tls_ms, ((timeout_ms - connect_ms) / 2).max(1));
+            assert!(connect_ms >= 1 && tls_ms >= 1);
+            assert!(
+                connect_ms + tls_ms <= timeout_ms,
+                "step budgets must fit inside the outer ceiling"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn budgeted_connect_healthy_keeps_identical_verdict() {
+        let timeout_ms = 3000;
+        let connect_ms = tcp_connect_budget(timeout_ms);
+        let verdict: Result<ProbeOutcome, ProbeError> =
+            timeout(Duration::from_millis(connect_ms), async {
+                Ok::<ProbeOutcome, ProbeError>(ProbeOutcome::plain(42))
+            })
+            .await
+            .map_err(|_| ProbeError::Timeout { timeout_ms })
+            .expect("healthy connect must fit its budget");
+        assert_eq!(verdict, Ok(ProbeOutcome::plain(42)));
+    }
+
+    #[tokio::test]
+    async fn budgeted_handshake_healthy_keeps_identical_verdict() {
+        let timeout_ms = 3000;
+        let (_, tls_ms) = tls_budgets(timeout_ms);
+        let verdict: Result<ProbeOutcome, ProbeError> =
+            timeout(Duration::from_millis(tls_ms), async {
+                Ok::<ProbeOutcome, ProbeError>(ProbeOutcome::plain(7))
+            })
+            .await
+            .map_err(|_| ProbeError::Timeout { timeout_ms })
+            .expect("healthy handshake must fit its budget");
+        assert_eq!(verdict, Ok(ProbeOutcome::plain(7)));
+    }
+
+    #[tokio::test]
+    async fn budgeted_connect_stall_fails_fast_with_outer_timeout() {
+        let timeout_ms = 3000;
+        let connect_ms = tcp_connect_budget(timeout_ms);
+        assert!(connect_ms < timeout_ms);
+        let start = Instant::now();
+        let err = timeout(Duration::from_millis(connect_ms), async {
+            tokio::time::sleep(Duration::from_secs(30)).await;
+            Ok::<ProbeOutcome, ProbeError>(ProbeOutcome::plain(1))
+        })
+        .await
+        .map_err(|_| ProbeError::Timeout { timeout_ms })
+        .expect_err("stalled connect must exhaust its budget");
+        assert_eq!(err, ProbeError::Timeout { timeout_ms });
+        assert_eq!(err.reason(), "timeout");
+        assert!(
+            start.elapsed() < Duration::from_millis(timeout_ms),
+            "connect budget must fire well before the outer ceiling"
+        );
+    }
+
+    #[tokio::test]
+    async fn budgeted_handshake_stall_fails_fast_with_outer_timeout() {
+        let timeout_ms = 3000;
+        let (_, tls_ms) = tls_budgets(timeout_ms);
+        assert!(tls_ms < timeout_ms);
+        let start = Instant::now();
+        let err = timeout(Duration::from_millis(tls_ms), async {
+            tokio::time::sleep(Duration::from_secs(30)).await;
+            Ok::<ProbeOutcome, ProbeError>(ProbeOutcome::plain(1))
+        })
+        .await
+        .map_err(|_| ProbeError::Timeout { timeout_ms })
+        .expect_err("stalled handshake must exhaust its budget");
+        assert_eq!(err, ProbeError::Timeout { timeout_ms });
+        assert_eq!(err.reason(), "timeout");
+        assert!(
+            start.elapsed() < Duration::from_millis(timeout_ms),
+            "handshake budget must fire well before the outer ceiling"
+        );
+    }
+
+    #[tokio::test]
+    async fn tcp_probe_healthy_loopback_keeps_verdict() {
+        let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            loop {
+                let Ok((stream, _)) = listener.accept().await else {
+                    break;
+                };
+                drop(stream);
+            }
+        });
+        let transport = TcpTransport;
+        let start = Instant::now();
+        let outcome = transport
+            .probe(
+                std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+                port,
+                3000,
+                0,
+            )
+            .await
+            .expect("loopback connect must succeed");
+        assert!(start.elapsed() < Duration::from_millis(3000));
+        assert_eq!((outcome.sent, outcome.received), (1, 1));
+        assert_eq!(outcome.colo, None);
+    }
+
+    #[tokio::test]
+    async fn tcp_probe_refused_keeps_reason() {
+        // Port 0 is never valid for connect: the stack rejects it
+        // synchronously, so this exercises the real Refused path with no I/O.
+        let err = TcpTransport
+            .probe(
+                std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+                0,
+                3000,
+                0,
+            )
+            .await
+            .expect_err("port 0 must refuse");
+        assert!(matches!(err, ProbeError::Refused(_)));
+        assert_eq!(err.reason(), "refused");
+    }
+
+    #[tokio::test]
+    async fn stalled_tls_transport_handshake_fails_fast() {
+        let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            loop {
+                let Ok((stream, _)) = listener.accept().await else {
+                    break;
+                };
+                tokio::spawn(async move {
+                    tokio::time::sleep(Duration::from_secs(30)).await;
+                    drop(stream);
+                });
+            }
+        });
+        let transport = TlsTransport::new();
+        let start = Instant::now();
+        let err = transport
+            .probe(
+                std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+                port,
+                3000,
+                0,
+            )
+            .await
+            .expect_err("black-hole TLS handshake must fail");
+        assert_eq!(err, ProbeError::Timeout { timeout_ms: 3000 });
+        assert_eq!(err.reason(), "timeout");
+        assert!(
+            start.elapsed() < Duration::from_millis(2500),
+            "per-step TLS budget must fire well before the full timeout"
+        );
     }
 
     #[tokio::test]

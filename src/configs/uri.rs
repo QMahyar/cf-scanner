@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::net::Ipv4Addr;
 
 use anyhow::{Result, anyhow, bail};
@@ -252,8 +253,60 @@ pub fn export_config_uri(
     }
 }
 
+/// Reattach query params pasted without their `?` separator (spec P0-4 row
+/// 8a): `vless://uuid@host:443&security=tls` or `.../security=tls&sni=x`
+/// would otherwise die on port parse or silently drop params into defaults.
+/// Single normalization attempt over a bounded (+1 byte) buffer; entries
+/// that already carry `?` are returned untouched, which is also what keeps
+/// the rejected `&`-in-path auto-join (row 8b) out: a real query is never
+/// merged with path segments.
+fn recover_missing_question_mark(entry: &str) -> Cow<'_, str> {
+    let head = match entry.find('#') {
+        Some(i) => &entry[..i],
+        None => entry,
+    };
+    if head.contains('?') {
+        return Cow::Borrowed(entry);
+    }
+    let after_scheme = match head.find("://") {
+        Some(i) => i + 3,
+        None => return Cow::Borrowed(entry),
+    };
+    let auth_start = match head[after_scheme..].rfind('@') {
+        Some(i) => after_scheme + i + 1,
+        None => after_scheme,
+    };
+    let tail = &head[auth_start..];
+    // A `/`-led `key=value` run is the whole query (`/security=tls&sni=x`
+    // must reattach from the `/`, not from the first `&` mid-run).
+    if let Some(eq) = tail.find('=')
+        && let Some(slash) = tail[..eq].rfind('/')
+    {
+        let at = auth_start + slash + 1;
+        let mut out = String::with_capacity(entry.len() + 1);
+        out.push_str(&entry[..at]);
+        out.push('?');
+        out.push_str(&entry[at..]);
+        return Cow::Owned(out);
+    }
+    // Otherwise the first `&` past the userinfo opens the query
+    // (`:443&security=tls`); without any `/` or `&` delimiter (`:443key=v`)
+    // the split is ambiguous, so the entry is left for the URL parser to
+    // reject rather than misparsed.
+    if let Some(amp) = tail.find('&') {
+        let at = auth_start + amp;
+        let mut out = String::with_capacity(entry.len() + 1);
+        out.push_str(&entry[..at]);
+        out.push('?');
+        out.push_str(&entry[at + 1..]);
+        return Cow::Owned(out);
+    }
+    Cow::Borrowed(entry)
+}
+
 fn parse_sip002(entry: &str) -> Result<OutboundSpec> {
-    let url = Url::parse(entry).map_err(|e| anyhow!("bad URL: {e}"))?;
+    let recovered = recover_missing_question_mark(entry);
+    let url = Url::parse(recovered.as_ref()).map_err(|e| anyhow!("bad URL: {e}"))?;
     let protocol = match url.scheme() {
         "vless" => Protocol::Vless,
         "trojan" => Protocol::Trojan,

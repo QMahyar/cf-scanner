@@ -1,6 +1,6 @@
 use super::limits::{
     DEFAULT_PORT, MAX_COLO_CODES, MAX_ENDPOINTS, MAX_IDLE_HOLD_MS, MAX_MIN_LATENCY_MS,
-    MAX_NEIGHBORS,
+    MAX_NEIGHBORS, MAX_PROBE_SNIS, MAX_WARP_JUNK_COUNT, MAX_WARP_JUNK_SIZE,
 };
 
 #[derive(Debug, PartialEq, Eq, thiserror::Error)]
@@ -91,6 +91,10 @@ pub enum ConfigError {
     EmptyHttpCodes,
     #[error("accepted_http_codes requires ProbeMode::Http")]
     HttpCodesNeedHttpProbe,
+    #[error("probe_snis must have at most {MAX_PROBE_SNIS} entries, got {0}")]
+    TooManyProbeSnis(usize),
+    #[error("probe_snis requires ProbeMode::Tls or ProbeMode::Http (TCP probes send no SNI)")]
+    ProbeSnisNeedTlsHttp,
     #[error("probe modes are CDN-only; WARP uses WireGuard handshake probes")]
     ProbeWrongMode,
     #[error("idle_hold_ms {0} out of range 0-{MAX_IDLE_HOLD_MS}")]
@@ -117,4 +121,10 @@ pub enum ConfigError {
     TooManyColos(usize),
     #[error("invalid colo code {0:?}: expected 3-5 ASCII letters")]
     InvalidColo(String),
+    #[error("warp junk count {0} out of range 0-{MAX_WARP_JUNK_COUNT}")]
+    InvalidJunkCount(u8),
+    #[error(
+        "warp junk sizes must satisfy min <= max <= {MAX_WARP_JUNK_SIZE} bytes with max >= 1 when enabled, got min {0} max {1}"
+    )]
+    InvalidJunkSize(u16, u16),
 }

@@ -1,5 +1,5 @@
 use std::io;
-use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -225,6 +225,26 @@ pub(crate) fn decode_chunked(mut input: &[u8]) -> Result<Vec<u8>> {
     }
 }
 
+pub(crate) fn server_name_for_host(host: &str) -> Result<rustls::pki_types::ServerName<'static>> {
+    // WHY: `Url::host_str` keeps IPv6 brackets (`[::1]`), which
+    // `ServerName::try_from` rejects; strip them (mirroring
+    // `configs::split_host_port`/`parse_sip002`) and map IP literals to
+    // `IpAddress` explicitly so in-tunnel handshakes are attempted instead of
+    // failing locally with "invalid hostname".
+    let bare = host.trim_start_matches('[').trim_end_matches(']');
+    if let Ok(ip) = bare.parse::<IpAddr>() {
+        return Ok(rustls::pki_types::ServerName::IpAddress(ip.into()));
+    }
+    Ok(rustls::pki_types::ServerName::try_from(bare.to_owned())?)
+}
+
+async fn real_tls_connect(
+    name: rustls::pki_types::ServerName<'static>,
+    stream: TcpStream,
+) -> Result<tokio_rustls::client::TlsStream<TcpStream>> {
+    Ok(tls_connector().connect(name, stream).await?)
+}
+
 pub(crate) fn tls_connector() -> tokio_rustls::TlsConnector {
     static CONNECTOR: std::sync::LazyLock<tokio_rustls::TlsConnector> =
         std::sync::LazyLock::new(|| {
@@ -249,6 +269,19 @@ pub async fn get_via_socks(url: &str, socks: SocketAddr, timeout_ms: u64) -> Res
 
 const SPEED_TEST_CHUNK: usize = 64 * 1024;
 
+/// True when a download/probe failure means "stalled or timed out" rather
+/// than a deterministic failure (bad URL, HTTP status, refused handshake).
+/// Owns the substring contract for this module's stall messages ("speed test
+/// timed out", "tunnel probe {what} stalled"); the speed-test burst fallback
+/// (`engine::speed`) degrades only these into lower-bound records.
+pub(crate) fn is_stall_or_timeout(err: &anyhow::Error) -> bool {
+    let msg = format!("{err:#}").to_lowercase();
+    msg.contains("timed out")
+        || msg.contains("timeout")
+        || msg.contains("deadline")
+        || msg.contains("stalled")
+}
+
 /// Download up to `max_bytes` from `url` through a SOCKS5 proxy, timing the
 /// transfer. Returns (bytes_read, elapsed_seconds). A short body (the server
 /// closes early) is not an error — `max_bytes` is a cap, not a target.
@@ -271,6 +304,20 @@ async fn timed_download_via_socks_inner(
     socks: SocketAddr,
     max_bytes: usize,
 ) -> Result<(u64, f64)> {
+    timed_download_via_socks_inner_with(url, socks, max_bytes, real_tls_connect).await
+}
+
+async fn timed_download_via_socks_inner_with<F, Fut, S>(
+    url: &str,
+    socks: SocketAddr,
+    max_bytes: usize,
+    connect_tls: F,
+) -> Result<(u64, f64)>
+where
+    F: FnOnce(rustls::pki_types::ServerName<'static>, TcpStream) -> Fut,
+    Fut: Future<Output = Result<S>>,
+    S: AsyncRead + AsyncWrite + Unpin,
+{
     let parsed = url::Url::parse(url).context("bad speed test URL")?;
     let use_tls = parsed.scheme() == "https";
     let host = parsed
@@ -295,9 +342,8 @@ async fn timed_download_via_socks_inner(
     let request = http_request(&host, &path, "Accept: */*");
     let started = Instant::now();
     let total = if use_tls {
-        let server_name =
-            rustls::pki_types::ServerName::try_from(host.clone()).context("invalid hostname")?;
-        let mut tls = tls_connector().connect(server_name, stream).await?;
+        let server_name = server_name_for_host(&host).context("invalid hostname")?;
+        let mut tls = connect_tls(server_name, stream).await?;
         io_step(tls.write_all(request.as_bytes()), "request write").await?;
         let _ = tls.shutdown().await;
         count_download(&mut tls, max_bytes).await?
@@ -363,6 +409,19 @@ async fn count_download<S: AsyncRead + Unpin + ?Sized>(
 }
 
 async fn get_via_socks_inner(url: &str, socks: SocketAddr) -> Result<Vec<u8>> {
+    get_via_socks_inner_with(url, socks, real_tls_connect).await
+}
+
+async fn get_via_socks_inner_with<F, Fut, S>(
+    url: &str,
+    socks: SocketAddr,
+    connect_tls: F,
+) -> Result<Vec<u8>>
+where
+    F: FnOnce(rustls::pki_types::ServerName<'static>, TcpStream) -> Fut,
+    Fut: Future<Output = Result<S>>,
+    S: AsyncRead + AsyncWrite + Unpin,
+{
     let parsed = url::Url::parse(url).context("bad probe URL")?;
     let use_tls = parsed.scheme() == "https";
     let host = parsed
@@ -386,9 +445,8 @@ async fn get_via_socks_inner(url: &str, socks: SocketAddr) -> Result<Vec<u8>> {
     socks5_connect(&mut stream, &host, port).await?;
     let request = http_request(&host, &path, "Accept: */*");
     let (status, _, body) = if use_tls {
-        let server_name =
-            rustls::pki_types::ServerName::try_from(host).context("invalid hostname")?;
-        let tls = tls_connector().connect(server_name, stream).await?;
+        let server_name = server_name_for_host(&host).context("invalid hostname")?;
+        let tls = connect_tls(server_name, stream).await?;
         send_http(tls, &request).await?
     } else {
         send_http(stream, &request).await?
@@ -630,6 +688,36 @@ mod tests {
         assert!(err.to_string().contains("timed out"), "{err}");
     }
 
+    #[test]
+    fn stall_classifier_matches_only_stall_and_timeout_failures() {
+        for msg in [
+            "speed test timed out",
+            "tunnel probe timed out: inner io failed",
+            "tunnel probe request write stalled",
+            "tunnel probe socks connect read stalled",
+            "deadline has elapsed",
+            "connection timeout after 30s",
+        ] {
+            assert!(
+                is_stall_or_timeout(&anyhow!("{msg}")),
+                "{msg} must classify as a stall"
+            );
+        }
+        for msg in [
+            "speed test got HTTP 403",
+            "bad speed test URL",
+            "invalid hostname",
+            "simulated download failure",
+            "socks CONNECT failed",
+            "response body exceeds the 1048576 cap",
+        ] {
+            assert!(
+                !is_stall_or_timeout(&anyhow!("{msg}")),
+                "{msg} must stay a hard error"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn socks5_connect_sends_v4_and_v6_atyp_requests() {
         // Server accepts and replies with an IPv4-shaped BND.ADDR.
@@ -775,6 +863,192 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.to_string().contains("timed out"), "{err}");
+    }
+
+    #[test]
+    fn server_name_maps_ip_literals_to_ip_address() {
+        match server_name_for_host("1.2.3.4").unwrap() {
+            rustls::pki_types::ServerName::IpAddress(ip) => {
+                assert_eq!(ip, "1.2.3.4".parse::<std::net::IpAddr>().unwrap().into());
+            }
+            other => panic!("an IPv4 literal must map to IpAddress, got {other:?}"),
+        }
+        match server_name_for_host("2606:4700:4700::1111").unwrap() {
+            rustls::pki_types::ServerName::IpAddress(ip) => {
+                assert_eq!(
+                    ip,
+                    "2606:4700:4700::1111"
+                        .parse::<std::net::IpAddr>()
+                        .unwrap()
+                        .into()
+                );
+            }
+            other => panic!("a bare IPv6 literal must map to IpAddress, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn server_name_strips_brackets_from_ipv6_literals() {
+        // `Url::host_str` keeps the brackets on IPv6 literals, and the plain
+        // `ServerName::try_from` constructor rejects them: without the strip,
+        // every IPv6-literal probe URL failed before any handshake bytes.
+        assert!(
+            rustls::pki_types::ServerName::try_from("[::1]".to_owned()).is_err(),
+            "pins the previously-failing constructor input"
+        );
+        for host in ["[::1]", "[2606:4700:4700::1111]"] {
+            match server_name_for_host(host).unwrap() {
+                rustls::pki_types::ServerName::IpAddress(ip) => {
+                    assert_eq!(
+                        ip,
+                        host.trim_start_matches('[')
+                            .trim_end_matches(']')
+                            .parse::<std::net::IpAddr>()
+                            .unwrap()
+                            .into()
+                    );
+                }
+                other => panic!("{host} must map to IpAddress, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn server_name_keeps_domain_names_unchanged() {
+        match server_name_for_host("example.com").unwrap() {
+            rustls::pki_types::ServerName::DnsName(name) => {
+                assert_eq!(name.as_ref(), "example.com");
+            }
+            other => panic!("a domain must stay a DnsName, got {other:?}"),
+        }
+        let via_helper = format!("{:?}", server_name_for_host("probe.test").unwrap());
+        let via_direct = format!(
+            "{:?}",
+            rustls::pki_types::ServerName::try_from("probe.test".to_owned()).unwrap()
+        );
+        assert_eq!(
+            via_helper, via_direct,
+            "domain dials must be byte-identical"
+        );
+    }
+
+    #[test]
+    fn server_name_rejects_invalid_hosts() {
+        for host in ["", "bad host!"] {
+            assert!(
+                server_name_for_host(host).is_err(),
+                "{host:?} must still fail instead of handshaking"
+            );
+        }
+    }
+
+    /// Regression test: an IP-literal dial previously failed inside
+    /// `ServerName::try_from` ("invalid hostname") before any handshake bytes.
+    /// The injected mock stands in for the endpoint's TLS session (identity
+    /// transform, as if its SNI cert verified): the handshake must now be
+    /// reached with an `IpAddress` name and the HTTP exchange must complete.
+    /// Loopback SOCKS tunnel only; no external network.
+    #[tokio::test]
+    async fn ip_literal_https_dial_completes_with_an_ip_server_name() {
+        let scripted = socks_scripted("HTTP/1.1 200 OK", b"colo=AMS").await;
+        let seen: std::sync::Arc<std::sync::Mutex<Vec<rustls::pki_types::ServerName<'static>>>> =
+            std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen_task = seen.clone();
+        let body = get_via_socks_inner_with(
+            "https://[::1]/cdn-cgi/trace",
+            scripted.addr,
+            move |name, stream| {
+                let seen_task = seen_task.clone();
+                async move {
+                    seen_task.lock().unwrap().push(name);
+                    Ok::<_, anyhow::Error>(stream)
+                }
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(body, b"colo=AMS");
+        let seen = seen.lock().unwrap().clone();
+        assert_eq!(
+            seen.len(),
+            1,
+            "the TLS handshake must be reached exactly once"
+        );
+        match &seen[0] {
+            rustls::pki_types::ServerName::IpAddress(ip) => {
+                assert_eq!(ip, &"::1".parse::<std::net::IpAddr>().unwrap().into());
+            }
+            other => panic!("an IP-literal dial must handshake as IpAddress, got {other:?}"),
+        }
+        let req = scripted.request.await.unwrap();
+        assert_eq!(
+            req[3], 0x03,
+            "remote-resolve behavior is unchanged: bracketed hosts still go ATYP-domain"
+        );
+    }
+
+    #[tokio::test]
+    async fn domain_https_dial_keeps_a_dns_server_name() {
+        let scripted = socks_scripted("HTTP/1.1 200 OK", b"ok").await;
+        let seen: std::sync::Arc<std::sync::Mutex<Vec<rustls::pki_types::ServerName<'static>>>> =
+            std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen_task = seen.clone();
+        let body = get_via_socks_inner_with(
+            "https://example.test/check",
+            scripted.addr,
+            move |name, stream| {
+                let seen_task = seen_task.clone();
+                async move {
+                    seen_task.lock().unwrap().push(name);
+                    Ok::<_, anyhow::Error>(stream)
+                }
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(body, b"ok");
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), 1);
+        match &seen[0] {
+            rustls::pki_types::ServerName::DnsName(name) => {
+                assert_eq!(name.as_ref(), "example.test");
+            }
+            other => panic!("a domain dial must handshake as DnsName, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn ip_literal_https_download_counts_with_an_ip_server_name() {
+        let scripted = socks_scripted("HTTP/1.1 200 OK", &[0xABu8; 4096]).await;
+        let seen: std::sync::Arc<std::sync::Mutex<Vec<rustls::pki_types::ServerName<'static>>>> =
+            std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen_task = seen.clone();
+        let (total, _) = timed_download_via_socks_inner_with(
+            "https://[::1]/data",
+            scripted.addr,
+            1 << 20,
+            move |name, stream| {
+                let seen_task = seen_task.clone();
+                async move {
+                    seen_task.lock().unwrap().push(name);
+                    Ok::<_, anyhow::Error>(stream)
+                }
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(total, 4096);
+        let seen = seen.lock().unwrap();
+        assert_eq!(
+            seen.len(),
+            1,
+            "the TLS handshake must be reached exactly once"
+        );
+        assert!(
+            matches!(&seen[0], rustls::pki_types::ServerName::IpAddress(_)),
+            "an IP-literal download must handshake as IpAddress, got {:?}",
+            seen[0]
+        );
     }
 
     #[tokio::test]

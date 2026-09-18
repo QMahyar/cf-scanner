@@ -20,9 +20,13 @@ over one in-process engine: no HTTP server, no browser UI, no tray.
 
 ## Skills
 
-- Rust work: always load the `rust-engineering` skill (Rust architecture, async,
-  ecosystem decisions, review; version-matched best practices) before writing
-  or reviewing Rust code here.
+- Rust work: load the matching installed skill(s) before writing or
+  reviewing Rust code here (`rust-async` for probe/engine work, `rust-cli`
+  for CLI/wizard, `rust-testing`/`tdd` for tests, `rust-error-handling` for
+  error work, `rust-security` for untrusted input). Catalog:
+  `.opencode/skills/`. There is no `rust-engineering` skill — do not
+  reference it. When no installed skill fits, the invariants, conventions,
+  and boundaries below are normative on their own.
 
 ## Commands
 
@@ -87,7 +91,7 @@ npm publishing knowledge (AGENTS must know, condensed from `docs/release-process
 - Results: last-scan-only, in memory; reset clears. NO history, NO telemetry.
 - GeoIP: db-ip Lite mmdb embedded via include_bytes! + maxminddb 0.30
   (geoip2 types built in). Country offline; datacenter = colo from
-  /cdn-cgi/trace (phase 2 only). Attribution required (CC BY 4.0, README link).
+  /cdn-cgi/trace (phase 2, or phase-1 with `--probe http`). Attribution required (CC BY 4.0, README link).
 - CLI agents: `scan` prints newline-delimited JSON on stdout + final summary;
   stderr carries human-only noise (progress ticker is TTY-gated).
   `--json-errors` prints `{"error": ...}` on stdout for failures.

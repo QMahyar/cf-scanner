@@ -375,6 +375,7 @@ fn build_wgconf(
         dns: Some(DNS.to_owned()),
         mtu: Some(1420),
         amnezia: Default::default(),
+        reserved: None,
         peer: WgPeer {
             public_key: peer.public_key.clone(),
             allowed_ips,

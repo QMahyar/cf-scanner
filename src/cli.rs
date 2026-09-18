@@ -123,6 +123,11 @@ pub(crate) enum Command {
         )]
         sni: Option<String>,
     },
+    #[command(about = "Find working junk/SNI/fragment settings by trial over small samples")]
+    Tune {
+        #[command(subcommand)]
+        action: TuneAction,
+    },
 }
 
 #[derive(Subcommand)]
@@ -133,6 +138,106 @@ pub(crate) enum RangesAction {
             help = "Also refresh the IPv6 range list (both files stay current afterwards)"
         )]
         ipv6: bool,
+    },
+}
+
+#[derive(Subcommand)]
+pub(crate) enum TuneAction {
+    #[command(about = "Try WARP junk counts head-to-head over small samples")]
+    Junk {
+        #[arg(
+            long,
+            value_delimiter = ',',
+            value_name = "COUNT",
+            help = "Junk counts to try per handshake probe (default 8,32,64; sizes fixed 10-50 bytes)"
+        )]
+        counts: Option<Vec<u8>>,
+        #[arg(
+            long,
+            default_value_t = 50,
+            value_name = "N",
+            help = "WARP endpoints sampled per junk value"
+        )]
+        candidates: u32,
+        #[arg(
+            long,
+            default_value_t = 30,
+            value_name = "PCT",
+            help = "Stop at the first value with at least PCT% working endpoints"
+        )]
+        need_pct: u32,
+        #[arg(
+            long,
+            default_value_t = 3000,
+            value_name = "MS",
+            help = "Per-probe timeout in milliseconds"
+        )]
+        timeout_ms: u64,
+    },
+    #[command(about = "Compare candidate phase-1 SNI hostnames head-to-head")]
+    Sni {
+        #[arg(
+            long,
+            required = true,
+            value_delimiter = ',',
+            value_name = "HOST",
+            help = "Candidate SNI hostnames to compare head-to-head (DNS names only)"
+        )]
+        snis: Vec<String>,
+        #[arg(
+            long,
+            default_value_t = 50,
+            value_name = "N",
+            help = "CDN candidates probed per SNI value"
+        )]
+        candidates: u32,
+        #[arg(
+            long,
+            default_value_t = 30,
+            value_name = "PCT",
+            help = "Stop at the first SNI with at least PCT% working endpoints"
+        )]
+        need_pct: u32,
+        #[arg(
+            long,
+            default_value_t = 3000,
+            value_name = "MS",
+            help = "Per-probe timeout in milliseconds"
+        )]
+        timeout_ms: u64,
+    },
+    #[command(
+        about = "Verify one config through xray at light, medium, then heavy fragment presets"
+    )]
+    Fragment {
+        #[arg(
+            long,
+            required = true,
+            value_name = "URI",
+            help = "Share URI verified through xray at each fragment preset (light, medium, heavy)"
+        )]
+        config: String,
+        #[arg(
+            long,
+            default_value_t = 20,
+            value_name = "N",
+            help = "CDN candidates verified per fragment preset"
+        )]
+        candidates: u32,
+        #[arg(
+            long,
+            default_value_t = 3,
+            value_name = "N",
+            help = "Stop at the first preset verifying at least N endpoints"
+        )]
+        need: u32,
+        #[arg(
+            long,
+            default_value_t = 3000,
+            value_name = "MS",
+            help = "Per-probe timeout in milliseconds"
+        )]
+        timeout_ms: u64,
     },
 }
 
@@ -154,6 +259,11 @@ pub(crate) enum WarpConfigAction {
             help = "Force a specific WARP endpoint (host:port); default is the built-in engage.cloudflareclient.com:2408"
         )]
         endpoint: Option<String>,
+        #[arg(
+            long,
+            help = "Also print a wireguard:// share link to stderr (stdout keeps exactly the wgconf body)"
+        )]
+        show_link: bool,
     },
     Export {
         #[arg(
@@ -166,6 +276,16 @@ pub(crate) enum WarpConfigAction {
             help = "Override the Endpoint line with a specific WARP endpoint (host:port)"
         )]
         endpoint: Option<String>,
+        #[arg(
+            long,
+            help = "Stamp Endpoint with the lowest-latency working result from the last scan (explicit --endpoint wins; errors when the scan found nothing)"
+        )]
+        bind_best: bool,
+        #[arg(
+            long,
+            help = "Also print a wireguard:// share link to stderr (stdout keeps exactly the wgconf body)"
+        )]
+        show_link: bool,
     },
 }
 
@@ -281,6 +401,15 @@ pub(crate) struct ScanArgs {
         long_help = "HTTP probe mode: status codes that count as working (100-599); default 200,301,302"
     )]
     pub(crate) http_status_code: Option<Vec<u16>>,
+
+    #[arg(
+        long,
+        value_name = "HOST",
+        value_delimiter = ',',
+        help_heading = "Tuning",
+        long_help = "TLS/HTTP probe mode: rotate these SNI hostnames across probes, one per probe (default cloudflare.com, max 8, DNS names only)"
+    )]
+    pub(crate) probe_snis: Vec<String>,
 
     #[arg(
         long,
@@ -441,6 +570,52 @@ pub(crate) struct ScanArgs {
 
     #[arg(
         long,
+        value_name = "N",
+        help_heading = "WARP",
+        help = "Junk padding datagrams per handshake probe for DPI noise, sent around the Init without modifying it (0 = off, max 128, WARP mode only)"
+    )]
+    pub(crate) warp_junk_count: Option<u8>,
+
+    #[arg(
+        long,
+        value_name = "BYTES",
+        help_heading = "WARP",
+        help = "Minimum junk datagram size in bytes (requires --warp-junk-count, WARP mode only)"
+    )]
+    pub(crate) warp_junk_min: Option<u16>,
+
+    #[arg(
+        long,
+        value_name = "BYTES",
+        help_heading = "WARP",
+        help = "Maximum junk datagram size in bytes, at most 1280 (requires --warp-junk-count, WARP mode only)"
+    )]
+    pub(crate) warp_junk_max: Option<u16>,
+
+    #[arg(
+        long,
+        help_heading = "WARP",
+        help = "Sample 100 endpoints before the WARP scan and raise --warp-probes on lossy or slow networks (never lowers an explicit --warp-probes, WARP mode only)"
+    )]
+    pub(crate) adaptive_retries: bool,
+
+    #[arg(
+        long,
+        help_heading = "WARP",
+        help = "Probe 12 sampled endpoints across WARP ports first and scan only answering ports (escalates to the extended port list; skipped on explicit ports/endpoints; WARP mode only)"
+    )]
+    pub(crate) warp_port_gate: bool,
+
+    #[arg(
+        long,
+        value_enum,
+        help_heading = "Tuning",
+        help = "Preset tuning for restricted networks: blocked = longer timeouts + idle-hold (CDN) or more probes (WARP); slow = longer timeout + halved concurrency (CDN) or longer timeout (WARP). Explicit flags always win; unset = today's defaults"
+    )]
+    pub(crate) network_profile: Option<NetworkProfileArg>,
+
+    #[arg(
+        long,
         help_heading = "Tuning",
         help = "Deterministic RNG seed for --count sampling and neighbor probes (same seed = same plan)"
     )]
@@ -460,6 +635,15 @@ pub(crate) struct ScanArgs {
         help = "Write results to this file when the scan ends (\"-\" = stdout)"
     )]
     pub(crate) export: Option<PathBuf>,
+
+    #[arg(
+        long,
+        conflicts_with = "export",
+        value_name = "FILE",
+        help_heading = "Export",
+        help = "Append NDJSON results to this file live as they arrive (crash-safe; conflicts with --export)"
+    )]
+    pub(crate) export_live: Option<PathBuf>,
 
     #[arg(
         long,
@@ -512,6 +696,21 @@ impl From<FragmentArg> for api::types::FragmentPreset {
             FragmentArg::Medium => api::types::FragmentPreset::Medium,
             FragmentArg::Heavy => api::types::FragmentPreset::Heavy,
             FragmentArg::Custom => api::types::FragmentPreset::Custom,
+        }
+    }
+}
+
+#[derive(Copy, Clone, PartialEq, Eq, Debug, ValueEnum)]
+pub(crate) enum NetworkProfileArg {
+    Blocked,
+    Slow,
+}
+
+impl From<NetworkProfileArg> for api::types::NetworkProfile {
+    fn from(p: NetworkProfileArg) -> Self {
+        match p {
+            NetworkProfileArg::Blocked => api::types::NetworkProfile::Blocked,
+            NetworkProfileArg::Slow => api::types::NetworkProfile::Slow,
         }
     }
 }
@@ -593,6 +792,108 @@ mod tests {
     fn warp_verify_without_wgconf_file_is_rejected() {
         let argv = ["cf-scanner", "scan", "--mode", "warp", "--warp-verify"];
         assert!(Cli::try_parse_from(argv).is_err());
+    }
+
+    #[test]
+    fn warp_config_export_bind_best_parses() {
+        let argv = ["cf-scanner", "warp-config", "export", "--bind-best"];
+        match Cli::try_parse_from(argv).unwrap().command {
+            Command::WarpConfig {
+                action:
+                    WarpConfigAction::Export {
+                        bind_best: true, ..
+                    },
+            } => {}
+            _ => panic!("expected export --bind-best"),
+        }
+        let argv = ["cf-scanner", "warp-config", "export"];
+        match Cli::try_parse_from(argv).unwrap().command {
+            Command::WarpConfig {
+                action:
+                    WarpConfigAction::Export {
+                        bind_best: false, ..
+                    },
+            } => {}
+            _ => panic!("--bind-best must default off"),
+        }
+        let argv = [
+            "cf-scanner",
+            "warp-config",
+            "export",
+            "--bind-best",
+            "--endpoint",
+            "203.0.113.7:2408",
+            "--out",
+            "wg.conf",
+        ];
+        match Cli::try_parse_from(argv).unwrap().command {
+            Command::WarpConfig {
+                action:
+                    WarpConfigAction::Export {
+                        bind_best: true,
+                        endpoint: Some(endpoint),
+                        out: Some(out),
+                        show_link: false,
+                    },
+            } => {
+                assert_eq!(endpoint, "203.0.113.7:2408");
+                assert_eq!(out, "wg.conf");
+            }
+            _ => panic!("expected export --bind-best --endpoint --out"),
+        }
+    }
+
+    #[test]
+    fn export_live_conflicts_with_export() {
+        let argv = [
+            "cf-scanner",
+            "scan",
+            "--export",
+            "a.csv",
+            "--export-live",
+            "b.jsonl",
+        ];
+        assert!(Cli::try_parse_from(argv).is_err());
+        let argv = ["cf-scanner", "scan", "--export-live", "b.jsonl"];
+        match Cli::try_parse_from(argv).unwrap().command {
+            Command::Scan { args } => {
+                assert_eq!(args.export_live, Some(std::path::PathBuf::from("b.jsonl")));
+                assert_eq!(args.export, None);
+            }
+            _ => panic!("expected scan --export-live"),
+        }
+    }
+
+    #[test]
+    fn warp_config_show_link_parses_and_defaults_off() {
+        let argv = ["cf-scanner", "warp-config", "generate", "--show-link"];
+        match Cli::try_parse_from(argv).unwrap().command {
+            Command::WarpConfig {
+                action: WarpConfigAction::Generate { show_link, .. },
+            } => assert!(show_link),
+            _ => panic!("expected generate --show-link"),
+        }
+        let argv = ["cf-scanner", "warp-config", "generate"];
+        match Cli::try_parse_from(argv).unwrap().command {
+            Command::WarpConfig {
+                action: WarpConfigAction::Generate { show_link, .. },
+            } => assert!(!show_link),
+            _ => panic!("expected plain generate"),
+        }
+        let argv = ["cf-scanner", "warp-config", "export", "--show-link"];
+        match Cli::try_parse_from(argv).unwrap().command {
+            Command::WarpConfig {
+                action: WarpConfigAction::Export { show_link, .. },
+            } => assert!(show_link),
+            _ => panic!("expected export --show-link"),
+        }
+        let argv = ["cf-scanner", "warp-config", "export"];
+        match Cli::try_parse_from(argv).unwrap().command {
+            Command::WarpConfig {
+                action: WarpConfigAction::Export { show_link, .. },
+            } => assert!(!show_link),
+            _ => panic!("expected plain export"),
+        }
     }
 
     #[test]

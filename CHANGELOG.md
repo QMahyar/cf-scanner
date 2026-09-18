@@ -5,7 +5,54 @@ Added / Changed / Fixed / Deprecated / Removed / Security, newest on top.
 
 ## [Unreleased]
 
+### Added
+- **WARP DPI noise core.** New `--warp-junk-count/min/max` send junk padding
+  datagrams around (never inside) the handshake Init; verification with your
+  own config now honors its AmneziaWG H/S/I1 parameters instead of failing
+  against AWG gateways with nonzero params.
+- **Opt-in `--warp-port-gate`.** Probes 12 sampled endpoints across the
+  primary WARP ports (escalating to the 50-port extended list on total
+  failure) and scans only answering ports; total failure aborts with an empty
+  summary instead of an error. Skipped on explicit ports/endpoints.
+- **`torn_down` failure signal (WARP, opt-in).** Endpoints that answer the
+  handshake then die mid-stream are stored export-only with
+  `fail_reason="torn_down"` once `--warp-probes` reaches 4+; they never count
+  as working, never win best/conf/bundles, and the same wording now marks
+  wgconf full-session mid-stream deaths.
+- **Opt-in `--adaptive-retries`.** A bounded 100-sample pre-flight raises
+  `--warp-probes` on lossy/slow networks, prints what it measured plus a
+  reusable re-run line, and yields to any explicit probe budget.
+- **`--network-profile blocked|slow` + reframed wizard.** One preset for
+  restricted networks (explicit flags always win); the wizard asks
+  blocked-vs-slow once and shows clearer client labels.
+- **Opt-in phase-1 SNI rotation (`--probe-snis`).** TLS/HTTP probes rotate up
+  to 8 DNS hostnames per probe (worker-index order, one dial per candidate);
+  the HTTP `Host` header tracks the rotated SNI. Default stays single-SNI.
+- **`tune` subcommand.** `tune junk`, `tune sni`, and
+  `tune fragment --config URI` try candidate values head-to-head over small
+  fixed samples (same sample per value) and print a reusable scan command
+  for the first value meeting the bar, else best-so-far.
+- **Phase-2 tier fallback ladder.** When the user's probe URLs yield zero
+  passes through the tunnel, verification retries the public trace +
+  data-path tier before failing the endpoint.
+- **`warp-config export --bind-best`.** Stamps Endpoint with the lowest-latency
+  working result from the last scan (explicit `--endpoint` wins, errors when
+  empty), plus additive `Reserved` parse/render passthrough for V2rayNG
+  import parity and opt-in `--show-link` (link on stderr, conf body untouched
+  on stdout).
+- **Opt-in `--export-live FILE`.** Appends NDJSON results per arrival with
+  fsync on finish, so interrupted scans stay parseable; `--export` keeps its
+  atomic all-or-nothing semantics (the two conflict).
+- **Speed-test burst fallback.** A stalled full sample behind `--speed-test`
+  degrades to parallel small-burst fetches recording a lower-bound MB/s
+  instead of erroring.
+
 ### Changed
+- **WARP pool list grew 8 → 15 /24s.** Seven probe-verified `8.x` ranges both
+  competitor scanners already ship; CDN ranges stay official-only.
+- **Budget-split probe timeouts (always-on).** TCP connect gets ≤¼ of the
+  timeout and the TLS handshake ≤½ of the remainder, so black-holed endpoints
+  fail fast with identical ceilings and verdicts.
 - **Honest speed-test field name.** The `speed_test_mbps` NDJSON/CSV field is
   now `speed_test_mb_s` — it always reported MB/s.
 - **Strict `--phase2-custom` grammar.** The custom fragment preset now accepts
@@ -47,6 +94,12 @@ Added / Changed / Fixed / Deprecated / Removed / Security, newest on top.
 - **Error chains no longer embed raw URLs.** Subscription-fetch and
   xray-download failures strip the URL (userinfo and query included) so
   tokens in subscription links never reach logs or NDJSON output.
+- **IP-literal dials with SNI certificates verify.** In-tunnel TLS handshakes
+  now repair the `ServerName` for IP-literal targets (bracket strip + IP
+  fallback) instead of failing; remote DNS resolution is unchanged.
+- **Malformed share links recover or explain.** Links with query parameters
+  but no `?` separator are reattached; truncated credentials fail fast with
+  an actionable pre-spawn error instead of dying downstream.
 
 
 ## [0.14.0] - 2026-09-08

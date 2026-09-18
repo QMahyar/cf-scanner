@@ -22,6 +22,17 @@ pub const SPEED_TEST_TIMEOUT: Duration = Duration::from_secs(30);
 const SPEED_TEST_CONCURRENCY: usize = 4;
 /// Sample source fetched through the tunnel.
 pub const SPEED_TEST_URL: &str = "https://speed.cloudflare.com/__down?bytes=8000000";
+/// Small-sample source for the stall fallback: same endpoint, 16 KiB body.
+pub const SPEED_BURST_URL: &str = "https://speed.cloudflare.com/__down?bytes=16384";
+/// Bytes per burst fetch.
+pub const SPEED_BURST_BYTES: usize = 16 * 1024;
+/// Parallel burst fetches per stalled endpoint.
+pub const SPEED_BURST_COUNT: usize = 8;
+/// Per-burst timeout: generous for 16 KiB, far below the full-sample wall.
+pub const SPEED_BURST_TIMEOUT: Duration = Duration::from_secs(10);
+/// Join arity of one burst wave. Waves are additionally capped at
+/// `SPEED_TEST_CONCURRENCY`, so the bound holds however either const moves.
+const BURST_WAVE_WIDTH: usize = 4;
 
 /// The exact probe parameters that made a candidate pass phase 2, so the
 /// speed test can recreate an identical tunnel.
@@ -138,10 +149,101 @@ pub(crate) fn apply_speed_result(
 }
 
 async fn measure_endpoint(tester: &dyn SpeedTester, socks: SocketAddr) -> Result<f32> {
-    let (bytes, seconds) = tester
+    match tester
         .download(SPEED_TEST_URL, socks, SPEED_TEST_BYTES, SPEED_TEST_TIMEOUT)
-        .await?;
-    mb_s(bytes, seconds).ok_or_else(|| anyhow::anyhow!("speed test returned an invalid duration"))
+        .await
+    {
+        Ok((bytes, seconds)) => mb_s(bytes, seconds)
+            .ok_or_else(|| anyhow::anyhow!("speed test returned an invalid duration")),
+        Err(full_err) => {
+            // WHY: only stalls degrade. Deterministic failures (HTTP status,
+            // bad URL, refused handshake) propagate exactly as before, so fast
+            // paths stay byte-identical and dead endpoints still error.
+            if !crate::socks::is_stall_or_timeout(&full_err) {
+                return Err(full_err);
+            }
+            match burst_lower_bound(tester, socks).await {
+                Some(bound) => Ok(bound),
+                None => Err(full_err),
+            }
+        }
+    }
+}
+
+/// Stall fallback: `SPEED_BURST_COUNT` small fetches in waves of at most
+/// `SPEED_TEST_CONCURRENCY`, reusing the `SpeedTester` seam (tests stay
+/// offline) and the already-open tunnel. Returns a conservative lower bound —
+/// successful bytes over summed burst times (the sequential-equivalent rate,
+/// so parallel delivery can only have been faster) — or `None` when no burst
+/// produced a usable sample, in which case the caller keeps the original
+/// stall error.
+async fn burst_lower_bound(tester: &dyn SpeedTester, socks: SocketAddr) -> Option<f32> {
+    let width = SPEED_TEST_CONCURRENCY.clamp(1, BURST_WAVE_WIDTH);
+    let mut remaining = SPEED_BURST_COUNT;
+    let mut total_bytes: u64 = 0;
+    let mut total_secs = 0.0f64;
+    while remaining > 0 {
+        let wave = remaining.min(width);
+        remaining -= wave;
+        for sample in burst_wave(tester, socks, wave).await {
+            let Ok((bytes, secs)) = sample else {
+                continue;
+            };
+            if bytes == 0 || !secs.is_finite() || secs <= 0.0 {
+                continue;
+            }
+            total_bytes = total_bytes.saturating_add(bytes);
+            total_secs += secs;
+        }
+    }
+    if total_bytes == 0 {
+        return None;
+    }
+    mb_s(total_bytes, total_secs)
+}
+
+/// One wave of at most `BURST_WAVE_WIDTH` concurrent burst fetches. Fixed
+/// `join!` arity keeps the futures on this task (no `spawn`, so the caller's
+/// cancel-`select!` drops them without leaking) while the caller caps the
+/// wave at the concurrency bound.
+async fn burst_wave(
+    tester: &dyn SpeedTester,
+    socks: SocketAddr,
+    n: usize,
+) -> Vec<Result<(u64, f64)>> {
+    debug_assert!((1..=BURST_WAVE_WIDTH).contains(&n));
+    fn burst(tester: &dyn SpeedTester, socks: SocketAddr) -> SpeedDownload<'_> {
+        tester.download(
+            SPEED_BURST_URL,
+            socks,
+            SPEED_BURST_BYTES,
+            SPEED_BURST_TIMEOUT,
+        )
+    }
+    match n {
+        1 => vec![burst(tester, socks).await],
+        2 => {
+            let (a, b) = tokio::join!(burst(tester, socks), burst(tester, socks),);
+            vec![a, b]
+        }
+        3 => {
+            let (a, b, c) = tokio::join!(
+                burst(tester, socks),
+                burst(tester, socks),
+                burst(tester, socks),
+            );
+            vec![a, b, c]
+        }
+        _ => {
+            let (a, b, c, d) = tokio::join!(
+                burst(tester, socks),
+                burst(tester, socks),
+                burst(tester, socks),
+                burst(tester, socks),
+            );
+            vec![a, b, c, d]
+        }
+    }
 }
 
 impl ScanController {
@@ -955,5 +1057,264 @@ mod tests {
         let p2v = updated.phase2.as_ref().unwrap();
         assert_eq!(p2v.speed_test_mb_s, Some(0.5));
         assert!(p2v.passed, "NaN threshold must not fail the endpoint");
+    }
+
+    /// Tester that fails the full capped sample on demand and answers bursts
+    /// programmably, recording every call plus peak in-flight downloads.
+    struct BurstMock {
+        full_err: Option<String>,
+        full_ok: (u64, f64),
+        burst_err: Option<String>,
+        burst_ok: (u64, f64),
+        delay_full: Duration,
+        delay_burst: Duration,
+        calls: Arc<std::sync::Mutex<Vec<(String, usize)>>>,
+        current: Arc<AtomicU64>,
+        peak: Arc<AtomicU64>,
+    }
+
+    impl BurstMock {
+        fn stall_then_ok() -> Self {
+            Self {
+                full_err: Some("speed test timed out".to_owned()),
+                full_ok: (0, 0.0),
+                burst_err: None,
+                burst_ok: (SPEED_BURST_BYTES as u64, 0.1),
+                delay_full: Duration::ZERO,
+                delay_burst: Duration::ZERO,
+                calls: Arc::new(std::sync::Mutex::new(Vec::new())),
+                current: Arc::new(AtomicU64::new(0)),
+                peak: Arc::new(AtomicU64::new(0)),
+            }
+        }
+    }
+
+    impl SpeedTester for BurstMock {
+        fn download<'a>(
+            &'a self,
+            url: &'a str,
+            _socks: SocketAddr,
+            max_bytes: usize,
+            _timeout: Duration,
+        ) -> SpeedDownload<'a> {
+            Box::pin(async move {
+                lock(&self.calls).push((url.to_owned(), max_bytes));
+                let full = max_bytes == SPEED_TEST_BYTES;
+                let delay = if full {
+                    self.delay_full
+                } else {
+                    self.delay_burst
+                };
+                self.current.fetch_add(1, Ordering::Relaxed);
+                self.peak
+                    .fetch_max(self.current.load(Ordering::Relaxed), Ordering::Relaxed);
+                if delay.is_zero() {
+                    tokio::task::yield_now().await;
+                } else {
+                    tokio::time::sleep(delay).await;
+                }
+                self.current.fetch_sub(1, Ordering::Relaxed);
+                if full {
+                    match &self.full_err {
+                        Some(e) => Err(anyhow::anyhow!("{e}")),
+                        None => Ok(self.full_ok),
+                    }
+                } else {
+                    match &self.burst_err {
+                        Some(e) => Err(anyhow::anyhow!("{e}")),
+                        None => Ok(self.burst_ok),
+                    }
+                }
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn stall_falls_back_to_burst_lower_bound() {
+        let mock = BurstMock::stall_then_ok();
+        let socks: SocketAddr = "127.0.0.1:1".parse().unwrap();
+        let m = measure_endpoint(&mock, socks).await.unwrap();
+        // 8 bursts x 16 KiB over the summed 0.8 s sequential-equivalent time.
+        let expected = mb_s(8 * SPEED_BURST_BYTES as u64, 0.8).unwrap();
+        assert!(
+            (m - expected).abs() < 1e-4,
+            "lower bound {m} != sequential-equivalent {expected}"
+        );
+        let calls = lock(&mock.calls).clone();
+        assert_eq!(
+            calls.len(),
+            1 + SPEED_BURST_COUNT,
+            "one full sample plus every burst"
+        );
+        assert_eq!(calls[0].1, SPEED_TEST_BYTES, "the full sample runs first");
+        assert!(
+            calls[1..].iter().all(|(_, b)| *b == SPEED_BURST_BYTES),
+            "every fallback fetch is burst-sized"
+        );
+        assert!(
+            calls[1..].iter().all(|(u, _)| u == SPEED_BURST_URL),
+            "bursts hit the small-sample URL"
+        );
+    }
+
+    #[tokio::test]
+    async fn non_stall_error_never_triggers_bursts() {
+        let mut mock = BurstMock::stall_then_ok();
+        mock.full_err = Some("speed test got HTTP 403".to_owned());
+        let socks: SocketAddr = "127.0.0.1:1".parse().unwrap();
+        let err = measure_endpoint(&mock, socks).await.unwrap_err();
+        assert!(err.to_string().contains("403"), "{err}");
+        assert_eq!(
+            lock(&mock.calls).len(),
+            1,
+            "a hard error must not spend burst traffic"
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_bursts_keep_the_original_stall_error() {
+        let mut mock = BurstMock::stall_then_ok();
+        mock.burst_err = Some("speed test timed out".to_owned());
+        let socks: SocketAddr = "127.0.0.1:1".parse().unwrap();
+        let err = measure_endpoint(&mock, socks).await.unwrap_err();
+        assert!(err.to_string().contains("timed out"), "{err}");
+        assert_eq!(
+            lock(&mock.calls).len(),
+            1 + SPEED_BURST_COUNT,
+            "bursts were attempted before giving up"
+        );
+    }
+
+    #[tokio::test]
+    async fn successful_full_sample_spends_no_burst_traffic() {
+        let mut mock = BurstMock::stall_then_ok();
+        mock.full_err = None;
+        mock.full_ok = (8 * 1024 * 1024, 4.0);
+        let socks: SocketAddr = "127.0.0.1:1".parse().unwrap();
+        let m = measure_endpoint(&mock, socks).await.unwrap();
+        assert!((m - 2.0).abs() < 1e-4, "{m}");
+        assert_eq!(
+            lock(&mock.calls).len(),
+            1,
+            "the fast path is byte-identical: no burst traffic"
+        );
+    }
+
+    #[tokio::test]
+    async fn burst_waves_honor_the_concurrency_bound() {
+        let mut mock = BurstMock::stall_then_ok();
+        mock.delay_burst = Duration::from_millis(5);
+        let socks: SocketAddr = "127.0.0.1:1".parse().unwrap();
+        measure_endpoint(&mock, socks).await.unwrap();
+        let peak = mock.peak.load(Ordering::Relaxed);
+        assert!(
+            peak <= SPEED_TEST_CONCURRENCY as u64,
+            "peak in-flight bursts {peak} exceed the bound"
+        );
+        assert_eq!(
+            peak,
+            SPEED_TEST_CONCURRENCY.min(BURST_WAVE_WIDTH) as u64,
+            "bursts actually run in parallel ({peak})"
+        );
+    }
+
+    #[tokio::test]
+    async fn cancel_during_bursts_still_cleans_up_the_tunnel() {
+        let opener = Arc::new(CountingOpener::new());
+        let opener_dyn: Arc<dyn TunnelOpener> = opener.clone();
+        // The full sample stalls at once; bursts hang until cancel wins.
+        let mut mock = BurstMock::stall_then_ok();
+        mock.delay_burst = Duration::from_secs(60);
+        let calls = mock.calls.clone();
+        let tester: Arc<dyn SpeedTester> = Arc::new(mock);
+        let spec =
+            crate::configs::parse_uri("vless://aaaaaaaa-bbbb-cccc-dddd-eeeeffff0000@1.2.3.4:443")
+                .unwrap();
+        let entry = PassingSpec {
+            spec,
+            fragment: FragmentPreset::Off,
+            sni: None,
+        };
+        let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
+        let ip: Ipv4Addr = "203.0.113.1".parse().unwrap();
+        let handle = tokio::spawn({
+            let opener_dyn = opener_dyn.clone();
+            let tester = tester.clone();
+            let entry = entry.clone();
+            let cancel_rx = cancel_rx.clone();
+            async move {
+                measure_through_tunnel(&opener_dyn, &tester, &entry, None, ip, &cancel_rx).await
+            }
+        });
+        // Wait until the first burst wave is in flight, then cancel.
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while lock(&calls).len() < 1 + SPEED_TEST_CONCURRENCY.min(BURST_WAVE_WIDTH) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("bursts must start before cancel fires");
+        cancel_tx.send(true).unwrap();
+        let outcome = tokio::time::timeout(Duration::from_secs(10), handle)
+            .await
+            .expect("cancelled bursts must resolve")
+            .expect("task panicked");
+        assert!(outcome.is_err(), "cancel must surface as an error");
+        assert_eq!(
+            opener.cleanups.load(Ordering::Relaxed),
+            1,
+            "the tunnel must be torn down even when cancel wins mid-burst"
+        );
+    }
+
+    #[tokio::test]
+    async fn speed_test_phase_records_burst_lower_bound_on_the_verdict() {
+        let c = Arc::new(ScanController::new(Arc::new(
+            crate::probe::FakeTransport::new(),
+        )));
+        crate::engine::store_seed(&c, vec![passing("203.0.113.1".parse().unwrap(), 443, 0)]);
+        c.set_tunnel_opener(Arc::new(FakeOpener));
+        c.set_speed_tester(Arc::new(BurstMock::stall_then_ok()));
+        let cfg = speed_cfg();
+        let p2 = Phase2Config::default();
+        c.speed_test_phase(&cfg, &p2, &[(spec_for(0), 0)])
+            .await
+            .unwrap();
+        let results = c.results();
+        assert_eq!(results.len(), 1);
+        let p2v = results[0].phase2.as_ref().unwrap();
+        let expected = mb_s(8 * SPEED_BURST_BYTES as u64, 0.8).unwrap();
+        assert!(
+            (p2v.speed_test_mb_s.unwrap() - expected).abs() < 1e-4,
+            "stall converts to a lower-bound record: {p2v:?}"
+        );
+        assert!(p2v.passed, "no threshold: the pass must stand");
+        assert!(p2v.error.is_none(), "a lower-bound record carries no error");
+    }
+
+    #[tokio::test]
+    async fn min_speed_still_gates_burst_lower_bounds() {
+        let c = Arc::new(ScanController::new(Arc::new(
+            crate::probe::FakeTransport::new(),
+        )));
+        crate::engine::store_seed(&c, vec![passing("203.0.113.1".parse().unwrap(), 443, 0)]);
+        c.set_tunnel_opener(Arc::new(FakeOpener));
+        c.set_speed_tester(Arc::new(BurstMock::stall_then_ok()));
+        let mut cfg = speed_cfg();
+        cfg.min_speed_mbps = Some(2.0);
+        let p2 = Phase2Config::default();
+        c.speed_test_phase(&cfg, &p2, &[(spec_for(0), 0)])
+            .await
+            .unwrap();
+        let results = c.results();
+        let p2v = results[0].phase2.as_ref().unwrap();
+        assert!(
+            !p2v.passed,
+            "a 0.16 MB/s bound must fail a 2.0 MB/s gate: {p2v:?}"
+        );
+        assert!(
+            p2v.error.as_deref().unwrap().contains("min-speed"),
+            "the error names the gate: {p2v:?}"
+        );
     }
 }

@@ -916,6 +916,96 @@ fn colo_filter_rejects_too_many_entries() {
 }
 
 #[test]
+fn probe_snis_default_to_single_and_round_trip() {
+    let c = valid_config();
+    assert_eq!(
+        c.probe_snis,
+        vec!["cloudflare.com".to_owned()],
+        "default must stay today's single probe SNI"
+    );
+    assert_eq!(c.validate(), Ok(()));
+    let json = serde_json::to_string(&c).unwrap();
+    assert!(
+        json.contains("\"probe_snis\":[\"cloudflare.com\"]"),
+        "{json}"
+    );
+    let back: ScanConfig = serde_json::from_str(&json).unwrap();
+    assert_eq!(c, back);
+}
+
+#[test]
+fn probe_snis_omitted_field_deserializes_as_default() {
+    let json = r#"{
+        "mode": "Cdn",
+        "target": {"Count": 10},
+        "ports": [443],
+        "stop": {"found": 1, "cap": null},
+        "exclude": [],
+        "custom_cidrs": [],
+        "concurrency": 10,
+        "timeout_ms": 3000
+    }"#;
+    let cfg: ScanConfig = serde_json::from_str(json).unwrap();
+    assert_eq!(
+        cfg.probe_snis,
+        vec!["cloudflare.com".to_owned()],
+        "omitted field must default to today's single SNI (retry-last compat)"
+    );
+}
+
+#[test]
+fn probe_snis_rejects_bad_shape_ip_and_too_many() {
+    for bad in [
+        "",
+        "not a host!",
+        "-lead.example",
+        "trailing-.example",
+        "a..b",
+    ] {
+        let mut c = valid_config();
+        c.probe_snis = vec![bad.to_owned()];
+        assert!(
+            matches!(&c.validate(), Err(ConfigError::InvalidSni(name, _)) if name == bad),
+            "{bad:?} must be rejected"
+        );
+    }
+    // IP literals pass the shared shape check elsewhere but are useless as
+    // rotation SNIs (no Host header value), so they are rejected here.
+    let mut c = valid_config();
+    c.probe_snis = vec!["1.2.3.4".to_owned()];
+    assert!(
+        matches!(c.validate(), Err(ConfigError::InvalidSni(_, _))),
+        "IP literals must be rejected"
+    );
+    let mut c = valid_config();
+    c.probe_snis = (0..MAX_PROBE_SNIS + 1)
+        .map(|i| format!("h{i}.example.com"))
+        .collect();
+    assert_eq!(
+        c.validate(),
+        Err(ConfigError::TooManyProbeSnis(MAX_PROBE_SNIS + 1))
+    );
+    c.probe_snis.truncate(MAX_PROBE_SNIS);
+    assert_eq!(c.validate(), Ok(()), "the limit value must be accepted");
+}
+
+#[test]
+fn probe_snis_custom_list_needs_tls_or_http() {
+    let mut c = valid_config();
+    c.probe_mode = ProbeMode::Tls;
+    c.probe_snis = vec!["example.com".to_owned()];
+    assert_eq!(c.validate(), Ok(()));
+    c.probe_mode = ProbeMode::Http;
+    assert_eq!(c.validate(), Ok(()));
+    c.probe_mode = ProbeMode::Tcp;
+    assert_eq!(c.validate(), Err(ConfigError::ProbeSnisNeedTlsHttp));
+    c.probe_snis = default_probe_snis();
+    assert_eq!(c.validate(), Ok(()), "default list under TCP stays valid");
+    c.probe_snis = Vec::new();
+    assert_eq!(c.validate(), Ok(()), "empty means unset everywhere");
+}
+
+#[test]
 fn colo_filter_is_cdn_only() {
     let mut c = valid_config();
     c.mode = Mode::Warp;
@@ -1595,6 +1685,10 @@ fn warp_and_full_phase2_configs_round_trip() {
         probes_per_endpoint: 5,
         wgconf: Some("[Interface]".to_owned()),
         verify_with_wgconf: true,
+        junk_count: 4,
+        junk_min: 32,
+        junk_max: 64,
+        port_gate: true,
     };
     let back: WarpConfig = serde_json::from_str(&serde_json::to_string(&w).unwrap()).unwrap();
     assert_eq!(back, w);
@@ -1613,4 +1707,11 @@ fn warp_and_full_phase2_configs_round_trip() {
     };
     let back: Phase2Config = serde_json::from_str(&serde_json::to_string(&p2).unwrap()).unwrap();
     assert_eq!(back, p2);
+}
+
+#[test]
+fn warp_port_gate_omitted_field_deserializes_as_false() {
+    let w: WarpConfig =
+        serde_json::from_str(r#"{"custom_endpoints":[],"probes_per_endpoint":3}"#).unwrap();
+    assert!(!w.port_gate, "omitted field must default to off");
 }

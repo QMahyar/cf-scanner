@@ -7,15 +7,25 @@ use anyhow::{Context as _, Result, anyhow, bail};
 use tokio::sync::watch;
 use tokio::task::JoinSet;
 
-use super::store::{PosIndex, remove_verdict_unless_passed, update_verdict_phase2};
+use super::store::{PosIndex, Store, remove_verdict_unless_passed, update_verdict_phase2};
 use super::{ScanController, cancelled_signal, claim_milestone, colo_rejected, lock};
 use crate::api::types::{
-    Phase2Config, Phase2Progress, Phase2Verdict, ScanConfig, ScanEvent, Verifier,
+    Phase2Config, Phase2Progress, Phase2Verdict, ScanConfig, ScanEvent, Verdict, Verifier,
 };
 use crate::configs::{OutboundSpec, parse_subscription, parse_uri, parse_xray_json};
 use crate::verify::ProbeRequest;
 
 const PROGRESS_EVERY_P2: u64 = 32;
+
+/// Fixed phase-2 fallback tier (spec P1-2): a public Cloudflare trace URL
+/// (edge reachability + colo) plus a real data-path page (payload delivery,
+/// not just status). Both must 200 over one tunnel, like any probe-URL tier.
+/// Fixed with no config surface, so single-tier configs behave exactly as
+/// today. Both URLs return HTTP 200, which is what the tunnel probes require.
+const FALLBACK_TIER_PROBE_URLS: &[&str] = &[
+    "https://cloudflare.com/cdn-cgi/trace",
+    "https://www.cloudflare.com/",
+];
 
 impl ScanController {
     pub(super) async fn verify_phase(&self, cfg: &ScanConfig, p2: &Phase2Config) -> Result<()> {
@@ -36,18 +46,9 @@ impl ScanController {
         } else {
             p2.snis.iter().map(|s| Some(s.clone())).collect()
         };
-        let probe_urls = p2.effective_probe_urls();
+        let tiers = phase2_tiers(p2.effective_probe_urls());
         let candidates = lock(&self.progress.store).clone();
-        let v4_candidates: Vec<(Ipv4Addr, u16)> = candidates
-            .iter()
-            .filter(|v| v.latency_ms.is_some())
-            .filter(|v| !v.phase2.as_ref().is_some_and(|p| p.passed))
-            .filter_map(|v| match v.ip {
-                IpAddr::V4(ip) => Some((ip, v.port)),
-                IpAddr::V6(_) => None,
-            })
-            .collect();
-        if v4_candidates.is_empty() {
+        if phase2_candidates_in(&candidates).is_empty() {
             return Ok(());
         }
         let pos_index: PosIndex = Arc::new(Mutex::new(Arc::new({
@@ -60,188 +61,221 @@ impl ScanController {
             map
         })));
 
-        let combos_per_candidate = (specs.len() * snis.len()) as u64;
-        let total = v4_candidates.len() as u64 * combos_per_candidate;
-        let next = Arc::new(AtomicU64::new(0));
+        let specs = Arc::new(specs);
+        let snis = Arc::new(snis);
+        // Shared across tiers: the cap budget, the stop budget, the kept-pass
+        // set, and the first error span the whole ladder, so cost stays
+        // bounded exactly as in a single wave.
         let passed: Arc<Mutex<HashSet<(Ipv4Addr, u16)>>> = Arc::new(Mutex::new(HashSet::new()));
         let attempts = Arc::new(AtomicU64::new(0));
         let completed = Arc::new(AtomicU64::new(0));
         let errored = Arc::new(AtomicU64::new(0));
-        let milestones = Arc::new(AtomicU64::new(0));
-        let terminal_sent = Arc::new(AtomicBool::new(false));
         let first_error: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
         let cap = cfg.stop.cap;
         let stop_found = cfg.stop.found as usize;
         let colo_filter = cfg.colo_filter.clone();
 
-        let specs = Arc::new(specs);
-        let snis = Arc::new(snis);
-        let probe_urls = Arc::new(probe_urls);
-        let v4_candidates = Arc::new(v4_candidates);
-        let mut tasks = JoinSet::new();
-        for _ in 0..p2.concurrency {
-            let probe = self.handles.tunnel_probe.clone();
-            let store = self.progress.store.clone();
-            let events = self.events.clone();
-            let cancel = cancel_rx.clone();
-            let passed = passed.clone();
-            let attempts = attempts.clone();
-            let completed = completed.clone();
-            let errored = errored.clone();
-            let milestones = milestones.clone();
-            let terminal_sent = terminal_sent.clone();
-            let first_error = first_error.clone();
-            let next = next.clone();
-            let candidates = v4_candidates.clone();
-            let pos_index = pos_index.clone();
-            let specs = specs.clone();
-            let snis = snis.clone();
-            let probe_urls = probe_urls.clone();
-            let p2 = p2.clone();
-            let colo_filter = colo_filter.clone();
-            let timeout_ms = cfg.timeout_ms;
-            tasks.spawn(async move {
-                loop {
-                    if *cancel.borrow()
-                        || cap.is_some_and(|c| attempts.load(Ordering::Relaxed) >= u64::from(c))
-                        || lock(&passed).len() >= stop_found
-                    {
-                        break;
-                    }
-                    let idx = next.fetch_add(1, Ordering::Relaxed);
-                    if idx >= total {
-                        break;
-                    }
-                    let (ci, rest) = (idx / combos_per_candidate, idx % combos_per_candidate);
-                    let (si, ni) = (rest / snis.len() as u64, rest % snis.len() as u64);
-                    let (ip, port) = candidates[ci as usize];
-                    let (spec, config_idx) = &specs[si as usize];
-                    let sni = &snis[ni as usize];
-                    if lock(&passed).contains(&(ip, port)) {
-                        continue;
-                    }
-                    if lock(&passed).len() >= stop_found {
-                        break;
-                    }
-                    attempts.fetch_add(1, Ordering::Relaxed);
-                    let probe_result = tokio::select! {
-                        r = probe.probe(ProbeRequest {
-                            spec,
-                            dial_ip: ip,
-                            preset: &p2.fragment,
-                            custom: p2.custom_fragment.as_ref(),
-                            sni: sni.as_deref(),
-                            probe_urls: &probe_urls,
-                            timeout_ms,
-                        }) => Some(r),
-                        _ = cancelled_signal(cancel.clone()) => None,
-                    };
-                    let Some(probe_result) = probe_result else {
-                        break;
-                    };
-                    match probe_result {
-                        Ok(result) => {
-                            completed.fetch_add(1, Ordering::Relaxed);
-                            let colo = result.colo.clone();
-                            let colo_kept = !colo_rejected(&colo_filter, colo.as_deref());
-                            let verdict = Phase2Verdict {
-                                passed: result.passed,
-                                fragment: p2.fragment.clone(),
-                                sni: sni.clone().unwrap_or_default(),
-                                latency_ms: result.latency_ms,
-                                error: None,
-                                config_index: Some(*config_idx),
-                                spec_index: Some(si as u32),
-                                verifier: result.verifier.and_then(parse_verifier),
-                                speed_test_mb_s: None,
-                            };
-                            if lock(&passed).len() >= stop_found && !result.passed {
-                                break;
-                            }
-                            let overshoot = lock(&passed).len() > stop_found;
-                            if !colo_kept {
-                                remove_verdict_unless_passed(&store, ip, port, &pos_index);
-                            } else if let Some(updated) =
-                                update_verdict_phase2(&store, ip, port, verdict, colo, &pos_index)
-                            {
-                                if result.passed {
-                                    // A kept pass counts toward the stop budget only
-                                    // when its verdict is visible in the store: a row
-                                    // removed by a racing colo rejection yields no row
-                                    // to update, and such an invisible pass must not
-                                    // consume stop budget.
-                                    lock(&passed).insert((ip, port));
+        for (tier_idx, tier_urls) in tiers.iter().enumerate() {
+            // A tier-1 colo rejection removes the row, so recompute from the live
+            // store: later tiers skip removed candidates instead of burning probes
+            // on rows that can no longer hold a verdict.
+            let v4_candidates = Arc::new(phase2_candidates(&self.progress.store));
+            if v4_candidates.is_empty() {
+                break;
+            }
+            let combos_per_candidate = (specs.len() * snis.len()) as u64;
+            let total = v4_candidates.len() as u64 * combos_per_candidate;
+            // Cumulative counters stay shared (final accounting spans the ladder);
+            // progress events below report this tier's wave only.
+            let base_done = completed.load(Ordering::Relaxed) + errored.load(Ordering::Relaxed);
+            let base_attempts = attempts.load(Ordering::Relaxed);
+            let next = Arc::new(AtomicU64::new(0));
+            let milestones = Arc::new(AtomicU64::new(0));
+            let terminal_sent = Arc::new(AtomicBool::new(false));
+            let tier_urls = Arc::new(tier_urls.clone());
+            let mut tasks = JoinSet::new();
+            for _ in 0..p2.concurrency {
+                let probe = self.handles.tunnel_probe.clone();
+                let store = self.progress.store.clone();
+                let events = self.events.clone();
+                let cancel = cancel_rx.clone();
+                let passed = passed.clone();
+                let attempts = attempts.clone();
+                let completed = completed.clone();
+                let errored = errored.clone();
+                let milestones = milestones.clone();
+                let terminal_sent = terminal_sent.clone();
+                let first_error = first_error.clone();
+                let next = next.clone();
+                let candidates = v4_candidates.clone();
+                let pos_index = pos_index.clone();
+                let specs = specs.clone();
+                let snis = snis.clone();
+                let tier_urls = tier_urls.clone();
+                let p2 = p2.clone();
+                let colo_filter = colo_filter.clone();
+                let timeout_ms = cfg.timeout_ms;
+                tasks.spawn(async move {
+                    loop {
+                        if *cancel.borrow()
+                            || cap.is_some_and(|c| attempts.load(Ordering::Relaxed) >= u64::from(c))
+                            || lock(&passed).len() >= stop_found
+                        {
+                            break;
+                        }
+                        let idx = next.fetch_add(1, Ordering::Relaxed);
+                        if idx >= total {
+                            break;
+                        }
+                        let (ci, rest) = (idx / combos_per_candidate, idx % combos_per_candidate);
+                        let (si, ni) = (rest / snis.len() as u64, rest % snis.len() as u64);
+                        let (ip, port) = candidates[ci as usize];
+                        let (spec, config_idx) = &specs[si as usize];
+                        let sni = &snis[ni as usize];
+                        if lock(&passed).contains(&(ip, port)) {
+                            continue;
+                        }
+                        if lock(&passed).len() >= stop_found {
+                            break;
+                        }
+                        attempts.fetch_add(1, Ordering::Relaxed);
+                        let probe_result = tokio::select! {
+                            r = probe.probe(ProbeRequest {
+                                spec,
+                                dial_ip: ip,
+                                preset: &p2.fragment,
+                                custom: p2.custom_fragment.as_ref(),
+                                sni: sni.as_deref(),
+                                probe_urls: &tier_urls,
+                                timeout_ms,
+                            }) => Some(r),
+                            _ = cancelled_signal(cancel.clone()) => None,
+                        };
+                        let Some(probe_result) = probe_result else {
+                            break;
+                        };
+                        match probe_result {
+                            Ok(result) => {
+                                completed.fetch_add(1, Ordering::Relaxed);
+                                let colo = result.colo.clone();
+                                let colo_kept = !colo_rejected(&colo_filter, colo.as_deref());
+                                let verdict = Phase2Verdict {
+                                    passed: result.passed,
+                                    fragment: p2.fragment.clone(),
+                                    sni: sni.clone().unwrap_or_default(),
+                                    latency_ms: result.latency_ms,
+                                    error: None,
+                                    config_index: Some(*config_idx),
+                                    spec_index: Some(si as u32),
+                                    verifier: result.verifier.and_then(parse_verifier),
+                                    speed_test_mb_s: None,
+                                };
+                                if lock(&passed).len() >= stop_found && !result.passed {
+                                    break;
                                 }
-                                let _ = events.send(ScanEvent::Result(Box::new(updated)));
+                                let overshoot = lock(&passed).len() > stop_found;
+                                if !colo_kept {
+                                    remove_verdict_unless_passed(&store, ip, port, &pos_index);
+                                } else if let Some(updated) = update_verdict_phase2(
+                                    &store, ip, port, verdict, colo, &pos_index,
+                                ) {
+                                    if result.passed {
+                                        // A kept pass counts toward the stop budget only
+                                        // when its verdict is visible in the store: a row
+                                        // removed by a racing colo rejection yields no row
+                                        // to update, and such an invisible pass must not
+                                        // consume stop budget.
+                                        lock(&passed).insert((ip, port));
+                                    }
+                                    let _ = events.send(ScanEvent::Result(Box::new(updated)));
+                                }
+                                if overshoot {
+                                    break;
+                                }
                             }
-                            if overshoot {
-                                break;
+                            Err(err) => {
+                                // Record the failure before any stop check: a probe that
+                                // errored after the stop budget filled must still count
+                                // toward `errored` and `first_error` (the terminal
+                                // `done == total` accounting depends on it). Only the
+                                // verdict store/emit is skipped once stopped, matching
+                                // the ok-but-failed path above.
+                                errored.fetch_add(1, Ordering::Relaxed);
+                                let msg = crate::configs::sanitize_error_text(&format!("{err:#}"));
+                                let mut slot = lock(&first_error);
+                                if slot.is_none() {
+                                    *slot = Some(msg.clone());
+                                }
+                                if lock(&passed).len() >= stop_found {
+                                    break;
+                                }
+                                let verdict = Phase2Verdict {
+                                    passed: false,
+                                    fragment: p2.fragment.clone(),
+                                    sni: sni.clone().unwrap_or_default(),
+                                    latency_ms: None,
+                                    error: Some(msg),
+                                    config_index: Some(*config_idx),
+                                    spec_index: Some(si as u32),
+                                    verifier: None,
+                                    speed_test_mb_s: None,
+                                };
+                                if lock(&passed).len() >= stop_found {
+                                    break;
+                                }
+                                if let Some(updated) = update_verdict_phase2(
+                                    &store, ip, port, verdict, None, &pos_index,
+                                ) {
+                                    let _ = events.send(ScanEvent::Result(Box::new(updated)));
+                                }
                             }
                         }
-                        Err(err) => {
-                            // Record the failure before any stop check: a probe that
-                            // errored after the stop budget filled must still count
-                            // toward `errored` and `first_error` (the terminal
-                            // `done == total` accounting depends on it). Only the
-                            // verdict store/emit is skipped once stopped, matching
-                            // the ok-but-failed path above.
-                            errored.fetch_add(1, Ordering::Relaxed);
-                            let msg = crate::configs::sanitize_error_text(&format!("{err:#}"));
-                            let mut slot = lock(&first_error);
-                            if slot.is_none() {
-                                *slot = Some(msg.clone());
-                            }
-                            if lock(&passed).len() >= stop_found {
-                                break;
-                            }
-                            let verdict = Phase2Verdict {
-                                passed: false,
-                                fragment: p2.fragment.clone(),
-                                sni: sni.clone().unwrap_or_default(),
-                                latency_ms: None,
-                                error: Some(msg),
-                                config_index: Some(*config_idx),
-                                spec_index: Some(si as u32),
-                                verifier: None,
-                                speed_test_mb_s: None,
-                            };
-                            if lock(&passed).len() >= stop_found {
-                                break;
-                            }
-                            if let Some(updated) =
-                                update_verdict_phase2(&store, ip, port, verdict, None, &pos_index)
-                            {
-                                let _ = events.send(ScanEvent::Result(Box::new(updated)));
-                            }
+                        let done = completed.load(Ordering::Relaxed)
+                            + errored.load(Ordering::Relaxed)
+                            - base_done;
+                        let terminal = done == total;
+                        if (terminal && !terminal_sent.swap(true, Ordering::Relaxed))
+                            || (!terminal && claim_milestone(&milestones, done, PROGRESS_EVERY_P2))
+                        {
+                            let _ = events
+                                .send(ScanEvent::Phase2Progress(Phase2Progress { done, total }));
                         }
                     }
-                    let done = completed.load(Ordering::Relaxed) + errored.load(Ordering::Relaxed);
-                    let terminal = done == total;
-                    if (terminal && !terminal_sent.swap(true, Ordering::Relaxed))
-                        || (!terminal && claim_milestone(&milestones, done, PROGRESS_EVERY_P2))
-                    {
-                        let _ =
-                            events.send(ScanEvent::Phase2Progress(Phase2Progress { done, total }));
-                    }
-                }
-                Ok::<(), anyhow::Error>(())
-            });
-        }
-        while let Some(res) = tasks.join_next().await {
-            res.map_err(|e| anyhow!("phase-2 task panicked: {e}"))??;
-        }
-        let done = completed.load(Ordering::Relaxed) + errored.load(Ordering::Relaxed);
-        if (done > 0 || attempts.load(Ordering::Relaxed) > 0)
-            && !terminal_sent.swap(true, Ordering::Relaxed)
-        {
-            let _ = self
-                .events
-                .send(ScanEvent::Phase2Progress(Phase2Progress { done, total }));
+                    Ok::<(), anyhow::Error>(())
+                });
+            }
+            while let Some(res) = tasks.join_next().await {
+                res.map_err(|e| anyhow!("phase-2 task panicked: {e}"))??;
+            }
+            let tier_done =
+                completed.load(Ordering::Relaxed) + errored.load(Ordering::Relaxed) - base_done;
+            let tier_attempts = attempts.load(Ordering::Relaxed) - base_attempts;
+            if (tier_done > 0 || tier_attempts > 0) && !terminal_sent.swap(true, Ordering::Relaxed)
+            {
+                let _ = self.events.send(ScanEvent::Phase2Progress(Phase2Progress {
+                    done: tier_done,
+                    total,
+                }));
+            }
+
+            if *cancel_rx.borrow() {
+                return Ok(());
+            }
+            if cap.is_some_and(|c| attempts.load(Ordering::Relaxed) >= u64::from(c)) {
+                break;
+            }
+            // Stop at the first tier with a kept pass; advance only on zero-pass
+            // tiers. Every probe loop above already races cancellation via
+            // select! + cancelled(), so an empty pass set here means the tier
+            // genuinely yielded nothing.
+            if !lock(&passed).is_empty() {
+                break;
+            }
+            if tier_idx + 1 < tiers.len() {
+                tracing::debug!("phase-2 tier yielded zero passes; advancing to the fallback tier");
+            }
         }
 
-        if *cancel_rx.borrow() {
-            return Ok(());
-        }
         let attempts_val = attempts.load(Ordering::Relaxed);
         let completed_val = completed.load(Ordering::Relaxed);
         if attempts_val > 0 && completed_val == 0 {
@@ -354,6 +388,40 @@ fn parse_verifier(tag: &str) -> Option<Verifier> {
     }
 }
 
+/// Engine-level tier list: the user's effective probe URLs first, then the
+/// fixed public-trace + data-path fallback tier — unless the user already
+/// configured exactly that tier, which stays single-tier. URL order is
+/// significant (it decides which response yields the colo), so only an exact
+/// ordered match dedupes.
+fn phase2_tiers(user_urls: Vec<String>) -> Vec<Vec<String>> {
+    let fallback: Vec<String> = FALLBACK_TIER_PROBE_URLS
+        .iter()
+        .map(|s| (*s).to_owned())
+        .collect();
+    if user_urls == fallback {
+        vec![user_urls]
+    } else {
+        vec![user_urls, fallback]
+    }
+}
+
+fn phase2_candidates_in(candidates: &[Verdict]) -> Vec<(Ipv4Addr, u16)> {
+    candidates
+        .iter()
+        .filter(|v| v.latency_ms.is_some())
+        .filter(|v| !v.phase2.as_ref().is_some_and(|p| p.passed))
+        .filter_map(|v| match v.ip {
+            IpAddr::V4(ip) => Some((ip, v.port)),
+            IpAddr::V6(_) => None,
+        })
+        .collect()
+}
+
+fn phase2_candidates(store: &Store) -> Vec<(Ipv4Addr, u16)> {
+    let guard = lock(store);
+    phase2_candidates_in(&guard)
+}
+
 /// Mirrors cli/scan_args.rs load_wgconf_file: read at most one byte past the
 /// cap so an oversized or pathological file cannot balloon memory inside the
 /// blocking pool.
@@ -447,6 +515,12 @@ mod tests {
         colo_by_server: std::collections::HashMap<String, String>,
         gated_server: Option<String>,
         gate: Option<Arc<tokio::sync::Barrier>>,
+        /// When set, a probe passes only if its URL list equals this tier
+        /// (combined with the `passed` IP set). Pins ladder tests to a tier.
+        pass_tier: Option<Vec<String>>,
+        /// When set, a probe whose URL list equals this tier pends forever, so
+        /// cancellation must win the select! race. Never real network.
+        hang_tier: Option<Vec<String>>,
     }
 
     impl FakeTunnelProbe {
@@ -465,6 +539,8 @@ mod tests {
                 colo_by_server: std::collections::HashMap::new(),
                 gated_server: None,
                 gate: None,
+                pass_tier: None,
+                hang_tier: None,
             }
         }
 
@@ -506,7 +582,10 @@ mod tests {
                     gate.wait().await;
                 }
                 this.attempts.fetch_add(1, Ordering::Relaxed);
-                lock(&this.url_lists).push(urls);
+                lock(&this.url_lists).push(urls.clone());
+                if this.hang_tier.as_ref().is_some_and(|t| *t == urls) {
+                    return std::future::pending::<Result<TunnelResult>>().await;
+                }
                 if this.always_err.load(Ordering::Relaxed) {
                     return Err(anyhow!("simulated spawn failure"));
                 }
@@ -529,7 +608,8 @@ mod tests {
                         verifier: None,
                     });
                 }
-                let passed = lock(&this.passed).contains(&dial_ip);
+                let tier_ok = this.pass_tier.as_ref().is_none_or(|t| *t == urls);
+                let passed = tier_ok && lock(&this.passed).contains(&dial_ip);
                 let colo = this
                     .colo_by_server
                     .get(&server)
@@ -568,6 +648,13 @@ mod tests {
     const VLESS: &str = "vless://aaaaaaaa-bbbb-cccc-dddd-eeeeffff0000@1.2.3.4:443";
     const VLESS_B: &str = "vless://aaaaaaaa-bbbb-cccc-dddd-eeeeffff0001@5.6.7.8:443";
 
+    fn fallback_tier() -> Vec<String> {
+        super::FALLBACK_TIER_PROBE_URLS
+            .iter()
+            .map(|s| (*s).to_owned())
+            .collect()
+    }
+
     #[tokio::test]
     async fn colo_filter_drops_known_foreign_colo_results_in_phase2() {
         let t = FakeTransport::new()
@@ -580,7 +667,15 @@ mod tests {
         let c = p2_controller(t, FakeSub(""), probe.clone());
         let mut cfg = ok_cfg(2, None);
         cfg.colo_filter = vec!["HKG".to_owned()];
-        cfg.phase2 = Some(p2_cfg(&[VLESS], &[]));
+        // Single-tier pin: the user tier IS the fixed fallback tier, so the
+        // ladder collapses to today's single wave and the attempt count stays
+        // exact (ladder coverage lives in the tier tests below).
+        cfg.phase2 = Some(Phase2Config {
+            configs: vec![VLESS.to_owned()],
+            probe_urls: fallback_tier(),
+            concurrency: 2,
+            ..Default::default()
+        });
         run_local(&c, cfg, 1).await.unwrap();
         assert_eq!(probe.attempts.load(Ordering::Relaxed), 2);
         assert!(
@@ -955,6 +1050,173 @@ mod tests {
         }
     }
 
+    #[test]
+    fn phase2_tiers_dedupes_an_exact_fallback_config_into_one_tier() {
+        let fb = fallback_tier();
+        assert_eq!(phase2_tiers(fb.clone()), vec![fb]);
+        let user = vec!["https://example.com/".to_owned()];
+        assert_eq!(
+            phase2_tiers(user.clone()),
+            vec![user, fallback_tier()],
+            "any other user tier ladders into the fixed fallback tier"
+        );
+    }
+
+    #[tokio::test]
+    async fn phase2_zero_pass_tier_advances_to_the_fallback_tier() {
+        let t = FakeTransport::new().ok("203.0.113.1".parse().unwrap(), 443, 50);
+        let mut probe = FakeTunnelProbe::new().pass("203.0.113.1".parse().unwrap());
+        probe.pass_tier = Some(fallback_tier());
+        let c = p2_controller(t, FakeSub(""), probe.clone());
+        let mut cfg = ok_cfg(1, None);
+        cfg.phase2 = Some(Phase2Config {
+            configs: vec![VLESS.to_owned()],
+            probe_urls: vec!["https://example.com/".to_owned()],
+            ..Default::default()
+        });
+        run_local(&c, cfg, 1).await.unwrap();
+        assert_eq!(
+            probe.attempts.load(Ordering::Relaxed),
+            2,
+            "one sweep per tier: the zero-pass user tier plus the fallback tier"
+        );
+        let lists = lock(&probe.url_lists);
+        assert_eq!(lists.len(), 2);
+        assert_eq!(lists[0], vec!["https://example.com/".to_owned()]);
+        assert_eq!(lists[1], fallback_tier());
+        drop(lists);
+        let results = c.results();
+        let p2 = results[0]
+            .phase2
+            .as_ref()
+            .expect("the tier-2 pass must upgrade the tier-1 fail verdict");
+        assert!(p2.passed);
+        assert_eq!(p2.latency_ms, Some(7));
+    }
+
+    #[tokio::test]
+    async fn phase2_first_pass_tier_never_runs_the_fallback() {
+        let t = FakeTransport::new().ok("203.0.113.1".parse().unwrap(), 443, 50);
+        let probe = FakeTunnelProbe::new().pass("203.0.113.1".parse().unwrap());
+        let c = p2_controller(t, FakeSub(""), probe.clone());
+        let mut cfg = ok_cfg(1, None);
+        cfg.phase2 = Some(Phase2Config {
+            configs: vec![VLESS.to_owned()],
+            probe_urls: vec!["https://example.com/".to_owned()],
+            ..Default::default()
+        });
+        run_local(&c, cfg, 1).await.unwrap();
+        assert_eq!(
+            probe.attempts.load(Ordering::Relaxed),
+            1,
+            "a passing first tier must stop the ladder with today's single-wave cost"
+        );
+        let lists = lock(&probe.url_lists);
+        assert_eq!(lists.len(), 1);
+        assert_eq!(lists[0], vec!["https://example.com/".to_owned()]);
+        drop(lists);
+        assert!(c.results()[0].phase2.as_ref().unwrap().passed);
+    }
+
+    #[tokio::test]
+    async fn phase2_fallback_config_is_single_tier_identical_to_today() {
+        let t = FakeTransport::new().ok("203.0.113.1".parse().unwrap(), 443, 50);
+        let probe = FakeTunnelProbe::new().pass("203.0.113.1".parse().unwrap());
+        let c = p2_controller(t, FakeSub(""), probe.clone());
+        let mut cfg = ok_cfg(1, None);
+        cfg.phase2 = Some(Phase2Config {
+            configs: vec![VLESS.to_owned()],
+            probe_urls: fallback_tier(),
+            ..Default::default()
+        });
+        run_local(&c, cfg, 1).await.unwrap();
+        assert_eq!(
+            probe.attempts.load(Ordering::Relaxed),
+            1,
+            "a user tier equal to the fallback tier runs exactly one wave"
+        );
+        let lists = lock(&probe.url_lists);
+        assert_eq!(*lists, vec![fallback_tier()]);
+        drop(lists);
+        assert!(c.results()[0].phase2.as_ref().unwrap().passed);
+    }
+
+    #[tokio::test]
+    async fn phase2_tier_advance_is_cancel_safe() {
+        let t = FakeTransport::new().ok("203.0.113.1".parse().unwrap(), 443, 50);
+        let mut probe = FakeTunnelProbe::new();
+        probe.hang_tier = Some(fallback_tier());
+        // Tier 1 fails fast (nothing passes); tier 2 hangs, so cancellation
+        // must win the select! race exactly as in a single wave.
+        let c = p2_controller(t, FakeSub(""), probe.clone());
+        let mut cfg = ok_cfg(1, None);
+        cfg.phase2 = Some(Phase2Config {
+            configs: vec![VLESS.to_owned()],
+            probe_urls: vec!["https://example.com/".to_owned()],
+            concurrency: 2,
+            ..Default::default()
+        });
+        let handle = tokio::spawn({
+            let c = c.clone();
+            async move { run_local(&c, cfg, 1).await }
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            loop {
+                if lock(&probe.url_lists).iter().any(|l| *l == fallback_tier()) {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("tier 2 must start after the zero-pass tier 1");
+        c.cancel();
+        let summary = tokio::time::timeout(std::time::Duration::from_secs(5), handle)
+            .await
+            .expect("cancel must abort the hanging tier-2 probe")
+            .unwrap()
+            .unwrap();
+        assert!(summary.cancelled, "summary must report the cancel");
+        assert_eq!(summary.found, 0);
+        assert_eq!(
+            probe.attempts.load(Ordering::Relaxed),
+            2,
+            "tier-1 sweep plus the single started tier-2 probe"
+        );
+    }
+
+    #[tokio::test]
+    async fn phase2_colo_rejected_zero_pass_tier_skips_removed_candidates() {
+        let t = FakeTransport::new().ok("203.0.113.1".parse().unwrap(), 443, 50);
+        let probe = FakeTunnelProbe::new()
+            .with_colo("FRA")
+            .pass("203.0.113.1".parse().unwrap());
+        let c = p2_controller(t, FakeSub(""), probe.clone());
+        let mut cfg = ok_cfg(2, None);
+        cfg.colo_filter = vec!["HKG".to_owned()];
+        cfg.phase2 = Some(Phase2Config {
+            configs: vec![VLESS.to_owned()],
+            probe_urls: vec!["https://example.com/".to_owned()],
+            ..Default::default()
+        });
+        run_local(&c, cfg, 1).await.unwrap();
+        // The tier-1 pass is colo-rejected: its row is removed, zero passes are
+        // kept, and the recomputed tier-2 candidate list is empty — no probe
+        // may burn on a row that can no longer hold a verdict.
+        assert_eq!(probe.attempts.load(Ordering::Relaxed), 1);
+        let results = c.results();
+        assert!(
+            results
+                .iter()
+                .all(|v| v.ip != "203.0.113.1".parse::<IpAddr>().unwrap()),
+            "the colo-rejected row stays removed: {results:#?}"
+        );
+        assert!(
+            results.iter().all(|v| v.phase2.is_none()),
+            "nothing may hold a phase-2 verdict: {results:#?}"
+        );
+    }
+
     #[tokio::test]
     async fn phase2_without_candidates_is_a_noop() {
         let probe = FakeTunnelProbe::new();
@@ -1244,7 +1506,16 @@ mod tests {
         let c = p2_controller(t, FakeSub(""), probe);
         let mut rx = c.subscribe();
         let mut cfg = ok_cfg(1, None);
-        cfg.phase2 = Some(p2_cfg(&[VLESS], &["a.me", "b.me"]));
+        // Single-tier pin: the user tier IS the fixed fallback tier, so the
+        // failing wave runs once and the terminal event fires exactly once
+        // (multi-tier terminal accounting is pinned by the ladder tests).
+        cfg.phase2 = Some(Phase2Config {
+            configs: vec![VLESS.to_owned()],
+            snis: vec!["a.me".to_owned(), "b.me".to_owned()],
+            probe_urls: fallback_tier(),
+            concurrency: 2,
+            ..Default::default()
+        });
         run_local(&c, cfg, 1).await.unwrap();
         let mut terminal = 0u32;
         while let Ok(e) = rx.try_recv() {

@@ -58,6 +58,16 @@ pub enum ScanTarget {
     Count(u32),
 }
 
+/// Restricted-network tuning preset (`--network-profile`, wizard
+/// blocked-vs-slow question). `None` on the root config means unset =
+/// today's defaults; explicit flags always win over the preset.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum NetworkProfile {
+    Blocked,
+    Slow,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct StopCondition {
@@ -182,6 +192,21 @@ pub struct WarpConfig {
     pub wgconf: Option<String>,
     #[serde(default)]
     pub verify_with_wgconf: bool,
+    /// DPI-noise padding for discovery: plain UDP datagrams sent around (never
+    /// inside) the handshake Init. Mirrors AmneziaWG Jc. 0 = off (default).
+    #[serde(default)]
+    pub junk_count: u8,
+    /// Min junk datagram size in bytes (AmneziaWG Jmin). Ignored when off.
+    #[serde(default)]
+    pub junk_min: u16,
+    /// Max junk datagram size in bytes (AmneziaWG Jmax). Ignored when off.
+    #[serde(default)]
+    pub junk_max: u16,
+    /// Opt-in fail-fast port gate (`--warp-port-gate`): probe sampled pool
+    /// endpoints across the primary ports (escalating to the extended list
+    /// on total failure) and scan only answering ports. Off by default.
+    #[serde(default)]
+    pub port_gate: bool,
 }
 
 impl Default for WarpConfig {
@@ -191,10 +216,25 @@ impl Default for WarpConfig {
             probes_per_endpoint: DEFAULT_PROBES_PER_ENDPOINT,
             wgconf: None,
             verify_with_wgconf: false,
+            junk_count: 0,
+            junk_min: 0,
+            junk_max: 0,
+            port_gate: false,
         }
     }
 }
 
+/// Default phase-1 SNI rotation list: today's single probe SNI. Empty in a
+/// hand-built config means the same thing (transports fall back to it).
+pub fn default_probe_snis() -> Vec<String> {
+    vec![crate::probe::PROBE_SNI.to_owned()]
+}
+
+// NOTE: ScanConfig intentionally has NO deny_unknown_fields. It is the
+// persisted --retry-last root (serde JSON only ever happens in
+// retry::load_config; the CLI builds it programmatically from clap flags),
+// so unknown top-level keys must be ignored for forward compatibility.
+// Strictness is preserved on every nested type and by validate().
 // NOTE: ScanConfig intentionally has NO deny_unknown_fields. It is the
 // persisted --retry-last root (serde JSON only ever happens in
 // retry::load_config; the CLI builds it programmatically from clap flags),
@@ -228,12 +268,27 @@ pub struct ScanConfig {
     pub probe_mode: ProbeMode,
     #[serde(default = "default_accepted_http_codes")]
     pub accepted_http_codes: Vec<u16>,
+    /// Opt-in phase-1 SNI rotation (`--probe-snis`): TLS/HTTP probes rotate
+    /// these hostnames per probe call (worker-index order). Empty = unset =
+    /// today's single `PROBE_SNI`; the transports fall back the same way.
+    #[serde(default = "default_probe_snis")]
+    pub probe_snis: Vec<String>,
     #[serde(default)]
     pub speed_test: bool,
     #[serde(default)]
     pub min_speed_mbps: Option<f32>,
     #[serde(default)]
     pub neighbor_count: u32,
+    /// Opt-in WARP pre-flight (`--adaptive-retries`): sample the pool before
+    /// the scan and raise the probe budget on lossy/slow networks. Off unless
+    /// requested; never default-on.
+    #[serde(default)]
+    pub adaptive_retries: bool,
+    /// Restricted-network tuning preset (`--network-profile blocked|slow`).
+    /// `None` = unset = today's defaults. Stored so the wizard recap and
+    /// `--retry-last` can show it; explicit flags always win over the preset.
+    #[serde(default)]
+    pub network_profile: Option<NetworkProfile>,
 }
 
 impl Default for ScanConfig {
@@ -256,9 +311,12 @@ impl Default for ScanConfig {
             colo_filter: Vec::new(),
             probe_mode: ProbeMode::Tls,
             accepted_http_codes: default_accepted_http_codes(),
+            probe_snis: default_probe_snis(),
             speed_test: false,
             min_speed_mbps: None,
             neighbor_count: 0,
+            adaptive_retries: false,
+            network_profile: None,
         }
     }
 }
@@ -366,6 +424,7 @@ impl ScanConfig {
                 self.min_speed_mbps,
                 self.speed_test,
                 self.neighbor_count,
+                &self.probe_snis,
             )?;
             parse_configured_cidrs(&self.exclude, &self.custom_cidrs)?;
             validate_mode_gates(self)?;
@@ -484,6 +543,7 @@ fn validate_filters(
     min_speed_mbps: Option<f32>,
     speed_test: bool,
     neighbor_count: u32,
+    probe_snis: &[String],
 ) -> Result<(), ConfigError> {
     if colo_filter.len() > MAX_COLO_CODES {
         return Err(ConfigError::TooManyColos(colo_filter.len()));
@@ -520,6 +580,24 @@ fn validate_filters(
     }
     if neighbor_count > MAX_NEIGHBORS {
         return Err(ConfigError::InvalidNeighbor(neighbor_count));
+    }
+    if probe_snis.len() > MAX_PROBE_SNIS {
+        return Err(ConfigError::TooManyProbeSnis(probe_snis.len()));
+    }
+    for sni in probe_snis {
+        validate_sni(sni)?;
+        if sni.parse::<IpAddr>().is_ok() {
+            return Err(ConfigError::InvalidSni(
+                sni.clone(),
+                "probe SNIs must be DNS hostnames, not IP addresses".to_owned(),
+            ));
+        }
+    }
+    // A customized list under TCP signals confused intent (mirrors
+    // HttpCodesNeedHttpProbe); empty means unset and stays valid everywhere.
+    if probe_mode == ProbeMode::Tcp && !probe_snis.is_empty() && *probe_snis != default_probe_snis()
+    {
+        return Err(ConfigError::ProbeSnisNeedTlsHttp);
     }
     Ok(())
 }
@@ -594,6 +672,15 @@ impl WarpConfig {
         }
         for ep in &self.custom_endpoints {
             parse_endpoint(ep)?;
+        }
+        if self.junk_count > MAX_WARP_JUNK_COUNT {
+            return Err(ConfigError::InvalidJunkCount(self.junk_count));
+        }
+        if self.junk_min > self.junk_max
+            || self.junk_max > MAX_WARP_JUNK_SIZE
+            || (self.junk_count > 0 && self.junk_max == 0)
+        {
+            return Err(ConfigError::InvalidJunkSize(self.junk_min, self.junk_max));
         }
         Ok(())
     }
