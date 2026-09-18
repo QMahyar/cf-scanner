@@ -969,6 +969,24 @@ fn warp_port_gate_builds_the_flag_and_requires_warp_mode() {
     .warp
     .unwrap();
     assert!(!warp.port_gate, "gate must default to off");
+    assert!(!warp.ports_explicit, "no --ports means not explicit");
+    let argv = [
+        "cf-scanner",
+        "scan",
+        "--mode",
+        "warp",
+        "--count",
+        "50",
+        "--ports",
+        "2408",
+        "--warp-port-gate",
+    ];
+    let scan_args = match Cli::try_parse_from(argv).unwrap().command {
+        Command::Scan { args } => *args,
+        _ => unreachable!(),
+    };
+    let warp = build_scan_config(&scan_args).unwrap().warp.unwrap();
+    assert!(warp.port_gate && warp.ports_explicit);
     let argv = ["cf-scanner", "scan", "--warp-port-gate"];
     let a = match Cli::try_parse_from(argv).unwrap().command {
         Command::Scan { args } => *args,

@@ -78,7 +78,7 @@ gate        → the release workflow's own job: test + clippy + fmt + audit
                 (--locked) on the exact tagged commit (fail = no artifacts;
                 a leaner subset than checks.yml — no build/doc-tests/
                 coverage/placeholder guard)
-  cross-check → cargo check --all-features on every release target (PRs + main/tags; ensures dist-bundle-xray is visible outside PRs)
+  cross-check → cargo check --all-features on every Linux release target (PRs + tags; ensures dist-bundle-xray is visible outside PRs)
   plan        → resolves the 3-target matrix + manifest
   build-local → per target: dist build (bundles checksum-verified xray),
                 archives + .sha256 + MSI (windows runner ships WiX)
@@ -95,9 +95,11 @@ Pushes to `main` and every PR trigger the `Checks` workflow. It runs test +
 clippy + fmt (unconditionally; CRLF is normalized via `.gitattributes`) and
 `cargo check --all-features` (so `dist-bundle-xray` is visible on `main`, not
 only on PRs) on `ubuntu-latest`, `windows-latest`, and `macos-latest`.
-`Checks` also runs doc tests, coverage (`--all-targets --doc`; doc tests are
-included in the llvm-cov gate), `cargo audit`, the xray-parity job (which
-fails fast if the pinned XTLS release disappears), and the placeholder guard.
+`Checks` also runs doc tests (a separate `cargo test --doc` step; doctests are
+not counted in the llvm-cov gate), coverage (`cargo llvm-cov --all-targets
+--fail-under-lines 80`), `cargo audit`, the xray-parity job (which
+fails fast if the pinned XTLS release disappears), the version-parity job,
+and the placeholder guard.
 Tag pushes and PRs additionally run the Release workflow in plan mode.
 
 ## First-time npm setup (one time)

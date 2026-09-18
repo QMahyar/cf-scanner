@@ -8,7 +8,7 @@ Added / Changed / Fixed / Deprecated / Removed / Security, newest on top.
 ### Added
 - **WARP DPI noise core.** New `--warp-junk-count/min/max` send junk padding
   datagrams around (never inside) the handshake Init; verification with your
-  own config now honors its AmneziaWG H/S/I1 parameters instead of failing
+  own config now honors its AmneziaWG H1-H4/S1-S2 parameters instead of failing
   against AWG gateways with nonzero params.
 - **Opt-in `--warp-port-gate`.** Probes 12 sampled endpoints across the
   primary WARP ports (escalating to the 50-port extended list on total
@@ -56,7 +56,7 @@ Added / Changed / Fixed / Deprecated / Removed / Security, newest on top.
 - **Honest speed-test field name.** The `speed_test_mbps` NDJSON/CSV field is
   now `speed_test_mb_s` — it always reported MB/s.
 - **Strict `--phase2-custom` grammar.** The custom fragment preset now accepts
-  exactly `length,interval` (milliseconds); the legacy three-field form is
+  exactly `length,interval`; the legacy three-field form is
   rejected with a clear error instead of being silently reinterpreted.
 - **check-sub NDJSON rows identify their config.** Every row now carries
   `config_index`; aggregate rows for unparseable lines use the sentinel

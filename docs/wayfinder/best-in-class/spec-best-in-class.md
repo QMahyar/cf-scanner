@@ -221,9 +221,12 @@ Every item: opt-in or no-behavior-change, S effort (≤5 files), additive only.
   `HttpTransport::with_shared` (`:196-215`) via `transport_for` (`:68-78`);
   new `ScanConfig` root field (plain `#[serde(default)]`, default = today's
   single `PROBE_SNI`, `src/probe.rs:17`). **Rotation policy (decided here):
-  rotate per probe call by worker index** — deterministic, no extra RNG,
-  test-friendly. Never 5× dials per IP (SenPai `prober.go:20-26,182-205`
-  retry-all-5 stays dropped as cost).
+  rotate per probe call by shared atomic counter** — strict round-robin
+  sequential, spread under concurrency, no extra RNG, test-friendly
+  (shipped as counter-based, not literal per-worker pinning: task→worker
+  assignment already races, so pinning would be unobservable, and it would
+  break the injectable-transport seam). Never 5× dials per IP (SenPai
+  `prober.go:20-26,182-205` retry-all-5 stays dropped as cost).
 - **Why:** SenPai 5-host rotation without its per-IP dial multiplication;
   phase-2 SNI *variants* (`src/api/types.rs:136`,
   `src/engine/phase2.rs:34-38`, `src/xray.rs:53-59`) are not the same thing

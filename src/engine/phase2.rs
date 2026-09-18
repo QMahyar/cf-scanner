@@ -75,6 +75,7 @@ impl ScanController {
         let stop_found = cfg.stop.found as usize;
         let colo_filter = cfg.colo_filter.clone();
 
+        let tier_count = tiers.len();
         for (tier_idx, tier_urls) in tiers.iter().enumerate() {
             // A tier-1 colo rejection removes the row, so recompute from the live
             // store: later tiers skip removed candidates instead of burning probes
@@ -233,7 +234,13 @@ impl ScanController {
                         let done = completed.load(Ordering::Relaxed)
                             + errored.load(Ordering::Relaxed)
                             - base_done;
-                        let terminal = done == total;
+                        // Terminal only when the ladder ends here: a zero-pass
+                        // non-final tier advances instead of finishing, so its
+                        // 100% would read as completion. `passed` is final
+                        // exactly when done == total (every combo accounted);
+                        // the tier-end re-check below stays authoritative.
+                        let terminal = done == total
+                            && (!lock(&passed).is_empty() || tier_idx + 1 == tier_count);
                         if (terminal && !terminal_sent.swap(true, Ordering::Relaxed))
                             || (!terminal && claim_milestone(&milestones, done, PROGRESS_EVERY_P2))
                         {
@@ -250,7 +257,13 @@ impl ScanController {
             let tier_done =
                 completed.load(Ordering::Relaxed) + errored.load(Ordering::Relaxed) - base_done;
             let tier_attempts = attempts.load(Ordering::Relaxed) - base_attempts;
-            if (tier_done > 0 || tier_attempts > 0) && !terminal_sent.swap(true, Ordering::Relaxed)
+            // Same ladder rule as the in-wave terminal above: only the final
+            // tier (or a tier with kept passes, which stops the ladder)
+            // reports completion. Post-join `passed` is race-free.
+            let ladder_done = !lock(&passed).is_empty() || tier_idx + 1 == tier_count;
+            if (tier_done > 0 || tier_attempts > 0)
+                && ladder_done
+                && !terminal_sent.swap(true, Ordering::Relaxed)
             {
                 let _ = self.events.send(ScanEvent::Phase2Progress(Phase2Progress {
                     done: tier_done,
@@ -1116,6 +1129,39 @@ mod tests {
         assert_eq!(lists[0], vec!["https://example.com/".to_owned()]);
         drop(lists);
         assert!(c.results()[0].phase2.as_ref().unwrap().passed);
+    }
+
+    #[tokio::test]
+    async fn phase2_ladder_emits_a_single_terminal_progress_event() {
+        let t = FakeTransport::new().ok("203.0.113.1".parse().unwrap(), 443, 50);
+        let mut probe = FakeTunnelProbe::new().pass("203.0.113.1".parse().unwrap());
+        probe.pass_tier = Some(fallback_tier());
+        let c = p2_controller(t, FakeSub(""), probe.clone());
+        let mut rx = c.subscribe();
+        let mut cfg = ok_cfg(1, None);
+        cfg.phase2 = Some(Phase2Config {
+            configs: vec![VLESS.to_owned()],
+            probe_urls: vec!["https://example.com/".to_owned()],
+            ..Default::default()
+        });
+        run_local(&c, cfg, 1).await.unwrap();
+        assert_eq!(
+            probe.attempts.load(Ordering::Relaxed),
+            2,
+            "both tiers ran: the zero-pass user tier plus the fallback tier"
+        );
+        let mut terminals = 0u32;
+        while let Ok(ev) = rx.try_recv() {
+            if let ScanEvent::Phase2Progress(p) = ev {
+                if p.done == p.total {
+                    terminals += 1;
+                }
+            }
+        }
+        assert_eq!(
+            terminals, 1,
+            "one terminal event for the whole ladder, on the final tier"
+        );
     }
 
     #[tokio::test]

@@ -76,8 +76,8 @@ evidence to a release, not to run in normal CI.
 
 ```sh
 export CFSCANNER_SUB_URL="https://your-sub.example/token"   # a credential
-cargo test --test live_smoke -- --ignored --nocapture
-cargo test --test cli_scan_agent -- --ignored --nocapture
+cargo test --locked --test live_smoke -- --ignored --nocapture
+cargo test --locked --test cli_scan_agent -- --ignored --nocapture
 ```
 
 **In CI:** run the `Live evidence` workflow from the Actions tab

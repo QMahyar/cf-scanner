@@ -1689,6 +1689,7 @@ fn warp_and_full_phase2_configs_round_trip() {
         junk_min: 32,
         junk_max: 64,
         port_gate: true,
+        ports_explicit: true,
     };
     let back: WarpConfig = serde_json::from_str(&serde_json::to_string(&w).unwrap()).unwrap();
     assert_eq!(back, w);

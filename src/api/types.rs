@@ -207,6 +207,11 @@ pub struct WarpConfig {
     /// on total failure) and scan only answering ports. Off by default.
     #[serde(default)]
     pub port_gate: bool,
+    /// Whether the user passed explicit `--ports`. The gate skips explicit
+    /// port lists; value-equality against the defaults cannot see the
+    /// explicit-but-identical case, so the CLI records it here.
+    #[serde(default)]
+    pub ports_explicit: bool,
 }
 
 impl Default for WarpConfig {
@@ -220,6 +225,7 @@ impl Default for WarpConfig {
             junk_min: 0,
             junk_max: 0,
             port_gate: false,
+            ports_explicit: false,
         }
     }
 }
@@ -230,11 +236,6 @@ pub fn default_probe_snis() -> Vec<String> {
     vec![crate::probe::PROBE_SNI.to_owned()]
 }
 
-// NOTE: ScanConfig intentionally has NO deny_unknown_fields. It is the
-// persisted --retry-last root (serde JSON only ever happens in
-// retry::load_config; the CLI builds it programmatically from clap flags),
-// so unknown top-level keys must be ignored for forward compatibility.
-// Strictness is preserved on every nested type and by validate().
 // NOTE: ScanConfig intentionally has NO deny_unknown_fields. It is the
 // persisted --retry-last root (serde JSON only ever happens in
 // retry::load_config; the CLI builds it programmatically from clap flags),

@@ -128,6 +128,7 @@ pub(crate) fn build_scan_config(args: &ScanArgs) -> Result<ScanConfig> {
         junk_min: args.warp_junk_min.unwrap_or(0),
         junk_max: args.warp_junk_max.unwrap_or(0),
         port_gate: args.warp_port_gate,
+        ports_explicit: args.ports.as_ref().is_some_and(|p| !p.is_empty()),
     });
     // Explicit --warp-probes always wins: the pre-flight must never lower
     // (or second-guess) a user-chosen budget, so it is switched off here

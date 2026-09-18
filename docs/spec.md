@@ -353,7 +353,7 @@ failures).
 2. **Budget-split timeouts** — TCP connect ≤¼, TLS handshake ≤½ of the budget; always-on, no flag.
 3. **SOCKS ServerName repair** — IP-literal dials presenting SNI certs verify.
 4. **Share-URL hardening** — missing-`?` recovery + truncated-credential shape check.
-5. **WARP DPI noise** — `--warp-junk-count/min/max` junk-send discovery + H/S/I1 honor in wgconf verify.
+5. **WARP DPI noise** — `--warp-junk-count/min/max` junk-send discovery + H1-H4/S1-S2 honor in wgconf verify.
 6. **Torn-down signal** — export-only `fail_reason="torn_down"`, active only at `--warp-probes >= 4`.
 7. **Adaptive UX** — opt-in `--adaptive-retries` pre-flight, `--network-profile blocked|slow`, reframed wizard.
 8. **Config bind + Reserved** — `warp-config export --bind-best`, additive `Reserved` passthrough.

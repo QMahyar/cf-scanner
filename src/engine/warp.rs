@@ -583,11 +583,14 @@ impl ScanController {
     /// Whether the opt-in port gate runs: default ports and pool sampling
     /// only. Explicit `--ports`/`--warp-endpoints` already narrow the scan,
     /// and wgconf verify does full sessions rather than shape probes, so all
-    /// three skip it (warpscout's skip conditions).
+    /// three skip it (warpscout's skip conditions). Both predicates stay:
+    /// the flag sees explicit-but-identical-to-default ports on fresh scans,
+    /// while value-equality covers replayed configs whose flag is unset.
     fn gate_applies(warp: &WarpConfig, ports: &[Port]) -> bool {
         warp.port_gate
             && warp.custom_endpoints.is_empty()
             && !warp.verify_with_wgconf
+            && !warp.ports_explicit
             && ports == DEFAULT_WARP_PORTS
     }
 
@@ -608,6 +611,10 @@ impl ScanController {
         timeout_ms: u64,
         cancel: &watch::Receiver<bool>,
     ) -> Vec<u16> {
+        // WHY unbounded fan-out here: the tier is at most 12 addrs × 50 ports
+        // = 600 short-lived UDP probes, under the 1000-worker ceiling the
+        // engine is sized for; serializing at cfg.concurrency would only make
+        // the fail-fast gate slower. Cancel aborts the set below.
         let mut pending = JoinSet::new();
         'spawn: for &ip in addrs {
             for &port in ports {
@@ -869,6 +876,14 @@ mod tests {
             ..Default::default()
         };
         assert!(!ScanController::gate_applies(&verify, DEFAULT_WARP_PORTS));
+        // Explicit-but-identical-to-default ports: value-equality alone would
+        // wrongly run the gate, so the CLI-recorded flag decides.
+        let explicit = WarpConfig {
+            port_gate: true,
+            ports_explicit: true,
+            ..Default::default()
+        };
+        assert!(!ScanController::gate_applies(&explicit, DEFAULT_WARP_PORTS));
     }
 
     #[test]
