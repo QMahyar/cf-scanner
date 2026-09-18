@@ -3,7 +3,7 @@
 All notable changes to CF-Scanner are documented here, grouped by
 Added / Changed / Fixed / Deprecated / Removed / Security, newest on top.
 
-## [Unreleased]
+## [0.15.0] - 2026-09-19
 
 ### Added
 - **WARP DPI noise core.** New `--warp-junk-count/min/max` send junk padding
