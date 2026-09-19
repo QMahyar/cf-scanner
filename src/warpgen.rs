@@ -47,12 +47,26 @@ pub fn keygen() -> (StaticSecret, PublicKey) {
     (secret, public)
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Deserialize)]
 struct Device {
     id: String,
     token: Option<String>,
     account: Account,
     config: DeviceConfig,
+}
+
+/// WHY: `token` is a live credential; a derived Debug would print it into
+/// any log or error that formats the device. All other fields are routing
+/// metadata and stay visible.
+impl std::fmt::Debug for Device {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Device")
+            .field("id", &self.id)
+            .field("token", &self.token.as_deref().map(|_| "***"))
+            .field("account", &self.account)
+            .field("config", &self.config)
+            .finish()
+    }
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -108,13 +122,13 @@ impl WarpClient {
             .no_proxy()
             .timeout(timeout)
             .redirect(reqwest::redirect::Policy::custom(|attempt| {
-                if attempt.previous().len() >= 5 {
-                    return attempt.error("too many redirects");
+                match crate::ranges::redirect_policy_allows(
+                    attempt.previous().len(),
+                    attempt.url().as_str(),
+                ) {
+                    Ok(()) => attempt.follow(),
+                    Err(err) => attempt.error(err.to_string()),
                 }
-                if let Err(err) = crate::ranges::validate_fetch_url(attempt.url().as_str()) {
-                    return attempt.error(err.to_string());
-                }
-                attempt.follow()
             }))
             .build()?)
     }
@@ -347,11 +361,40 @@ pub fn persisted_server_public_key() -> Option<String> {
     }
 }
 
+/// WHY: the override is rendered verbatim into the wgconf `Endpoint` line,
+/// so any newline or control character would break the file structure.
+/// The CLI documents `host:port`; anything else is rejected here, once,
+//  before any registration or rendering touches the value.
+fn validate_endpoint_override(v: &str) -> Result<()> {
+    let (host, port) = v
+        .rsplit_once(':')
+        .ok_or_else(|| anyhow!("invalid --endpoint '{v}': must be host:port"))?;
+    if host.is_empty() || host.len() > 253 {
+        anyhow::bail!("invalid --endpoint '{v}': host must be 1-253 characters");
+    }
+    let host_ok = host
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_' | b':' | b'[' | b']'));
+    if !host_ok {
+        anyhow::bail!("invalid --endpoint '{v}': host has invalid characters");
+    }
+    let port: u16 = port
+        .parse()
+        .map_err(|_| anyhow!("invalid --endpoint '{v}': port is not a number"))?;
+    if port == 0 {
+        anyhow::bail!("invalid --endpoint '{v}': port is 0");
+    }
+    Ok(())
+}
+
 fn build_wgconf(
     secret: &StaticSecret,
     dev: &Device,
     endpoint_override: Option<&str>,
 ) -> Result<WgConfig> {
+    if let Some(v) = endpoint_override {
+        validate_endpoint_override(v)?;
+    }
     let private_key = base64::engine::general_purpose::STANDARD.encode(secret.to_bytes());
     let peer = dev
         .config
@@ -604,6 +647,66 @@ pub(crate) mod tests {
             .route("/v0a884/reg/{id}", get(mock_fetch))
             .route("/v0a884/reg/{id}/account", put(mock_put_account))
             .with_state(seen)
+    }
+
+    #[test]
+    fn endpoint_override_must_be_host_port_without_control_chars() {
+        let (secret, _) = keygen();
+        let dev = minimal_dev();
+        assert!(build_wgconf(&secret, &dev, Some("1.2.3.4:2408")).is_ok());
+        assert!(build_wgconf(&secret, &dev, Some("example.net:2408")).is_ok());
+        assert!(build_wgconf(&secret, &dev, Some("[::1]:2408")).is_ok());
+        for bad in [
+            "",
+            "1.2.3.4",
+            "1.2.3.4:0",
+            "1.2.3.4:notaport",
+            "1.2.3.4:2408\nInjected: line",
+            "1.2.3.4:2408\r",
+            "ho st:2408",
+            ":2408",
+            "1.2.3.4:2408 ",
+        ] {
+            assert!(
+                build_wgconf(&secret, &dev, Some(bad)).is_err(),
+                "{bad:?} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn debug_output_redacts_device_token() {
+        let mut dev = minimal_dev();
+        dev.token = Some("warp-token-secret".to_owned());
+        let dbg = format!("{dev:?}");
+        assert!(!dbg.contains("warp-token-secret"), "token leaked: {dbg}");
+        assert!(dbg.contains("abc"), "non-secret fields stay visible: {dbg}");
+    }
+
+    fn minimal_dev() -> Device {
+        Device {
+            id: "abc".into(),
+            token: None,
+            account: Account {
+                account_type: "free".into(),
+            },
+            config: DeviceConfig {
+                client_id: String::new(),
+                interface: InterfaceConfig {
+                    addresses: NetworkAddress {
+                        v4: "172.16.0.2/32".into(),
+                        v6: String::new(),
+                    },
+                },
+                peers: vec![DevicePeer {
+                    public_key: "AAAA".into(),
+                    endpoint: PeerEndpoint {
+                        host: String::new(),
+                    },
+                    allowed_ips: vec![],
+                }],
+            },
+        }
     }
 
     #[test]

@@ -9,7 +9,7 @@ use crate::util::percent_decode;
 const MAX_WGCONF_LINE_BYTES: usize = 4096;
 const MAX_KEY_B64_LEN: usize = 64;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct WgConfig {
     pub private_key: String,
     pub address: String,
@@ -35,13 +35,45 @@ pub struct AmneziaParams {
     pub h4: Option<u8>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct WgPeer {
     pub public_key: String,
     pub preshared_key: Option<String>,
     pub allowed_ips: Vec<String>,
     pub endpoint: Option<String>,
     pub persistent_keepalive: Option<u16>,
+}
+
+/// WHY: key material must never reach logs or errors through `{:?}`.
+/// `private_key` and `preshared_key` print redacted; everything else is
+/// routing metadata and stays visible.
+impl std::fmt::Debug for WgConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WgConfig")
+            .field("private_key", &"***")
+            .field("address", &self.address)
+            .field("dns", &self.dns)
+            .field("mtu", &self.mtu)
+            .field("amnezia", &self.amnezia)
+            .field("reserved", &self.reserved)
+            .field("peer", &self.peer)
+            .finish()
+    }
+}
+
+impl std::fmt::Debug for WgPeer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WgPeer")
+            .field("public_key", &self.public_key)
+            .field(
+                "preshared_key",
+                &self.preshared_key.as_deref().map(|_| "***"),
+            )
+            .field("allowed_ips", &self.allowed_ips)
+            .field("endpoint", &self.endpoint)
+            .field("persistent_keepalive", &self.persistent_keepalive)
+            .finish()
+    }
 }
 
 pub fn parse_wg_entry(entry: &str) -> Result<WgConfig> {
@@ -475,6 +507,29 @@ mod tests {
 
     const INI_FIXTURE: &str = include_str!("../tests/fixtures/warp-wgconf.txt");
     const URI_FIXTURE: &str = include_str!("../tests/fixtures/warp-uri.txt");
+
+    #[test]
+    fn debug_output_redacts_keys() {
+        let wg = parse_wgconf(INI_FIXTURE).unwrap();
+        let dbg = format!("{wg:?}");
+        assert!(
+            !dbg.contains("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="),
+            "private_key leaked: {dbg}"
+        );
+        assert!(
+            dbg.contains("8.6.112.31:4198"),
+            "non-secret fields stay visible: {dbg}"
+        );
+        let peer = WgPeer {
+            public_key: "pub".to_owned(),
+            preshared_key: Some("psk-secret".to_owned()),
+            allowed_ips: vec![],
+            endpoint: None,
+            persistent_keepalive: None,
+        };
+        let dbg = format!("{peer:?}");
+        assert!(!dbg.contains("psk-secret"), "preshared_key leaked: {dbg}");
+    }
 
     #[test]
     fn parses_wgquick_ini_fixture() {

@@ -247,12 +247,23 @@ fn ensure_placeholder(path: &std::path::Path) {
     }
 }
 
+/// WHY: mirrors the runtime 64 MiB archive/entry caps; an oversized entry
+/// must fail the build loudly, not stamp a truncated binary as bundled.
+const MAX_BUILD_ENTRY_BYTES: u64 = 64 * 1024 * 1024;
+
 fn read_all<R: Read>(entry: &mut R) -> Vec<u8> {
     let mut buf = Vec::new();
-    if let Err(err) = entry.read_to_end(&mut buf) {
-        // A swallowed error here would stamp a partial xray binary as bundled.
-        eprintln!("error: reading xray zip entry: {err}");
-        std::process::exit(1);
+    match entry.take(MAX_BUILD_ENTRY_BYTES + 1).read_to_end(&mut buf) {
+        Err(err) => {
+            // A swallowed error here would stamp a partial xray binary as bundled.
+            eprintln!("error: reading xray zip entry: {err}");
+            std::process::exit(1);
+        }
+        Ok(len) if len as u64 > MAX_BUILD_ENTRY_BYTES => {
+            eprintln!("error: xray zip entry exceeds 64 MiB; refusing to bundle");
+            std::process::exit(1);
+        }
+        Ok(_) => {}
     }
     buf
 }

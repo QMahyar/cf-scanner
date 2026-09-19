@@ -156,7 +156,7 @@ scan; results up to that point are kept.
 | `--export-format FMT` | `csv`, `json`, `base64`, `raw`, `singbox`, `clash`, `sharelinks`, `v2ray`, `shadowrocket`, `quantumult` (default `csv`) |
 | `--export-live FILE` | Append NDJSON results to this file live as they arrive (crash-safe; conflicts with `--export`) |
 | `--retry-last` | Replay the last scan's saved configuration (saved after each scan; phase-2 configs and WARP keys are never saved — re-supply those) |
-| `--json-errors` | Print `{"error": …}` on stdout when the program fails (for scripts) |
+| `--json-errors` | Print `{"type":"error","error": …}` on stdout when the program fails (for scripts; the `type` tag distinguishes it from NDJSON data rows). Exit codes: 0 success, 1 runtime failure, 2 CLI usage error |
 | `--verbose` | Per-IP diagnostics on stderr plus info logs |
 
 ### Other subcommands
