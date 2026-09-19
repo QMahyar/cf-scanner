@@ -47,9 +47,7 @@ pub async fn check_subscription(
         .with_context(|| "subscription fetch failed")?;
     let parsed = crate::configs::parse_subscription(&body);
     if parsed.specs.len() > MAX_SUBSCRIPTION_SPECS {
-        anyhow::bail!(
-            "subscription expands to more than {MAX_SUBSCRIPTION_SPECS} configs"
-        );
+        anyhow::bail!("subscription expands to more than {MAX_SUBSCRIPTION_SPECS} configs");
     }
     // The engine's default probe URL, so a check-sub verdict means the same
     // thing as a phase-2 pass (InlineTunnelProbe refuses to open a tunnel
