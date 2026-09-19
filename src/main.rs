@@ -266,12 +266,12 @@ async fn run_scan(args: ScanArgs, verbose: bool) -> Result<()> {
             }
             if let Some(line) = serialize_event(&e) {
                 write_line(&line);
-                if let Some(live) = live.as_mut() {
-                    if let Err(err) = live.push_line(&line) {
-                        eprintln!("live export write failed; cancelling scan: {err:#}");
-                        live_error.get_or_insert(anyhow!("live export failed: {err:#}"));
-                        scan_controller.cancel();
-                    }
+                if let Some(live) = live.as_mut()
+                    && let Err(err) = live.push_line(&line)
+                {
+                    eprintln!("live export write failed; cancelling scan: {err:#}");
+                    live_error.get_or_insert(anyhow!("live export failed: {err:#}"));
+                    scan_controller.cancel();
                 }
             }
         }
@@ -342,11 +342,11 @@ async fn run_scan(args: ScanArgs, verbose: bool) -> Result<()> {
     }
     // Flush + fsync promptly (before process exit paths below): a crash after
     // this point still leaves a parseable file.
-    if let Some(live) = live.as_mut() {
-        if let Err(err) = live.finish() {
-            eprintln!("live export fsync failed: {err:#}");
-            live_error.get_or_insert(anyhow!("live export failed: {err:#}"));
-        }
+    if let Some(live) = live.as_mut()
+        && let Err(err) = live.finish()
+    {
+        eprintln!("live export fsync failed: {err:#}");
+        live_error.get_or_insert(anyhow!("live export failed: {err:#}"));
     }
     if let Some(err) = live_error {
         return Err(err);
