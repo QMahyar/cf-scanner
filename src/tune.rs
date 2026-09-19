@@ -105,7 +105,28 @@ pub fn sni_command(sni: &str) -> String {
 }
 
 pub fn fragment_command(config_uri: &str, preset: FragmentPreset) -> String {
-    format!("cf-scanner scan --mode cdn --phase2-configs {config_uri} --phase2-fragment {preset}")
+    format!(
+        "cf-scanner scan --mode cdn --phase2-configs {} --phase2-fragment {preset}",
+        mask_config_uri(config_uri)
+    )
+}
+
+/// WHY: the printed command lands on stdout (and shell history on re-run),
+/// so credential bytes must never reach it. Userinfo (or an opaque
+/// vmess/ss blob) becomes `***`, which the user replaces with their own
+/// value; every non-secret parameter survives so the command stays
+/// re-runnable.
+fn mask_config_uri(uri: &str) -> String {
+    let Some(scheme_end) = uri.find("://") else {
+        return "***".to_owned();
+    };
+    let (scheme, rest) = uri.split_at(scheme_end + 3);
+    let head_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let (head, tail) = rest.split_at(head_end);
+    match head.rfind('@') {
+        Some(at) => format!("{scheme}***@{}", &head[at + 1..]) + tail,
+        None => format!("{scheme}***") + tail,
+    }
 }
 
 #[cfg(test)]
@@ -158,6 +179,31 @@ mod tests {
         let phase2 = cfg.phase2.as_ref().expect("fragment patch sets phase2");
         assert_eq!(phase2.fragment, FragmentPreset::Medium);
         assert_eq!(phase2.configs, vec!["vless://x@y:443".to_owned()]);
+    }
+
+    #[test]
+    fn fragment_command_masks_credentials_but_stays_rerunnable() {
+        let cmd = fragment_command(
+            "vless://secret-uuid@1.2.3.4:443?security=tls&sni=x.example.com#tag",
+            FragmentPreset::Heavy,
+        );
+        assert!(!cmd.contains("secret-uuid"), "credential leaked: {cmd}");
+        assert!(
+            cmd.contains("***@1.2.3.4:443"),
+            "placeholder marks the spot: {cmd}"
+        );
+        assert!(
+            cmd.contains("security=tls") && cmd.contains("#tag"),
+            "non-secret params survive for re-runs: {cmd}"
+        );
+        let opaque = fragment_command(
+            "vmess://bG9vcXVlLWJsb2ItY29udGFpbnMtc2VjcmV0",
+            FragmentPreset::Medium,
+        );
+        assert!(
+            !opaque.contains("bG9vcXVlLWJsb2ItY29udGFpbnMtc2VjcmV0"),
+            "opaque blob leaked: {opaque}"
+        );
     }
 
     #[test]

@@ -12,17 +12,24 @@ pub(crate) static HTTP_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
     reqwest::Client::builder()
         .use_rustls_tls()
         .redirect(Policy::custom(|attempt| {
-            if attempt.previous().len() >= 5 {
-                return attempt.error("too many redirects");
+            match redirect_policy_allows(attempt.previous().len(), attempt.url().as_str()) {
+                Ok(()) => attempt.follow(),
+                Err(err) => attempt.error(err.to_string()),
             }
-            if let Err(err) = validate_fetch_url(attempt.url().as_str()) {
-                return attempt.error(err.to_string());
-            }
-            attempt.follow()
         }))
         .build()
         .expect("HTTP client must build")
 });
+
+/// WHY: the hop cap and per-hop re-validation are security logic; extracted
+/// from the client-builder closure so tests pin them without network, and so
+/// the registration client shares the exact same decision (no drift).
+pub(crate) fn redirect_policy_allows(previous_hops: usize, next_url: &str) -> Result<()> {
+    if previous_hops >= 5 {
+        bail!("too many redirects");
+    }
+    validate_fetch_url(next_url)
+}
 
 pub fn validate_fetch_url(url: &str) -> Result<()> {
     let parsed = url::Url::parse(url).context("bad URL")?;
@@ -304,6 +311,41 @@ mod tests {
         assert!(validate_fetch_url("https://10.0.0.1/x").is_ok());
         assert!(validate_fetch_url("https://example.com/x").is_ok());
         assert!(validate_fetch_url("https://www.cloudflare.com/ips-v4/").is_ok());
+    }
+
+    #[test]
+    fn redirect_policy_caps_hops_and_revalidates_each_hop() {
+        assert!(redirect_policy_allows(0, "https://example.com/sub").is_ok());
+        assert!(redirect_policy_allows(4, "https://example.com/sub").is_ok());
+        let err = redirect_policy_allows(5, "https://example.com/sub")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("too many redirects"), "{err}");
+        for bad in [
+            "https://127.0.0.1/x",
+            "http://example.com/x",
+            "https://localhost/y",
+        ] {
+            assert!(
+                redirect_policy_allows(0, bad).is_err(),
+                "{bad} must be refused on every hop"
+            );
+            assert!(
+                redirect_policy_allows(4, bad).is_err(),
+                "{bad} must be refused on later hops too"
+            );
+        }
+    }
+
+    #[test]
+    fn private_ranges_are_allowed_for_user_chosen_urls() {
+        // WHY: the guard blocks non-routable literals (loopback, link-local,
+        // multicast, unspecified, zero-net, mapped/obscured forms) but
+        // deliberately allows RFC1918/ULA: subscription and config URLs may
+        // legitimately live on the operator's LAN. Do not tighten this
+        // without updating the LAN-subscription workflows it protects.
+        assert!(redirect_policy_allows(0, "https://10.0.0.5:8443/sub").is_ok());
+        assert!(redirect_policy_allows(0, "https://192.168.1.10/x").is_ok());
     }
 
     #[test]

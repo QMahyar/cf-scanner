@@ -183,6 +183,7 @@ impl XrayProcess {
 pub async fn spawn(config_dir: &Path, xray_bin: &Path, config_json: &Value) -> Result<XrayProcess> {
     let config_path = config_dir.join("config.json");
     write_trial_config(&config_path, config_json).await?;
+    verify_binary_at_spawn(xray_bin).await?;
 
     let mut child = tokio::process::Command::new(xray_bin)
         .arg("run")
@@ -482,6 +483,23 @@ async fn resolve_binary(fetch: &impl BinaryFetch) -> Result<PathBuf> {
     download_binary(fetch).await
 }
 
+/// WHY: the binary sits on disk between verification and exec; re-hash here
+/// so a swapped file fails closed instead of running. Sidecar-gated: paths
+/// without a `.dgst` (release bundles, verified at build) skip the check.
+async fn verify_binary_at_spawn(bin: &Path) -> Result<()> {
+    if !dgst_path(bin).exists() {
+        return Ok(());
+    }
+    if cached_matches_dgst(bin).await {
+        return Ok(());
+    }
+    anyhow::bail!(
+        "xray binary failed verification at spawn: {} does not match {}; delete both files and re-run to re-download (or check the pinned xray version)",
+        bin.display(),
+        dgst_path(bin).display()
+    )
+}
+
 async fn cached_matches_dgst(bin: &Path) -> bool {
     let Ok(text) = tokio::fs::read_to_string(dgst_path(bin)).await else {
         return false;
@@ -518,7 +536,11 @@ pub async fn download_binary(fetch: &impl BinaryFetch) -> Result<PathBuf> {
     tokio::task::spawn_blocking(move || -> Result<()> {
         let actual = hex_lower(&Sha256::digest(&zip));
         if actual != expected {
-            bail!("xray checksum mismatch: got {actual}, want {expected}");
+            bail!(
+                "xray checksum mismatch for {asset} {version}: got {actual}, want {expected}; delete {} and {} then re-run to re-download (or check the pinned xray version)",
+                install_dest.display(),
+                dgst_dest.display()
+            );
         }
         if let Some(parent) = install_dest.parent() {
             std::fs::create_dir_all(parent)?;
@@ -1009,6 +1031,69 @@ mod tests {
         extract_xray_from_zip(&zip_bytes, &tmp).unwrap();
         assert_eq!(std::fs::read(&tmp).unwrap(), b"fake xray payload");
         std::fs::remove_file(&tmp).ok();
+    }
+
+    #[tokio::test]
+    async fn checksum_mismatch_error_names_recovery_steps() {
+        let _guard = crate::paths::test_env::DATA_DIR_LOCK.lock().await;
+        let _isolated = isolated_data_dir().await;
+        reset_binary_state().await;
+        let bad_zip = b"not the right data".to_vec();
+        let dgst = format!("SHA2-256= {}", "0".repeat(64));
+        struct FetchMismatch(Vec<u8>, String);
+        impl BinaryFetch for FetchMismatch {
+            async fn bytes(&self, url: &str) -> Result<Vec<u8>> {
+                if url.ends_with(".dgst") {
+                    Ok(self.1.clone().into_bytes())
+                } else {
+                    Ok(self.0.clone())
+                }
+            }
+        }
+        let err = download_binary(&FetchMismatch(bad_zip, dgst))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("checksum mismatch"), "{err}");
+        assert!(err.contains("delete"), "must name the recovery: {err}");
+        assert!(
+            err.contains("pinned"),
+            "must point at the version pin: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn binary_failing_reverification_at_spawn_is_rejected() {
+        use crate::dgst::hex_lower;
+        use sha2::{Digest as _, Sha256};
+
+        let dir = std::env::temp_dir().join(format!(
+            "cf-scanner-spawnverify-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock sane")
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let bin = dir.join(exe_name());
+        std::fs::write(&bin, b"v1").unwrap();
+        assert!(
+            verify_binary_at_spawn(&bin).await.is_ok(),
+            "paths without a sidecar skip the check"
+        );
+        let digest = hex_lower(&Sha256::digest(b"v1"));
+        std::fs::write(dgst_path(&bin), format!("SHA2-256= {digest}\n")).unwrap();
+        assert!(
+            verify_binary_at_spawn(&bin).await.is_ok(),
+            "matching sidecar passes"
+        );
+        std::fs::write(&bin, b"v2-swapped").unwrap();
+        let err = verify_binary_at_spawn(&bin).await.unwrap_err().to_string();
+        assert!(err.contains("failed verification"), "{err}");
+        assert!(err.contains("delete"), "must name the recovery: {err}");
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[tokio::test]

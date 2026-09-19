@@ -880,6 +880,24 @@ fn neighbor_count_omitted_field_deserializes_as_zero() {
 }
 
 #[test]
+fn invalid_colo_errors_are_sanitized_and_truncated() {
+    let mut c = valid_config();
+    c.colo_filter = vec!["x".repeat(600)];
+    assert_eq!(
+        c.validate(),
+        Err(ConfigError::InvalidColo("x".repeat(512))),
+        "hostile echo must be truncated to 512 chars"
+    );
+    let mut c = valid_config();
+    c.colo_filter = vec!["ab\x01cd".to_owned()];
+    assert_eq!(
+        c.validate(),
+        Err(ConfigError::InvalidColo("abcd".to_owned())),
+        "control characters must not echo into errors"
+    );
+}
+
+#[test]
 fn colo_filter_rejects_bad_codes() {
     for bad in ["HK", "HKGNRT", "H1G", "", "hkg ", "hk-g"] {
         let mut c = valid_config();

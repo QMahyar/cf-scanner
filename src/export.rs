@@ -812,7 +812,15 @@ fn create_tmp(dest: &std::path::Path) -> std::io::Result<(std::path::PathBuf, st
             // salt collision (another writer drew the same random name);
             // never touch a file we did not create — re-salt instead
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            other => return other.map(|f| (tmp, f)),
+            Err(e) => return Err(e),
+            Ok(f) => {
+                // WHY: owner-only at creation on Windows, mirroring the
+                // 0o600 mode on unix — export bundles intentionally carry
+                // credentials (off Windows lock_down_to_owner is a no-op).
+                #[cfg(windows)]
+                crate::paths::lock_down_to_owner(&tmp)?;
+                return Ok((tmp, f));
+            }
         }
     }
     Err(std::io::Error::other(
@@ -830,7 +838,13 @@ fn atomic_write_file(dest: &std::path::Path, body: &[u8]) -> std::io::Result<()>
         {
             let _ = std::fs::remove_file(dest);
         }
-        std::fs::rename(&tmp, dest)
+        std::fs::rename(&tmp, dest)?;
+        // WHY: rename preserves the tmp's locked-down ACL same-volume, but
+        // re-assert explicitly so the destination never keeps an inherited
+        // permissive ACL (no-op off Windows).
+        #[cfg(windows)]
+        crate::paths::lock_down_to_owner(dest)?;
+        Ok(())
     })();
     if result.is_err() {
         let _ = std::fs::remove_file(&tmp);
@@ -855,9 +869,12 @@ impl LiveExport {
             use std::os::unix::fs::OpenOptionsExt as _;
             opts.mode(0o600);
         }
-        Ok(Self {
-            file: opts.open(path)?,
-        })
+        let file = opts.open(path)?;
+        // WHY: create+truncate keeps a pre-existing file's permissive mode;
+        // re-assert owner-only so live exports match atomic exports.
+        #[cfg(windows)]
+        crate::paths::lock_down_to_owner(path)?;
+        Ok(Self { file })
     }
 
     pub fn push_line(&mut self, line: &str) -> std::io::Result<()> {
@@ -1556,6 +1573,58 @@ mod tests {
             "credential-bearing export must be owner-only, got {:o}",
             mode & 0o777
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(windows)]
+    fn dacl_is_protected(path: &std::path::Path) -> bool {
+        use std::os::windows::ffi::OsStrExt as _;
+        use windows::Win32::Foundation::NO_ERROR;
+        use windows::Win32::Security::Authorization::{GetNamedSecurityInfoW, SE_FILE_OBJECT};
+        use windows::Win32::Security::{
+            DACL_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION,
+        };
+
+        let wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+        let mut dacl = std::ptr::null_mut();
+        let err = unsafe {
+            GetNamedSecurityInfoW(
+                windows::core::PCWSTR::from_raw(wide.as_ptr()),
+                SE_FILE_OBJECT,
+                DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+                None,
+                None,
+                Some(&mut dacl),
+                None,
+                std::ptr::null_mut(),
+            )
+        };
+        // WHY: mirrors the proven paths.rs DACL assertion — the returned
+        // pointer is intentionally not freed here (same as there); freeing
+        // it corrupted the heap in this test binary.
+        err == NO_ERROR && !dacl.is_null()
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn export_files_are_owner_only_on_windows() {
+        let dir = live_test_dir("win-acl");
+        let dest = dir.join("results.csv");
+        atomic_write_file(&dest, b"secret\n").unwrap();
+        assert_eq!(std::fs::read(&dest).unwrap(), b"secret\n");
+        assert!(
+            dacl_is_protected(&dest),
+            "atomic export must carry a protected owner-only DACL"
+        );
+        let live_path = dir.join("live.jsonl");
+        let mut live = LiveExport::create(&live_path).unwrap();
+        live.push_line("{}").unwrap();
+        live.finish().unwrap();
+        assert!(
+            dacl_is_protected(&live_path),
+            "live export must carry a protected owner-only DACL"
+        );
+        drop(live);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

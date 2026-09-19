@@ -12,7 +12,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 
 use crate::api::types::{
-    CustomFragment, DEFAULT_PROBE_URL, FragmentPreset, MAX_SUBSCRIPTION_SPECS,
+    ConfigError, CustomFragment, DEFAULT_PROBE_URL, FragmentPreset, MAX_SUBSCRIPTION_SPECS,
 };
 use crate::configs::{OutboundSpec, SubFetch};
 use crate::verify::{ProbeRequest, TunnelProbe};
@@ -41,6 +41,9 @@ pub async fn check_subscription(
     probe: &dyn TunnelProbe,
     timeout_ms: u64,
 ) -> Result<Vec<CheckRow>> {
+    if !(100..=30_000).contains(&timeout_ms) {
+        return Err(ConfigError::InvalidTimeout(timeout_ms).into());
+    }
     let body = fetcher
         .fetch(url)
         .await
@@ -105,8 +108,11 @@ async fn check_one(
         probe_urls,
         timeout_ms,
     };
-    let result =
-        tokio::time::timeout(Duration::from_millis(timeout_ms + 1_000), probe.probe(req)).await;
+    let result = tokio::time::timeout(
+        Duration::from_millis(timeout_ms.saturating_add(1_000)),
+        probe.probe(req),
+    )
+    .await;
     match result {
         Err(_) => CheckRow {
             config_index,
@@ -244,6 +250,43 @@ not-a-uri
                 .as_deref()
                 .is_some_and(|e| e.contains("1 line(s)"))
         );
+    }
+
+    #[tokio::test]
+    async fn out_of_range_timeout_is_rejected_before_any_probe() {
+        for bad in [0, 99, 30_001, u64::MAX] {
+            let err = check_subscription(
+                "https://sub.example/x",
+                &FakeSub(
+                    "vless://11111111-2222-3333-4444-555555555555@1.2.3.4:443#good\n".to_owned(),
+                ),
+                &FakeProbe(true),
+                bad,
+            )
+            .await
+            .expect_err("out-of-range timeout must fail");
+            assert!(
+                format!("{err:#}").contains("out of range 100-30000"),
+                "{err:#}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn boundary_timeouts_are_accepted() {
+        for good in [100, 30_000] {
+            let rows = check_subscription(
+                "https://sub.example/x",
+                &FakeSub(
+                    "vless://11111111-2222-3333-4444-555555555555@1.2.3.4:443#good\n".to_owned(),
+                ),
+                &FakeProbe(true),
+                good,
+            )
+            .await
+            .unwrap();
+            assert!(rows.iter().any(|r| r.ok), "{rows:?}");
+        }
     }
 
     #[tokio::test]

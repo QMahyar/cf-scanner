@@ -321,6 +321,11 @@ fn json_errors_flag_prints_a_json_envelope_on_stdout_for_config_failures() {
         .as_str()
         .expect("envelope carries an error string");
     assert!(err.contains("concurrency"), "{err}");
+    assert_eq!(
+        parsed["type"].as_str(),
+        Some("error"),
+        "envelope must be tagged so NDJSON parsers can tell it from data rows"
+    );
     // The human message still goes to stderr.
     assert!(stderr_of(&out).contains("error:"));
 }
@@ -334,6 +339,11 @@ fn json_errors_flag_wraps_clap_parse_failures_too() {
         serde_json::from_str(&stdout).expect("clap errors must be wrapped in JSON on stdout");
     let err = parsed["error"].as_str().unwrap_or_default();
     assert!(err.contains("cannot be used with"), "{err}");
+    assert_eq!(
+        parsed["type"].as_str(),
+        Some("error"),
+        "clap envelope must carry the same type tag"
+    );
 }
 
 #[test]

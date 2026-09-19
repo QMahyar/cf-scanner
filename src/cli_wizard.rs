@@ -43,7 +43,7 @@ fn stop_prompt() -> &'static str {
 }
 
 fn warp_endpoints_prompt() -> &'static str {
-    "Custom endpoints ip or ip:port (IPv6 as [addr]:port, comma-separated; empty = bundled pools)"
+    "Custom endpoints (IPv4 ip or ip:port, comma-separated; empty = bundled pools)"
 }
 
 fn phase2_configs_prompt() -> &'static str {
@@ -1441,8 +1441,8 @@ mod tests {
             "Stop after N working endpoints (unreachable = excluded, slow = kept — slowness is filtered by --min-speed, not here)"
         );
         assert!(
-            warp_endpoints_prompt().contains("IPv6 as [addr]:port"),
-            "endpoint prompt lost the bracketed-IPv6 hint: {}",
+            warp_endpoints_prompt().contains("IPv4 ip or ip:port"),
+            "endpoint prompt must match the IPv4-only validator: {}",
             warp_endpoints_prompt()
         );
         assert!(

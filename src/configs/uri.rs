@@ -240,6 +240,9 @@ pub fn export_config_uri(
     if original_config.len() > MAX_EXPORT_CONFIG_BYTES {
         bail!("config exceeds {MAX_EXPORT_CONFIG_BYTES} bytes");
     }
+    if let Some(s) = sni_override {
+        crate::api::types::validate_sni(s).map_err(|e| anyhow!("invalid --sni: {e}"))?;
+    }
     let mut spec = parse_uri(original_config)?;
     spec.server = dial_ip.to_string();
     spec.port = port;

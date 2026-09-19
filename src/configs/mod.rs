@@ -118,7 +118,7 @@ fn redact_line(line: &str) -> String {
     out
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct OutboundSpec {
     pub protocol: Protocol,
     pub server: String,
@@ -134,6 +134,30 @@ pub struct OutboundSpec {
     pub tag: Option<String>,
     pub alter_id: u16,
     pub vmess_security: Option<String>,
+}
+
+impl std::fmt::Debug for OutboundSpec {
+    /// WHY: `user_id` carries passwords/UUIDs; a derived Debug would print
+    /// them into any log or error that formats the spec. Every other field
+    /// is routing metadata and stays visible.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OutboundSpec")
+            .field("protocol", &self.protocol)
+            .field("server", &self.server)
+            .field("port", &self.port)
+            .field("user_id", &"***")
+            .field("method", &self.method)
+            .field("security", &self.security)
+            .field("tls_server_name", &self.tls_server_name)
+            .field("fingerprint", &self.fingerprint)
+            .field("ws", &self.ws)
+            .field("grpc", &self.grpc)
+            .field("xhttp", &self.xhttp)
+            .field("tag", &self.tag)
+            .field("alter_id", &self.alter_id)
+            .field("vmess_security", &self.vmess_security)
+            .finish()
+    }
 }
 
 impl OutboundSpec {
@@ -1029,6 +1053,32 @@ mod tests {
     }
 
     #[test]
+    fn debug_output_redacts_user_id() {
+        let spec = OutboundSpec {
+            protocol: Protocol::Vless,
+            server: "1.2.3.4".to_owned(),
+            port: 443,
+            user_id: "super-secret-id".to_owned(),
+            method: None,
+            security: "tls".to_owned(),
+            tls_server_name: None,
+            fingerprint: None,
+            ws: None,
+            grpc: None,
+            xhttp: None,
+            tag: None,
+            alter_id: 0,
+            vmess_security: None,
+        };
+        let dbg = format!("{spec:?}");
+        assert!(!dbg.contains("super-secret-id"), "user_id leaked: {dbg}");
+        assert!(
+            dbg.contains("1.2.3.4"),
+            "non-secret fields stay visible: {dbg}"
+        );
+    }
+
+    #[test]
     fn export_config_uri_swaps_the_dial_endpoint() {
         let uri = export_config_uri(
             "vless://aaaaaaaa-bbbb-cccc-dddd-eeeeffff0000@1.2.3.4:443?security=tls&sni=orig.example.com&fp=chrome",
@@ -1058,6 +1108,17 @@ mod tests {
         .unwrap();
         assert!(uri.contains("sni=orig.example.com"), "{uri}");
         assert!(export_config_uri("not a uri", DIAL_IP.parse().unwrap(), 443, None, None).is_err());
+    }
+
+    #[test]
+    fn export_config_uri_rejects_invalid_sni_override() {
+        let base = "vless://aaaaaaaa-bbbb-cccc-dddd-eeeeffff0000@1.2.3.4:443";
+        for bad in ["", "not a host!", "a..b", &"x".repeat(300)] {
+            let err = export_config_uri(base, DIAL_IP.parse().unwrap(), 443, Some(bad), None)
+                .expect_err("invalid SNI override must fail");
+            assert!(format!("{err:#}").contains("sni"), "{err:#}");
+        }
+        assert!(export_config_uri(base, DIAL_IP.parse().unwrap(), 443, Some("b.me"), None).is_ok());
     }
 
     #[test]

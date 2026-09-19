@@ -41,7 +41,8 @@ async fn main() -> ExitCode {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
             if json_errors {
-                let line = serde_json::json!({ "error": err.to_string() }).to_string();
+                let line =
+                    serde_json::json!({ "type": "error", "error": err.to_string() }).to_string();
                 let _ = write_stdout_line(&line);
             }
             eprintln!("error: {err:#}");
@@ -190,8 +191,16 @@ async fn run_check_sub(url: &str, timeout_ms: u64) -> Result<()> {
         println!("{entry}");
     }
     eprintln!("check-sub: {ok}/{} config(s) verified", rows.len());
-    if ok == 0 && !rows.is_empty() {
-        anyhow::bail!("no subscription config verified");
+    check_sub_verdict(ok, rows.len())?;
+    Ok(())
+}
+
+/// WHY: an empty subscription verifies nothing, so it fails like any other
+/// zero-pass run (documented "non-zero exit when nothing verifies").
+/// Kept as a named helper so the contract is pinned by unit test.
+fn check_sub_verdict(ok: usize, total: usize) -> Result<()> {
+    if ok == 0 {
+        anyhow::bail!("no subscription config verified ({ok}/{total})");
     }
     Ok(())
 }
@@ -399,6 +408,44 @@ fn tune_base_warp(candidates: u32, timeout_ms: u64) -> cf_scanner::api::types::S
 /// steps or into the last-scan store (no retry-save, no enrich, no NDJSON).
 /// Human progress goes to stderr; stdout carries exactly one reusable scan
 /// command — the first value meeting the bar, else best-so-far.
+/// WHY: the tune reject paths are pure input validation; extracted from
+/// `run_tune` so unit tests can pin every reject without spinning an engine.
+fn validate_junk_tune(counts: &Option<Vec<u8>>, need_pct: u32) -> Result<Vec<u8>> {
+    if !(1..=100).contains(&need_pct) {
+        anyhow::bail!("--need-pct must be 1-100");
+    }
+    let counts = counts.clone().unwrap_or_else(tune::default_junk_counts);
+    if counts.is_empty() || counts.len() > tune::MAX_TUNE_VALUES {
+        anyhow::bail!("--counts takes 1-{} values", tune::MAX_TUNE_VALUES);
+    }
+    if counts
+        .iter()
+        .any(|&c| c == 0 || c > cf_scanner::api::types::MAX_WARP_JUNK_COUNT)
+    {
+        anyhow::bail!("--counts entries must be 1-128 (0 would measure junk-off)");
+    }
+    Ok(counts)
+}
+
+/// WHY: see `validate_junk_tune`.
+fn validate_sni_tune(snis: &[String], need_pct: u32) -> Result<()> {
+    if !(1..=100).contains(&need_pct) {
+        anyhow::bail!("--need-pct must be 1-100");
+    }
+    if snis.is_empty() || snis.len() > tune::MAX_TUNE_VALUES {
+        anyhow::bail!("--snis takes 1-{} hostnames", tune::MAX_TUNE_VALUES);
+    }
+    Ok(())
+}
+
+/// WHY: see `validate_junk_tune`.
+fn validate_fragment_tune(need: u32) -> Result<()> {
+    if need == 0 {
+        anyhow::bail!("--need must be at least 1");
+    }
+    Ok(())
+}
+
 async fn run_tune(action: TuneAction) -> Result<()> {
     let (trials, per_step, timeout_ms, need): (Vec<TuneTrial>, u32, u64, TuneNeed) = match action {
         TuneAction::Junk {
@@ -407,19 +454,7 @@ async fn run_tune(action: TuneAction) -> Result<()> {
             need_pct,
             timeout_ms,
         } => {
-            if !(1..=100).contains(&need_pct) {
-                anyhow::bail!("--need-pct must be 1-100");
-            }
-            let counts = counts.unwrap_or_else(tune::default_junk_counts);
-            if counts.is_empty() || counts.len() > tune::MAX_TUNE_VALUES {
-                anyhow::bail!("--counts takes 1-{} values", tune::MAX_TUNE_VALUES);
-            }
-            if counts
-                .iter()
-                .any(|&c| c == 0 || c > cf_scanner::api::types::MAX_WARP_JUNK_COUNT)
-            {
-                anyhow::bail!("--counts entries must be 1-128 (0 would measure junk-off)");
-            }
+            let counts = validate_junk_tune(&counts, need_pct)?;
             let mut trials = Vec::with_capacity(counts.len());
             for count in counts {
                 let cfg = tune::with_junk(tune_base_warp(candidates, timeout_ms), count);
@@ -439,12 +474,7 @@ async fn run_tune(action: TuneAction) -> Result<()> {
             need_pct,
             timeout_ms,
         } => {
-            if !(1..=100).contains(&need_pct) {
-                anyhow::bail!("--need-pct must be 1-100");
-            }
-            if snis.is_empty() || snis.len() > tune::MAX_TUNE_VALUES {
-                anyhow::bail!("--snis takes 1-{} hostnames", tune::MAX_TUNE_VALUES);
-            }
+            validate_sni_tune(&snis, need_pct)?;
             let mut trials = Vec::with_capacity(snis.len());
             for sni in snis {
                 let cfg =
@@ -465,9 +495,7 @@ async fn run_tune(action: TuneAction) -> Result<()> {
             need,
             timeout_ms,
         } => {
-            if need == 0 {
-                anyhow::bail!("--need must be at least 1");
-            }
+            validate_fragment_tune(need)?;
             let mut trials = Vec::with_capacity(3);
             for preset in tune::fragment_ladder() {
                 let cfg = tune::with_fragment(
@@ -651,6 +679,48 @@ mod tests {
     use super::*;
     use cf_scanner::api;
     use clap::Parser;
+
+    #[test]
+    fn check_sub_verdict_fails_when_nothing_verifies_including_empty() {
+        assert!(
+            check_sub_verdict(0, 0).is_err(),
+            "empty run verifies nothing"
+        );
+        assert!(check_sub_verdict(0, 3).is_err());
+        assert!(check_sub_verdict(2, 3).is_ok());
+    }
+
+    #[test]
+    fn tune_validators_reject_bad_flags_and_accept_good_ones() {
+        assert!(validate_junk_tune(&None, 30).is_ok(), "defaults are valid");
+        assert!(validate_junk_tune(&Some(vec![8, 32]), 1).is_ok());
+        assert!(validate_junk_tune(&Some(vec![8]), 0).is_err(), "need-pct 0");
+        assert!(
+            validate_junk_tune(&Some(vec![8]), 101).is_err(),
+            "need-pct 101"
+        );
+        assert!(
+            validate_junk_tune(&Some(vec![]), 30).is_err(),
+            "empty counts"
+        );
+        assert!(
+            validate_junk_tune(&Some(vec![0]), 30).is_err(),
+            "junk 0 measures junk-off"
+        );
+        assert!(
+            validate_junk_tune(&Some(vec![129]), 30).is_err(),
+            "junk above the cap"
+        );
+        assert!(
+            validate_junk_tune(&Some(vec![8; tune::MAX_TUNE_VALUES + 1]), 30).is_err(),
+            "counts above the length cap"
+        );
+        assert!(validate_sni_tune(&["a.example.com".to_owned()], 30).is_ok());
+        assert!(validate_sni_tune(&[], 30).is_err(), "empty snis");
+        assert!(validate_sni_tune(&["a.example.com".to_owned()], 101).is_err());
+        assert!(validate_fragment_tune(3).is_ok());
+        assert!(validate_fragment_tune(0).is_err());
+    }
 
     #[test]
     fn export_config_subcommand_renders_a_ready_uri() {

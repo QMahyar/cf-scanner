@@ -548,7 +548,7 @@ pub(crate) struct ScanArgs {
         long,
         value_delimiter = ',',
         help_heading = "WARP",
-        help = "Scan these WARP endpoints (ip:port or host:port) instead of the bundled pools"
+        help = "Scan these WARP endpoints (IPv4 ip or ip:port) instead of the bundled pools"
     )]
     pub(crate) warp_endpoints: Vec<String>,
 
@@ -745,7 +745,7 @@ pub(crate) fn parse_error_line(err: &clap::Error, json_errors: bool) -> Option<S
     if !json_errors || !err.use_stderr() {
         return None;
     }
-    Some(serde_json::json!({ "error": err.to_string() }).to_string())
+    Some(serde_json::json!({ "type": "error", "error": err.to_string() }).to_string())
 }
 
 #[cfg(test)]
@@ -761,6 +761,10 @@ mod tests {
         assert!(usage.use_stderr());
         let line = parse_error_line(&usage, true).unwrap();
         assert!(line.contains("\"error\""), "{line}");
+        assert!(
+            line.contains("\"type\":\"error\""),
+            "envelope must be tagged so NDJSON parsers can tell it from data rows: {line}"
+        );
         assert!(parse_error_line(&usage, false).is_none());
         let help = match Cli::try_parse_from(["cf-scanner", "--help"]) {
             Err(e) => e,

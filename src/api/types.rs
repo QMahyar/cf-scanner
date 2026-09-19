@@ -458,11 +458,12 @@ impl ScanConfig {
                 ConfigError::NonRoutableEndpoint(s) => {
                     ConfigError::NonRoutableEndpoint(sanitize(s))
                 }
-                other => {
-                    let sanitized = crate::configs::sanitize_error_text(&other.to_string());
-                    let _: String = sanitized.chars().take(512).collect();
-                    other
-                }
+                ConfigError::InvalidColo(s) => ConfigError::InvalidColo(sanitize(s)),
+                // WHY: every other variant today carries only numbers or
+                // unit/static markers, so returning it unchanged leaks
+                // nothing. Any NEW string-carrying variant must gain an
+                // explicit sanitizing arm above — never extend this fallback.
+                other => other,
             }
         })
     }
