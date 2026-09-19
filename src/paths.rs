@@ -71,6 +71,37 @@ pub fn lock_down_to_owner(_path: &std::path::Path) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Test-only assertion: the file carries a protected owner-only DACL.
+/// Single home for the `GetNamedSecurityInfoW` check previously duplicated
+/// in the export tests; production code uses `lock_down_to_owner` instead.
+#[cfg(all(test, windows))]
+pub(crate) fn dacl_is_protected(path: &std::path::Path) -> bool {
+    use std::os::windows::ffi::OsStrExt as _;
+    use windows::Win32::Foundation::NO_ERROR;
+    use windows::Win32::Security::Authorization::{GetNamedSecurityInfoW, SE_FILE_OBJECT};
+    use windows::Win32::Security::{
+        DACL_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION,
+    };
+
+    let wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+    let mut dacl = std::ptr::null_mut();
+    let err = unsafe {
+        GetNamedSecurityInfoW(
+            windows::core::PCWSTR::from_raw(wide.as_ptr()),
+            SE_FILE_OBJECT,
+            DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+            None,
+            None,
+            Some(&mut dacl),
+            None,
+            std::ptr::null_mut(),
+        )
+    };
+    // WHY: the returned pointer is intentionally not freed here; freeing
+    // it corrupted the heap in this test binary.
+    err == NO_ERROR && !dacl.is_null()
+}
+
 #[cfg(windows)]
 mod windows_security {
     use std::io;

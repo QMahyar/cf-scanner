@@ -896,7 +896,10 @@ impl LiveExport {
 #[cfg(test)]
 mod tests {
     use super::*;
+
     use crate::api::types::{FragmentPreset, Phase2Verdict};
+    #[cfg(windows)]
+    use crate::paths::dacl_is_protected;
     use base64::Engine;
 
     const VLESS: &str = "vless://11111111-2222-3333-4444-555555555555@origin.example.com:443?security=tls&sni=origin.example.com&type=ws&path=%2Fws&host=ws.example.com#orig";
@@ -1576,35 +1579,6 @@ mod tests {
             mode & 0o777
         );
         let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[cfg(windows)]
-    fn dacl_is_protected(path: &std::path::Path) -> bool {
-        use std::os::windows::ffi::OsStrExt as _;
-        use windows::Win32::Foundation::NO_ERROR;
-        use windows::Win32::Security::Authorization::{GetNamedSecurityInfoW, SE_FILE_OBJECT};
-        use windows::Win32::Security::{
-            DACL_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION,
-        };
-
-        let wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
-        let mut dacl = std::ptr::null_mut();
-        let err = unsafe {
-            GetNamedSecurityInfoW(
-                windows::core::PCWSTR::from_raw(wide.as_ptr()),
-                SE_FILE_OBJECT,
-                DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
-                None,
-                None,
-                Some(&mut dacl),
-                None,
-                std::ptr::null_mut(),
-            )
-        };
-        // WHY: mirrors the proven paths.rs DACL assertion — the returned
-        // pointer is intentionally not freed here (same as there); freeing
-        // it corrupted the heap in this test binary.
-        err == NO_ERROR && !dacl.is_null()
     }
 
     #[cfg(windows)]
