@@ -356,7 +356,7 @@ async fn tunnel_probe_happy_path_passes_through_fake_socks() {
 
     let result = result.expect("probe must complete without a local failure");
     assert!(result.passed, "fake SOCKS 200 must pass: {result:?}");
-    assert_eq!(result.verifier.as_deref(), Some("xray"));
+    assert_eq!(result.verifier, Some("xray"));
     assert!(result.latency_ms.is_some(), "{result:?}");
     assert_eq!(result.colo.as_deref(), Some("IAD"), "{result:?}");
     assert!(marker.exists(), "the fake xray must have been spawned");

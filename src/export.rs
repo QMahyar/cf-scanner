@@ -840,10 +840,12 @@ fn atomic_write_file(dest: &std::path::Path, body: &[u8]) -> std::io::Result<()>
         }
         std::fs::rename(&tmp, dest)?;
         // WHY: rename preserves the tmp's locked-down ACL same-volume, but
-        // re-assert explicitly so the destination never keeps an inherited
-        // permissive ACL (no-op off Windows).
+        // re-assert best-effort: a concurrent writer may replace dest between
+        // the rename and this call (last-writer-wins protocol), so a failure
+        // here must not fail the write. The tmp itself was locked fail-closed
+        // at creation, which is the real guarantee.
         #[cfg(windows)]
-        crate::paths::lock_down_to_owner(dest)?;
+        let _ = crate::paths::lock_down_to_owner(dest);
         Ok(())
     })();
     if result.is_err() {
