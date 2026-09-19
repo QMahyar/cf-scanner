@@ -48,8 +48,7 @@ pub async fn check_subscription(
     let parsed = crate::configs::parse_subscription(&body);
     if parsed.specs.len() > MAX_SUBSCRIPTION_SPECS {
         anyhow::bail!(
-            "subscription expands to more than {} configs",
-            MAX_SUBSCRIPTION_SPECS
+            "subscription expands to more than {MAX_SUBSCRIPTION_SPECS} configs"
         );
     }
     // The engine's default probe URL, so a check-sub verdict means the same
