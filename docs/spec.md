@@ -74,6 +74,13 @@ services.
   1-30000 ms; idle hold 0-60000 ms; colo codes ≤16 (3-5 ASCII letters each);
   HTTP status codes 100-599 (default 200,301,302); neighbor breadth 0-64;
   speed sample 8 MiB per endpoint, 30 s timeout.
+  Wall-clock note: a probe with idle-hold on may take ~2× timeout + idle-hold
+  (the hold sleep and its trailing read sit outside the handshake budget).
+  Explicit-input routing rule: `--custom-cidrs` entries whose network address
+  is loopback/link-local/unspecified/private/RFC1918/ULA (and
+  `--warp-endpoints` on unroutable IPs) are rejected with
+  `NonRoutableCidr`/`NonRoutableEndpoint` — intentional anti-abuse so scan
+  targets stay on public space even when typed by hand.
 - Configuration: hand-rolled JSON in the platform data dir (`identity.json`
   for WARP keys with 0600 on Unix, `refreshed-ranges.json` +
   `refreshed-ranges-v6.json`);
@@ -281,7 +288,8 @@ pub struct Verdict {
 
 ## 9. Decisions (confirmed 2026-08-12)
 
-1. Server default port **8765**, `--port` flag.
+1. ~~Server default port **8765**, `--port` flag.~~ (historical: the HTTP
+   server was removed by ADR-013; the product is a pure CLI with no port.)
 2. **Xray delivery: bundled in releases.** The dist build downloads the pinned
    xray binary + `.dgst` and bundles it in every release archive (dist
    ExtraArtifact). Runtime graceful fallback: if the binary is absent, offer a

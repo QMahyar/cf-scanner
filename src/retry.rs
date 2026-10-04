@@ -126,6 +126,9 @@ mod tests {
             .as_object_mut()
             .unwrap()
             .remove("verify_with_wgconf");
+        // A pre-serde-default shape without the wgconf key must also load
+        // (wgconf defaults to None like every other WarpConfig field).
+        v["warp"].as_object_mut().unwrap().remove("wgconf");
         std::fs::write(
             last_scan_path().unwrap(),
             serde_json::to_string_pretty(&v).unwrap(),
@@ -135,7 +138,7 @@ mod tests {
         let warp = loaded.warp.expect("warp block must survive");
         assert!(!warp.verify_with_wgconf, "new flags default off");
         assert_eq!(loaded.neighbor_count, 0, "new scalars default");
-        assert!(warp.wgconf.is_some(), "present keys must survive");
+        assert!(warp.wgconf.is_none(), "absent wgconf defaults to None");
     }
 
     #[test]

@@ -189,6 +189,7 @@ pub struct WarpConfig {
     pub custom_endpoints: Vec<String>,
     #[serde(default = "default_probes_per_endpoint")]
     pub probes_per_endpoint: u8,
+    #[serde(default)]
     pub wgconf: Option<String>,
     #[serde(default)]
     pub verify_with_wgconf: bool,
@@ -627,6 +628,12 @@ fn validate_mode_gates(cfg: &ScanConfig) -> Result<(), ConfigError> {
         Mode::Warp => {
             if cfg.probe_mode != ProbeMode::Tls {
                 return Err(ConfigError::ProbeWrongMode);
+            }
+            // A customized SNI list under WARP signals confused intent
+            // (mirrors HttpCodesNeedHttpProbe); empty means unset and stays
+            // valid everywhere.
+            if !cfg.probe_snis.is_empty() && cfg.probe_snis != default_probe_snis() {
+                return Err(ConfigError::ProbeSnisNeedTlsHttp);
             }
             if cfg.phase2.is_some() {
                 return Err(ConfigError::Phase2WrongMode);

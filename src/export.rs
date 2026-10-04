@@ -874,6 +874,11 @@ impl LiveExport {
         let file = opts.open(path)?;
         // WHY: create+truncate keeps a pre-existing file's permissive mode;
         // re-assert owner-only so live exports match atomic exports.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+        }
         #[cfg(windows)]
         crate::paths::lock_down_to_owner(path)?;
         Ok(Self { file })
@@ -1667,17 +1672,26 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn live_export_sets_owner_only_permissions() {
-        let dir = live_test_dir("perms");
-        let dest = dir.join("live.jsonl");
-        let _live = LiveExport::create(&dest).unwrap();
+    fn live_export_locks_down_a_preexisting_permissive_file() {
         use std::os::unix::fs::PermissionsExt as _;
+        let dir = live_test_dir("perms-existing");
+        let dest = dir.join("live.jsonl");
+        std::fs::write(&dest, b"stale\n").unwrap();
+        std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let mut live = LiveExport::create(&dest).unwrap();
+        live.push_line(r#"{"ip":"1.2.3.4"}"#).unwrap();
+        live.finish().unwrap();
         let mode = std::fs::metadata(&dest).unwrap().permissions().mode();
         assert_eq!(
             mode & 0o777,
             0o600,
-            "live export must be owner-only, got {:o}",
+            "re-opening a pre-existing file must lock it to owner-only, got {:o}",
             mode & 0o777
+        );
+        assert_eq!(
+            std::fs::read_to_string(&dest).unwrap(),
+            "{\"ip\":\"1.2.3.4\"}\n",
+            "the stale body must be truncated"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
