@@ -38,7 +38,7 @@ on ISP-restricted networks. Two modes:
   client registration API.
 
 Results stream as newline-delimited JSON on stdout with a final summary;
-`--export` writes csv/json/base64/raw/singbox/clash bundles to a file.
+`--export` writes csv/json/base64/raw/sharelinks/singbox/clash/v2ray/shadowrocket/quantumult bundles to a file.
 CLI flags and an interactive wizard drive the same in-process engine.
 
 Users: operators via the CLI and wizard; agents via NDJSON stdout + `--export`.
@@ -145,7 +145,7 @@ src/
   cli_wizard.rs      interactive prompts over the same API (builds one engine
                       per scan so the chosen probe protocol runs)
   export.rs          result/bundle rendering (csv, json, base64, raw, singbox,
-                      clash, sharelinks)
+                      clash, sharelinks, v2ray, shadowrocket, quantumult)
   util.rs            shared small helpers (`percent_decode` for configs,
                       ranges, wgconf)
   api/{types,limits,validate,error}.rs  request/response contract + caps
@@ -177,8 +177,11 @@ wix/                 MSI installer source
   no unbounded loops — all scan loops check stop conditions every iteration.
 - Caps are single-sourced in `src/api/limits.rs`; `ScanConfig::validate()`
   enforces them before any scan starts. New request fields use
-  `#[serde(default)]` so additive evolution stays compatible; `deny_unknown_fields`
-  keeps unknown keys at 422 (`invalid_config`).
+  `#[serde(default)]` so additive evolution stays compatible; nested
+  `deny_unknown_fields` keeps unknown keys at 422 (`invalid_config`).
+  `ScanConfig` itself has NO `deny_unknown_fields`: it is the persisted
+  `--retry-last` root, so unknown top-level keys are ignored for forward
+  compatibility (strictness lives on the nested types and in `validate()`).
 - Naming: snake_case; verbs for tasks (`probe`, `verify`), nouns for types
   (`Verdict`, `ScanConfig`).
 - No comments unless explaining WHY (doubt-driven style); no dead code;
@@ -270,8 +273,8 @@ pub struct Verdict {
       copy with ports / raw IPs (one per line, no trailing whitespace); save
 - [ ] GeoIP: country via embedded mmdb offline; datacenter colo via
   /cdn-cgi/trace in phase 2 (or phase 1 with `--probe http`)
-- [ ] Export: `scan --export FILE --export-format csv|json|base64|raw|singbox|
-      clash` writes results/bundles to a file (`-` = stdout) via `src/export.rs`
+- [ ] Export: `scan --export FILE --export-format csv|json|base64|raw|sharelinks|singbox|
+      clash|v2ray|shadowrocket|quantumult` writes results/bundles to a file (`-` = stdout) via `src/export.rs`
 - [ ] `dist plan` passes for the 3-target matrix (linux x86_64/aarch64 +
       windows x86_64); PR CI runs test+clippy+fmt+coverage+version-parity
 - [ ] README documents Termux musl caveat + xray glibc note + SmartScreen note

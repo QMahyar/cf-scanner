@@ -13,7 +13,10 @@ pub fn data_dir() -> Result<PathBuf> {
     if let Ok(dir) = std::env::var("CF_SCANNER_DATA_DIR")
         && !dir.trim().is_empty()
     {
-        return Ok(PathBuf::from(dir));
+        // WHY: trim the override so a trailing newline/space in CI env cannot
+        // redirect the data dir to a lookalike path; relative values stay
+        // allowed (tests rely on temp-dir joins, which are absolute anyway).
+        return Ok(PathBuf::from(dir.trim()));
     }
     let dirs = directories::ProjectDirs::from("com", "qmahyar", "cf-scanner")
         .ok_or_else(|| anyhow!("could not resolve a data directory"))?;

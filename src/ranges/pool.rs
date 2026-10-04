@@ -1,8 +1,10 @@
 use std::fs;
+use std::io::Write as _;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::{Context, Result, anyhow};
+use rand_core::{OsRng, RngCore};
 
 use crate::paths;
 
@@ -46,7 +48,13 @@ impl Cidr {
     }
 
     pub(crate) fn sub24_count(self) -> u64 {
-        debug_assert!(self.addr.is_ipv4());
+        // WHY: v4 planning helper; a v6 range reaching it degrades to one
+        // block instead of underflowing `24 - prefix` (debug panic; release
+        // shift overflow). Callers only feed it v4 today, so this is a
+        // fail-safe, not a live path.
+        if !self.addr.is_ipv4() {
+            return 1;
+        }
         if self.prefix >= 24 {
             1
         } else {
@@ -364,9 +372,19 @@ pub fn write_pool_to(path: &std::path::Path, pool: &CidrPool, last_updated: &str
     let mut text = format!("{LAST_UPDATED_PREFIX}{last_updated}\n");
     text.push_str(&render_lines(pool.ranges()));
     let seq = TMP_SEQ.fetch_add(1, Ordering::Relaxed);
-    let tmp = path.with_extension(format!("txt.tmp.{}.{seq}", std::process::id()));
+    // WHY: the temp name carries an OsRng salt plus pid/seq (matching the
+    // paths.rs secret-temp convention) so a local attacker cannot pre-place
+    // a symlink at a predictable path; create_new fails instead of following.
+    let salt = OsRng.next_u32();
+    let tmp = path.with_extension(format!("txt.tmp.{}.{seq}.{salt:08x}", std::process::id()));
     let write = || -> Result<()> {
-        fs::write(&tmp, text.as_bytes()).context("write refreshed ranges")?;
+        fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp)
+            .context("create refreshed ranges temp")?
+            .write_all(text.as_bytes())
+            .context("write refreshed ranges")?;
         fs::rename(&tmp, path).context("replace refreshed ranges")
     };
     match write() {
@@ -621,6 +639,16 @@ mod tests {
         };
         let v4_ex = parse_cidr("10.0.0.0/8").unwrap();
         assert_eq!(v6.excluding(&[v4_ex]), v6, "v4 exclude must not touch v6");
+    }
+
+    #[test]
+    fn sub24_count_never_underflows_on_v6() {
+        // WHY: sub24_count is a v4 planning helper; a v6 range reaching it
+        // used to underflow `24 - prefix`. It must degrade to one block.
+        let v6 = parse_cidr("2001:db8::/32").unwrap();
+        assert_eq!(v6.sub24_count(), 1);
+        let v4 = parse_cidr("10.0.0.0/8").unwrap();
+        assert_eq!(v4.sub24_count(), 1 << 16);
     }
 
     #[test]

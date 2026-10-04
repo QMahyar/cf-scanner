@@ -94,8 +94,8 @@ npm publishing knowledge (AGENTS must know, condensed from `docs/release-process
   /cdn-cgi/trace (phase 2, or phase-1 with `--probe http`). Attribution required (CC BY 4.0, README link).
 - CLI agents: `scan` prints newline-delimited JSON on stdout + final summary;
   stderr carries human-only noise (progress ticker is TTY-gated).
-  `--json-errors` prints `{"error": ...}` on stdout for failures.
-  `--export FILE --export-format csv|json|base64|raw|singbox|clash|sharelinks` writes
+  `--json-errors` prints `{"type": "error", "error": ...}` on stdout for failures.
+  `--export FILE --export-format csv|json|base64|raw|singbox|clash|sharelinks|v2ray|shadowrocket|quantumult` writes
   results/bundles to a file (`-` = stdout) via `src/export.rs`.
 
 ### v0.8.0 invariants (do not regress)
@@ -169,3 +169,17 @@ npm publishing knowledge (AGENTS must know, condensed from `docs/release-process
 - This is a pure CLI (server/tray/UI were removed 2026-09-02). axum survives
   only as a dev-dependency (warpgen's mock registration server in tests).
   Do not reintroduce serve/tray/UI code.
+
+## Agent skills
+
+### Issue tracker
+
+Issues live as GitHub issues (QMahyar/cf-scanner) via the `gh` CLI. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Default vocabulary (`needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`). See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context: root `CONTEXT.md` + ADRs under `docs/decisions/`. See `docs/agents/domain.md`.
