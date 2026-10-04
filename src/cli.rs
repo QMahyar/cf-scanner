@@ -338,7 +338,7 @@ pub(crate) struct ScanArgs {
         long,
         value_delimiter = ',',
         help_heading = "Candidate selection",
-        help = "Comma-separated TCP ports to probe (default 443 for CDN, 2408,500,1701,4500 for WARP)"
+        help = "Comma-separated TCP ports to probe (default 443 for CDN, 2408,500,854,880,1701,3138,4500 for WARP)"
     )]
     pub(crate) ports: Option<Vec<u16>>,
 
@@ -491,7 +491,7 @@ pub(crate) struct ScanArgs {
         value_delimiter = ',',
         requires = "phase2_configs",
         help_heading = "Phase 2 (xray verification)",
-        help = "HTTPS URLs fetched through the tunnel to confirm it works; default is the built-in /cdn-cgi/trace check. Takes precedence over the single built-in URL"
+        help = "HTTPS URLs fetched through the tunnel to confirm it works (default https://www.google.com/robots.txt). Takes precedence over the single built-in URL"
     )]
     pub(crate) phase2_probe_urls: Vec<String>,
 

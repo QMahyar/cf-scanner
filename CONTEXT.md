@@ -27,7 +27,7 @@ Read next (pick by task, not wholesale):
 |---|---|---|---|
 | API contract | `src/api/types.rs` | ScanConfig/Verdict/StopCondition/events, validation caps (`MAX_*`), `deny_unknown_fields` payloads | ADR-005, ADR-011 |
 | Engine | `src/engine/{mod,cdn,warp,phase2,plan,speed}.rs` | Orchestration, stop conditions, per-worker queues, cancellation (`select!` over probes), verdict store (push + lazy `sort_if_dirty`), event broadcast (4096) | spec 6 tests |
-| Export | `src/export.rs` | Results/bundle rendering for `--export`: csv/json dumps, base64/raw/singbox/clash bundles | (none) |
+| Export | `src/export.rs` | Results/bundle rendering for `--export`: csv/json dumps, base64/raw/sharelinks/singbox/clash/v2ray/shadowrocket/quantumult bundles | (none) |
 | Probe (phase 1) | `src/probe.rs` | TLS handshake probe + latency; injectable `Transport`; `no_verify_client_config` (probe/tunnel use ONLY) | intent correction #3 |
 | Phase-2 verify | `src/verify.rs`, `src/inline_verify.rs`, `src/xray.rs`, `src/socks.rs` | Inline VLESS/Trojan wire protocol vs xray subprocess paths; trial-dir hygiene; xray binary lifecycle (`.dgst` verify, zip caps, memo re-stat); fragment/SNI config builder | ADR-001, ADR-004 |
 | WARP probe | `src/warp.rs` | Pools, boringtun Init probe, shape-only open classification, full-session wgconf verification, per-controller `SocketCache` | ADR-002 |
@@ -36,7 +36,7 @@ Read next (pick by task, not wholesale):
 | GeoIP | `src/geo.rs` | Offline country via embedded mmdb; colo via /cdn-cgi/trace | ADR-003 |
 | Config parsing | `src/configs.rs` | vless/trojan/vmess/ss URI, subscription, and xray JSON ingestion; secret sanitization | (none) |
 | Util | `src/util.rs` | Shared small helpers (`percent_decode` for configs, ranges, wgconf) | (none) |
-| CLI surface | `src/main.rs`, `src/cli_wizard.rs` | clap subcommands (scan/wizard/ranges/warp-config/export-config), NDJSON stdout, TTY-gated stderr ticker, `--export`, wizard | spec §3 |
+| CLI surface | `src/main.rs`, `src/cli_wizard.rs` | clap subcommands (scan/wizard/ranges/check-sub/tune/warp-config/export-config), NDJSON stdout, TTY-gated stderr ticker, `--export`, wizard | spec §3 |
 | Packaging | `build.rs`, `dist-workspace.toml`, `wix/`, `.github/workflows/`, `npm/cf-scanner/` | GeoIP/xray build-time bundling (checksummed), dist matrix (linux x86_64/aarch64 + windows), npm wrapper (sha256-verified installs), CI gates + version-parity job | ADR-007..010 |
 
 ## Layer 3: Invariants that span modules

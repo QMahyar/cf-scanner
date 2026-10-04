@@ -77,7 +77,7 @@ fn refresh_cache(cache: &Path) {
             "error: db-ip download failed; refusing to embed an empty geoip db \
              (pinned version {}, sha256 {}...)",
             version(),
-            &geoip_pin()[..8]
+            geoip_pin().get(..8).unwrap_or(geoip_pin())
         );
         std::process::exit(1);
     };
@@ -89,11 +89,21 @@ fn refresh_cache(cache: &Path) {
         );
         std::process::exit(1);
     }
-    let mut decoder = GzDecoder::new(bytes.as_slice());
+    let decoder = GzDecoder::new(bytes.as_slice());
     let mut raw = Vec::new();
-    if decoder.read_to_end(&mut raw).is_err() || raw.is_empty() {
-        eprintln!("error: db-ip download is not valid gzip");
-        std::process::exit(1);
+    // WHY: mirror the runtime 64 MiB caps; an unbounded read_to_end lets a
+    // malicious gzip bomb OOM the build machine before any checksum runs.
+    const MAX_GEOIP_BYTES: u64 = 64 * 1024 * 1024;
+    match decoder.take(MAX_GEOIP_BYTES + 1).read_to_end(&mut raw) {
+        Err(_) => {
+            eprintln!("error: db-ip download is not valid gzip");
+            std::process::exit(1);
+        }
+        Ok(len) if len as u64 > MAX_GEOIP_BYTES || raw.is_empty() => {
+            eprintln!("error: db-ip download exceeds 64 MiB or is empty; refusing to embed");
+            std::process::exit(1);
+        }
+        Ok(_) => {}
     }
     if let Err(err) = write_atomic(cache, &raw) {
         eprintln!("error: could not cache {}: {err}", cache.display());
@@ -326,6 +336,8 @@ fn download(url: &str) -> Option<Vec<u8>> {
             "--tlsv1.2",
             "--max-time",
             "180",
+            "--max-filesize",
+            "67108864",
             "-o",
             "-",
             url,
@@ -333,6 +345,12 @@ fn download(url: &str) -> Option<Vec<u8>> {
         .output()
         .ok()?;
     if !out.status.success() || out.stdout.is_empty() {
+        return None;
+    }
+    // WHY: curl --max-filesize aborts the transfer, but a compromised mirror
+    // could still stream up to the cap; enforce the same 64 MiB ceiling here
+    // before the bytes are checksummed or decompressed.
+    if out.stdout.len() as u64 > 64 * 1024 * 1024 {
         return None;
     }
     Some(out.stdout)

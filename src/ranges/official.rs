@@ -65,7 +65,11 @@ pub fn parse_official(body: &str) -> Result<Vec<super::pool::Cidr>> {
     let resp: OfficialResponse =
         serde_json::from_str(body).context("parse cloudflare API response")?;
     if !resp.success {
-        bail!("cloudflare API error: {:#?}", resp.errors);
+        let errors = format!("{:#?}", resp.errors);
+        // WHY: the API errors array is unbounded remote input; truncate so a
+        // hostile payload cannot flood logs/stderr through this bail.
+        let capped: String = errors.chars().take(500).collect();
+        bail!("cloudflare API error: {capped}");
     }
     let Some(r) = resp.result else {
         bail!("cloudflare API returned no result");

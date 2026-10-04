@@ -88,7 +88,7 @@ them through a real proxy config.
 | `--mode cdn\|warp` | `cdn` probes Cloudflare ranges for working proxies (default); `warp` discovers usable WARP UDP endpoints |
 | `--preset quick\|normal\|full` | Sized CDN sweep of the official ranges: `quick` = 1 IP per /24, `normal` = 3 per /24, `full` = every usable host. Conflicts with `--count` |
 | `--count N` | Probe N random candidates from the ranges instead of a preset |
-| `--ports 443,2053` | TCP ports to probe (CDN default 443; WARP default 2408,500,1701,4500) |
+| `--ports 443,2053` | TCP ports to probe (CDN default 443; WARP default 2408,500,854,880,1701,3138,4500) |
 | `--exclude CIDR,…` | CIDR blocks to skip (e.g. `10.0.0.0/8,192.168.0.0/16`) |
 | `--custom-cidrs CIDR,…` | Scan only these blocks instead of the official ranges |
 | `--ipv6` | Include the IPv6 range pool (CDN only; WARP pools are IPv4) |
@@ -129,7 +129,7 @@ scan; results up to that point are kept.
 | `--phase2-fragment off\|light\|medium\|heavy\|custom` | DPI-bypass fragmentation. Values are TLS-hello fragment length/interval: `light` 100-200/10-20, `medium` 50-200/10-40, `heavy` 10-300/5-50 |
 | `--phase2-custom length,interval` | Custom fragment values, e.g. `10-20,10-20`; requires `--phase2-fragment custom` |
 | `--phase2-snis SNI,…` | SNI values to try per config (first that verifies wins) |
-| `--phase2-probe-urls URL,…` | HTTPS URLs fetched through the tunnel to confirm it works; default is the built-in trace check. When set, this list takes precedence over the built-in single URL |
+| `--phase2-probe-urls URL,…` | HTTPS URLs fetched through the tunnel to confirm it works (default `https://www.google.com/robots.txt`). When set, this list takes precedence over the built-in single URL |
 | `--phase2-concurrency N` | Parallel verifications (default 3, max 8) |
 | `--speed-test` | After verification, download an 8 MiB sample through each verified endpoint and record MB/s (CDN only) |
 | `--min-speed MBPS` | Drop endpoints measuring below MB/s (requires `--speed-test`) |
@@ -296,7 +296,7 @@ Design rationale lives in [docs/decisions/](docs/decisions/).
 | Termux: phase-2 xray fails to start | Termux builds static musl; xray linux-arm64 is glibc. Install Termux's glibc package. |
 | Phase 2: "no verified xray binary" | Re-run the scan; the runtime re-downloads xray from the pinned GitHub release and checks its SHA-256. Behind a blocked proxy, download the archive manually into the data dir (the path is printed in the error). |
 | Phase 2: everything fails with handshake errors | Try `--phase2-fragment medium` (DPI bypass), then `--phase2-fragment heavy`. Try `--phase2-snis` with a fronting domain your ISP allows. |
-| WARP mode finds no results | WARP is UDP; some networks block it entirely. Try `--ports 2408,500,1701,4500`, or `--warp-probes 10`. If nothing answers, the network blocks WireGuard — use CDN mode. |
+| WARP mode finds no results | WARP is UDP; some networks block it entirely. Try `--ports 2408,500,854,880,1701,3138,4500`, or `--warp-probes 10`. If nothing answers, the network blocks WireGuard — use CDN mode. |
 | Scan finds no results | Check network reachability, run `cf-scanner ranges refresh`, or try WARP mode or other ports. |
 | Ranges refresh fails | The refresh fetches `api.cloudflare.com/client/v4/ips` over HTTPS with SSRF guards. If it fails, the scan keeps the bundled (possibly older) list and warns once. Automate refreshes — see `docs/refresh-automation.md` (cron/systemd/Task Scheduler/Termux). |
 
