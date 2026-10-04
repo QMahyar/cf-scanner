@@ -1024,6 +1024,30 @@ fn probe_snis_custom_list_needs_tls_or_http() {
 }
 
 #[test]
+fn probe_snis_custom_list_is_cdn_only() {
+    let mut c = valid_config();
+    c.mode = Mode::Warp;
+    c.ports = vec![Port::new(2408)];
+    c.probe_snis = vec!["example.com".to_owned()];
+    assert_eq!(c.validate(), Err(ConfigError::ProbeSnisNeedTlsHttp));
+    c.probe_snis = default_probe_snis();
+    assert_eq!(c.validate(), Ok(()), "default list under WARP stays valid");
+    c.probe_snis = Vec::new();
+    assert_eq!(c.validate(), Ok(()), "empty means unset everywhere");
+}
+
+#[test]
+fn duplicate_ports_never_consume_the_unique_budget() {
+    let mut c = valid_config();
+    c.ports = vec![Port::new(443); 5000];
+    assert_eq!(
+        c.validate(),
+        Ok(()),
+        "duplicates collapse to one unique port"
+    );
+}
+
+#[test]
 fn colo_filter_is_cdn_only() {
     let mut c = valid_config();
     c.mode = Mode::Warp;

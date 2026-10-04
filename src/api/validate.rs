@@ -80,13 +80,12 @@ pub(crate) fn validate_ports(ports: &[super::types::Port]) -> Result<(), ConfigE
     if ports.is_empty() {
         return Err(ConfigError::InvalidPort(0));
     }
-    if ports.len() > MAX_PORTS * 64 {
-        return Err(ConfigError::TooManyPorts(ports.len()));
-    }
-    for &p in ports {
-        if p.get() == 0 {
-            return Err(ConfigError::InvalidPort(0));
-        }
+    // Distinct-only cap: duplicates never consume the 64-unique budget.
+    // Port 0 stays rejected here (Port::new is const and cannot fail, so
+    // programmatic configs and the wizard's parse_ports both route through
+    // this check).
+    if ports.iter().any(|p| p.get() == 0) {
+        return Err(ConfigError::InvalidPort(0));
     }
     let mut unique: Vec<u16> = ports.iter().map(|p| p.get()).collect();
     unique.sort_unstable();

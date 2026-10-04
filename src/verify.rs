@@ -324,6 +324,12 @@ fn fresh_trial_dir(work_dir: &Path) -> std::io::Result<PathBuf> {
         use std::os::unix::fs::PermissionsExt as _;
         std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))?;
     }
+    #[cfg(windows)]
+    {
+        // Same credential-bearing dir on Windows: lock the DACL to its owner,
+        // mirroring the export path (export::create_tmp).
+        crate::paths::lock_down_to_owner(&dir)?;
+    }
     Ok(dir)
 }
 
@@ -621,6 +627,21 @@ mod tests {
         let trial = fresh_trial_dir(&dir).unwrap();
         let mode = std::fs::metadata(&trial).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o700, "trial dir must be owner-only");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn trial_dirs_are_owner_only_windows() {
+        let dir =
+            std::env::temp_dir().join(format!("cf-scanner-verify-perms-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let trial = fresh_trial_dir(&dir).unwrap();
+        assert!(
+            crate::paths::dacl_is_protected(&trial),
+            "trial dir must carry a protected owner-only DACL"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

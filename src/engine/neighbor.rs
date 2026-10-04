@@ -17,7 +17,7 @@ pub(super) const NEIGHBOR_CHANNEL_CAP: usize = 256;
 pub(super) const NEIGHBOR_IDLE_POLL_MS: u64 = 1;
 
 pub(super) struct NeighborHub {
-    seen: Mutex<HashSet<IpAddr>>,
+    seen: Mutex<HashSet<(IpAddr, u16)>>,
     tx: mpsc::Sender<ProbeTask>,
     limit: u32,
 }
@@ -33,13 +33,15 @@ impl NeighborHub {
 
     pub(super) fn enqueue(&self, hit: IpAddr, port: u16, ctx: &ProbeContext) {
         let mut seen = lock(&self.seen);
-        seen.insert(hit);
+        // Endpoint identity is (ip, port): tracking the ip alone would
+        // suppress the same neighbor offset on a second port.
+        seen.insert((hit, port));
         for ip in neighbor_candidates(hit, self.limit) {
             if ctx.should_stop() {
                 break;
             }
-            if seen.insert(ip) && self.tx.try_send(ProbeTask { ip, port }).is_err() {
-                seen.remove(&ip);
+            if seen.insert((ip, port)) && self.tx.try_send(ProbeTask { ip, port }).is_err() {
+                seen.remove(&(ip, port));
             }
         }
     }
@@ -180,6 +182,48 @@ mod tests {
         hub.enqueue("203.0.113.10".parse().unwrap(), 443, &ctx);
         // Seen keeps only the hit itself; all candidates rolled back.
         assert_eq!(lock(&hub.seen).len(), 1);
+    }
+
+    #[test]
+    fn enqueue_tracks_neighbors_per_port_not_per_ip() {
+        // Same neighbor offsets on two ports must both enqueue: a hit on 443
+        // must not suppress the identical walk on 8443.
+        let (tx, mut rx) = mpsc::channel(64);
+        let hub = NeighborHub::new(2, tx);
+        let ctx = ProbeContext {
+            cancel: tokio::sync::watch::channel(false).1,
+            stop: crate::api::types::StopCondition::unlimited(100),
+            scanned: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            found: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            last_milestone: std::sync::atomic::AtomicU64::new(0),
+            cadence: 100,
+            total: 1,
+            store: Arc::new(Mutex::new(Vec::new())),
+            dirty: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            events: tokio::sync::broadcast::channel(4).0,
+            geo: Arc::new(crate::geo::Geo::embedded()),
+            colo_filter: Arc::new(Vec::new()),
+            colo_warned: std::sync::atomic::AtomicBool::new(false),
+        };
+        hub.enqueue("203.0.113.10".parse().unwrap(), 443, &ctx);
+        hub.enqueue("203.0.113.10".parse().unwrap(), 8443, &ctx);
+        let mut tasks: Vec<(IpAddr, u16)> = Vec::new();
+        while let Ok(t) = rx.try_recv() {
+            tasks.push((t.ip, t.port));
+        }
+        assert_eq!(tasks.len(), 4, "two neighbors x two ports: {tasks:?}");
+        for port in [443u16, 8443] {
+            for host in ["203.0.113.9", "203.0.113.11"] {
+                let want: IpAddr = host.parse().unwrap();
+                assert!(
+                    tasks.contains(&(want, port)),
+                    "neighbor {host}:{port} must enqueue: {tasks:?}"
+                );
+            }
+        }
+        // Re-hitting the same (ip, port) enqueues nothing new.
+        hub.enqueue("203.0.113.10".parse().unwrap(), 443, &ctx);
+        assert!(rx.is_empty(), "re-hit on the same port must dedupe");
     }
 
     #[test]
