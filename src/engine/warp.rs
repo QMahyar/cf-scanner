@@ -1906,8 +1906,7 @@ mod tests {
         );
         assert!(
             observed <= PREFLIGHT_CONCURRENCY,
-            "pre-flight must stay within cap {}, got {observed}",
-            PREFLIGHT_CONCURRENCY
+            "pre-flight must stay within cap {PREFLIGHT_CONCURRENCY}, got {observed}",
         );
         assert!(
             elapsed < std::time::Duration::from_millis(2500),
