@@ -75,7 +75,7 @@ pub struct FormatSpec {
     pub description: &'static str,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum FormatKind {
     /// Row-per-verdict results (csv, json).
     Results,
@@ -152,7 +152,18 @@ pub fn render_bundle(
     configs: &[String],
     specs: &[(OutboundSpec, u32)],
 ) -> Result<String, String> {
-    let allowed = format_names(None);
+    // WHY: bundle entry point only accepts Bundle/Sharelinks rows (story 17);
+    // Results names must fail here, not silently render as base64.
+    let allowed: Vec<&str> = FORMATS
+        .iter()
+        .filter(|f| f.kind != FormatKind::Results)
+        .map(|f| f.name)
+        .collect();
+    if resolve_format(format, &format_names(None)).is_none() {
+        // Totally unknown name: point at the whole registry (mirrors the
+        // bundle_body fallback below), not just the bundle half.
+        return Err(unknown_format(format, &format_names(None)));
+    }
     resolve_format(format, &allowed)
         .ok_or_else(|| unknown_format(format, &allowed))
         .and_then(|fmt| bundle_body(fmt, verdicts, configs, specs))
@@ -162,7 +173,7 @@ pub fn render_results(format: &str, verdicts: &[Verdict]) -> Result<String, Stri
     let allowed = format_names(Some(FormatKind::Results));
     resolve_format(format, &allowed)
         .ok_or_else(|| unknown_format(format, &allowed))
-        .map(|fmt| result_dump(fmt, verdicts))
+        .and_then(|fmt| result_dump(fmt, verdicts))
 }
 
 fn unknown_format(format: &str, allowed: &[&str]) -> String {
@@ -311,18 +322,21 @@ fn bundle_body(
         );
     }
     let joined = uris.join("\n");
-    Ok(match format {
-        "raw" | "sharelinks" => joined,
-        "singbox" => singbox_body(&uris),
-        "clash" => clash_body(&uris),
-        "v2ray" => v2ray_body(&uris),
-        "shadowrocket" => shadowrocket_body(&uris),
-        "quantumult" => quantumult_body(&uris),
-        _ => base64::Engine::encode(
+    // WHY: exhaustive on purpose (story 17) — a new FORMATS row without a
+    // renderer must fail loudly here instead of silently shipping base64.
+    match format {
+        "raw" | "sharelinks" => Ok(joined),
+        "singbox" => Ok(singbox_body(&uris)),
+        "clash" => Ok(clash_body(&uris)),
+        "v2ray" => Ok(v2ray_body(&uris)),
+        "shadowrocket" => Ok(shadowrocket_body(&uris)),
+        "quantumult" => Ok(quantumult_body(&uris)),
+        "base64" => Ok(base64::Engine::encode(
             &base64::engine::general_purpose::STANDARD,
             joined.as_bytes(),
-        ),
-    })
+        )),
+        _ => Err(unknown_format(format, &format_names(None))),
+    }
 }
 
 fn singbox_body(uris: &[String]) -> String {
@@ -658,7 +672,7 @@ pub(crate) fn csv_field(v: &str) -> String {
     }
 }
 
-fn result_dump(format: &str, verdicts: &[Verdict]) -> String {
+fn result_dump(format: &str, verdicts: &[Verdict]) -> Result<String, String> {
     match format {
         "json" => {
             // config_index is engine-internal plumbing; it never appears in
@@ -674,9 +688,9 @@ fn result_dump(format: &str, verdicts: &[Verdict]) -> String {
                     val
                 })
                 .collect();
-            serde_json::json!({ "results": cleaned, "count": verdicts.len() }).to_string()
+            Ok(serde_json::json!({ "results": cleaned, "count": verdicts.len() }).to_string())
         }
-        _ => {
+        "csv" => {
             let mut out = String::from(
                 "ip,port,latency_ms,country,colo,phase2_passed,phase2_latency_ms,speed_test_mb_s,sent,received,loss_pct,fail_reason,asn,isp\n",
             );
@@ -708,8 +722,12 @@ fn result_dump(format: &str, verdicts: &[Verdict]) -> String {
                 out.push_str(&quoted.join(","));
                 out.push('\n');
             }
-            out
+            Ok(out)
         }
+        _ => Err(unknown_format(
+            format,
+            &format_names(Some(FormatKind::Results)),
+        )),
     }
 }
 
@@ -742,11 +760,46 @@ fn export_format_name(format: ExportFormatArg) -> &'static str {
     }
 }
 
+impl ExportFormatArg {
+    /// Registry kind for this CLI variant (mirrors the FORMATS table).
+    pub fn kind(self) -> FormatKind {
+        match self {
+            ExportFormatArg::Csv | ExportFormatArg::Json => FormatKind::Results,
+            ExportFormatArg::Raw | ExportFormatArg::Sharelinks => FormatKind::Sharelinks,
+            ExportFormatArg::Base64
+            | ExportFormatArg::Singbox
+            | ExportFormatArg::Clash
+            | ExportFormatArg::V2ray
+            | ExportFormatArg::Shadowrocket
+            | ExportFormatArg::Quantumult => FormatKind::Bundle,
+        }
+    }
+
+    /// Bundle/sharelink formats re-render phase-2 verified endpoints, so
+    /// they need `--phase2-configs`; row formats never do.
+    pub fn requires_phase2(self) -> bool {
+        self.kind() != FormatKind::Results
+    }
+
+    /// Canonical registry name for this variant.
+    pub fn name(self) -> &'static str {
+        export_format_name(self)
+    }
+}
+
 pub fn write_export(
     controller: &Arc<ScanController>,
     path: &std::path::Path,
     format: ExportFormatArg,
 ) -> anyhow::Result<()> {
+    // WHY: stdout already carries the NDJSON event stream; an export blob on
+    // the same fd corrupts every downstream parser (story 5-6). The scan path
+    // rejects this before scanning; fail closed here too.
+    if path.as_os_str() == "-" {
+        return Err(anyhow::anyhow!(
+            "--export - would mix the export blob into the NDJSON stream on stdout; write to a file instead (e.g. --export results.csv)"
+        ));
+    }
     let format_name = export_format_name(format);
     let results = controller.results();
     let body = match format {
@@ -765,18 +818,13 @@ pub fn write_export(
         }
     }
     .map_err(|e| anyhow::anyhow!("export failed: {e}"))?;
-    if path.as_os_str() == "-" {
-        let mut out = std::io::stdout().lock();
-        emit_stdout(&body, &mut out)
-            .map_err(|e| anyhow::anyhow!("could not write export to stdout: {e}"))?;
-    } else {
-        atomic_write_file(path, body.as_bytes())
-            .map_err(|e| anyhow::anyhow!("could not write {}: {e}", path.display()))?;
-        eprintln!("results exported to {}", path.display());
-    }
+    atomic_write_file(path, body.as_bytes())
+        .map_err(|e| anyhow::anyhow!("could not write {}: {e}", path.display()))?;
+    eprintln!("results exported to {}", path.display());
     Ok(())
 }
 
+#[allow(dead_code)]
 fn emit_stdout<W: std::io::Write>(body: &str, out: &mut W) -> std::io::Result<()> {
     out.write_all(body.as_bytes())?;
     out.write_all(b"\n")?;
@@ -854,13 +902,19 @@ fn atomic_write_file(dest: &std::path::Path, body: &[u8]) -> std::io::Result<()>
     result
 }
 
-/// Crash-safe live NDJSON sink: one JSON row per result, flushed per row and
-/// fsynced on finish, so an interrupted scan stays parseable. Partial by
-/// design (unlike the atomic `write_export`); unlike stdout it survives a
-/// closed pipe. Opened truncated so a new scan never mixes with an old file.
+/// Crash-safe live NDJSON sink: one JSON row per result, batched through a
+/// BufWriter and flushed per batch with an fsync on finish, so an
+/// interrupted scan stays parseable. Partial by design (unlike the atomic
+/// `write_export`); unlike stdout it survives a closed pipe. Opened
+/// truncated so a new scan never mixes with an old file.
 pub struct LiveExport {
-    file: std::fs::File,
+    file: std::io::BufWriter<std::fs::File>,
+    pending: usize,
 }
+
+/// Lines buffered between OS flushes: large enough to avoid a syscall per
+/// row, small enough that a killed scan loses at most one batch.
+pub(crate) const LIVE_FLUSH_INTERVAL: usize = 32;
 
 impl LiveExport {
     pub fn create(path: &std::path::Path) -> std::io::Result<Self> {
@@ -881,20 +935,41 @@ impl LiveExport {
         }
         #[cfg(windows)]
         crate::paths::lock_down_to_owner(path)?;
-        Ok(Self { file })
+        Ok(Self {
+            file: std::io::BufWriter::new(file),
+            pending: 0,
+        })
     }
 
     pub fn push_line(&mut self, line: &str) -> std::io::Result<()> {
         use std::io::Write as _;
         self.file.write_all(line.as_bytes())?;
         self.file.write_all(b"\n")?;
-        self.file.flush()
+        self.pending += 1;
+        if self.pending >= LIVE_FLUSH_INTERVAL {
+            self.file.flush()?;
+            self.pending = 0;
+        }
+        Ok(())
     }
 
     pub fn finish(&mut self) -> std::io::Result<()> {
         use std::io::Write as _;
         self.file.flush()?;
-        self.file.sync_all()
+        self.pending = 0;
+        self.file.get_ref().sync_all()
+    }
+}
+
+impl Drop for LiveExport {
+    fn drop(&mut self) {
+        // WHY: BufWriter holds up to 8 KiB in memory; a killed scan that
+        // never reaches finish() must still leave a parseable prefix, so
+        // best-effort flush on drop (errors unreportable here).
+        let _ = {
+            use std::io::Write as _;
+            self.file.flush()
+        };
     }
 }
 
@@ -1061,7 +1136,14 @@ mod tests {
     fn render_bundle_errors_when_only_ipv6_passed() {
         let v6 = passing("2001:db8::1", 443, Some(0));
         let configs = [VLESS.to_owned()];
-        for fmt in format_names(None) {
+        // Bundle entry point only accepts bundle/sharelink rows; Results
+        // names are rejected as unknown (story 17), not as IPv6.
+        let bundle_formats: Vec<&str> = FORMATS
+            .iter()
+            .filter(|f| f.kind != FormatKind::Results)
+            .map(|f| f.name)
+            .collect();
+        for fmt in bundle_formats {
             let err = render_bundle(fmt, std::slice::from_ref(&v6), &configs, &[]).unwrap_err();
             assert!(err.contains("IPv6"), "{fmt}: {err}");
         }
@@ -1953,5 +2035,103 @@ mod tests {
             assert_eq!(arr.len(), 1, "{fmt}: only the v4 endpoint exports");
             assert_eq!(arr[0][addr_key].as_str().unwrap(), "1.2.3.4", "{fmt}");
         }
+    }
+
+    #[test]
+    fn unknown_formats_error_instead_of_defaulting() {
+        // Story 17: a new FORMATS row without a renderer must fail loudly.
+        let bundle_err = render_bundle("nope", &[], &[], &[]).unwrap_err();
+        assert!(bundle_err.contains("unknown format"), "{bundle_err}");
+        assert!(bundle_err.contains("csv"), "{bundle_err}");
+        let results_err = render_results("nope", &[]).unwrap_err();
+        assert!(results_err.contains("unknown format"), "{results_err}");
+        assert!(results_err.contains("csv|json"), "{results_err}");
+        // Results-only entry point rejects bundle names and vice versa.
+        let csv_as_bundle = render_bundle("csv", &[], &[], &[]).unwrap_err();
+        assert!(
+            csv_as_bundle.contains("unknown format"),
+            "csv through the bundle path must not silently base64: {csv_as_bundle}"
+        );
+        let bundle_as_results = render_results("singbox", &[]).unwrap_err();
+        assert!(
+            bundle_as_results.contains("unknown format"),
+            "{bundle_as_results}"
+        );
+    }
+
+    #[test]
+    fn export_format_arg_kinds_match_the_registry() {
+        assert!(!ExportFormatArg::Csv.requires_phase2());
+        assert!(!ExportFormatArg::Json.requires_phase2());
+        for fmt in [
+            ExportFormatArg::Base64,
+            ExportFormatArg::Raw,
+            ExportFormatArg::Singbox,
+            ExportFormatArg::Clash,
+            ExportFormatArg::Sharelinks,
+            ExportFormatArg::V2ray,
+            ExportFormatArg::Shadowrocket,
+            ExportFormatArg::Quantumult,
+        ] {
+            assert!(fmt.requires_phase2(), "{} must need phase2", fmt.name());
+        }
+        assert_eq!(ExportFormatArg::Csv.kind(), FormatKind::Results);
+        assert_eq!(ExportFormatArg::Raw.kind(), FormatKind::Sharelinks);
+        assert_eq!(ExportFormatArg::Sharelinks.kind(), FormatKind::Sharelinks);
+        assert_eq!(ExportFormatArg::Base64.kind(), FormatKind::Bundle);
+    }
+
+    #[tokio::test]
+    async fn write_export_rejects_stdout_dash_to_keep_ndjson_pure() {
+        let c = Arc::new(ScanController::new(Arc::new(
+            crate::probe::FakeTransport::new(),
+        )));
+        crate::engine::store_seed(&c, vec![passing("1.2.3.4", 443, Some(0))]);
+        let err = write_export(&c, std::path::Path::new("-"), ExportFormatArg::Csv).unwrap_err();
+        assert!(err.to_string().contains("--export"), "{err:#}");
+        assert!(err.to_string().contains("NDJSON"), "{err:#}");
+    }
+
+    #[test]
+    fn live_export_buffers_single_line_until_finish_or_batch() {
+        // A single push stays in the BufWriter (no per-line syscall); finish
+        // makes it durable. This pins the batched behavior (story 18).
+        let dir = live_test_dir("buffered");
+        let dest = dir.join("live.jsonl");
+        let mut live = LiveExport::create(&dest).unwrap();
+        live.push_line(r#"{"ip":"1.2.3.4"}"#).unwrap();
+        let before = std::fs::read_to_string(&dest).unwrap();
+        assert_eq!(
+            before, "",
+            "one line must stay buffered, not flushed per line"
+        );
+        live.finish().unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&dest).unwrap(),
+            "{\"ip\":\"1.2.3.4\"}\n"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn live_export_batch_flush_makes_full_batches_durable_before_finish() {
+        let dir = live_test_dir("batch-flush");
+        let dest = dir.join("live.jsonl");
+        let mut live = LiveExport::create(&dest).unwrap();
+        for i in 0..LIVE_FLUSH_INTERVAL {
+            live.push_line(&format!("{{\"n\":{i}}}")).unwrap();
+        }
+        let body = std::fs::read_to_string(&dest).unwrap();
+        assert_eq!(
+            body.lines().count(),
+            LIVE_FLUSH_INTERVAL,
+            "a full batch must flush without waiting for finish()"
+        );
+        live.finish().unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&dest).unwrap().lines().count(),
+            LIVE_FLUSH_INTERVAL
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

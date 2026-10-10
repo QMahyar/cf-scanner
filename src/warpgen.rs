@@ -511,7 +511,11 @@ pub async fn export(out: Option<&Path>, endpoint_override: Option<&str>) -> Resu
 fn write_out(out: Option<&Path>, text: &str) -> Result<()> {
     match out {
         Some(path) => {
-            paths::write_secret(path, text.as_bytes())
+            // Story 26: atomic wgconf export (same pattern as identity saves):
+            // tmp+rename so a crash never leaves a half-written credential
+            // file, owner-only at creation, tmp cleaned on failure.
+            let _gate = crate::paths::data_write_guard();
+            paths::write_secret_atomic(path, text.as_bytes())
                 .with_context(|| format!("writing {}", path.display()))?;
         }
         None => write_stdout(text),
@@ -1245,6 +1249,53 @@ pub(crate) mod tests {
                 && !resolved.is_relative(),
             "empty env must fall back to the default data dir, got {resolved:?}"
         );
+    }
+
+    #[test]
+    fn wgconf_export_is_atomic_owner_only_and_leaves_no_tmp() {
+        // Story 26: write_out must follow the single safe pattern (tmp+rename,
+        // owner-only at creation, no .tmp- remnant, overwrite replaces).
+        let dir = std::env::temp_dir().join(format!(
+            "cf-scanner-wgconf-atomic-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let dest = dir.join("exported.conf");
+        let body = "[Interface]\nPrivateKey = AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\n";
+        write_out(Some(&dest), body).unwrap();
+        assert_eq!(fs::read_to_string(&dest).unwrap(), body);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mode = std::fs::metadata(&dest).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600, "wgconf export must be owner-only");
+        }
+        #[cfg(windows)]
+        assert!(
+            crate::paths::dacl_is_protected(&dest),
+            "wgconf export must carry a protected owner-only DACL"
+        );
+        // Overwrite replaces cleanly (checksum-then-replace installs rely on
+        // the same atomic replace, not refuse-overwrite).
+        let body2 = "[Interface]\nPrivateKey = BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB=\n";
+        write_out(Some(&dest), body2).unwrap();
+        assert_eq!(fs::read_to_string(&dest).unwrap(), body2);
+        let leftovers: Vec<_> = fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.contains(".tmp-"))
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "tmp files must be cleaned up, found {leftovers:?}"
+        );
+        let _ = fs::remove_dir_all(&dir);
     }
 }
 

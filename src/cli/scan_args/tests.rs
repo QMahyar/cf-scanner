@@ -1,7 +1,7 @@
 use super::super::{
     Cli, Command, FragmentArg, ModeArg, NetworkProfileArg, PresetArg, ProbeArg, ScanArgs,
 };
-use super::{build_scan_config, cap_warning};
+use super::{build_scan_config, cap_warning, cap_warning_for_stop, retry_ignored_flags};
 use cf_scanner::api;
 use cf_scanner::api::types::{
     CdnPreset, DEFAULT_CONCURRENCY, DEFAULT_PORT, Mode, Port, ProbeMode, ScanTarget, StopCondition,
@@ -1370,4 +1370,205 @@ fn network_profile_serde_defaults_unset_and_round_trips() {
         .insert("future_flag".to_owned(), serde_json::Value::Bool(true));
     serde_json::from_value::<api::types::ScanConfig>(v)
         .expect("the root must stay non-strict around the new field");
+}
+
+#[test]
+fn retry_ignored_flags_warn_on_target_and_concurrency() {
+    assert!(
+        retry_ignored_flags(&args()).is_empty(),
+        "defaults must not warn"
+    );
+    let mut a = args();
+    a.retry_last = true;
+    assert!(
+        retry_ignored_flags(&a).is_empty(),
+        "--retry-last alone must not warn"
+    );
+    let mut a = args();
+    a.retry_last = true;
+    a.target = 5;
+    let ignored = retry_ignored_flags(&a);
+    assert!(ignored.contains(&"--target"), "{ignored:?}");
+    let mut a = args();
+    a.retry_last = true;
+    a.concurrency = 100;
+    let ignored = retry_ignored_flags(&a);
+    assert!(ignored.contains(&"--concurrency"), "{ignored:?}");
+    let mut a = args();
+    a.count = Some(10);
+    a.ports = Some(vec![8443]);
+    a.timeout_ms = 5000;
+    let ignored = retry_ignored_flags(&a);
+    for flag in ["--count", "--ports", "--timeout-ms"] {
+        assert!(ignored.contains(&flag), "{ignored:?}");
+    }
+}
+
+#[test]
+fn retry_ignored_flags_keep_the_documented_override_subset() {
+    let mut a = args();
+    a.phase2_configs = vec!["vless://a@1.2.3.4:443".to_owned()];
+    a.warp_wgconf_file = Some("tests/fixtures/warp-wgconf.txt".to_owned());
+    a.warp_verify = true;
+    a.adaptive_retries = true;
+    a.network_profile = Some(NetworkProfileArg::Blocked);
+    a.seed = Some(42);
+    a.export = Some(std::path::PathBuf::from("out.csv"));
+    a.enrich_asn = true;
+    let ignored = retry_ignored_flags(&a);
+    for flag in [
+        "--phase2-configs",
+        "--warp-wgconf-file",
+        "--warp-verify",
+        "--adaptive-retries",
+        "--network-profile",
+        "--seed",
+        "--export",
+        "--enrich-asn",
+    ] {
+        assert!(
+            !ignored.contains(&flag),
+            "{flag} must not warn: {ignored:?}"
+        );
+    }
+}
+
+#[test]
+fn retry_still_applies_the_documented_override_subset() {
+    // Filesystem-free: the retry path is load -> warn (retry_ignored_flags)
+    // -> apply_retry_overrides -> cap warning -> validate. Pin the middle two
+    // steps here; save/load round-trips stay covered in src/retry.rs.
+    let mut saved = build_scan_config(&args()).unwrap();
+    assert!(saved.phase2.is_none(), "precondition: no phase2 by default");
+    let mut a = args();
+    a.retry_last = true;
+    a.target = 5;
+    a.phase2_configs = vec!["vless://a@1.2.3.4:443".to_owned()];
+    assert!(
+        retry_ignored_flags(&a).contains(&"--target"),
+        "--target must warn on retry"
+    );
+    assert!(
+        !retry_ignored_flags(&a).contains(&"--phase2-configs"),
+        "the documented override must not warn"
+    );
+    super::apply_retry_overrides(&mut saved, &a).unwrap();
+    assert_eq!(
+        saved.stop.found, 20,
+        "the ignored --target must not move the saved stop condition"
+    );
+    let p2 = saved
+        .phase2
+        .as_ref()
+        .expect("phase2 configs must still apply on retry");
+    assert_eq!(p2.configs, vec!["vless://a@1.2.3.4:443".to_owned()]);
+    saved
+        .validate()
+        .expect("the overridden retry config must stay valid");
+}
+
+#[test]
+fn retry_overrides_resupply_the_warp_key() {
+    let mut warp_args = args();
+    warp_args.mode = ModeArg::Warp;
+    let mut saved = build_scan_config(&warp_args).unwrap();
+    assert!(saved.warp.is_some(), "precondition: warp block present");
+    assert!(
+        saved.warp.as_ref().is_some_and(|w| w.wgconf.is_none()),
+        "precondition: no key without --warp-wgconf-file"
+    );
+    let mut a = args();
+    a.retry_last = true;
+    a.warp_wgconf_file = Some("tests/fixtures/warp-wgconf.txt".to_owned());
+    a.warp_verify = true;
+    assert!(
+        retry_ignored_flags(&a).is_empty(),
+        "the documented key re-supply must not warn: {:?}",
+        retry_ignored_flags(&a)
+    );
+    super::apply_retry_overrides(&mut saved, &a).unwrap();
+    let warp = saved
+        .warp
+        .as_ref()
+        .expect("warp block must survive the override");
+    assert!(
+        warp.wgconf
+            .as_ref()
+            .is_some_and(|w| w.contains("[Interface]")),
+        "the wgconf file must load into the saved config"
+    );
+    assert!(warp.verify_with_wgconf);
+    saved
+        .validate()
+        .expect("the overridden retry config must stay valid");
+}
+
+#[test]
+fn retry_cap_warning_runs_on_saved_values() {
+    assert!(cap_warning_for_stop(20, Some(10)).is_some());
+    assert!(cap_warning_for_stop(20, Some(25)).is_none());
+    assert!(cap_warning_for_stop(20, None).is_none());
+    // The retry path feeds the SAVED stop condition (not the ignored CLI
+    // flags) into the same helper the fresh path uses via cap_warning.
+    let saved_stop = StopCondition {
+        found: 20,
+        cap: Some(10),
+    };
+    assert!(
+        cap_warning_for_stop(saved_stop.found, saved_stop.cap).is_some(),
+        "the retry path must surface the saved cap-below-target warning"
+    );
+    let mut a = args();
+    a.cap = Some(10);
+    assert_eq!(
+        cap_warning(&a),
+        cap_warning_for_stop(a.target, a.cap),
+        "fresh and retry warnings share one helper"
+    );
+}
+
+#[test]
+fn bundle_export_without_phase2_fails_before_scanning() {
+    // Story 7: bundle/sharelink formats need verified endpoints; the config
+    // gate must fail fast instead of scanning for minutes first.
+    for fmt in [
+        ExportFormatArg::Base64,
+        ExportFormatArg::Raw,
+        ExportFormatArg::Singbox,
+        ExportFormatArg::Clash,
+        ExportFormatArg::Sharelinks,
+        ExportFormatArg::V2ray,
+        ExportFormatArg::Shadowrocket,
+        ExportFormatArg::Quantumult,
+    ] {
+        let mut a = args();
+        a.export = Some(std::path::PathBuf::from("out.txt"));
+        a.export_format = fmt;
+        let err = build_scan_config(&a).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("--export-format"), "{fmt:?}: {msg}");
+        assert!(msg.contains("--phase2-configs"), "{fmt:?}: {msg}");
+    }
+}
+
+#[test]
+fn row_export_without_phase2_stays_valid_and_bundle_with_phase2_passes() {
+    for fmt in [ExportFormatArg::Csv, ExportFormatArg::Json] {
+        let mut a = args();
+        a.export = Some(std::path::PathBuf::from("out.txt"));
+        a.export_format = fmt;
+        assert!(
+            build_scan_config(&a).is_ok(),
+            "{fmt:?} must not need phase2"
+        );
+    }
+    // No --export at all: the default csv format never gates, even with the
+    // same format value.
+    assert!(build_scan_config(&args()).is_ok());
+    let mut a = args();
+    a.export = Some(std::path::PathBuf::from("out.txt"));
+    a.export_format = ExportFormatArg::Singbox;
+    a.phase2_configs = vec!["vless://a@1.2.3.4:443".to_owned()];
+    let cfg = build_scan_config(&a).unwrap();
+    assert!(cfg.phase2.is_some());
 }

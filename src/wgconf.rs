@@ -449,6 +449,23 @@ pub fn decode_key(b64: &str) -> Result<[u8; 32]> {
     <[u8; 32]>::try_from(raw.as_slice()).map_err(|_| anyhow!("key must decode to exactly 32 bytes"))
 }
 
+/// Shared wg-quick / AmneziaWG file reader (64 KiB cap): the single home for
+/// the `--warp-wgconf-file` and wizard wgconf loads so the cap cannot drift.
+/// Never logs the path contents; errors name only the flag context given.
+pub fn read_wgconf_file(path: &str, ctx: &str) -> Result<String> {
+    use std::io::Read as _;
+    let cap = crate::api::types::MAX_WGCONF_BYTES;
+    let file = std::fs::File::open(path).map_err(|e| anyhow!("could not open {ctx}: {e}"))?;
+    let mut buf = String::new();
+    file.take(cap as u64 + 1)
+        .read_to_string(&mut buf)
+        .map_err(|e| anyhow!("could not read {ctx}: {e}"))?;
+    if buf.len() > cap {
+        bail!("{ctx} exceeds {cap} bytes");
+    }
+    Ok(buf)
+}
+
 fn required_key(map: &BTreeMap<String, String>, key: &str) -> Result<String> {
     map.get(key)
         .filter(|v| !v.is_empty())
@@ -975,5 +992,40 @@ mod tests {
         let mut wg = linkable_config();
         wg.private_key.clear();
         assert!(render_awg_uri(&wg).is_err());
+    }
+
+    #[test]
+    fn read_wgconf_file_enforces_the_cap_without_echoing_contents() {
+        let dir = std::env::temp_dir().join(format!(
+            "cf-scanner-wgconf-cap-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let small = dir.join("small.conf");
+        std::fs::write(&small, "[Interface]\nPrivateKey = SECRET-MARKER\n").unwrap();
+        let back = read_wgconf_file(small.to_str().unwrap(), "--warp-wgconf-file").unwrap();
+        assert!(back.contains("SECRET-MARKER"));
+        let big = dir.join("big.conf");
+        let pad = "x".repeat(crate::api::types::MAX_WGCONF_BYTES + 1);
+        std::fs::write(&big, format!("SECRET-MARKER-{pad}")).unwrap();
+        let err = read_wgconf_file(big.to_str().unwrap(), "--warp-wgconf-file")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("exceeds"), "{err}");
+        assert!(
+            !err.contains("SECRET-MARKER"),
+            "cap errors must not echo file contents: {err}"
+        );
+        let missing = dir.join("missing.conf");
+        let err = read_wgconf_file(missing.to_str().unwrap(), "--warp-wgconf-file")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("--warp-wgconf-file"), "{err}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -4,7 +4,9 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
 use rustls::RootCertStore;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::io::{
+    AsyncBufRead, AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader,
+};
 use tokio::net::TcpStream;
 
 pub(crate) fn http_request(host: &str, path: &str, extra_headers: &str) -> String {
@@ -21,6 +23,11 @@ const MAX_TRAILER_LINE_BYTES: usize = 4096;
 
 const IO_STEP_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// Bound for a best-effort half-close after the request write. The shutdown
+/// result is always ignored (the request bytes already went out); this only
+/// keeps a hung peer from stalling the probe (T05).
+const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(1);
+
 pub(crate) fn http_request_keepalive(host: &str, path: &str, extra_headers: &str) -> String {
     format!("GET {path} HTTP/1.1\r\nHost: {host}\r\n{extra_headers}\r\n\r\n")
 }
@@ -35,17 +42,37 @@ pub(crate) async fn read_response<S: AsyncRead + Unpin + ?Sized>(
     stream: &mut S,
     max_body: usize,
 ) -> Result<ParsedResponse> {
+    // T05: buffered chunk reads. fill_buf() issues one syscall per ~8 KiB
+    // fill while consume() advances only through the next newline, so header
+    // bytes cost chunk reads instead of one syscall per byte, with no
+    // over-read past the terminating empty line: leftover buffered bytes
+    // stay with `reader` for the body below.
+    let mut reader = BufReader::new(stream);
     let mut head = Vec::new();
-    let mut byte = [0u8; 1];
-    while !head.ends_with(b"\r\n\r\n") {
+    loop {
+        if head.ends_with(b"\r\n\r\n") {
+            break;
+        }
         if head.len() >= MAX_HEADER_BYTES {
             bail!("response headers exceed the {MAX_HEADER_BYTES} cap");
         }
-        stream
-            .read_exact(&mut byte)
-            .await
-            .context("reading response headers")?;
-        head.push(byte[0]);
+        let chunk: Vec<u8> = {
+            let buf = reader
+                .fill_buf()
+                .await
+                .context("reading response headers")?;
+            if buf.is_empty() {
+                bail!("unexpected EOF reading response headers");
+            }
+            let upto = buf
+                .iter()
+                .position(|&b| b == b'\n')
+                .map_or(buf.len(), |i| i + 1);
+            let allowance = (MAX_HEADER_BYTES + 2).saturating_sub(head.len()).max(1);
+            buf[..upto.min(allowance)].to_vec()
+        };
+        reader.consume(chunk.len());
+        head.extend_from_slice(&chunk);
     }
     let mut skip = 0usize;
     while head[skip..].starts_with(b"\r\n") {
@@ -64,7 +91,7 @@ pub(crate) async fn read_response<S: AsyncRead + Unpin + ?Sized>(
         .and_then(|s| s.parse().ok())
         .context("malformed status line")?;
     let headers: Vec<String> = lines.map(str::to_owned).collect();
-    let body = read_body(stream, &headers, max_body).await?;
+    let body = read_body(&mut reader, &headers, max_body).await?;
     Ok(ParsedResponse {
         status,
         headers,
@@ -72,8 +99,8 @@ pub(crate) async fn read_response<S: AsyncRead + Unpin + ?Sized>(
     })
 }
 
-async fn read_body<S: AsyncRead + Unpin + ?Sized>(
-    stream: &mut S,
+async fn read_body<R: AsyncBufRead + Unpin + ?Sized>(
+    stream: &mut R,
     headers: &[String],
     max_body: usize,
 ) -> Result<Vec<u8>> {
@@ -85,7 +112,7 @@ async fn read_body<S: AsyncRead + Unpin + ?Sized>(
     if contains("transfer-encoding: chunked") {
         let mut raw = Vec::new();
         loop {
-            let size_line = read_line(stream, MAX_CHUNK_SIZE_LINE_BYTES)
+            let size_line = read_line(&mut *stream, MAX_CHUNK_SIZE_LINE_BYTES)
                 .await
                 .context("reading chunk size")?;
             let text = std::str::from_utf8(&size_line).context("chunk size not utf-8")?;
@@ -93,7 +120,7 @@ async fn read_body<S: AsyncRead + Unpin + ?Sized>(
                 .context("malformed chunk size")?;
             if size == 0 {
                 loop {
-                    let line = read_line(stream, MAX_TRAILER_LINE_BYTES).await?;
+                    let line = read_line(&mut *stream, MAX_TRAILER_LINE_BYTES).await?;
                     if line.is_empty() {
                         break;
                     }
@@ -167,15 +194,32 @@ async fn read_body<S: AsyncRead + Unpin + ?Sized>(
     }
 }
 
-async fn read_line<S: AsyncRead + Unpin + ?Sized>(stream: &mut S, cap: usize) -> Result<Vec<u8>> {
+async fn read_line<R: AsyncBufRead + Unpin + ?Sized>(
+    reader: &mut R,
+    cap: usize,
+) -> Result<Vec<u8>> {
+    // T05: buffered line reads companion to read_response: consume only
+    // through the next newline so an over-long line is capped without
+    // over-reading into the following chunk framing.
     let mut line = Vec::new();
-    let mut byte = [0u8; 1];
     loop {
         if line.len() >= cap {
             bail!("line exceeds the {cap} cap");
         }
-        stream.read_exact(&mut byte).await?;
-        line.push(byte[0]);
+        let chunk: Vec<u8> = {
+            let buf = reader.fill_buf().await?;
+            if buf.is_empty() {
+                bail!("unexpected EOF reading line");
+            }
+            let upto = buf
+                .iter()
+                .position(|&b| b == b'\n')
+                .map_or(buf.len(), |i| i + 1);
+            let allowance = cap.saturating_sub(line.len()).max(1);
+            buf[..upto.min(allowance)].to_vec()
+        };
+        reader.consume(chunk.len());
+        line.extend_from_slice(&chunk);
         if line.ends_with(b"\r\n") {
             line.truncate(line.len() - 2);
             return Ok(line);
@@ -189,7 +233,7 @@ where
 {
     let (mut rd, mut wr) = tokio::io::split(stream);
     io_step(wr.write_all(request.as_bytes()), "request write").await?;
-    let _ = wr.shutdown().await;
+    let _ = tokio::time::timeout(SHUTDOWN_TIMEOUT, wr.shutdown()).await;
     let resp = read_response(&mut rd, MAX_BODY_BYTES).await?;
     Ok((resp.status, resp.headers, resp.body))
 }
@@ -345,11 +389,11 @@ where
         let server_name = server_name_for_host(&host).context("invalid hostname")?;
         let mut tls = connect_tls(server_name, stream).await?;
         io_step(tls.write_all(request.as_bytes()), "request write").await?;
-        let _ = tls.shutdown().await;
+        let _ = tokio::time::timeout(SHUTDOWN_TIMEOUT, tls.shutdown()).await;
         count_download(&mut tls, max_bytes).await?
     } else {
         io_step(stream.write_all(request.as_bytes()), "request write").await?;
-        let _ = stream.shutdown().await;
+        let _ = tokio::time::timeout(SHUTDOWN_TIMEOUT, stream.shutdown()).await;
         count_download(&mut stream, max_bytes).await?
     };
     let elapsed = started.elapsed().as_secs_f64();
@@ -360,16 +404,35 @@ async fn count_download<S: AsyncRead + Unpin + ?Sized>(
     rd: &mut S,
     max_bytes: usize,
 ) -> Result<u64> {
+    // T05: same buffered header scan as read_response (one syscall per ~8
+    // KiB fill, no per-byte reads); the body counter below already reads in
+    // 64 KiB chunks.
+    let mut reader = BufReader::new(rd);
     let mut head = Vec::new();
-    let mut byte = [0u8; 1];
-    while !head.ends_with(b"\r\n\r\n") {
+    loop {
+        if head.ends_with(b"\r\n\r\n") {
+            break;
+        }
         if head.len() >= MAX_HEADER_BYTES {
             bail!("response headers exceed the {MAX_HEADER_BYTES} cap");
         }
-        rd.read_exact(&mut byte)
-            .await
-            .context("reading response headers")?;
-        head.push(byte[0]);
+        let chunk: Vec<u8> = {
+            let buf = reader
+                .fill_buf()
+                .await
+                .context("reading response headers")?;
+            if buf.is_empty() {
+                bail!("unexpected EOF reading response headers");
+            }
+            let upto = buf
+                .iter()
+                .position(|&b| b == b'\n')
+                .map_or(buf.len(), |i| i + 1);
+            let allowance = (MAX_HEADER_BYTES + 2).saturating_sub(head.len()).max(1);
+            buf[..upto.min(allowance)].to_vec()
+        };
+        reader.consume(chunk.len());
+        head.extend_from_slice(&chunk);
     }
     let head_str = std::str::from_utf8(&head).context("response headers are not utf-8")?;
     let status = head_str
@@ -390,7 +453,7 @@ async fn count_download<S: AsyncRead + Unpin + ?Sized>(
         if total >= cap {
             break;
         }
-        match rd.read(&mut chunk).await {
+        match reader.read(&mut chunk).await {
             Ok(0) => break,
             Ok(n) => total = total.saturating_add(n as u64).min(cap),
             Err(err) if err.kind() == io::ErrorKind::Interrupted => continue,
@@ -1152,6 +1215,26 @@ mod tests {
         let parsed = read_response(&mut &resp[..], MAX_BODY_BYTES).await.unwrap();
         assert_eq!(parsed.status, 200);
         assert_eq!(parsed.body, b"ok");
+    }
+
+    #[tokio::test]
+    async fn read_response_spanning_several_buffer_fills_stays_exact() {
+        // T05 pin: headers larger than one BufReader fill (~8 KiB) must parse
+        // identically, with no buffered body byte lost to the header scan.
+        let mut resp = b"HTTP/1.1 200 OK\r\n".to_vec();
+        for i in 0..400 {
+            resp.extend_from_slice(format!("X-Pad-{i:03}: {}\r\n", "x".repeat(40)).as_bytes());
+        }
+        assert!(
+            resp.len() > 16 * 1024,
+            "the header block must span several fills: {}",
+            resp.len()
+        );
+        resp.extend_from_slice(b"Content-Length: 5\r\n\r\nhello");
+        let parsed = read_response(&mut &resp[..], MAX_BODY_BYTES).await.unwrap();
+        assert_eq!(parsed.status, 200);
+        assert_eq!(parsed.body, b"hello");
+        assert!(parsed.headers.iter().any(|h| h.starts_with("X-Pad-000")));
     }
 
     fn encode_chunked(data: &[u8]) -> Vec<u8> {

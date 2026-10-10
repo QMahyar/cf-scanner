@@ -1758,3 +1758,156 @@ fn warp_port_gate_omitted_field_deserializes_as_false() {
         serde_json::from_str(r#"{"custom_endpoints":[],"probes_per_endpoint":3}"#).unwrap();
     assert!(!w.port_gate, "omitted field must default to off");
 }
+
+#[test]
+fn sanitizer_is_exhaustive_and_never_leaks_strings() {
+    // Story 22: the `other => other` fallback in sanitize_validation_error
+    // must never hide a string payload. This match lists EVERY ConfigError
+    // variant explicitly (no wildcard): adding a new variant breaks
+    // compilation here until both the sanitizer and this test gain an arm.
+    use super::sanitize_validation_error;
+    let hostile = "x".repeat(600) + " https://user:secret@example.com/path?token=abc";
+    let cases: Vec<ConfigError> = vec![
+        ConfigError::InvalidPort(0),
+        ConfigError::InvalidCount(0),
+        ConfigError::InvalidFound(0),
+        ConfigError::InvalidCidr(hostile.clone(), hostile.clone()),
+        ConfigError::InvalidEndpoint(hostile.clone(), hostile.clone()),
+        ConfigError::Phase2WrongMode,
+        ConfigError::WarpWrongMode,
+        ConfigError::NoConfigs,
+        ConfigError::InvalidProbeUrl,
+        ConfigError::TooManyProbeUrls(9),
+        ConfigError::MissingCustomFragment,
+        ConfigError::InvalidConcurrency(0),
+        ConfigError::InvalidTimeout(1),
+        ConfigError::InvalidProbes(0),
+        ConfigError::InvalidPhase2Concurrency(0),
+        ConfigError::VerifyNeedsWgconf,
+        ConfigError::TooManyPorts(65),
+        ConfigError::TooManyExcludes(65),
+        ConfigError::TooManyCidrs(65),
+        ConfigError::TooManyConfigs(9),
+        ConfigError::TooManySnis(9),
+        ConfigError::ConfigEntryTooLong(8193),
+        ConfigError::SniTooLong(257),
+        ConfigError::ProbeUrlTooLong(2049),
+        ConfigError::WgconfTooLong(65537),
+        ConfigError::WarpPresetNotAllowed,
+        ConfigError::WarpCidrsNotAllowed,
+        ConfigError::InvalidFragment("length", hostile.clone()),
+        ConfigError::InvalidSni(hostile.clone(), hostile.clone()),
+        ConfigError::InvalidFoundUpper(1),
+        ConfigError::InvalidCap(0),
+        ConfigError::InvalidFragmentRange("length", hostile.clone()),
+        ConfigError::TooManyEndpoints(2049),
+        ConfigError::NonRoutableCidr(hostile.clone()),
+        ConfigError::NonRoutableEndpoint(hostile.clone()),
+        ConfigError::InvalidLossThreshold(101),
+        ConfigError::InvalidMinLatency(0),
+        ConfigError::InvalidHttpStatusCode(99),
+        ConfigError::EmptyHttpCodes,
+        ConfigError::HttpCodesNeedHttpProbe,
+        ConfigError::TooManyProbeSnis(9),
+        ConfigError::ProbeSnisNeedTlsHttp,
+        ConfigError::ProbeWrongMode,
+        ConfigError::InvalidIdleHold(1),
+        ConfigError::SpeedTestNeedsConfigs,
+        ConfigError::SpeedTestWrongMode,
+        ConfigError::MinSpeedNeedsSpeedTest,
+        ConfigError::InvalidMinSpeed,
+        ConfigError::NeighborWrongMode,
+        ConfigError::InvalidNeighbor(65),
+        ConfigError::DefaultWarpPort,
+        ConfigError::ColoWrongMode,
+        ConfigError::TooManyColos(17),
+        ConfigError::InvalidColo(hostile.clone()),
+        ConfigError::InvalidJunkCount(129),
+        ConfigError::InvalidJunkSize(64, 32),
+    ];
+    for err in cases {
+        let sanitized = sanitize_validation_error(err);
+        let rendered = sanitized.to_string();
+        assert!(
+            !rendered.contains("secret"),
+            "sanitizer leaked a credential: {rendered}"
+        );
+        assert!(
+            !rendered.contains("token"),
+            "sanitizer leaked a token: {rendered}"
+        );
+        // Exhaustive pin: every variant must be classified. String-carrying
+        // variants are scrubbed + truncated; numeric/unit pass through
+        // unchanged (their Display carries only numbers).
+        match sanitized {
+            ConfigError::InvalidPort(_) => {}
+            ConfigError::InvalidCount(_) => {}
+            ConfigError::InvalidFound(_) => {}
+            ConfigError::InvalidCidr(s, reason) => {
+                assert!(s.chars().count() <= 512, "must truncate: {}", s.len());
+                assert!(reason.chars().count() <= 512);
+            }
+            ConfigError::InvalidEndpoint(s, reason) => {
+                assert!(s.chars().count() <= 512);
+                assert!(reason.chars().count() <= 512);
+            }
+            ConfigError::Phase2WrongMode => {}
+            ConfigError::WarpWrongMode => {}
+            ConfigError::NoConfigs => {}
+            ConfigError::InvalidProbeUrl => {}
+            ConfigError::TooManyProbeUrls(_) => {}
+            ConfigError::MissingCustomFragment => {}
+            ConfigError::InvalidConcurrency(_) => {}
+            ConfigError::InvalidTimeout(_) => {}
+            ConfigError::InvalidProbes(_) => {}
+            ConfigError::InvalidPhase2Concurrency(_) => {}
+            ConfigError::VerifyNeedsWgconf => {}
+            ConfigError::TooManyPorts(_) => {}
+            ConfigError::TooManyExcludes(_) => {}
+            ConfigError::TooManyCidrs(_) => {}
+            ConfigError::TooManyConfigs(_) => {}
+            ConfigError::TooManySnis(_) => {}
+            ConfigError::ConfigEntryTooLong(_) => {}
+            ConfigError::SniTooLong(_) => {}
+            ConfigError::ProbeUrlTooLong(_) => {}
+            ConfigError::WgconfTooLong(_) => {}
+            ConfigError::WarpPresetNotAllowed => {}
+            ConfigError::WarpCidrsNotAllowed => {}
+            ConfigError::InvalidFragment(_, _) => {}
+            ConfigError::InvalidSni(_, _) => {}
+            ConfigError::InvalidFoundUpper(_) => {}
+            ConfigError::InvalidCap(_) => {}
+            ConfigError::InvalidFragmentRange(_, _) => {}
+            ConfigError::TooManyEndpoints(_) => {}
+            ConfigError::NonRoutableCidr(_) => {}
+            ConfigError::NonRoutableEndpoint(_) => {}
+            ConfigError::InvalidLossThreshold(_) => {}
+            ConfigError::InvalidMinLatency(_) => {}
+            ConfigError::InvalidHttpStatusCode(_) => {}
+            ConfigError::EmptyHttpCodes => {}
+            ConfigError::HttpCodesNeedHttpProbe => {}
+            ConfigError::TooManyProbeSnis(_) => {}
+            ConfigError::ProbeSnisNeedTlsHttp => {}
+            ConfigError::ProbeWrongMode => {}
+            ConfigError::InvalidIdleHold(_) => {}
+            ConfigError::SpeedTestNeedsConfigs => {}
+            ConfigError::SpeedTestWrongMode => {}
+            ConfigError::MinSpeedNeedsSpeedTest => {}
+            ConfigError::InvalidMinSpeed => {}
+            ConfigError::NeighborWrongMode => {}
+            ConfigError::InvalidNeighbor(_) => {}
+            ConfigError::DefaultWarpPort => {}
+            ConfigError::ColoWrongMode => {}
+            ConfigError::TooManyColos(_) => {}
+            ConfigError::InvalidColo(_) => {}
+            ConfigError::InvalidJunkCount(_) => {}
+            ConfigError::InvalidJunkSize(_, _) => {}
+        }
+    }
+    // Truncation pin: a 600-char hostile echo must come back at 512.
+    let long = ConfigError::InvalidColo("x".repeat(600));
+    match sanitize_validation_error(long) {
+        ConfigError::InvalidColo(s) => assert_eq!(s, "x".repeat(512)),
+        other => panic!("expected InvalidColo, got {other:?}"),
+    }
+}

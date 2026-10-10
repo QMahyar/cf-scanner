@@ -6,6 +6,7 @@ pub mod dgst;
 pub mod engine;
 pub mod enrich;
 pub mod export;
+pub mod offline_flag;
 pub mod paths;
 pub mod probe;
 pub mod ranges;

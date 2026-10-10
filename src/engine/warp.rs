@@ -2,9 +2,10 @@ use std::collections::HashSet;
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result, anyhow, bail};
+use rand_core::RngCore as _;
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinSet;
 
@@ -57,6 +58,33 @@ const ADAPTIVE_MAX_PROBES: u8 = 10;
 const ADAPTIVE_SEED_XOR: u64 = 0x51ab3c0ffee77aa;
 /// Domain-separates port-gate sampling from the main scan plan.
 const GATE_SEED_XOR: u64 = 0x9e3779b97f4a7c15;
+
+/// Pre-flight parallelism: the 100 single-handshake samples run with this
+/// many probes in flight (spec story 10: startup must not cost 100 serial
+/// timeouts). 16 keeps a bounded UDP burst while honoring cancel.
+pub(crate) const PREFLIGHT_CONCURRENCY: usize = 16;
+
+/// Port-gate fan-out bound (spec story 11): one tier is at most
+/// 12 addrs x 50 ports = 600 probes. The gate runs with the scan
+/// concurrency clamped into this window so large sweeps cannot OOM.
+pub(crate) const GATE_MIN_PAR: usize = 64;
+pub(crate) const GATE_MAX_PAR: usize = 128;
+
+/// Scheduler-side pacing jitter (moved out of the transport probe): one
+/// 10-40ms stagger per scan worker at startup. The probe itself stays
+/// jitter-free so the fail-fast pre-flight/port-gate tiers pay no
+/// per-attempt sleep.
+const WARP_TASK_JITTER_MIN_MS: u64 = 10;
+const WARP_TASK_JITTER_SPAN_MS: u64 = 31; // 10..=40ms
+
+/// Pure gate bound: scan concurrency clamped into `[64, 128]`.
+pub(crate) fn gate_cap(scan_concurrency: usize) -> usize {
+    scan_concurrency.max(1).clamp(GATE_MIN_PAR, GATE_MAX_PAR)
+}
+
+fn warp_task_jitter_ms() -> u64 {
+    WARP_TASK_JITTER_MIN_MS + (rand_core::OsRng.next_u32() as u64 % WARP_TASK_JITTER_SPAN_MS)
+}
 
 /// Outcome of the adaptive pre-flight. `None` from `warp_preflight` means a
 /// clean Ctrl+C abort: nothing was recorded and the scan must stop.
@@ -323,6 +351,20 @@ impl ScanController {
             let transport = transport.clone();
             let timeout_ms = cfg.timeout_ms;
             workers.spawn(async move {
+                // Scheduler-side pacing jitter (moved out of the transport
+                // probe): one 10-40ms stagger per worker at startup keeps the
+                // UDP burst desynchronized. Cancel-safe so a Ctrl+C during the
+                // sleep still aborts promptly. Per-task sleeps would serialize
+                // large low-concurrency sweeps (3840 tasks x 25ms), and the
+                // probe itself stays jitter-free so the fail-fast
+                // pre-flight/port-gate tiers pay no per-attempt sleep.
+                {
+                    let jitter = warp_task_jitter_ms();
+                    tokio::select! {
+                        _ = tokio::time::sleep(Duration::from_millis(jitter)) => {},
+                        _ = ctx.cancelled() => return,
+                    }
+                }
                 let mut batch: Vec<Verdict> = Vec::new();
                 loop {
                     if ctx.should_stop() {
@@ -483,9 +525,10 @@ impl ScanController {
     /// Opt-in adaptive pre-flight: exactly 100 single handshake probes over
     /// the bundled pool plan through the already-built transport (same
     /// ShapeOnly discovery semantics, per-controller SocketCache, junk
-    /// profile as the scan itself). Each probe is bounded by the scan
-    /// timeout; zero verdicts are recorded. Returns `None` on a clean
-    /// Ctrl+C abort (the caller stops the scan with nothing recorded).
+    /// profile as the scan itself). Probes run with `PREFLIGHT_CONCURRENCY`
+    /// in flight; each probe is bounded by the scan timeout; zero verdicts
+    /// are recorded. Returns `None` on a clean Ctrl+C abort (the caller
+    /// stops the scan with nothing recorded).
     async fn warp_preflight(
         &self,
         cfg: &ScanConfig,
@@ -496,28 +539,72 @@ impl ScanController {
     ) -> Result<Option<PreflightReport>> {
         let targets = Self::preflight_targets(cfg, seed)?;
         let timeout_ms = cfg.timeout_ms;
-        let mut latencies: Vec<u32> = Vec::new();
-        let mut failed: u32 = 0;
-        for (ip, port) in &targets {
-            // Pre-scan there is nothing to drain: found/cap cannot fire with
-            // zero scanned/found, so the user-cancel latch is the whole stop
-            // condition here. Checked every step, raced per probe below.
+        if targets.is_empty() {
             if *cancel.borrow() {
                 return Ok(None);
             }
-            let outcome = tokio::select! {
-                outcome = transport.probe(IpAddr::V4(*ip), *port, timeout_ms, 0) => Some(outcome),
-                _ = cancelled_signal(cancel.clone()) => None,
-            };
-            let Some(outcome) = outcome else {
-                return Ok(None);
-            };
-            match outcome {
-                Ok(probe) => latencies.push(probe.latency_ms),
-                Err(_) => failed += 1,
+            return Ok(Some(PreflightReport::build(
+                0,
+                0,
+                Vec::new(),
+                current.max(1),
+            )));
+        }
+        // Pre-scan there is nothing to drain: found/cap cannot fire with
+        // zero scanned/found, so the user-cancel latch is the whole stop
+        // condition here. Checked before each spawn and raced while joining.
+        if *cancel.borrow() {
+            return Ok(None);
+        }
+        let mut pending = JoinSet::new();
+        let mut next: usize = 0;
+        let mut latencies: Vec<u32> = Vec::with_capacity(targets.len());
+        let mut failed: u32 = 0;
+        let mut aborted = false;
+        loop {
+            while pending.len() < PREFLIGHT_CONCURRENCY && next < targets.len() {
+                if *cancel.borrow() {
+                    pending.abort_all();
+                    return Ok(None);
+                }
+                let (ip, port) = targets[next];
+                next += 1;
+                let transport = transport.clone();
+                pending.spawn(async move {
+                    match transport.probe(IpAddr::V4(ip), port, timeout_ms, 0).await {
+                        Ok(probe) => Ok(probe.latency_ms),
+                        Err(_) => Err(()),
+                    }
+                });
+            }
+            if pending.is_empty() {
+                break;
+            }
+            tokio::select! {
+                joined = pending.join_next() => {
+                    let Some(joined) = joined else { break };
+                    match joined {
+                        Ok(Ok(lat)) => latencies.push(lat),
+                        Ok(Err(())) => failed += 1,
+                        // JoinError: only from abort_all below; the cancel
+                        // path returns None, so a stray error here just
+                        // drops that sample without recording a verdict.
+                        Err(_) => failed += 1,
+                    }
+                    if *cancel.borrow() {
+                        pending.abort_all();
+                        aborted = true;
+                        break;
+                    }
+                }
+                _ = cancelled_signal(cancel.clone()) => {
+                    pending.abort_all();
+                    aborted = true;
+                    break;
+                }
             }
         }
-        if *cancel.borrow() {
+        if aborted || *cancel.borrow() {
             return Ok(None);
         }
         Ok(Some(PreflightReport::build(
@@ -601,26 +688,40 @@ impl ScanController {
     }
 
     /// Probe one port tier: each (addr, port) once through the built
-    /// transport. A port counts as open when any sample answers with a
-    /// received packet. Cancel-safe: a fired cancel abandons the tier; the
-    /// caller re-checks cancel before acting on the result.
+    /// transport, with at most `cap` probes in flight. A port counts as open
+    /// when any sample answers with a received packet. Cancel-safe: a fired
+    /// cancel abandons the tier; the caller re-checks cancel before acting
+    /// on the result.
     async fn gate_open_ports(
         transport: &Arc<dyn Transport>,
         addrs: &[Ipv4Addr],
         ports: &[u16],
         timeout_ms: u64,
         cancel: &watch::Receiver<bool>,
+        cap: usize,
     ) -> Vec<u16> {
-        // WHY unbounded fan-out here: the tier is at most 12 addrs × 50 ports
-        // = 600 short-lived UDP probes, under the 1000-worker ceiling the
-        // engine is sized for; serializing at cfg.concurrency would only make
-        // the fail-fast gate slower. Cancel aborts the set below.
+        // WHY bounded fan-out here: one tier is at most 12 addrs x 50 ports
+        // = 600 short-lived UDP probes. The cap is the scan concurrency
+        // clamped into [64, 128] (see gate_cap): fast enough to stay
+        // fail-fast, bounded enough to never OOM the task set.
+        let cap = cap.max(1);
         let mut pending = JoinSet::new();
-        'spawn: for &ip in addrs {
+        let mut combos: Vec<(Ipv4Addr, u16)> = Vec::new();
+        for &ip in addrs {
             for &port in ports {
+                combos.push((ip, port));
+            }
+        }
+        let mut next: usize = 0;
+        let mut open_ports = Vec::new();
+        loop {
+            while pending.len() < cap && next < combos.len() {
                 if *cancel.borrow() {
-                    break 'spawn;
+                    pending.abort_all();
+                    return open_ports;
                 }
+                let (ip, port) = combos[next];
+                next += 1;
                 let transport = transport.clone();
                 pending.spawn(async move {
                     let open = matches!(
@@ -630,9 +731,9 @@ impl ScanController {
                     (port, open)
                 });
             }
-        }
-        let mut open_ports = Vec::new();
-        while !pending.is_empty() {
+            if pending.is_empty() {
+                break;
+            }
             tokio::select! {
                 joined = pending.join_next() => {
                     let Some(joined) = joined else { break };
@@ -669,13 +770,28 @@ impl ScanController {
         if addrs.is_empty() {
             return Ok(Some(cfg.ports.iter().map(|p| p.get()).collect()));
         }
-        let open =
-            Self::gate_open_ports(transport, &addrs, PRIMARY_WARP_PORTS, timeout_ms, cancel).await;
+        let cap = gate_cap(usize::from(cfg.concurrency));
+        let open = Self::gate_open_ports(
+            transport,
+            &addrs,
+            PRIMARY_WARP_PORTS,
+            timeout_ms,
+            cancel,
+            cap,
+        )
+        .await;
         if !open.is_empty() {
             return Ok(Some(open));
         }
-        let open =
-            Self::gate_open_ports(transport, &addrs, EXTENDED_WARP_PORTS, timeout_ms, cancel).await;
+        let open = Self::gate_open_ports(
+            transport,
+            &addrs,
+            EXTENDED_WARP_PORTS,
+            timeout_ms,
+            cancel,
+            cap,
+        )
+        .await;
         Ok(if open.is_empty() { None } else { Some(open) })
     }
 
@@ -1604,7 +1720,10 @@ mod tests {
         let targets = adaptive_targets(&cfg, 21);
         let mut t = FakeTransport::new();
         for (ip, port) in &targets {
-            t = t.ok_slow(IpAddr::V4(*ip), *port, 5, 10);
+            // 60ms keeps the abort deterministic under parallel pre-flight:
+            // 100 samples at cap 16 need ~375ms, so a 100ms cancel lands
+            // mid-flight instead of after completion.
+            t = t.ok_slow(IpAddr::V4(*ip), *port, 5, 60);
         }
         let t: Arc<dyn Transport> = Arc::new(t);
         let (c, _) = warp_controller(FakeTransport::new());
@@ -1634,7 +1753,7 @@ mod tests {
         let targets = adaptive_targets(&cfg, 33);
         let mut t = FakeTransport::new();
         for (ip, port) in &targets {
-            t = t.ok_slow(IpAddr::V4(*ip), *port, 5, 10);
+            t = t.ok_slow(IpAddr::V4(*ip), *port, 5, 60);
         }
         t = t.ok("203.0.113.1".parse().unwrap(), 2408, 7);
         let (c, _) = warp_controller(t);
@@ -1717,5 +1836,150 @@ mod tests {
             .unwrap();
         assert_eq!(report.samples, 0);
         assert_eq!(report.applied_probes, 3);
+    }
+
+    #[test]
+    fn gate_cap_clamps_scan_concurrency_into_64_128() {
+        assert_eq!(gate_cap(1), 64);
+        assert_eq!(gate_cap(8), 64);
+        assert_eq!(gate_cap(64), 64);
+        assert_eq!(gate_cap(100), 100);
+        assert_eq!(gate_cap(128), 128);
+        assert_eq!(gate_cap(1000), 128);
+        assert_eq!(PREFLIGHT_CONCURRENCY, 16, "pre-flight cap stays 8-16");
+        assert!((8..=16).contains(&PREFLIGHT_CONCURRENCY));
+    }
+
+    /// In-flight counter transport: every probe parks 50ms while bumping
+    /// the gauge, so the observed max is the achieved parallelism.
+    struct GaugeTransport {
+        current: Arc<std::sync::atomic::AtomicUsize>,
+        max: Arc<std::sync::atomic::AtomicUsize>,
+        delay_ms: u64,
+    }
+
+    impl crate::probe::Transport for GaugeTransport {
+        fn probe(
+            &self,
+            _ip: IpAddr,
+            _port: u16,
+            _timeout_ms: u64,
+            _idle_hold_ms: u64,
+        ) -> crate::probe::ProbeFuture<'_> {
+            let current = self.current.clone();
+            let max = self.max.clone();
+            let delay = self.delay_ms;
+            Box::pin(async move {
+                let cur = current.fetch_add(1, Ordering::SeqCst) + 1;
+                max.fetch_max(cur, Ordering::SeqCst);
+                tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+                current.fetch_sub(1, Ordering::SeqCst);
+                Ok(crate::probe::ProbeOutcome::plain(5))
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn preflight_runs_parallel_within_cap() {
+        let (c, _) = warp_controller(FakeTransport::new());
+        let cfg = adaptive_cfg();
+        let current = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let max = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let transport: Arc<dyn Transport> = Arc::new(GaugeTransport {
+            current: current.clone(),
+            max: max.clone(),
+            delay_ms: 50,
+        });
+        let cancel = c.cancel_signal();
+        let started = std::time::Instant::now();
+        let report = c
+            .warp_preflight(&cfg, &transport, 41, 3, &cancel)
+            .await
+            .unwrap()
+            .unwrap();
+        let elapsed = started.elapsed();
+        assert_eq!(report.samples, ADAPTIVE_PREFLIGHT_SAMPLES);
+        let observed = max.load(Ordering::SeqCst);
+        assert!(
+            observed > 1,
+            "100 x 50ms probes must overlap, got max {observed}"
+        );
+        assert!(
+            observed <= PREFLIGHT_CONCURRENCY,
+            "pre-flight must stay within cap {PREFLIGHT_CONCURRENCY}, got {observed}",
+        );
+        assert!(
+            elapsed < std::time::Duration::from_millis(2500),
+            "parallel 100 x 50ms at cap 16 must finish well under serial 5000ms, took {elapsed:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn preflight_parallel_honors_cancel() {
+        let (c, _) = warp_controller(FakeTransport::new());
+        let cfg = adaptive_cfg();
+        let current = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let max = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let transport: Arc<dyn Transport> = Arc::new(GaugeTransport {
+            current,
+            max,
+            delay_ms: 80,
+        });
+        let handle = tokio::spawn({
+            let c = c.clone();
+            let cfg = cfg.clone();
+            let transport = transport.clone();
+            async move {
+                let cancel = c.cancel_signal();
+                c.warp_preflight(&cfg, &transport, 43, 3, &cancel)
+                    .await
+                    .unwrap()
+            }
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        c.cancel();
+        assert!(
+            handle.await.unwrap().is_none(),
+            "cancel during parallel pre-flight must yield no report"
+        );
+    }
+
+    #[tokio::test]
+    async fn gate_tier_stays_within_cap() {
+        let current = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let max = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let transport: Arc<dyn Transport> = Arc::new(GaugeTransport {
+            current,
+            max: max.clone(),
+            delay_ms: 20,
+        });
+        let (_tx, rx) = tokio::sync::watch::channel(false);
+        // 12 addrs x 50 ports = 600 combos, the ticket's worst-case tier.
+        let addrs: Vec<Ipv4Addr> = (1..=12u8).map(|i| Ipv4Addr::new(203, 0, 113, i)).collect();
+        let ports: Vec<u16> = (2000..2050u16).collect();
+        let cap = gate_cap(1);
+        let open =
+            ScanController::gate_open_ports(&transport, &addrs, &ports, 3000, &rx, cap).await;
+        assert_eq!(open.len(), ports.len(), "gauge transport answers all");
+        let observed = max.load(Ordering::SeqCst);
+        assert!(
+            observed > 1,
+            "gate tier must run concurrently, got max {observed}"
+        );
+        assert!(
+            observed <= cap,
+            "gate tier must stay within cap {cap}, got {observed}"
+        );
+    }
+
+    #[test]
+    fn warp_task_jitter_stays_in_10_40ms() {
+        for _ in 0..100 {
+            let ms = warp_task_jitter_ms();
+            assert!(
+                (10..=40).contains(&ms),
+                "scheduler jitter must stay 10-40ms, got {ms}"
+            );
+        }
     }
 }

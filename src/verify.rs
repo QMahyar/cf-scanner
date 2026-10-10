@@ -93,7 +93,7 @@ impl XrayTunnelProbe {
         let xray_bin = xray::ensure_binary(&fetch).await.with_context(
             || "no verified xray binary (cached copy failed its checksum or the download failed)",
         )?;
-        let proc = spawn_with_retry(dial_ip, |socks_port| {
+        let proc = spawn_with_retry(dial_ip, |reserved: ReservedPort| {
             let spec = spec.clone();
             let preset = preset.clone();
             let custom = custom.cloned();
@@ -101,6 +101,7 @@ impl XrayTunnelProbe {
             let trial_dir = trial_dir.clone();
             let xray_bin = xray_bin.clone();
             async move {
+                let socks_port = reserved.port();
                 let cfg = xray::build_config(
                     &spec,
                     dial_ip,
@@ -109,7 +110,8 @@ impl XrayTunnelProbe {
                     sni.as_deref(),
                     socks_port,
                 )?;
-                xray::spawn(&trial_dir, &xray_bin, &cfg).await
+                xray::spawn_with_reservation(&trial_dir, &xray_bin, &cfg, reserved.into_listener())
+                    .await
             }
         })
         .await?;
@@ -229,7 +231,7 @@ impl TunnelProbe for XrayTunnelProbe {
             })?;
             let outcome: Result<TunnelResult> =
                 match tokio::time::timeout(Duration::from_millis(timeout_ms), async {
-                    let mut proc = spawn_with_retry(dial_ip, |socks_port| {
+                    let mut proc = spawn_with_retry(dial_ip, |reserved: ReservedPort| {
                         let spec = spec.clone();
                         let preset = preset.clone();
                         let custom = custom.clone();
@@ -237,6 +239,7 @@ impl TunnelProbe for XrayTunnelProbe {
                         let trial_dir = trial_dir.clone();
                         let xray_bin = xray_bin.clone();
                         async move {
+                            let socks_port = reserved.port();
                             let cfg = xray::build_config(
                                 &spec,
                                 dial_ip,
@@ -245,7 +248,13 @@ impl TunnelProbe for XrayTunnelProbe {
                                 sni.as_deref(),
                                 socks_port,
                             )?;
-                            xray::spawn(&trial_dir, &xray_bin, &cfg).await
+                            xray::spawn_with_reservation(
+                                &trial_dir,
+                                &xray_bin,
+                                &cfg,
+                                reserved.into_listener(),
+                            )
+                            .await
                         }
                     })
                     .await?;
@@ -439,32 +448,64 @@ fn next_trial_id() -> u64 {
     TRIAL_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
-fn pick_ephemeral_port() -> Result<u16> {
-    let listener = std::net::TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
-        .map_err(|e| anyhow!("no free ephemeral port ({}): {e}", e.kind()))?;
-    Ok(listener.local_addr()?.port())
+/// Reserved ephemeral port: the bound listener is held from reservation
+/// through config write + verification and handed to xray, which drops it
+/// immediately before `Command::spawn` (no await in between). This removes
+/// the pick-then-drop race where the port was freed right after picking and
+/// sat stealable across the whole config-write await window.
+pub(crate) struct ReservedPort {
+    port: u16,
+    listener: Option<std::net::TcpListener>,
 }
 
-async fn spawn_with_retry<T, Fut>(ip: Ipv4Addr, mut attempt: impl FnMut(u16) -> Fut) -> Result<T>
+impl ReservedPort {
+    pub(crate) fn port(&self) -> u16 {
+        self.port
+    }
+
+    pub(crate) fn into_listener(self) -> Option<std::net::TcpListener> {
+        self.listener
+    }
+}
+
+fn reserve_ephemeral_port(exclude: &[u16]) -> Result<ReservedPort> {
+    for _ in 0..16 {
+        let listener = std::net::TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+            .map_err(|e| anyhow!("no free ephemeral port ({}): {e}", e.kind()))?;
+        let port = listener.local_addr()?.port();
+        if port != 0 && !exclude.contains(&port) {
+            return Ok(ReservedPort {
+                port,
+                listener: Some(listener),
+            });
+        }
+        // Duplicate pick: listener drops here, freeing the port.
+    }
+    Err(anyhow!("no distinct ephemeral port after 16 picks"))
+}
+
+#[cfg(test)]
+fn pick_ephemeral_port() -> Result<u16> {
+    // Legacy helper kept for the range/reusable test: bind, read back the
+    // OS-assigned port, then release. Production spawns use
+    // `reserve_ephemeral_port` handover instead so the port is never
+    // stealable across an await window.
+    Ok(reserve_ephemeral_port(&[])?.port())
+}
+
+async fn spawn_with_retry<T, Fut>(
+    ip: Ipv4Addr,
+    mut attempt: impl FnMut(ReservedPort) -> Fut,
+) -> Result<T>
 where
     Fut: Future<Output = Result<T>>,
 {
     let mut last_err: Option<anyhow::Error> = None;
     let mut tried: Vec<u16> = Vec::new();
     for attempt_no in 1..=3u32 {
-        let socks_port = {
-            let mut picked = None;
-            for _ in 0..16 {
-                let candidate = pick_ephemeral_port().context("no free port for xray inbound")?;
-                if !tried.contains(&candidate) {
-                    picked = Some(candidate);
-                    break;
-                }
-            }
-            picked.ok_or_else(|| anyhow!("no distinct ephemeral port after 16 picks"))?
-        };
-        tried.push(socks_port);
-        match attempt(socks_port).await {
+        let reserved = reserve_ephemeral_port(&tried).context("no free port for xray inbound")?;
+        tried.push(reserved.port());
+        match attempt(reserved).await {
             Ok(value) => return Ok(value),
             Err(err) if attempt_no < 3 => {
                 tracing::debug!(
@@ -586,6 +627,26 @@ mod tests {
             let listener = std::net::TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], port)));
             assert!(listener.is_ok(), "port {port} should be free after pick");
         }
+    }
+
+    #[test]
+    fn reserved_port_holds_the_binding_until_handover() {
+        // Story 20: the reservation holds the port bound across the config
+        // write window; only the handover drop frees it for xray.
+        let reserved = reserve_ephemeral_port(&[]).unwrap();
+        let port = reserved.port();
+        assert!(port > 0);
+        let stolen = std::net::TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], port)));
+        assert!(
+            stolen.is_err(),
+            "reserved port {port} must stay bound until handover"
+        );
+        drop(stolen);
+        let listener = reserved.into_listener().unwrap();
+        assert_eq!(listener.local_addr().unwrap().port(), port);
+        drop(listener);
+        let rebound = std::net::TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], port)));
+        assert!(rebound.is_ok(), "handover drop must free the port for xray");
     }
 
     #[tokio::test]
@@ -814,9 +875,10 @@ mod tests {
     async fn spawn_retry_succeeds_on_the_first_attempt() {
         let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let seen = calls.clone();
-        let out = spawn_with_retry(Ipv4Addr::LOCALHOST, move |port| {
+        let out = spawn_with_retry(Ipv4Addr::LOCALHOST, move |reserved: ReservedPort| {
             let seen = seen.clone();
             async move {
+                let port = reserved.port();
                 seen.lock().unwrap().push(port);
                 Ok(port)
             }
@@ -835,9 +897,10 @@ mod tests {
     async fn spawn_retry_succeeds_after_two_failures_with_fresh_ports() {
         let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let seen = calls.clone();
-        let out = spawn_with_retry(Ipv4Addr::LOCALHOST, move |port| {
+        let out = spawn_with_retry(Ipv4Addr::LOCALHOST, move |reserved: ReservedPort| {
             let seen = seen.clone();
             async move {
+                let port = reserved.port();
                 let mut v = seen.lock().unwrap();
                 v.push(port);
                 if v.len() < 3 {
@@ -862,9 +925,10 @@ mod tests {
     async fn spawn_retry_reports_the_last_error_after_three_failures() {
         let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let seen = calls.clone();
-        let err = spawn_with_retry(Ipv4Addr::LOCALHOST, move |port| {
+        let err = spawn_with_retry(Ipv4Addr::LOCALHOST, move |reserved: ReservedPort| {
             let seen = seen.clone();
             async move {
+                let port = reserved.port();
                 seen.lock().unwrap().push(port);
                 Err::<u16, _>(anyhow!("boom {port}"))
             }

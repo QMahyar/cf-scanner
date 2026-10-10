@@ -6,6 +6,10 @@ cargo-dist-version = "0.32.0"
 ci = "github"
 installers = ["msi", "powershell", "shell"]
 allow-dirty = ["msi", "ci"]
+# Story 25 macOS gap (documented, out of scope for pipeline work): the runtime
+# knows macos x86_64 + arm64 assets (src/xray.rs asset_name) and can download
+# them on demand, but no macos target ships here — releases cover linux
+# (aarch64/x86_64) + windows (x86_64) only.
 targets = ["aarch64-unknown-linux-gnu", "x86_64-unknown-linux-gnu", "x86_64-pc-windows-msvc"]
 
 include = ["data/bundled"]

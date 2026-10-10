@@ -766,6 +766,32 @@ mod tests {
         assert!(events.iter().any(|e| matches!(e, ScanEvent::Failed(_))));
     }
 
+    /// T07: exactly one failure envelope per failed run — the engine emits a
+    /// single `Failed` event (main's `--json-errors` duplicate is suppressed
+    /// by the caller spotting this shape, pinned in src/main.rs).
+    #[tokio::test]
+    async fn failed_run_emits_exactly_one_failure_envelope() {
+        let c = Arc::new(ScanController::new(Arc::new(FakeTransport::new())));
+        let mut cfg = ok_cfg(1, None);
+        cfg.ports = vec![Port::new(0)];
+        let mut events = vec![];
+        let err = c.run_streaming(cfg, |e| events.push(e)).await.unwrap_err();
+        assert!(err.to_string().contains("out of range"), "{err}");
+        let failed = events
+            .iter()
+            .filter(|e| matches!(e, ScanEvent::Failed(_)))
+            .count();
+        assert_eq!(
+            failed, 1,
+            "one failure must produce exactly one Failed envelope: {events:?}"
+        );
+        let finished = events
+            .iter()
+            .filter(|e| matches!(e, ScanEvent::Finished(_)))
+            .count();
+        assert_eq!(finished, 0, "a failed run must not also finish: {events:?}");
+    }
+
     #[tokio::test]
     async fn concurrent_runs_are_rejected_and_failed_event_is_emitted() {
         let mut t = FakeTransport::new();
