@@ -1,5 +1,6 @@
+use std::collections::HashMap;
 use std::net::IpAddr;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use crate::api::types::MAX_ISP_CHARS;
@@ -12,6 +13,38 @@ const LOOKUP_CONCURRENCY: usize = 8;
 pub struct AsnInfo {
     pub asn: u32,
     pub isp: String,
+}
+
+/// Process-lifetime IP -> ASN cache: repeat scans (and repeat enrich calls in
+/// one session) never pay a second lookup for the same IP. Guarded by a short
+/// std mutex; never held across network I/O or the store lock (lock order:
+/// cache, then store, never nested).
+fn asn_cache() -> &'static Mutex<HashMap<IpAddr, AsnInfo>> {
+    static CACHE: OnceLock<Mutex<HashMap<IpAddr, AsnInfo>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn cache_get(ip: IpAddr) -> Option<AsnInfo> {
+    asn_cache()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(&ip)
+        .cloned()
+}
+
+fn cache_put(ip: IpAddr, info: AsnInfo) {
+    asn_cache()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(ip, info);
+}
+
+#[cfg(test)]
+pub(crate) fn clear_asn_cache_for_tests() {
+    asn_cache()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clear();
 }
 
 fn ipwho_url(ip: IpAddr) -> String {
@@ -78,21 +111,48 @@ pub async fn enrich_working_with(
     fetch: Arc<dyn AsnFetch>,
     controller: &Arc<ScanController>,
 ) -> usize {
+    // Working endpoints only: measured latency, no failed phase-2, and not
+    // already annotated. Failures never burn a lookup (spec story 21).
     let targets: Vec<(IpAddr, u16)> = controller
         .results()
         .into_iter()
+        .filter(|v| v.latency_ms.is_some())
+        .filter(|v| v.phase2.as_ref().is_none_or(|p| p.passed))
+        .filter(|v| v.asn.is_none())
         .map(|v| (v.ip, v.port))
         .collect();
     if targets.is_empty() {
         return 0;
     }
-    let semaphore = Arc::new(tokio::sync::Semaphore::new(LOOKUP_CONCURRENCY));
-    let mut set = tokio::task::JoinSet::new();
     // One lookup per distinct IP; every port of that IP gets annotated.
     let mut distinct: Vec<IpAddr> = targets.iter().map(|(ip, _)| *ip).collect();
     distinct.sort();
     distinct.dedup();
+    // Serve cache hits without spawning (no network, no semaphore slot).
+    let mut cached: Vec<(IpAddr, AsnInfo)> = Vec::new();
+    let mut to_fetch: Vec<IpAddr> = Vec::new();
     for ip in distinct {
+        if let Some(info) = cache_get(ip) {
+            cached.push((ip, info));
+        } else {
+            to_fetch.push(ip);
+        }
+    }
+    // Annotate cache hits first (single pass over targets per IP below).
+    let mut enriched = 0;
+    for (ip, info) in &cached {
+        for (tip, tport) in &targets {
+            if *tip == *ip && controller.set_asn(*tip, *tport, info.asn, &info.isp) {
+                enriched += 1;
+            }
+        }
+    }
+    if to_fetch.is_empty() {
+        return enriched;
+    }
+    let semaphore = Arc::new(tokio::sync::Semaphore::new(LOOKUP_CONCURRENCY));
+    let mut set = tokio::task::JoinSet::new();
+    for ip in to_fetch {
         let permit = Arc::clone(&semaphore);
         set.spawn({
             let fetch = Arc::clone(&fetch);
@@ -102,9 +162,11 @@ pub async fn enrich_working_with(
             }
         });
     }
-    let mut enriched = 0;
     while let Some(res) = set.join_next().await {
         if let Ok(Some((ip, info))) = res {
+            // Populate the cache before annotating so a racing enrich call
+            // observes the value even if this task is cancelled mid-annotate.
+            cache_put(ip, info.clone());
             for (tip, tport) in &targets {
                 if *tip == ip && controller.set_asn(*tip, *tport, info.asn, &info.isp) {
                     enriched += 1;
@@ -222,12 +284,14 @@ mod tests {
 
     #[tokio::test]
     async fn enrich_empty_results_is_a_no_op() {
+        clear_asn_cache_for_tests();
         let c = seeded_controller(&[]);
         assert_eq!(enrich_working_with(scripted(vec![]), &c).await, 0);
     }
 
     #[tokio::test]
     async fn enrich_counts_only_successful_lookups_and_annotates_the_verdict() {
+        clear_asn_cache_for_tests();
         let c = seeded_controller(&["1.1.1.1", "8.8.8.8"]);
         let fetch = scripted(vec![
             ("1.1.1.1", info(13335)),
@@ -254,6 +318,7 @@ mod tests {
     #[tokio::test]
     async fn enrich_annotates_every_port_of_the_same_ip() {
         use crate::api::types::Verdict;
+        clear_asn_cache_for_tests();
         let c = seeded_controller(&["1.1.1.1"]);
         // A second port for the same IP: enrichment applies to all of them.
         let second = Verdict {
@@ -278,8 +343,140 @@ mod tests {
 
     #[tokio::test]
     async fn enrich_all_lookups_fail_is_silent_zero() {
+        clear_asn_cache_for_tests();
         let c = seeded_controller(&["1.1.1.1", "8.8.8.8"]);
         assert_eq!(enrich_working_with(scripted(vec![]), &c).await, 0);
         assert!(c.results().iter().all(|v| v.asn.is_none()));
+    }
+
+    /// T07: failures are never looked up — only working endpoints burn ASN
+    /// calls. Uses per-test IPs so the global cache cannot leak between tests.
+    #[tokio::test]
+    async fn enrich_skips_failed_endpoints_without_a_lookup() {
+        use crate::api::types::Verdict;
+        use std::sync::atomic::{AtomicU64, Ordering};
+        clear_asn_cache_for_tests();
+        let c = Arc::new(ScanController::new(Arc::new(
+            crate::probe::FakeTransport::new(),
+        )));
+        let working = Verdict {
+            ip: "192.0.2.11".parse().unwrap(),
+            port: 443,
+            latency_ms: Some(5),
+            country: None,
+            colo: None,
+            phase2: None,
+            sent: 1,
+            received: 1,
+            loss_pct: Some(0),
+            fail_reason: None,
+            asn: None,
+            isp: None,
+        };
+        let dead = Verdict {
+            ip: "192.0.2.12".parse().unwrap(),
+            port: 443,
+            latency_ms: None,
+            country: None,
+            colo: None,
+            phase2: None,
+            sent: 1,
+            received: 0,
+            loss_pct: Some(100),
+            fail_reason: Some("refused".to_owned()),
+            asn: None,
+            isp: None,
+        };
+        crate::engine::store_seed(&c, vec![working, dead]);
+        struct Counting(AtomicU64);
+        impl AsnFetch for Counting {
+            fn fetch(
+                &self,
+                ip: IpAddr,
+            ) -> Pin<Box<dyn Future<Output = Option<AsnInfo>> + Send + '_>> {
+                self.0.fetch_add(1, Ordering::Relaxed);
+                let info = (ip == "192.0.2.11".parse::<IpAddr>().unwrap()).then(|| AsnInfo {
+                    asn: 13335,
+                    isp: "CLOUDFLARENET".to_owned(),
+                });
+                Box::pin(async move { info })
+            }
+        }
+        let counting = Arc::new(Counting(AtomicU64::new(0)));
+        let fetch: Arc<dyn AsnFetch> = counting.clone();
+        assert_eq!(enrich_working_with(fetch, &c).await, 1);
+        assert_eq!(
+            counting.0.load(Ordering::Relaxed),
+            1,
+            "only the working endpoint may burn a lookup"
+        );
+        let results = c.results();
+        assert_eq!(
+            results
+                .iter()
+                .find(|v| v.ip == "192.0.2.11".parse::<IpAddr>().unwrap())
+                .unwrap()
+                .asn,
+            Some(13335)
+        );
+        assert_eq!(
+            results
+                .iter()
+                .find(|v| v.ip == "192.0.2.12".parse::<IpAddr>().unwrap())
+                .unwrap()
+                .asn,
+            None,
+            "the failed endpoint must stay bare"
+        );
+    }
+
+    /// T07: the in-memory cache serves repeat enrichments without a second
+    /// network call.
+    #[tokio::test]
+    async fn enrich_caches_lookups_across_calls() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        clear_asn_cache_for_tests();
+        let c = seeded_controller(&["192.0.2.21"]);
+        struct Counting(AtomicU64);
+        impl AsnFetch for Counting {
+            fn fetch(
+                &self,
+                _ip: IpAddr,
+            ) -> Pin<Box<dyn Future<Output = Option<AsnInfo>> + Send + '_>> {
+                self.0.fetch_add(1, Ordering::Relaxed);
+                Box::pin(async move {
+                    Some(AsnInfo {
+                        asn: 13335,
+                        isp: "CLOUDFLARENET".to_owned(),
+                    })
+                })
+            }
+        }
+        let counting = Arc::new(Counting(AtomicU64::new(0)));
+        let fetch: Arc<dyn AsnFetch> = counting.clone();
+        assert_eq!(enrich_working_with(fetch, &c).await, 1);
+        assert_eq!(counting.0.load(Ordering::Relaxed), 1);
+        // A fresh scan of the same IP on a new controller must be served from
+        // the cache with zero fetches (the fetch impl panics if reached).
+        let c2 = seeded_controller(&["192.0.2.21"]);
+        struct PanicFetch;
+        impl AsnFetch for PanicFetch {
+            fn fetch(
+                &self,
+                _ip: IpAddr,
+            ) -> Pin<Box<dyn Future<Output = Option<AsnInfo>> + Send + '_>> {
+                panic!("cache hit must not reach the network");
+            }
+        }
+        assert_eq!(
+            enrich_working_with(Arc::new(PanicFetch), &c2).await,
+            1,
+            "the cached ASN must annotate without a fetch"
+        );
+        assert_eq!(
+            counting.0.load(Ordering::Relaxed),
+            1,
+            "exactly one network lookup for the IP across both enrichments"
+        );
     }
 }

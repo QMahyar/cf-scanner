@@ -9,6 +9,9 @@ use zip::ZipArchive;
 #[path = "src/dgst.rs"]
 mod dgst;
 
+#[path = "src/offline_flag.rs"]
+mod offline_flag;
+
 const VERSION_FILE: &str = include_str!("data/geoip-version.txt");
 const XRAY_VERSION_FILE: &str = include_str!("data/xray-version.txt");
 const URL: &str = "https://download.db-ip.com/free/dbip-country-lite-{version}.mmdb.gz";
@@ -24,9 +27,10 @@ fn geoip_pin() -> &'static str {
 }
 
 fn offline_build() -> bool {
-    std::env::var_os("CFSCANNER_OFFLINE_BUILD")
-        .map(|v| !v.is_empty())
-        .unwrap_or(false)
+    // Story 24: explicit truthy parse — only 1/true/yes/on take the offline
+    // path, so "0"/"false" build online. Single home for the grammar is
+    // src/offline_flag.rs (unit-tested via `cargo test`).
+    offline_flag::is_truthy(std::env::var_os("CFSCANNER_OFFLINE_BUILD").as_deref())
 }
 
 fn xray_version() -> &'static str {
@@ -74,8 +78,8 @@ fn embed_geoip() {
 fn refresh_cache(cache: &Path) {
     let Some(bytes) = download(&URL.replace("{version}", version())) else {
         eprintln!(
-            "error: db-ip download failed; refusing to embed an empty geoip db \
-             (pinned version {}, sha256 {}...)",
+            "error: db-ip download failed (curl needs https + network); refusing to embed an empty geoip db \
+             (pinned version {}, sha256 {}...); hint: CFSCANNER_OFFLINE_BUILD=1 embeds a placeholder instead (country lookups return None)",
             version(),
             geoip_pin().get(..8).unwrap_or(geoip_pin())
         );
@@ -194,11 +198,15 @@ fn bundle_xray_if_requested() {
 
     let url = format!("{XRAY_BASE}/{}/{}", xray_version(), asset);
     let Some(zip) = download(&url) else {
-        eprintln!("error: could not download {url}");
+        eprintln!(
+            "error: could not download {url} (curl needs https + network; check the pinned xray version in data/xray-version.txt)"
+        );
         std::process::exit(1);
     };
     let Some(dgst) = download(&format!("{url}.dgst")) else {
-        eprintln!("error: could not download {url}.dgst");
+        eprintln!(
+            "error: could not download {url}.dgst (curl needs https + network; check the pinned xray version in data/xray-version.txt)"
+        );
         std::process::exit(1);
     };
     let text = String::from_utf8_lossy(&dgst);

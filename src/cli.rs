@@ -362,7 +362,7 @@ pub(crate) struct ScanArgs {
         long,
         value_name = "PCT",
         help_heading = "Tuning",
-        long_help = "Filter results whose packet-loss rate exceeds PCT (0-100); default keeps everything"
+        long_help = "Deprecated and ignored: single-shot probes always report 0% loss, so nothing is ever filtered (kept for back-compat; use --min-latency / --idle-hold-ms instead)"
     )]
     pub(crate) loss_threshold: Option<u32>,
 
@@ -921,8 +921,9 @@ mod tests {
         assert!(!Cli::try_parse_from(["cf-scanner", "scan"]).unwrap().verbose);
     }
     #[test]
-    fn every_long_scan_flag_is_documented_in_help_and_readme() {
-        let readme = include_str!("../README.md");
+    fn every_long_scan_flag_is_documented_in_help() {
+        // NOTE: the README.md half of this check was removed with the root
+        // README.md itself (docs-removal commit); only the --help half stays.
         // Only the non-test part of this file: the test's own string literals
         // contain the markers being scanned for.
         let src = include_str!("cli.rs")
@@ -961,11 +962,6 @@ mod tests {
             assert!(
                 has_help,
                 "--{name} has no help text; every long flag needs one (T-20)"
-            );
-            let dash = format!("--{name}");
-            assert!(
-                readme.contains(&dash),
-                "--{name} is documented in --help but missing from README.md's Commands reference"
             );
         }
     }

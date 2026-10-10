@@ -12,52 +12,24 @@ mod tests;
 pub(crate) fn build_scan_config(args: &ScanArgs) -> Result<ScanConfig> {
     if args.retry_last {
         let mut cfg = cf_scanner::retry::load_config()?;
-        if !args.phase2_configs.is_empty() {
-            let mut phase2 = cfg.phase2.take().unwrap_or_default();
-            phase2.configs = args.phase2_configs.clone();
-            cfg.phase2 = Some(phase2);
-        }
-        if args.adaptive_retries {
-            if cfg.mode != Mode::Warp {
-                bail!("--adaptive-retries requires --mode warp");
-            }
-            cfg.adaptive_retries = true;
-        }
-        if let Some(probes) = args.warp_probes
-            && cfg.adaptive_retries
-        {
-            eprintln!("note: {}", adaptive_skip_note(probes));
-            cfg.adaptive_retries = false;
-        }
-        // A --network-profile on a retry relabels the config and retunes
-        // whatever still sits at defaults; saved non-default values count as
-        // explicit and survive, mirroring the fresh-scan explicit-wins rule.
-        // Without the flag the saved profile (if any) simply persists.
-        if let Some(profile) = args.network_profile.map(NetworkProfile::from) {
-            cfg.network_profile = Some(profile);
-            let mut probes = cfg
-                .warp
-                .as_ref()
-                .map(|w| w.probes_per_endpoint)
-                .unwrap_or(api::DEFAULT_PROBES_PER_ENDPOINT);
-            apply_profile_tuning(
-                &cfg.mode,
-                Some(profile),
-                cfg.timeout_ms != api::types::DEFAULT_TIMEOUT_MS,
-                cfg.concurrency != api::types::DEFAULT_CONCURRENCY,
-                cfg.idle_hold_ms != 0,
-                probes != api::DEFAULT_PROBES_PER_ENDPOINT,
-                &mut cfg.timeout_ms,
-                &mut cfg.concurrency,
-                &mut cfg.idle_hold_ms,
-                &mut probes,
+        let ignored = retry_ignored_flags(args);
+        if !ignored.is_empty() {
+            eprintln!(
+                "warning: {} ignored with --retry-last; using saved scan config (only --phase2-configs, --warp-wgconf-file, --adaptive-retries, --network-profile apply)",
+                ignored.join(", ")
             );
-            if let Some(warp) = cfg.warp.as_mut() {
-                warp.probes_per_endpoint = probes;
-            }
+        }
+        apply_retry_overrides(&mut cfg, args)?;
+        if let Some(warning) = cap_warning_for_stop(cfg.stop.found, cfg.stop.cap) {
+            eprintln!("warning: {warning}");
         }
         cfg.validate()
             .map_err(|e| anyhow!("saved scan config is no longer valid: {e}"))?;
+        validate_export_needs_phase2(
+            args.export.as_ref(),
+            args.export_format,
+            cfg.phase2.as_ref(),
+        )?;
         return Ok(cfg);
     }
     validate_basic_flags(args)?;
@@ -181,6 +153,11 @@ pub(crate) fn build_scan_config(args: &ScanArgs) -> Result<ScanConfig> {
     };
     cfg.validate()
         .map_err(|e| anyhow!("invalid scan config: {e}"))?;
+    validate_export_needs_phase2(
+        args.export.as_ref(),
+        args.export_format,
+        cfg.phase2.as_ref(),
+    )?;
     Ok(cfg)
 }
 
@@ -383,23 +360,30 @@ fn validate_phase2_flags(args: &ScanArgs) -> Result<()> {
     Ok(())
 }
 
+/// Fail fast when a bundle/sharelink export is requested without phase-2
+/// (story 7): those formats re-render verified endpoints, so waiting through
+/// a full scan only to learn phase-2 was missing wastes minutes. Only applies
+/// when `--export` is set; `--export-format` without `--export` already fails
+/// at clap parse time.
+fn validate_export_needs_phase2(
+    export: Option<&std::path::PathBuf>,
+    format: cf_scanner::export::ExportFormatArg,
+    phase2: Option<&api::types::Phase2Config>,
+) -> Result<()> {
+    if export.is_none() {
+        return Ok(());
+    }
+    if format.requires_phase2() && phase2.is_none() {
+        return Err(anyhow!(
+            "--export-format {} requires --phase2-configs (bundle formats re-render verified endpoints); add --phase2-configs or use --export-format csv|json",
+            format.name()
+        ));
+    }
+    Ok(())
+}
+
 fn load_wgconf_file(path: &str) -> Result<String> {
-    let read = || -> Result<String> {
-        use std::io::Read as _;
-        let file = std::fs::File::open(path)
-            .map_err(|e| anyhow!("could not open --warp-wgconf-file: {e}"))?;
-        let mut buf = String::new();
-        file.take(api::types::MAX_WGCONF_BYTES as u64 + 1)
-            .read_to_string(&mut buf)
-            .map_err(|e| anyhow!("could not read --warp-wgconf-file: {e}"))?;
-        if buf.len() > api::types::MAX_WGCONF_BYTES {
-            bail!(
-                "--warp-wgconf-file exceeds {} bytes",
-                api::types::MAX_WGCONF_BYTES
-            );
-        }
-        Ok(buf)
-    };
+    let read = || cf_scanner::wgconf::read_wgconf_file(path, "--warp-wgconf-file");
     if tokio::runtime::Handle::try_current().is_ok() {
         tokio::task::block_in_place(read)
     } else {
@@ -458,12 +442,195 @@ fn build_phase2(args: &ScanArgs) -> Result<Option<api::types::Phase2Config>> {
     }))
 }
 
+/// Apply the documented `--retry-last` override subset to a loaded config:
+/// `--phase2-configs` (re-supplied keys are never persisted),
+/// `--warp-wgconf-file`/`--warp-verify`, `--adaptive-retries`, and
+/// `--network-profile`. Everything else in [`retry_ignored_flags`] keeps the
+/// saved value. Pure apart from the wgconf file read and stderr notes.
+pub(crate) fn apply_retry_overrides(cfg: &mut ScanConfig, args: &ScanArgs) -> Result<()> {
+    if !args.phase2_configs.is_empty() {
+        let mut phase2 = cfg.phase2.take().unwrap_or_default();
+        phase2.configs = args.phase2_configs.clone();
+        cfg.phase2 = Some(phase2);
+    }
+    if let Some(path) = args.warp_wgconf_file.as_deref() {
+        let content = load_wgconf_file(path)?;
+        match cfg.warp.as_mut() {
+            Some(warp) => {
+                warp.wgconf = Some(content);
+                warp.verify_with_wgconf = args.warp_verify;
+            }
+            None => {
+                eprintln!(
+                    "warning: --warp-wgconf-file ignored with --retry-last; saved scan is not WARP mode"
+                );
+            }
+        }
+    } else if args.warp_verify {
+        eprintln!("warning: --warp-verify ignored with --retry-last; re-supply --warp-wgconf-file");
+    }
+    if args.adaptive_retries {
+        if cfg.mode != Mode::Warp {
+            bail!("--adaptive-retries requires --mode warp");
+        }
+        cfg.adaptive_retries = true;
+    }
+    if let Some(probes) = args.warp_probes
+        && cfg.adaptive_retries
+    {
+        eprintln!("note: {}", adaptive_skip_note(probes));
+        cfg.adaptive_retries = false;
+    }
+    // A --network-profile on a retry relabels the config and retunes
+    // whatever still sits at defaults; saved non-default values count as
+    // explicit and survive, mirroring the fresh-scan explicit-wins rule.
+    // Without the flag the saved profile (if any) simply persists.
+    if let Some(profile) = args.network_profile.map(NetworkProfile::from) {
+        cfg.network_profile = Some(profile);
+        let mut probes = cfg
+            .warp
+            .as_ref()
+            .map(|w| w.probes_per_endpoint)
+            .unwrap_or(api::DEFAULT_PROBES_PER_ENDPOINT);
+        apply_profile_tuning(
+            &cfg.mode,
+            Some(profile),
+            cfg.timeout_ms != api::types::DEFAULT_TIMEOUT_MS,
+            cfg.concurrency != api::types::DEFAULT_CONCURRENCY,
+            cfg.idle_hold_ms != 0,
+            probes != api::DEFAULT_PROBES_PER_ENDPOINT,
+            &mut cfg.timeout_ms,
+            &mut cfg.concurrency,
+            &mut cfg.idle_hold_ms,
+            &mut probes,
+        );
+        if let Some(warp) = cfg.warp.as_mut() {
+            warp.probes_per_endpoint = probes;
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn cap_warning(args: &ScanArgs) -> Option<String> {
-    let cap = args.cap?;
-    (cap < args.target).then(|| {
+    cap_warning_for_stop(args.target, args.cap)
+}
+
+pub(crate) fn cap_warning_for_stop(found: u32, cap: Option<u32>) -> Option<String> {
+    let cap = cap?;
+    (cap < found).then(|| {
         format!(
-            "--cap ({cap}) is below --target ({}); the scan stops at the cap and may find fewer than {} working endpoints",
-            args.target, args.target
+            "--cap ({cap}) is below --target ({found}); the scan stops at the cap and may find fewer than {found} working endpoints"
         )
     })
+}
+
+/// Scan flags that `--retry-last` ignores (spec story 8). Pure so tests pin
+/// the set without capturing stderr. The documented override subset
+/// (`--phase2-configs`, `--warp-wgconf-file`/`--warp-verify`,
+/// `--adaptive-retries`, `--network-profile`) plus run-time flags that still
+/// apply (`--seed`, `--export`, `--export-live`, `--export-format`,
+/// `--enrich-asn`) are intentionally absent: everything else reuses the saved
+/// config and must warn.
+pub(crate) fn retry_ignored_flags(args: &ScanArgs) -> Vec<&'static str> {
+    let mut ignored = Vec::new();
+    if args.mode != super::ModeArg::Cdn {
+        ignored.push("--mode");
+    }
+    if args.preset.is_some() {
+        ignored.push("--preset");
+    }
+    if args.count.is_some() {
+        ignored.push("--count");
+    }
+    if args.target != 20 {
+        ignored.push("--target");
+    }
+    if args.cap.is_some() {
+        ignored.push("--cap");
+    }
+    if args.ports.as_ref().is_some_and(|p| !p.is_empty()) {
+        ignored.push("--ports");
+    }
+    if args.concurrency != api::types::DEFAULT_CONCURRENCY {
+        ignored.push("--concurrency");
+    }
+    if args.timeout_ms != api::types::DEFAULT_TIMEOUT_MS {
+        ignored.push("--timeout-ms");
+    }
+    if args.loss_threshold.is_some() {
+        ignored.push("--loss-threshold");
+    }
+    if args.min_latency.is_some() {
+        ignored.push("--min-latency");
+    }
+    if args.idle_hold_ms != 0 {
+        ignored.push("--idle-hold-ms");
+    }
+    if args.probe != super::ProbeArg::Tls {
+        ignored.push("--probe");
+    }
+    if args.http_status_code.is_some() {
+        ignored.push("--http-status-code");
+    }
+    if !args.probe_snis.is_empty() {
+        ignored.push("--probe-snis");
+    }
+    if args.neighbor_scan != 0 {
+        ignored.push("--neighbor-scan");
+    }
+    if !args.exclude.is_empty() {
+        ignored.push("--exclude");
+    }
+    if !args.custom_cidrs.is_empty() {
+        ignored.push("--custom-cidrs");
+    }
+    if !args.colo.is_empty() {
+        ignored.push("--colo");
+    }
+    if args.ipv6 {
+        ignored.push("--ipv6");
+    }
+    if args.phase2_fragment.is_some() {
+        ignored.push("--phase2-fragment");
+    }
+    if args.phase2_custom.is_some() {
+        ignored.push("--phase2-custom");
+    }
+    if !args.phase2_snis.is_empty() {
+        ignored.push("--phase2-snis");
+    }
+    if !args.phase2_probe_urls.is_empty() {
+        ignored.push("--phase2-probe-urls");
+    }
+    if args
+        .phase2_concurrency
+        .is_some_and(|v| v != api::DEFAULT_PHASE2_CONCURRENCY)
+    {
+        ignored.push("--phase2-concurrency");
+    }
+    if args.speed_test {
+        ignored.push("--speed-test");
+    }
+    if args.min_speed.is_some() {
+        ignored.push("--min-speed");
+    }
+    if args.warp_probes.is_some() {
+        ignored.push("--warp-probes");
+    }
+    if !args.warp_endpoints.is_empty() {
+        ignored.push("--warp-endpoints");
+    }
+    if args.warp_junk_count.is_some() {
+        ignored.push("--warp-junk-count");
+    }
+    if args.warp_junk_min.is_some() {
+        ignored.push("--warp-junk-min");
+    }
+    if args.warp_junk_max.is_some() {
+        ignored.push("--warp-junk-max");
+    }
+    if args.warp_port_gate {
+        ignored.push("--warp-port-gate");
+    }
+    ignored
 }

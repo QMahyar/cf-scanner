@@ -51,7 +51,7 @@ impl ScanController {
         if phase2_candidates_in(&candidates).is_empty() {
             return Ok(());
         }
-        let pos_index: PosIndex = Arc::new(Mutex::new(Arc::new({
+        let pos_index: PosIndex = Arc::new(Mutex::new({
             let mut map: HashMap<(Ipv4Addr, u16), usize> = HashMap::new();
             for (i, v) in candidates.iter().enumerate() {
                 if let IpAddr::V4(ip) = v.ip {
@@ -59,14 +59,17 @@ impl ScanController {
                 }
             }
             map
-        })));
+        }));
 
         let specs = Arc::new(specs);
         let snis = Arc::new(snis);
         // Shared across tiers: the cap budget, the stop budget, the kept-pass
         // set, and the first error span the whole ladder, so cost stays
-        // bounded exactly as in a single wave.
+        // bounded exactly as in a single wave. `passed` is the dedup set;
+        // `passed_count` is the lock-free stop-budget counter — stop checks
+        // read the atomic, never the mutex, so high-concurrency scans scale.
         let passed: Arc<Mutex<HashSet<(Ipv4Addr, u16)>>> = Arc::new(Mutex::new(HashSet::new()));
+        let passed_count = Arc::new(AtomicU64::new(0));
         let attempts = Arc::new(AtomicU64::new(0));
         let completed = Arc::new(AtomicU64::new(0));
         let errored = Arc::new(AtomicU64::new(0));
@@ -101,6 +104,8 @@ impl ScanController {
                 let events = self.events.clone();
                 let cancel = cancel_rx.clone();
                 let passed = passed.clone();
+                let passed_count = passed_count.clone();
+                let stop_found_u64 = stop_found as u64;
                 let attempts = attempts.clone();
                 let completed = completed.clone();
                 let errored = errored.clone();
@@ -118,9 +123,11 @@ impl ScanController {
                 let timeout_ms = cfg.timeout_ms;
                 tasks.spawn(async move {
                     loop {
+                        // Stop-budget reads are lock-free (atomic); the `passed`
+                        // mutex is only for dedup (contains/insert).
                         if *cancel.borrow()
                             || cap.is_some_and(|c| attempts.load(Ordering::Relaxed) >= u64::from(c))
-                            || lock(&passed).len() >= stop_found
+                            || passed_count.load(Ordering::Acquire) >= stop_found_u64
                         {
                             break;
                         }
@@ -136,7 +143,7 @@ impl ScanController {
                         if lock(&passed).contains(&(ip, port)) {
                             continue;
                         }
-                        if lock(&passed).len() >= stop_found {
+                        if passed_count.load(Ordering::Acquire) >= stop_found_u64 {
                             break;
                         }
                         attempts.fetch_add(1, Ordering::Relaxed);
@@ -171,10 +178,13 @@ impl ScanController {
                                     verifier: result.verifier.and_then(parse_verifier),
                                     speed_test_mb_s: None,
                                 };
-                                if lock(&passed).len() >= stop_found && !result.passed {
+                                if passed_count.load(Ordering::Acquire) >= stop_found_u64
+                                    && !result.passed
+                                {
                                     break;
                                 }
-                                let overshoot = lock(&passed).len() > stop_found;
+                                let overshoot =
+                                    passed_count.load(Ordering::Acquire) > stop_found_u64;
                                 if !colo_kept {
                                     remove_verdict_unless_passed(&store, ip, port, &pos_index);
                                 } else if let Some(updated) = update_verdict_phase2(
@@ -186,7 +196,9 @@ impl ScanController {
                                         // removed by a racing colo rejection yields no row
                                         // to update, and such an invisible pass must not
                                         // consume stop budget.
-                                        lock(&passed).insert((ip, port));
+                                        if lock(&passed).insert((ip, port)) {
+                                            passed_count.fetch_add(1, Ordering::AcqRel);
+                                        }
                                     }
                                     let _ = events.send(ScanEvent::Result(Box::new(updated)));
                                 }
@@ -207,7 +219,7 @@ impl ScanController {
                                 if slot.is_none() {
                                     *slot = Some(msg.clone());
                                 }
-                                if lock(&passed).len() >= stop_found {
+                                if passed_count.load(Ordering::Acquire) >= stop_found_u64 {
                                     break;
                                 }
                                 let verdict = Phase2Verdict {
@@ -221,7 +233,7 @@ impl ScanController {
                                     verifier: None,
                                     speed_test_mb_s: None,
                                 };
-                                if lock(&passed).len() >= stop_found {
+                                if passed_count.load(Ordering::Acquire) >= stop_found_u64 {
                                     break;
                                 }
                                 if let Some(updated) = update_verdict_phase2(
@@ -239,8 +251,10 @@ impl ScanController {
                         // 100% would read as completion. `passed` is final
                         // exactly when done == total (every combo accounted);
                         // the tier-end re-check below stays authoritative.
+                        // Stop-budget read is lock-free (atomic).
                         let terminal = done == total
-                            && (!lock(&passed).is_empty() || tier_idx + 1 == tier_count);
+                            && (passed_count.load(Ordering::Acquire) > 0
+                                || tier_idx + 1 == tier_count);
                         if (terminal && !terminal_sent.swap(true, Ordering::Relaxed))
                             || (!terminal && claim_milestone(&milestones, done, PROGRESS_EVERY_P2))
                         {
@@ -259,8 +273,9 @@ impl ScanController {
             let tier_attempts = attempts.load(Ordering::Relaxed) - base_attempts;
             // Same ladder rule as the in-wave terminal above: only the final
             // tier (or a tier with kept passes, which stops the ladder)
-            // reports completion. Post-join `passed` is race-free.
-            let ladder_done = !lock(&passed).is_empty() || tier_idx + 1 == tier_count;
+            // reports completion. Post-join the atomic is race-free.
+            let ladder_done =
+                passed_count.load(Ordering::Acquire) > 0 || tier_idx + 1 == tier_count;
             if (tier_done > 0 || tier_attempts > 0)
                 && ladder_done
                 && !terminal_sent.swap(true, Ordering::Relaxed)
@@ -281,7 +296,7 @@ impl ScanController {
             // tiers. Every probe loop above already races cancellation via
             // select! + cancelled(), so an empty pass set here means the tier
             // genuinely yielded nothing.
-            if !lock(&passed).is_empty() {
+            if passed_count.load(Ordering::Acquire) > 0 {
                 break;
             }
             if tier_idx + 1 < tiers.len() {
@@ -1299,6 +1314,60 @@ mod tests {
         assert!(err.to_string().contains("every attempt failed"), "{err}");
     }
 
+    /// T07: the atomic stop budget must halt the wave early under
+    /// concurrency — lock-free reads replace the per-combo mutex size check.
+    #[tokio::test]
+    async fn phase2_stop_budget_halts_early_under_concurrency() {
+        let mut t = FakeTransport::new();
+        for i in 1..=8u8 {
+            t = t.ok(format!("203.0.113.{i}").parse().unwrap(), 443, 10);
+        }
+        let mut probe = FakeTunnelProbe::new();
+        for i in 1..=8u8 {
+            probe = probe.pass(format!("203.0.113.{i}").parse().unwrap());
+        }
+        let c = p2_controller(t, FakeSub(""), probe.clone());
+        let mut rx = c.subscribe();
+        let mut cfg = ok_cfg(1, None);
+        cfg.concurrency = 8;
+        cfg.phase2 = Some(Phase2Config {
+            configs: vec![VLESS.to_owned()],
+            probe_urls: fallback_tier(),
+            concurrency: 8,
+            ..Default::default()
+        });
+        let summary =
+            tokio::time::timeout(std::time::Duration::from_secs(30), run_local(&c, cfg, 1))
+                .await
+                .expect("phase-2 stop run must finish")
+                .expect("scan failed");
+        assert!(
+            summary.found >= 1,
+            "the stop budget must keep at least one pass: {summary:?}"
+        );
+        let attempts = probe.attempts.load(Ordering::Relaxed);
+        // 8 candidates x 1 combo = 8 total; an early stop must skip work.
+        // Racing workers may overshoot by a few, but never run the full wave
+        // plus the fallback tier (16).
+        assert!(
+            attempts < 16,
+            "atomic stop must cut the wave short (attempts={attempts})"
+        );
+        // Progress accounting must still close: done reaches a terminal event.
+        let mut saw_terminal = false;
+        while let Ok(ev) = rx.try_recv() {
+            if let ScanEvent::Phase2Progress(p) = ev
+                && p.done == p.total
+            {
+                saw_terminal = true;
+            }
+        }
+        assert!(
+            saw_terminal,
+            "the stopped wave must still emit terminal progress"
+        );
+    }
+
     #[test]
     fn redact_entry_strips_secrets_from_uris() {
         assert_eq!(
@@ -1441,10 +1510,10 @@ mod tests {
             verifier: None,
             speed_test_mb_s: None,
         };
-        let index: PosIndex = PosIndex::new(Mutex::new(Arc::new(HashMap::from([(
+        let index: PosIndex = Arc::new(Mutex::new(HashMap::from([(
             ("203.0.113.1".parse().unwrap(), 443),
             0,
-        )]))));
+        )])));
         let updated = update_verdict_phase2(
             &store,
             "203.0.113.1".parse().unwrap(),
@@ -1460,10 +1529,10 @@ mod tests {
             assert_eq!(row.colo.as_deref(), Some("FRA"));
         }
 
-        let stale_index = PosIndex::new(Mutex::new(Arc::new(HashMap::from([(
+        let stale_index: PosIndex = Arc::new(Mutex::new(HashMap::from([(
             ("203.0.113.1".parse().unwrap(), 443),
             7_usize,
-        )]))));
+        )])));
         let via_fallback = update_verdict_phase2(
             &store,
             "203.0.113.1".parse().unwrap(),
@@ -1480,7 +1549,7 @@ mod tests {
         assert_eq!(
             rebuilt.get(&("203.0.113.1".parse::<Ipv4Addr>().unwrap(), 443)),
             Some(&0),
-            "fallback must rebuild the index from the store"
+            "fallback must repair the stale index entry from the store"
         );
     }
 

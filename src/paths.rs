@@ -355,17 +355,61 @@ fn secret_temp_name(name: &str, salt: u32) -> String {
 pub fn write_secret_atomic(dest: &std::path::Path, data: &[u8]) -> Result<()> {
     if let Some(parent) = dest.parent() {
         std::fs::create_dir_all(parent)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let _ = std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700));
+        }
     }
     let name = dest
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| "out".to_owned());
-    let tmp = dest.with_file_name(secret_temp_name(&name, random_u32()));
-    let result = write_secret(&tmp, data).and_then(|()| std::fs::rename(&tmp, dest));
-    if result.is_err() {
-        let _ = std::fs::remove_file(&tmp);
+    // Mirror export::create_tmp (story 26): create_new + re-salt on
+    // AlreadyExists so a colliding tmp (another writer drew the same salt)
+    // is never truncated — we only ever write a file we just created.
+    for _ in 0..3 {
+        let tmp = dest.with_file_name(secret_temp_name(&name, random_u32()));
+        let mut opts = std::fs::OpenOptions::new();
+        opts.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            opts.mode(0o600);
+        }
+        let mut file = match opts.open(&tmp) {
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e.into()),
+            Ok(f) => f,
+        };
+        #[cfg(windows)]
+        if let Err(e) = lock_down_to_owner(&tmp) {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(e.into());
+        }
+        let result = (|| -> std::io::Result<()> {
+            use std::io::Write as _;
+            file.write_all(data)?;
+            file.sync_all()?;
+            drop(file);
+            #[cfg(windows)]
+            {
+                let _ = std::fs::remove_file(dest);
+            }
+            std::fs::rename(&tmp, dest)?;
+            #[cfg(windows)]
+            let _ = lock_down_to_owner(dest);
+            Ok(())
+        })();
+        if result.is_err() {
+            let _ = std::fs::remove_file(&tmp);
+        }
+        return result.map_err(anyhow::Error::from);
     }
-    result.map_err(anyhow::Error::from)
+    Err(anyhow!(
+        "could not create a unique temp file next to {}",
+        dest.display()
+    ))
 }
 
 #[cfg(test)]
@@ -615,5 +659,85 @@ mod tests {
         );
         // The salt is zero-padded hex so names sort stably and have fixed shape.
         assert_eq!(secret_temp_name("out", 1), "out.tmp-00000001");
+    }
+
+    #[test]
+    fn write_secret_atomic_never_truncates_a_colliding_tmp_and_leaves_no_remnant() {
+        // Story 26: create_new + re-salt (mirrors export::create_tmp). A
+        // pre-placed file at a colliding tmp name must survive (we retry with
+        // a fresh salt), and no .tmp- sibling may linger after success.
+        let dir = std::env::temp_dir().join(format!(
+            "cf-scanner-atomic-collide-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let dest = dir.join("secret.json");
+        // Seed a colliding tmp name candidate: even if the RNG never draws
+        // this exact salt, the create_new contract is pinned by the concurrent
+        // test below; here we pin the no-clobber shape — a pre-existing
+        // sibling is never truncated by a later atomic write.
+        let decoy = dir.join("secret.json.tmp-00000000");
+        std::fs::write(&decoy, b"decoy").unwrap();
+        write_secret_atomic(&dest, b"payload").expect("atomic write must succeed");
+        assert_eq!(std::fs::read(&dest).unwrap(), b"payload");
+        assert_eq!(
+            std::fs::read(&decoy).unwrap(),
+            b"decoy",
+            "a colliding tmp sibling must never be truncated"
+        );
+        let _ = std::fs::remove_file(&decoy);
+        let leftovers: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.contains(".tmp-"))
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "tmp files must be cleaned up, found {leftovers:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn write_secret_atomic_concurrent_writers_agree_and_leave_no_tmp() {
+        let dir = std::env::temp_dir().join(format!(
+            "cf-scanner-atomic-concurrent-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let dest = dir.join("secret.json");
+        let first = {
+            let dest = dest.clone();
+            std::thread::spawn(move || write_secret_atomic(&dest, b"writer-one\n"))
+        };
+        let second = {
+            let dest = dest.clone();
+            std::thread::spawn(move || write_secret_atomic(&dest, b"writer-two\n"))
+        };
+        assert!(first.join().unwrap().is_ok());
+        assert!(second.join().unwrap().is_ok());
+        let body = std::fs::read(&dest).unwrap();
+        assert!(
+            body == b"writer-one\n" || body == b"writer-two\n",
+            "destination must hold exactly one writer's body"
+        );
+        let leftovers: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.contains(".tmp-"))
+            .collect();
+        assert!(leftovers.is_empty(), "no tmp files must remain");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -375,6 +375,12 @@ fn bundle_export_formats_write_parseable_files_even_with_zero_findings() {
             "2".into(),
             "--seed".into(),
             "11".into(),
+            // Bundle formats require phase-2 (fail-fast gate, story 7); the
+            // dummy URI parses but never verifies offline (zero findings),
+            // so the empty-bundle assertions below still hold.
+            "--phase2-configs".into(),
+            "vless://11111111-2222-3333-4444-555555555555@origin.example.com:443?security=tls&sni=origin.example.com&type=ws&path=%2Fws&host=ws.example.com#orig"
+                .into(),
             "--export".into(),
             file.to_string_lossy().into_owned(),
             "--export-format".into(),
@@ -490,4 +496,125 @@ fn phase2_with_an_unresolvable_config_reports_a_clean_config_error() {
     let err = stderr_of(&out);
     assert!(err.contains("error:"), "{err}");
     assert!(!err.contains("panic"), "{err}");
+}
+
+#[test]
+fn export_dash_is_rejected_before_scanning_to_keep_stdout_pure_ndjson() {
+    let out = run(&[
+        "scan",
+        "--custom-cidrs",
+        "203.0.113.0/30",
+        "--count",
+        "2",
+        "--target",
+        "1",
+        "--cap",
+        "2",
+        "--timeout-ms",
+        "500",
+        "--concurrency",
+        "2",
+        "--seed",
+        "7",
+        "--export",
+        "-",
+    ]);
+    assert!(!out.status.success());
+    let err = stderr_of(&out);
+    assert!(err.contains("--export"), "{err}");
+    assert!(err.contains("NDJSON"), "{err}");
+    // Stdout must stay parseable: no export blob mixed in (empty or error
+    // envelope only).
+    for line in stdout_of(&out).lines().filter(|l| !l.is_empty()) {
+        let v: serde_json::Value =
+            serde_json::from_str(line).unwrap_or_else(|e| panic!("non-NDJSON line {line:?}: {e}"));
+        assert!(v.is_object(), "{line}");
+    }
+}
+
+#[test]
+fn bundle_export_without_phase2_fails_fast_with_an_actionable_error() {
+    let dir = std::env::temp_dir().join(format!(
+        "cf-scanner-e2e-export-gate-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let dest = dir.join("out.txt");
+    let out = run(&[
+        "scan",
+        "--custom-cidrs",
+        "203.0.113.0/30",
+        "--count",
+        "2",
+        "--target",
+        "1",
+        "--cap",
+        "2",
+        "--timeout-ms",
+        "500",
+        "--concurrency",
+        "2",
+        "--seed",
+        "7",
+        "--export",
+        dest.to_str().unwrap(),
+        "--export-format",
+        "singbox",
+    ]);
+    assert!(!out.status.success());
+    let err = stderr_of(&out);
+    assert!(err.contains("--export-format"), "{err}");
+    assert!(err.contains("--phase2-configs"), "{err}");
+    assert!(
+        !dest.exists(),
+        "the fail-fast gate must fire before any export file is written"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn live_export_writes_parseable_ndjson_rows_offline() {
+    let dir = std::env::temp_dir().join(format!(
+        "cf-scanner-e2e-live-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let live = dir.join("live.jsonl");
+    let out = run(&[
+        "scan",
+        "--custom-cidrs",
+        "203.0.113.0/30",
+        "--count",
+        "4",
+        "--target",
+        "1",
+        "--cap",
+        "4",
+        "--timeout-ms",
+        "500",
+        "--concurrency",
+        "4",
+        "--seed",
+        "7",
+        "--export-live",
+        live.to_str().unwrap(),
+    ]);
+    assert!(out.status.success(), "stderr: {}", stderr_of(&out));
+    let body = std::fs::read_to_string(&live).expect("live export must exist");
+    assert!(!body.is_empty(), "offline scan still records verdict rows");
+    for line in body.lines().filter(|l| !l.is_empty()) {
+        let v: serde_json::Value =
+            serde_json::from_str(line).unwrap_or_else(|e| panic!("non-NDJSON line {line:?}: {e}"));
+        let o = v.as_object().expect("live rows must be JSON objects");
+        assert!(o.contains_key("ip"), "{line}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
 }

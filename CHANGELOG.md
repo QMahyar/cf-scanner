@@ -3,6 +3,15 @@
 All notable changes to CF-Scanner are documented here, grouped by
 Added / Changed / Fixed / Deprecated / Removed / Security, newest on top.
 
+## [Unreleased]
+
+### Changed
+- **check-sub NDJSON envelope + JSON-safe aggregate.** Every row now carries
+  `"type":"check_result"` so one NDJSON parser handles both scan and
+  check-sub streams; aggregate rows for unparseable lines use
+  `"config_index":null` instead of the `18446744073709551615` (`usize::MAX`)
+  sentinel, which exceeds JS 2^53.
+
 ## [0.15.0] - 2026-09-19
 
 ### Added

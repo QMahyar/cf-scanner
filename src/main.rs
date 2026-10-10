@@ -40,7 +40,12 @@ async fn main() -> ExitCode {
     match run(cli).await {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
-            if json_errors {
+            // T07 story 16: a scan failure already streamed its single `Failed`
+            // envelope on stdout — a generic `{"type":"error"}` here would be
+            // a second shape for the same failure. Pre-scan failures (config,
+            // export, clap) never streamed, so they still get the envelope.
+            let streamed = err.downcast_ref::<ScanFailedStreamed>().is_some();
+            if json_errors && !streamed {
                 let line =
                     serde_json::json!({ "type": "error", "error": err.to_string() }).to_string();
                 let _ = write_stdout_line(&line);
@@ -50,6 +55,21 @@ async fn main() -> ExitCode {
         }
     }
 }
+
+/// Marker for scan failures whose single `Failed` envelope was already
+/// streamed on stdout by the engine. `main` spots it to skip the generic
+/// `--json-errors` duplicate (T07 story 16). Displays as the inner message so
+/// stderr keeps today's human text.
+#[derive(Debug)]
+struct ScanFailedStreamed(String);
+
+impl std::fmt::Display for ScanFailedStreamed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl std::error::Error for ScanFailedStreamed {}
 
 fn env_filter(verbose: bool, rust_log: Option<&str>) -> EnvFilter {
     let directive = match rust_log.map(str::trim).filter(|s| !s.is_empty()) {
@@ -162,6 +182,7 @@ async fn run(cli: Cli) -> Result<()> {
 
 fn check_row_json(row: &cf_scanner::check_sub::CheckRow) -> serde_json::Value {
     serde_json::json!({
+        "type": "check_result",
         "config_index": row.config_index,
         "tag": row.tag,
         "server": row.server,
@@ -237,8 +258,12 @@ fn spawn_cancel_on_ctrl_c(
 }
 
 async fn run_scan(args: ScanArgs, verbose: bool) -> Result<()> {
-    let cfg = build_scan_config(&args)?;
+    // WHY: stdout already streams NDJSON; both stdout exports are rejected
+    // before any probe runs (stories 5-6) so a bad flag fails in ms, not
+    // after minutes of scanning.
+    reject_stdout_export(args.export.as_deref())?;
     reject_stdout_live_export(args.export_live.as_deref())?;
+    let cfg = build_scan_config(&args)?;
     // Fail fast on an unwritable live target: every later row would fail too.
     let mut live = args
         .export_live
@@ -258,13 +283,25 @@ async fn run_scan(args: ScanArgs, verbose: bool) -> Result<()> {
         }
     };
     let stderr_is_tty = std::io::stderr().is_terminal();
+    // T07 story 15: dropped NDJSON rows are counted so `summary.found`
+    // reconciles with emitted rows; the total surfaces once on stderr below.
+    // Atomics (shared with the streaming borrow) so the count survives the
+    // run call that consumes the closure's borrows.
+    let serialize_drops = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let emitted_results = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let drops_c = serialize_drops.clone();
+    let emitted_c = emitted_results.clone();
     let streaming = |e: ScanEvent| match &e {
         ScanEvent::Result(v) => {
             if verbose {
                 clear_ticker_line();
                 eprintln!("{}", export::diagnostic_line(v));
             }
-            if let Some(line) = serialize_event(&e) {
+            let mut local_drops = drops_c.load(std::sync::atomic::Ordering::Relaxed);
+            let line = serialize_event_counted(&e, &mut local_drops);
+            drops_c.store(local_drops, std::sync::atomic::Ordering::Relaxed);
+            if let Some(line) = line {
+                emitted_c.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 write_line(&line);
                 if let Some(live) = live.as_mut()
                     && let Err(err) = live.push_line(&line)
@@ -276,7 +313,10 @@ async fn run_scan(args: ScanArgs, verbose: bool) -> Result<()> {
             }
         }
         ScanEvent::Finished(_) | ScanEvent::Failed(_) => {
-            if let Some(line) = serialize_event(&e) {
+            let mut local_drops = drops_c.load(std::sync::atomic::Ordering::Relaxed);
+            let line = serialize_event_counted(&e, &mut local_drops);
+            drops_c.store(local_drops, std::sync::atomic::Ordering::Relaxed);
+            if let Some(line) = line {
                 write_line(&line);
             }
         }
@@ -309,16 +349,34 @@ async fn run_scan(args: ScanArgs, verbose: bool) -> Result<()> {
     }
     .map_err(|e| anyhow!("scan failed: {e:#}"));
     cancel_on_ctrl_c.abort();
+    let drops = serialize_drops.load(std::sync::atomic::Ordering::Relaxed);
+    let emitted = emitted_results.load(std::sync::atomic::Ordering::Relaxed);
     let summary = match result {
         Ok(summary) => summary,
         Err(err) => {
             clear_ticker_line();
+            if drops > 0 {
+                eprintln!(
+                    "warning: {drops} result row(s) dropped (serialization failed); \
+                     {emitted} row(s) emitted before the failure"
+                );
+            }
             if let Some(live) = live.as_mut() {
                 let _ = live.finish();
             }
-            return Err(err);
+            // T07 story 16: the engine already streamed a single `Failed`
+            // envelope for this run — mark it so main skips its generic
+            // `--json-errors` duplicate and stdout keeps exactly one shape.
+            return Err(anyhow::Error::new(ScanFailedStreamed(err.to_string())));
         }
     };
+    if drops > 0 {
+        eprintln!(
+            "warning: {drops} result row(s) dropped (serialization failed); \
+             {emitted} row(s) emitted, summary found {} working",
+            summary.found
+        );
+    }
     clear_ticker_line();
     eprintln!(
         "scanned {} hosts, found {} working in {} ms",
@@ -591,6 +649,18 @@ fn serialize_event<T: serde::Serialize>(value: &T) -> Option<String> {
     }
 }
 
+/// T07 story 15: counted wrapper so dropped rows reconcile with
+/// `summary.found` — the caller surfaces the total once on stderr.
+fn serialize_event_counted<T: serde::Serialize>(value: &T, drops: &mut u64) -> Option<String> {
+    match serialize_event(value) {
+        Some(line) => Some(line),
+        None => {
+            *drops += 1;
+            None
+        }
+    }
+}
+
 fn write_stdout_line(line: &str) -> std::io::Result<()> {
     use std::io::Write as _;
     let mut out = std::io::stdout().lock();
@@ -652,6 +722,15 @@ fn warp_config_output(text: &str, show_link: bool) -> Result<(String, Option<Str
 fn reject_stdout_live_export(path: Option<&std::path::Path>) -> Result<()> {
     if path.is_some_and(|p| p.as_os_str() == "-") {
         anyhow::bail!("--export-live - is redundant: NDJSON results already stream on stdout");
+    }
+    Ok(())
+}
+
+fn reject_stdout_export(path: Option<&std::path::Path>) -> Result<()> {
+    if path.is_some_and(|p| p.as_os_str() == "-") {
+        anyhow::bail!(
+            "--export - would mix the export blob into the NDJSON stream on stdout; write to a file instead (e.g. --export results.csv)"
+        );
     }
     Ok(())
 }
@@ -791,10 +870,12 @@ mod tests {
     #[test]
     fn check_sub_rows_emit_config_index_for_ndjson() {
         // Contract guard for the check-sub NDJSON shape: config_index maps a
-        // row back to its config position (usize::MAX only for aggregate
-        // rows); no keys or subscription content are emitted.
+        // row back to its config position (null only for aggregate rows);
+        // every row carries the "check_result" type envelope so one NDJSON
+        // parser handles both scan and check-sub streams. No keys or
+        // subscription content are emitted.
         let real_row = cf_scanner::check_sub::CheckRow {
-            config_index: 0,
+            config_index: Some(0),
             tag: "a".to_owned(),
             server: "1.2.3.4:443".to_owned(),
             ok: true,
@@ -802,7 +883,7 @@ mod tests {
             error: None,
         };
         let aggregate_row = cf_scanner::check_sub::CheckRow {
-            config_index: usize::MAX,
+            config_index: None,
             tag: "<unparseable lines>".to_owned(),
             server: "-".to_owned(),
             ok: false,
@@ -812,10 +893,30 @@ mod tests {
         let line = check_row_json(&real_row).to_string();
         assert!(line.contains("\"config_index\":0"), "{line}");
         assert!(line.contains("\"ok\":true"), "{line}");
+        assert!(
+            line.contains("\"type\":\"check_result\""),
+            "every row carries the type envelope: {line}"
+        );
         let line = check_row_json(&aggregate_row).to_string();
         assert!(
-            line.contains(&format!("\"config_index\":{}", usize::MAX)),
-            "{line}"
+            line.contains("\"config_index\":null"),
+            "aggregate sentinel must be JSON-safe null, got: {line}"
+        );
+        assert!(
+            line.contains("\"type\":\"check_result\""),
+            "aggregate rows carry the envelope too: {line}"
+        );
+        assert!(
+            !line.contains("18446744073709551615"),
+            "usize::MAX must never reach NDJSON: {line}"
+        );
+        // JSON-safe: the aggregate value parses and is null, not a
+        // precision-losing integer above JS 2^53.
+        let parsed: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert!(parsed.get("config_index").is_some_and(|v| v.is_null()));
+        assert_eq!(
+            parsed.get("type").and_then(|v| v.as_str()),
+            Some("check_result")
         );
     }
 
@@ -844,6 +945,62 @@ mod tests {
         let line = serialize_event(&verdict).unwrap();
         assert!(line.contains("\"ip\":\"1.2.3.4\""), "{line}");
         assert!(serialize_event(&Fails).is_none());
+    }
+
+    #[test]
+    fn serialize_drops_are_counted_for_stderr_reconciliation() {
+        struct Fails;
+        impl serde::Serialize for Fails {
+            fn serialize<S: serde::Serializer>(&self, _serializer: S) -> Result<S::Ok, S::Error> {
+                Err(serde::ser::Error::custom("boom"))
+            }
+        }
+        let mut drops = 0u64;
+        assert!(serialize_event_counted(&Fails, &mut drops).is_none());
+        assert_eq!(drops, 1, "a failed row must increment the drop counter");
+        assert!(serialize_event_counted(&Fails, &mut drops).is_none());
+        assert_eq!(
+            drops, 2,
+            "drops accumulate so the summary warning reconciles"
+        );
+        let verdict = api::types::Verdict {
+            ip: "1.2.3.4".parse().unwrap(),
+            port: 443,
+            latency_ms: Some(12),
+            country: None,
+            colo: None,
+            phase2: None,
+            sent: 1,
+            received: 1,
+            loss_pct: Some(0),
+            fail_reason: None,
+            asn: None,
+            isp: None,
+        };
+        assert!(serialize_event_counted(&verdict, &mut drops).is_some());
+        assert_eq!(drops, 2, "good rows must not move the counter");
+    }
+
+    #[test]
+    fn streamed_scan_failures_skip_the_generic_json_duplicate() {
+        // T07 story 16 pin: engine-streamed failures carry the marker, so
+        // main's `{"type":"error"}` duplicate stays off and stdout keeps one
+        // shape; pre-scan errors have no marker and keep the envelope.
+        let streamed = anyhow::Error::new(ScanFailedStreamed("scan failed: nope".to_owned()));
+        assert!(
+            streamed.downcast_ref::<ScanFailedStreamed>().is_some(),
+            "streamed failures must be recognizable"
+        );
+        assert_eq!(
+            streamed.to_string(),
+            "scan failed: nope",
+            "stderr keeps the human text"
+        );
+        let plain: anyhow::Error = anyhow!("concurrency must be nonzero");
+        assert!(
+            plain.downcast_ref::<ScanFailedStreamed>().is_none(),
+            "pre-scan failures must still get the generic envelope"
+        );
     }
 
     fn bind_verdict(ip: &str, port: u16, latency_ms: Option<u32>) -> Verdict {
@@ -975,5 +1132,16 @@ mod tests {
         assert!(reject_stdout_live_export(Some(std::path::Path::new("live.jsonl"))).is_ok());
         let err = reject_stdout_live_export(Some(std::path::Path::new("-"))).unwrap_err();
         assert!(err.to_string().contains("--export-live"), "{err:#}");
+    }
+
+    #[test]
+    fn reject_stdout_export_rejects_dash_with_actionable_error() {
+        assert!(reject_stdout_export(None).is_ok());
+        assert!(reject_stdout_export(Some(std::path::Path::new("results.csv"))).is_ok());
+        let err = reject_stdout_export(Some(std::path::Path::new("-"))).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("--export"), "{err:#}");
+        assert!(msg.contains("NDJSON"), "{err:#}");
+        assert!(msg.contains("results.csv"), "{err:#}");
     }
 }

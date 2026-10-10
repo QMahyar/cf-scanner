@@ -434,39 +434,44 @@ impl ScanConfig {
             reject_non_routable(self)?;
             Ok(())
         })();
-        result.map_err(|e| {
-            let sanitize = |s: String| {
-                let san = crate::configs::sanitize_error_text(&s);
-                san.chars().take(512).collect::<String>()
-            };
-            match e {
-                ConfigError::InvalidCidr(s, reason) => {
-                    ConfigError::InvalidCidr(sanitize(s), sanitize(reason))
-                }
-                ConfigError::InvalidEndpoint(s, reason) => {
-                    ConfigError::InvalidEndpoint(sanitize(s), sanitize(reason))
-                }
-                ConfigError::InvalidSni(s, reason) => {
-                    ConfigError::InvalidSni(sanitize(s), sanitize(reason))
-                }
-                ConfigError::InvalidFragment(field, val) => {
-                    ConfigError::InvalidFragment(field, sanitize(val))
-                }
-                ConfigError::InvalidFragmentRange(field, val) => {
-                    ConfigError::InvalidFragmentRange(field, sanitize(val))
-                }
-                ConfigError::NonRoutableCidr(s) => ConfigError::NonRoutableCidr(sanitize(s)),
-                ConfigError::NonRoutableEndpoint(s) => {
-                    ConfigError::NonRoutableEndpoint(sanitize(s))
-                }
-                ConfigError::InvalidColo(s) => ConfigError::InvalidColo(sanitize(s)),
-                // WHY: every other variant today carries only numbers or
-                // unit/static markers, so returning it unchanged leaks
-                // nothing. Any NEW string-carrying variant must gain an
-                // explicit sanitizing arm above — never extend this fallback.
-                other => other,
-            }
-        })
+        result.map_err(sanitize_validation_error)
+    }
+}
+
+/// Single home for validation-error redaction: string payloads are scrubbed
+/// of URLs/credentials then truncated to 512 chars. Numeric/unit variants
+/// pass through unchanged. Any NEW string-carrying `ConfigError` variant must
+/// gain an explicit arm here — never extend the `other` fallback — and the
+/// exhaustiveness test below fails to compile until it does.
+pub(crate) fn sanitize_validation_error(e: ConfigError) -> ConfigError {
+    let sanitize = |s: String| {
+        let san = crate::configs::sanitize_error_text(&s);
+        san.chars().take(512).collect::<String>()
+    };
+    match e {
+        ConfigError::InvalidCidr(s, reason) => {
+            ConfigError::InvalidCidr(sanitize(s), sanitize(reason))
+        }
+        ConfigError::InvalidEndpoint(s, reason) => {
+            ConfigError::InvalidEndpoint(sanitize(s), sanitize(reason))
+        }
+        ConfigError::InvalidSni(s, reason) => {
+            ConfigError::InvalidSni(sanitize(s), sanitize(reason))
+        }
+        ConfigError::InvalidFragment(field, val) => {
+            ConfigError::InvalidFragment(field, sanitize(val))
+        }
+        ConfigError::InvalidFragmentRange(field, val) => {
+            ConfigError::InvalidFragmentRange(field, sanitize(val))
+        }
+        ConfigError::NonRoutableCidr(s) => ConfigError::NonRoutableCidr(sanitize(s)),
+        ConfigError::NonRoutableEndpoint(s) => ConfigError::NonRoutableEndpoint(sanitize(s)),
+        ConfigError::InvalidColo(s) => ConfigError::InvalidColo(sanitize(s)),
+        // WHY: every other variant today carries only numbers or
+        // unit/static markers, so returning it unchanged leaks
+        // nothing. Any NEW string-carrying variant must gain an
+        // explicit sanitizing arm above — never extend this fallback.
+        other => other,
     }
 }
 

@@ -6,7 +6,10 @@
 //! existing redaction (`configs::sanitize_error_text`). Caps are enforced at
 //! the subscription level and per config; keys never reach output.
 
+use std::future::Future;
 use std::net::Ipv4Addr;
+use std::pin::Pin;
+use std::task::Poll;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -17,14 +20,22 @@ use crate::api::types::{
 use crate::configs::{OutboundSpec, SubFetch};
 use crate::verify::{ProbeRequest, TunnelProbe};
 
+/// Bounded fan-out for subscription probing (phase-2 `chunks` pattern).
+/// Single-task concurrency: each chunk's `check_one` futures are polled
+/// together via `poll_fn`, so N configs are in flight at once while rows
+/// stay in `config_index` order. No cancel is plumbed for check-sub
+/// (single-shot CLI), so the bound is the constant.
+pub const CHECK_SUB_CONCURRENCY: usize = 16;
+
 /// One NDJSON row of the report.
 ///
 /// `config_index` is the row's config position in the parsed subscription
 /// spec list; aggregate rows (unparseable lines, which have no single
-/// config) carry the `usize::MAX` sentinel.
+/// config) carry `None` (serialized as JSON `null`, safe for parsers that
+/// lose precision above 2^53).
 #[derive(Debug)]
 pub struct CheckRow {
-    pub config_index: usize,
+    pub config_index: Option<usize>,
     pub tag: String,
     pub server: String,
     pub ok: bool,
@@ -58,14 +69,50 @@ pub async fn check_subscription(
     let probe_urls = [DEFAULT_PROBE_URL.to_owned()];
 
     let mut rows = Vec::new();
-    for (config_index, spec) in parsed.specs.iter().enumerate() {
-        rows.push(check_one(config_index, spec, &probe_urls, probe, timeout_ms).await);
+    let width = CHECK_SUB_CONCURRENCY.max(1);
+    for (chunk_no, chunk) in parsed.specs.chunks(width).enumerate() {
+        let base = chunk_no * width;
+        let mut futs: Vec<Pin<Box<dyn Future<Output = CheckRow> + Send + '_>>> =
+            Vec::with_capacity(chunk.len());
+        for (offset, spec) in chunk.iter().enumerate() {
+            futs.push(Box::pin(check_one(
+                base + offset,
+                spec,
+                &probe_urls,
+                probe,
+                timeout_ms,
+            )));
+        }
+        let mut results: Vec<Option<CheckRow>> = (0..futs.len()).map(|_| None).collect();
+        std::future::poll_fn(|cx| {
+            let mut all_done = true;
+            for (i, fut) in futs.iter_mut().enumerate() {
+                if results[i].is_some() {
+                    continue;
+                }
+                match fut.as_mut().poll(cx) {
+                    Poll::Ready(row) => {
+                        results[i] = Some(row);
+                    }
+                    Poll::Pending => {
+                        all_done = false;
+                    }
+                }
+            }
+            if all_done {
+                Poll::Ready(())
+            } else {
+                Poll::Pending
+            }
+        })
+        .await;
+        rows.extend(results.into_iter().flatten());
     }
     // Unparseable lines are reported as one aggregate row (they carry no
     // per-line identity to report).
     if parsed.ignored > 0 || !parsed.errors.is_empty() {
         rows.push(CheckRow {
-            config_index: usize::MAX,
+            config_index: None,
             tag: "<unparseable lines>".to_owned(),
             server: "-".to_owned(),
             ok: false,
@@ -91,7 +138,7 @@ async fn check_one(
     let server = format!("{}:{}", spec.server, spec.port);
     let Ok(dial_ip) = spec.server.parse::<Ipv4Addr>() else {
         return CheckRow {
-            config_index,
+            config_index: Some(config_index),
             tag,
             server,
             ok: false,
@@ -115,7 +162,7 @@ async fn check_one(
     .await;
     match result {
         Err(_) => CheckRow {
-            config_index,
+            config_index: Some(config_index),
             tag,
             server,
             ok: false,
@@ -125,7 +172,7 @@ async fn check_one(
         Ok(Ok(res)) => {
             if res.passed {
                 CheckRow {
-                    config_index,
+                    config_index: Some(config_index),
                     tag,
                     server,
                     ok: true,
@@ -134,7 +181,7 @@ async fn check_one(
                 }
             } else {
                 CheckRow {
-                    config_index,
+                    config_index: Some(config_index),
                     tag,
                     server,
                     ok: false,
@@ -146,7 +193,7 @@ async fn check_one(
         Ok(Err(err)) => {
             // The probe errors carry sanitized text already; belt and braces.
             CheckRow {
-                config_index,
+                config_index: Some(config_index),
                 tag,
                 server,
                 ok: false,
@@ -162,7 +209,9 @@ mod tests {
     use super::*;
     use crate::configs::{SubscriptionParse, parse_uri};
     use std::pin::Pin;
+    use std::sync::Arc;
     use std::sync::Mutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     /// Returns a canned subscription body (real parse path, no network).
     struct FakeSub(String);
@@ -388,14 +437,13 @@ trojan://pw@1.2.3.5:443#b
         .unwrap();
         assert_eq!(rows.len(), 3, "two config rows + one aggregate");
         assert_eq!(rows[0].tag, "a");
-        assert_eq!(rows[0].config_index, 0, "{rows:?}");
+        assert_eq!(rows[0].config_index, Some(0), "{rows:?}");
         assert_eq!(rows[1].tag, "b");
-        assert_eq!(rows[1].config_index, 1, "{rows:?}");
+        assert_eq!(rows[1].config_index, Some(1), "{rows:?}");
         assert_eq!(rows[2].tag, "<unparseable lines>");
         assert_eq!(
-            rows[2].config_index,
-            usize::MAX,
-            "aggregate rows keep the documented sentinel"
+            rows[2].config_index, None,
+            "aggregate rows use None so NDJSON serializes config_index as null"
         );
     }
 
@@ -405,5 +453,84 @@ trojan://pw@1.2.3.5:443#b
         // report: specs carry tag/server, ignored counts unparseable lines.
         let parsed: SubscriptionParse = SubscriptionParse::default();
         assert!(parsed.specs.is_empty() && parsed.ignored == 0);
+    }
+
+    /// Tracks in-flight probes so the test can prove overlap; the delay is
+    /// longest for the first config so an unordered fan-out would scramble
+    /// the rows.
+    struct ConcurrentProbe {
+        in_flight: Arc<AtomicUsize>,
+        max: Arc<AtomicUsize>,
+    }
+
+    impl TunnelProbe for ConcurrentProbe {
+        fn probe(
+            &self,
+            req: ProbeRequest<'_>,
+        ) -> Pin<Box<dyn Future<Output = Result<crate::verify::TunnelResult>> + Send + '_>>
+        {
+            let in_flight = Arc::clone(&self.in_flight);
+            let max = Arc::clone(&self.max);
+            // First configs sleep longest: `c0` ~80ms down to `c7` ~10ms.
+            // An unordered implementation would emit `c7` first.
+            let tag = req.spec.tag.clone().unwrap_or_default();
+            let idx: u64 = tag
+                .strip_prefix('c')
+                .and_then(|n| n.parse().ok())
+                .unwrap_or(0);
+            let delay_ms = (8 - idx.min(8)).saturating_mul(10).max(10);
+            Box::pin(async move {
+                let cur = in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+                max.fetch_max(cur, Ordering::SeqCst);
+                tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+                in_flight.fetch_sub(1, Ordering::SeqCst);
+                Ok(crate::verify::TunnelResult {
+                    passed: true,
+                    latency_ms: Some(7),
+                    colo: None,
+                    verifier: Some("concurrent"),
+                })
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn probes_run_concurrently_and_rows_stay_ordered() {
+        assert_eq!(
+            CHECK_SUB_CONCURRENCY, 16,
+            "bounded fan-out default must stay 16"
+        );
+        let body: String = (0..8)
+            .map(|i| format!("vless://11111111-2222-3333-4444-555555555555@1.2.3.4:443#c{i}\n"))
+            .collect();
+        let in_flight = Arc::new(AtomicUsize::new(0));
+        let max = Arc::new(AtomicUsize::new(0));
+        let probe = ConcurrentProbe {
+            in_flight: Arc::clone(&in_flight),
+            max: Arc::clone(&max),
+        };
+        let rows = check_subscription("https://sub.example/x", &FakeSub(body), &probe, 5_000)
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 8, "every config yields one row: {rows:?}");
+        assert!(
+            max.load(Ordering::SeqCst) >= 2,
+            "probes must overlap (max in-flight >= 2), got {}",
+            max.load(Ordering::SeqCst)
+        );
+        for (i, row) in rows.iter().enumerate() {
+            assert_eq!(
+                row.tag,
+                format!("c{i}"),
+                "row order must match input: {rows:?}"
+            );
+            assert_eq!(row.config_index, Some(i), "{rows:?}");
+            assert!(row.ok, "{row:?}");
+        }
+        assert_eq!(
+            in_flight.load(Ordering::SeqCst),
+            0,
+            "all in-flight guards must be released"
+        );
     }
 }

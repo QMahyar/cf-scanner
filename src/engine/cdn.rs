@@ -293,7 +293,6 @@ impl ScanController {
             let transport = self.transport.clone();
             let timeout_ms = cfg.timeout_ms;
             let idle_hold_ms = cfg.idle_hold_ms;
-            let loss_threshold = cfg.loss_threshold;
             let min_latency_ms = cfg.min_latency_ms;
             let inflight = Arc::clone(&inflight);
             let hub = hub.clone();
@@ -335,8 +334,17 @@ impl ScanController {
                                 .saturating_mul(100)
                                 .checked_div(sent)
                                 .unwrap_or(100);
-                            let acceptable = loss_threshold.is_none_or(|t| loss_pct <= t)
-                                && min_latency_ms.is_none_or(|t| latency_ms >= t);
+                            // T05 DECISION: loss_threshold is deprecated and
+                            // ignored. Real transports are single-shot
+                            // (sent=1/received=1, loss always 0%), so the
+                            // filter could never fire on a real success; a
+                            // multi-shot loss probe was rejected as too
+                            // invasive (see ProbeOutcome::plain). The
+                            // measured loss_pct is still recorded on the
+                            // verdict for trait-injected transports and the
+                            // export contract.
+                            let acceptable =
+                                min_latency_ms.is_none_or(|t| latency_ms >= t);
                             if !acceptable {
                                 None
                             } else {
@@ -767,7 +775,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn loss_threshold_filters_lossy_results_from_the_store() {
+    async fn loss_threshold_is_deprecated_and_ignored() {
+        // T05: single-shot probes always report sent=1/received=1, so the
+        // engine ignores loss_threshold. Even trait-injected lossy outcomes
+        // are kept with their measured loss instead of filtered.
         let t = FakeTransport::new()
             .ok_loss("203.0.113.0".parse().unwrap(), 443, 10, 10, 10)
             .ok_loss("203.0.113.1".parse().unwrap(), 443, 10, 10, 4);
@@ -778,17 +789,13 @@ mod tests {
         let summary = c.run_seeded_with_pool(cfg, 1, pool).await.unwrap();
         assert_eq!(summary.scanned, 2);
         assert_eq!(
-            summary.found, 1,
-            "an endpoint above the loss threshold must not count as found"
+            summary.found, 2,
+            "the deprecated loss filter must not drop anything"
         );
         let results = c.results();
-        assert_eq!(
-            results.len(),
-            1,
-            "a result above the loss threshold must be dropped entirely"
-        );
-        assert_eq!(results[0].ip, "203.0.113.0".parse::<IpAddr>().unwrap());
+        assert_eq!(results.len(), 2, "lossy results are kept with their loss");
         assert_eq!(results[0].loss_pct, Some(0));
+        assert_eq!(results[1].loss_pct, Some(60));
     }
 
     #[tokio::test]

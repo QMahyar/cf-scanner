@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -7,9 +8,9 @@ use crate::api::types::{
     DEFAULT_PORT, DEFAULT_PROBE_URL, DEFAULT_TIMEOUT_MS, DEFAULT_WARP_PORTS, FragmentPreset,
     MAX_CIDRS, MAX_COLO_CODES, MAX_CONFIG_ENTRY_BYTES, MAX_ENDPOINTS, MAX_IDLE_HOLD_MS,
     MAX_MIN_LATENCY_MS, MAX_NEIGHBORS, MAX_PHASE2_ENTRIES, MAX_PROBE_URL_BYTES, MAX_SCAN_COUNT,
-    MAX_SNI_BYTES, MAX_STOP_VALUE, MAX_WGCONF_BYTES, Mode, NetworkProfile, Phase2Config, Port,
-    ProbeMode, ScanConfig, ScanEvent, ScanSummary, ScanTarget, StopCondition, WarpConfig,
-    parse_cidr, parse_endpoint, validate_fragment, validate_sni,
+    MAX_SNI_BYTES, MAX_STOP_VALUE, Mode, NetworkProfile, Phase2Config, Port, ProbeMode, ScanConfig,
+    ScanEvent, ScanSummary, ScanTarget, StopCondition, WarpConfig, parse_cidr, parse_endpoint,
+    validate_fragment, validate_sni,
 };
 use crate::engine::ScanController;
 use crate::probe;
@@ -156,22 +157,50 @@ fn prompt_warp(network_profile: Option<NetworkProfile>) -> Result<ScanConfig> {
         let path: String = Input::new()
             .with_prompt("Path to a wg-quick / AmneziaWG config file")
             .interact()?;
-        {
-            use std::io::Read as _;
-            let file =
-                std::fs::File::open(&path).map_err(|e| anyhow!("could not read wgconf: {e}"))?;
-            let mut buf = String::new();
-            file.take(MAX_WGCONF_BYTES as u64 + 1)
-                .read_to_string(&mut buf)
-                .map_err(|e| anyhow!("could not read wgconf: {e}"))?;
-            if buf.len() > MAX_WGCONF_BYTES {
-                bail!("wgconf exceeds {MAX_WGCONF_BYTES} bytes");
-            }
-            Some(buf)
-        }
+        Some(crate::wgconf::read_wgconf_file(&path, "wgconf file")?)
     } else {
         None
     };
+    let junk_count: u8 = Input::new()
+        .with_prompt("DPI junk padding count per handshake (0-128, 0 = off)")
+        .validate_with(|n: &u8| {
+            (*n <= crate::api::types::MAX_WARP_JUNK_COUNT)
+                .then_some(())
+                .ok_or("must be 0-128")
+        })
+        .default(0)
+        .interact()?;
+    let (junk_min, junk_max) = if junk_count > 0 {
+        let junk_min: u16 = Input::new()
+            .with_prompt("Minimum junk datagram size in bytes (0-1280)")
+            .validate_with(|n: &u16| {
+                (*n <= crate::api::types::MAX_WARP_JUNK_SIZE)
+                    .then_some(())
+                    .ok_or("must be 0-1280")
+            })
+            .default(32)
+            .interact()?;
+        let junk_max: u16 = Input::new()
+            .with_prompt("Maximum junk datagram size in bytes (1-1280, >= min)")
+            .validate_with(move |n: &u16| {
+                (*n >= 1 && *n <= crate::api::types::MAX_WARP_JUNK_SIZE && *n >= junk_min)
+                    .then_some(())
+                    .ok_or("must be 1-1280 and >= min")
+            })
+            .default(64)
+            .interact()?;
+        (junk_min, junk_max)
+    } else {
+        (0, 0)
+    };
+    let port_gate = Confirm::new()
+        .with_prompt("Gate ports first (probe sampled endpoints across WARP ports, scan only answering ports)?")
+        .default(false)
+        .interact()?;
+    let adaptive_retries = Confirm::new()
+        .with_prompt("Adaptive pre-flight (sample the pool first, raise probe budget on lossy/slow networks)?")
+        .default(false)
+        .interact()?;
     let concurrency: u16 = Input::new()
         .with_prompt("Parallel probes (1-1000)")
         .validate_with(|n: &u16| (1..=1000).contains(n).then_some(()).ok_or("must be 1-1000"))
@@ -188,6 +217,7 @@ fn prompt_warp(network_profile: Option<NetworkProfile>) -> Result<ScanConfig> {
         .default(profile_timeout_default(network_profile))
         .interact()?;
 
+    let ports_explicit = false;
     let cfg = ScanConfig {
         mode: Mode::Warp,
         target: ScanTarget::Count(count),
@@ -198,11 +228,16 @@ fn prompt_warp(network_profile: Option<NetworkProfile>) -> Result<ScanConfig> {
             probes_per_endpoint: probes,
             wgconf,
             verify_with_wgconf: verify,
-            ..Default::default()
+            junk_count,
+            junk_min,
+            junk_max,
+            port_gate,
+            ports_explicit,
         }),
         concurrency,
         timeout_ms,
         network_profile,
+        adaptive_retries,
         ..ScanConfig::default()
     };
     cfg.validate().map_err(|e| anyhow!("invalid input: {e}"))?;
@@ -212,6 +247,124 @@ fn prompt_warp(network_profile: Option<NetworkProfile>) -> Result<ScanConfig> {
 #[derive(Debug, thiserror::Error)]
 #[error("interrupted")]
 pub struct WizardInterrupted;
+
+/// Wizard-chosen export destinations (mirrors `--export/--export-live`).
+/// Paths only — never config contents — so the recap can show what will run.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WizardExport {
+    pub export: Option<PathBuf>,
+    pub format: crate::export::ExportFormatArg,
+    pub live: Option<PathBuf>,
+}
+
+impl Default for WizardExport {
+    fn default() -> Self {
+        Self {
+            export: None,
+            format: crate::export::ExportFormatArg::Csv,
+            live: None,
+        }
+    }
+}
+
+fn export_format_items() -> [&'static str; 10] {
+    [
+        "csv",
+        "json",
+        "base64",
+        "raw",
+        "singbox",
+        "clash",
+        "sharelinks",
+        "v2ray",
+        "shadowrocket",
+        "quantumult",
+    ]
+}
+
+fn export_format_from_idx(idx: usize) -> crate::export::ExportFormatArg {
+    use crate::export::ExportFormatArg as F;
+    match idx {
+        1 => F::Json,
+        2 => F::Base64,
+        3 => F::Raw,
+        4 => F::Singbox,
+        5 => F::Clash,
+        6 => F::Sharelinks,
+        7 => F::V2ray,
+        8 => F::Shadowrocket,
+        9 => F::Quantumult,
+        _ => F::Csv,
+    }
+}
+
+fn prompt_export() -> Result<WizardExport> {
+    let raw: String = Input::new()
+        .with_prompt("Export results to file when done (empty = no export file)")
+        .allow_empty(true)
+        .interact()?;
+    let raw = raw.trim();
+    let export = (!raw.is_empty()).then(|| PathBuf::from(raw));
+    if let Some(path) = &export
+        && path.as_os_str() == "-"
+    {
+        return Err(anyhow!(
+            "--export - would mix the export blob into the NDJSON stream; write to a file instead"
+        ));
+    }
+    let format = if export.is_some() {
+        let idx = Select::new()
+            .with_prompt("Export format")
+            .items(export_format_items().as_slice())
+            .default(0)
+            .interact()?;
+        export_format_from_idx(idx)
+    } else {
+        crate::export::ExportFormatArg::Csv
+    };
+    let live_raw: String = Input::new()
+        .with_prompt("Append NDJSON results live to file (empty = off; conflicts with export file)")
+        .allow_empty(true)
+        .interact()?;
+    let live_raw = live_raw.trim();
+    if live_raw == "-" {
+        return Err(anyhow!(
+            "--export-live - is redundant: NDJSON results already stream on stdout"
+        ));
+    }
+    let live = (!live_raw.is_empty()).then(|| PathBuf::from(live_raw));
+    if export.is_some() && live.is_some() {
+        return Err(anyhow!(
+            "export file and live file conflict; choose one (mirrors --export vs --export-live)"
+        ));
+    }
+    Ok(WizardExport {
+        export,
+        format,
+        live,
+    })
+}
+
+fn export_recap(export: &WizardExport) -> Vec<String> {
+    vec![recap_line(
+        "export",
+        match (&export.export, &export.live) {
+            (Some(path), None) => {
+                format!("{} -> {}", export.format.name(), path.display())
+            }
+            (None, Some(path)) => format!("live NDJSON -> {}", path.display()),
+            (None, None) => "off".to_owned(),
+            // Unreachable: prompt_export rejects the conflict, but show
+            // both rather than silently dropping one.
+            (Some(path), Some(live)) => format!(
+                "{} -> {}; live -> {}",
+                export.format.name(),
+                path.display(),
+                live.display()
+            ),
+        },
+    )]
+}
 
 pub async fn run() -> Result<()> {
     let interrupted = Arc::new(AtomicBool::new(false));
@@ -284,8 +437,17 @@ async fn run_wizard(
         if interrupted.load(Ordering::Relaxed) {
             return Err(WizardInterrupted.into());
         }
+        let wizard_export = tokio::task::spawn_blocking(prompt_export)
+            .await
+            .map_err(|e| anyhow!("wizard task failed: {e}"))??;
+        if interrupted.load(Ordering::Relaxed) {
+            return Err(WizardInterrupted.into());
+        }
         eprintln!();
         for line in config_recap(&cfg) {
+            eprintln!("{line}");
+        }
+        for line in export_recap(&wizard_export) {
             eprintln!("{line}");
         }
         let verbose = tokio::task::spawn_blocking(|| {
@@ -322,12 +484,35 @@ async fn run_wizard(
             &snis,
         )));
         *current.lock().unwrap_or_else(|e| e.into_inner()) = Some(Arc::clone(&controller));
-        let summary = run_scan(&controller, &cfg, verbose).await?;
+        let mut live = wizard_export
+            .live
+            .as_deref()
+            .map(crate::export::LiveExport::create)
+            .transpose()
+            .map_err(|e| anyhow!("could not open live export file: {e:#}"))?;
+        let mut live_error: Option<anyhow::Error> = None;
+        let summary = run_scan(&controller, &cfg, verbose, &mut live, &mut live_error).await?;
+        if let Some(live) = live.as_mut()
+            && let Err(err) = live.finish()
+        {
+            eprintln!("live export fsync failed: {err:#}");
+            live_error.get_or_insert(anyhow!("live export failed: {err:#}"));
+        }
+        if let Some(err) = live_error {
+            return Err(err);
+        }
         *current.lock().unwrap_or_else(|e| e.into_inner()) = None;
         eprintln!(
             "done — scanned {}, found {} working in {} ms",
             summary.scanned, summary.found, summary.duration_ms
         );
+        if let Some(path) = wizard_export.export.as_deref() {
+            crate::export::write_export(&controller, path, wizard_export.format)?;
+            eprintln!(
+                "results exported to {}",
+                wizard_export.export.as_deref().unwrap().display()
+            );
+        }
         if summary.cancelled {
             eprintln!("cancelled — {} working endpoints retained", summary.found);
             return Ok(());
@@ -356,7 +541,10 @@ async fn run_scan(
     controller: &Arc<ScanController>,
     cfg: &ScanConfig,
     verbose: bool,
+    live: &mut Option<crate::export::LiveExport>,
+    live_error: &mut Option<anyhow::Error>,
 ) -> Result<ScanSummary> {
+    let controller_for_live = Arc::clone(controller);
     controller
         .run_streaming(cfg.clone(), |e| match e {
             ScanEvent::Progress(p) => {
@@ -364,11 +552,25 @@ async fn run_scan(
                 let (scanned, found) = (p.scanned, p.found);
                 eprint!("\r\x1b[Kchecked {scanned}{total} — {found} working");
             }
-            ScanEvent::Result(v) => {
+            ScanEvent::Result(ref v) => {
                 use std::io::Write as _;
+                if let Some(live) = live.as_mut() {
+                    match serde_json::to_string(&e) {
+                        Ok(line) => {
+                            if let Err(err) = live.push_line(&line) {
+                                eprintln!("live export write failed; cancelling scan: {err:#}");
+                                live_error.get_or_insert(anyhow!("live export failed: {err:#}"));
+                                controller_for_live.cancel();
+                            }
+                        }
+                        Err(err) => {
+                            eprintln!("could not serialize scan event: {err}");
+                        }
+                    }
+                }
                 let mut err = std::io::stderr().lock();
                 if verbose {
-                    let _ = writeln!(err, "\r\x1b[K{}", crate::export::diagnostic_line(&v));
+                    let _ = writeln!(err, "\r\x1b[K{}", crate::export::diagnostic_line(v));
                     return;
                 }
                 let phase2 = match &v.phase2 {
@@ -554,12 +756,11 @@ fn prompt_config() -> Result<ScanConfig> {
         .default(profile_timeout_default(network_profile))
         .interact()?;
 
-    let loss_threshold_raw: String = Input::new()
-        .with_prompt("Loss-rate threshold (0-100, empty = keep everything)")
-        .allow_empty(true)
-        .validate_with(|s: &String| parse_loss_threshold(s).map(|_| ()))
-        .interact()?;
-    let loss_threshold = parse_loss_threshold(&loss_threshold_raw).map_err(|e| anyhow!("{e}"))?;
+    // T05: --loss-threshold is deprecated and ignored by the engine
+    // (single-shot probes always report 0% loss), so the wizard no longer
+    // asks for it and always leaves it unset. The ScanConfig field stays for
+    // CLI/retry back-compat; the recap below marks any CLI-set value.
+    let loss_threshold: Option<u32> = None;
     // Blocked networks idle-drop connections, so the profile offers 2000 ms
     // as the default while keeping an explicit 0 (or any typed value) intact.
     let idle_hold_raw: String = if network_profile == Some(NetworkProfile::Blocked) {
@@ -824,7 +1025,9 @@ fn config_recap(cfg: &ScanConfig) -> Vec<String> {
         recap_line(
             "loss filter",
             match cfg.loss_threshold {
-                Some(t) => format!("drop results above {t}% loss"),
+                // T05: deprecated and ignored by the engine; shown so a
+                // CLI-built config that still sets the flag stays honest.
+                Some(t) => format!("deprecated (ignores {t}% - probes report 0% loss)"),
                 None => "off".to_owned(),
             },
         ),
@@ -872,6 +1075,16 @@ fn config_recap(cfg: &ScanConfig) -> Vec<String> {
                 n => format!("{n} per hit"),
             },
         ),
+        recap_line(
+            "sni rotation",
+            if cfg.probe_snis.is_empty() {
+                "unset".to_owned()
+            } else if cfg.probe_snis == crate::api::types::default_probe_snis() {
+                format!("default ({})", cfg.probe_snis.join(","))
+            } else {
+                cfg.probe_snis.join(",")
+            },
+        ),
     ];
     if !cfg.custom_cidrs.is_empty() {
         lines.push(recap_line(
@@ -907,13 +1120,24 @@ fn config_recap(cfg: &ScanConfig) -> Vec<String> {
         ));
     }
     if let Some(warp) = &cfg.warp {
+        let junk = if warp.junk_count == 0 {
+            "junk off".to_owned()
+        } else {
+            format!(
+                "junk {} ({}-{}B)",
+                warp.junk_count, warp.junk_min, warp.junk_max
+            )
+        };
         lines.push(recap_line(
             "warp",
             format!(
-                "{} custom endpoint(s), {} probe(s)/endpoint, wgconf verify {}",
+                "{} custom endpoint(s), {} probe(s)/endpoint, wgconf verify {}, {}, port-gate {}, adaptive {}",
                 warp.custom_endpoints.len(),
                 warp.probes_per_endpoint,
-                if warp.verify_with_wgconf { "on" } else { "off" }
+                if warp.verify_with_wgconf { "on" } else { "off" },
+                junk,
+                if warp.port_gate { "on" } else { "off" },
+                if cfg.adaptive_retries { "on" } else { "off" },
             ),
         ));
     }
@@ -942,20 +1166,6 @@ fn validate_stop_value(n: &u32) -> Result<(), String> {
         .contains(n)
         .then_some(())
         .ok_or_else(|| format!("must be 1-{MAX_STOP_VALUE}"))
-}
-
-fn parse_loss_threshold(raw: &str) -> Result<Option<u32>, String> {
-    let value = raw.trim();
-    if value.is_empty() {
-        return Ok(None);
-    }
-    let t: u32 = value
-        .parse()
-        .map_err(|_| "loss threshold must be a number".to_owned())?;
-    if t > 100 {
-        return Err("loss threshold must be 0-100".to_owned());
-    }
-    Ok(Some(t))
 }
 
 fn parse_idle_hold(raw: &str) -> Result<u64, String> {
@@ -1223,16 +1433,6 @@ mod tests {
         assert!(parse_cap("0").is_err());
         assert!(parse_cap("abc").is_err());
         assert!(parse_cap(&(u64::from(MAX_STOP_VALUE) + 1).to_string()).is_err());
-    }
-
-    #[test]
-    fn loss_threshold_parses_empty_and_bounded_numbers() {
-        assert_eq!(parse_loss_threshold("").unwrap(), None);
-        assert_eq!(parse_loss_threshold(" 40 ").unwrap(), Some(40));
-        assert_eq!(parse_loss_threshold("0").unwrap(), Some(0));
-        assert_eq!(parse_loss_threshold("100").unwrap(), Some(100));
-        assert!(parse_loss_threshold("101").is_err());
-        assert!(parse_loss_threshold("abc").is_err());
     }
 
     #[test]
@@ -1526,5 +1726,94 @@ mod tests {
             assert!(!recap.contains("vless://"), "recap:\n{recap}");
             assert!(!recap.contains("example.com"), "recap:\n{recap}");
         }
+    }
+
+    #[test]
+    fn recap_shows_sni_rotation_and_warp_tuning_without_payloads() {
+        let cfg = ScanConfig {
+            mode: Mode::Cdn,
+            target: ScanTarget::Count(10),
+            probe_snis: vec!["a.example.com".to_owned(), "b.example.com".to_owned()],
+            ..ScanConfig::default()
+        };
+        let recap = config_recap(&cfg).join("\n");
+        assert!(
+            recap.contains("sni rotation") && recap.contains("a.example.com,b.example.com"),
+            "recap must show the rotation list:\n{recap}"
+        );
+        let default_cfg = ScanConfig::default();
+        let recap = config_recap(&default_cfg).join("\n");
+        assert!(recap.contains("sni rotation"), "recap:\n{recap}");
+
+        let warp_cfg = ScanConfig {
+            mode: Mode::Warp,
+            target: ScanTarget::Count(3),
+            warp: Some(WarpConfig {
+                custom_endpoints: vec!["203.0.113.1:2408".to_owned()],
+                probes_per_endpoint: 5,
+                wgconf: Some("private-key = xyz".to_owned()),
+                verify_with_wgconf: true,
+                junk_count: 4,
+                junk_min: 32,
+                junk_max: 64,
+                port_gate: true,
+                ports_explicit: false,
+            }),
+            adaptive_retries: true,
+            ..ScanConfig::default()
+        };
+        let recap = config_recap(&warp_cfg).join("\n");
+        assert!(recap.contains("junk 4 (32-64B)"), "recap:\n{recap}");
+        assert!(recap.contains("port-gate on"), "recap:\n{recap}");
+        assert!(recap.contains("adaptive on"), "recap:\n{recap}");
+        assert!(!recap.contains("203.0.113.1"), "recap:\n{recap}");
+        assert!(!recap.contains("private-key"), "recap:\n{recap}");
+    }
+
+    #[test]
+    fn export_format_menu_mapping_matches_names() {
+        use crate::export::ExportFormatArg as F;
+        let items = export_format_items();
+        let formats = [
+            F::Csv,
+            F::Json,
+            F::Base64,
+            F::Raw,
+            F::Singbox,
+            F::Clash,
+            F::Sharelinks,
+            F::V2ray,
+            F::Shadowrocket,
+            F::Quantumult,
+        ];
+        assert_eq!(items.len(), formats.len());
+        for (idx, fmt) in formats.into_iter().enumerate() {
+            assert_eq!(export_format_from_idx(idx), fmt);
+            assert_eq!(items[idx], fmt.name());
+        }
+        assert_eq!(export_format_from_idx(99), F::Csv);
+    }
+
+    #[test]
+    fn export_recap_shows_paths_never_contents() {
+        let csv = WizardExport {
+            export: Some(PathBuf::from("out.csv")),
+            format: crate::export::ExportFormatArg::Csv,
+            live: None,
+        };
+        let recap = export_recap(&csv).join("\n");
+        assert!(
+            recap.contains("out.csv") && recap.contains("csv"),
+            "{recap}"
+        );
+        let live = WizardExport {
+            export: None,
+            format: crate::export::ExportFormatArg::Csv,
+            live: Some(PathBuf::from("live.jsonl")),
+        };
+        let recap = export_recap(&live).join("\n");
+        assert!(recap.contains("live.jsonl"), "{recap}");
+        let off = WizardExport::default();
+        assert!(export_recap(&off).join("\n").contains("off"));
     }
 }

@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -175,21 +175,58 @@ impl Default for WarpTransport {
 
 const MAX_SOCKETS: usize = 1024;
 
+/// LRU socket cache: one connected UDP socket per (ip, port), bounded at
+/// `MAX_SOCKETS`. Hits refresh recency; inserts evict the
+/// least-recently-used entry first so large sweeps do not thrash hot
+/// endpoints (replaces the old random `keys().next()` victim pick).
 #[derive(Default)]
 pub struct SocketCache {
-    sockets: tokio::sync::Mutex<HashMap<(Ipv4Addr, u16), Arc<UdpSocket>>>,
+    inner: tokio::sync::Mutex<CacheInner>,
+}
+
+#[derive(Default)]
+struct CacheInner {
+    map: HashMap<(Ipv4Addr, u16), Arc<UdpSocket>>,
+    /// LRU order: front = least-recently-used, back = most-recently-used.
+    /// Entries appear exactly once; `touch` moves hits to the back.
+    order: VecDeque<(Ipv4Addr, u16)>,
+}
+
+impl CacheInner {
+    fn touch(&mut self, key: (Ipv4Addr, u16)) {
+        if let Some(pos) = self.order.iter().position(|k| *k == key) {
+            self.order.remove(pos);
+        }
+        self.order.push_back(key);
+    }
+
+    fn evict_oldest(&mut self) {
+        while let Some(victim) = self.order.pop_front() {
+            if self.map.remove(&victim).is_some() {
+                break;
+            }
+        }
+    }
 }
 
 impl SocketCache {
     pub(crate) async fn clear(&self) {
-        self.sockets.lock().await.clear();
+        let mut inner = self.inner.lock().await;
+        inner.map.clear();
+        inner.order.clear();
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn len(&self) -> usize {
+        self.inner.lock().await.map.len()
     }
 
     async fn get_or_bind(&self, ip: Ipv4Addr, port: u16) -> Result<Arc<UdpSocket>, ProbeError> {
         {
-            let map = self.sockets.lock().await;
-            if let Some(socket) = map.get(&(ip, port)) {
-                return Ok(socket.clone());
+            let mut inner = self.inner.lock().await;
+            if let Some(socket) = inner.map.get(&(ip, port)).cloned() {
+                inner.touch((ip, port));
+                return Ok(socket);
             }
         }
         let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0))
@@ -200,16 +237,16 @@ impl SocketCache {
             .await
             .map_err(|_| ProbeError::Refused("udp connect failed"))?;
         let socket = Arc::new(socket);
-        let mut map = self.sockets.lock().await;
-        if let Some(existing) = map.get(&(ip, port)) {
+        let mut inner = self.inner.lock().await;
+        if let Some(existing) = inner.map.get(&(ip, port)).cloned() {
+            inner.touch((ip, port));
             return Ok(existing.clone());
         }
-        if map.len() >= MAX_SOCKETS
-            && let Some(victim) = map.keys().next().copied()
-        {
-            map.remove(&victim);
+        if inner.map.len() >= MAX_SOCKETS {
+            inner.evict_oldest();
         }
-        map.insert((ip, port), socket.clone());
+        inner.map.insert((ip, port), socket.clone());
+        inner.order.push_back((ip, port));
         Ok(socket)
     }
 }
@@ -470,9 +507,11 @@ async fn probe_once(
     junk: JunkConfig,
     amnezia: Option<&crate::wgconf::AmneziaParams>,
 ) -> Result<u32, ProbeError> {
-    let jitter_ms = 10 + OsRng.next_u32() % 31;
-    tokio::time::sleep(Duration::from_millis(jitter_ms as u64)).await;
-
+    // WHY no sleep here: the 10-40ms anti-burst stagger lives in the engine
+    // scheduler (per-endpoint pacing in run_warp), not inside the probe.
+    // Keeping it here would tax every handshake attempt — including the
+    // fail-fast pre-flight/port-gate tiers — and serialize behind the
+    // transport seam where tests cannot observe or bound it.
     let index = {
         let v = NEXT_INDEX.fetch_add(1, Ordering::Relaxed);
         if v == 0 {
@@ -1012,7 +1051,7 @@ mod tests {
             let port = 20000 + (i as u16 % 500);
             let _ = cache.get_or_bind(ip, port).await.unwrap();
         }
-        let len = cache.sockets.lock().await.len();
+        let len = cache.len().await;
         assert!(len <= MAX_SOCKETS, "cache must stay bounded, got {len}");
         let s = cache
             .get_or_bind(Ipv4Addr::new(8, 8, 8, 8), 5353)
@@ -1021,6 +1060,43 @@ mod tests {
         assert!(s.local_addr().is_ok());
         let s3 = cache.get_or_bind(Ipv4Addr::LOCALHOST, 12000).await.unwrap();
         assert!(s3.local_addr().is_ok());
+    }
+
+    #[tokio::test]
+    async fn socket_cache_evicts_least_recently_used() {
+        // Fill to capacity with A oldest, then touch A so B0 becomes LRU.
+        // The next insert must evict B0, keeping the hot entry A cached.
+        let cache = SocketCache::default();
+        let a_ip = Ipv4Addr::new(10, 9, 9, 9);
+        let a = cache.get_or_bind(a_ip, 41000).await.unwrap();
+        let b0_ip = Ipv4Addr::from(0x0a000001u32);
+        let b0 = cache.get_or_bind(b0_ip, 42000).await.unwrap();
+        // A + B0 + (MAX_SOCKETS - 2) more = exactly MAX_SOCKETS entries.
+        for i in 1..(MAX_SOCKETS - 1) {
+            let ip = Ipv4Addr::from(0x0a000001u32.wrapping_add(i as u32));
+            let port = 42000 + (i as u16 % 500);
+            let _ = cache.get_or_bind(ip, port).await.unwrap();
+        }
+        assert_eq!(cache.len().await, MAX_SOCKETS);
+        // Touch A: it is now most-recently-used, B0 is the LRU victim.
+        let a_again = cache.get_or_bind(a_ip, 41000).await.unwrap();
+        assert!(Arc::ptr_eq(&a, &a_again), "touch must reuse the socket");
+        // One more insert forces exactly one LRU eviction.
+        let _ = cache
+            .get_or_bind(Ipv4Addr::new(10, 8, 8, 8), 43000)
+            .await
+            .unwrap();
+        assert_eq!(cache.len().await, MAX_SOCKETS);
+        let a_hot = cache.get_or_bind(a_ip, 41000).await.unwrap();
+        assert!(
+            Arc::ptr_eq(&a, &a_hot),
+            "LRU must keep the recently-touched entry"
+        );
+        let b0_after = cache.get_or_bind(b0_ip, 42000).await.unwrap();
+        assert!(
+            !Arc::ptr_eq(&b0, &b0_after),
+            "LRU must evict the least-recently-used entry first"
+        );
     }
 
     #[test]

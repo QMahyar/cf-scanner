@@ -181,10 +181,28 @@ impl XrayProcess {
 }
 
 pub async fn spawn(config_dir: &Path, xray_bin: &Path, config_json: &Value) -> Result<XrayProcess> {
+    spawn_with_reservation(config_dir, xray_bin, config_json, None).await
+}
+
+/// Handover spawn (story 20): `reserved` holds the ephemeral port bound from
+/// reservation through config write + binary verification, and is dropped
+/// immediately before `Command::spawn` with no await in between. The port is
+/// therefore never pick-then-dropped across an await window; a stolen port
+/// still retries via `verify::spawn_with_retry`.
+pub(crate) async fn spawn_with_reservation(
+    config_dir: &Path,
+    xray_bin: &Path,
+    config_json: &Value,
+    reserved: Option<std::net::TcpListener>,
+) -> Result<XrayProcess> {
     let config_path = config_dir.join("config.json");
     write_trial_config(&config_path, config_json).await?;
     verify_binary_at_spawn(xray_bin).await?;
 
+    // Release the reservation here: no await between drop and spawn, so the
+    // steal window is a single synchronous handover, not the whole config
+    // write + verification that pick-then-drop left open.
+    drop(reserved);
     let mut child = tokio::process::Command::new(xray_bin)
         .arg("run")
         .arg("-c")
@@ -381,6 +399,9 @@ async fn drain_stderr(
     }
 }
 
+// Story 25 macOS gap: macos x86_64 + arm64 assets resolve here so macOS
+// builds can download xray on demand, but dist-workspace.toml ships linux +
+// windows only (documented there; release pipeline work is out of scope).
 fn asset_name() -> Result<&'static str> {
     Ok(match (std::env::consts::OS, std::env::consts::ARCH) {
         ("windows", "x86_64") => "Xray-windows-64.zip",
@@ -429,8 +450,26 @@ fn dgst_path(bin: &Path) -> PathBuf {
     bin.with_extension("dgst")
 }
 
-static BINARY_STATE: OnceLock<tokio::sync::Mutex<Option<Result<PathBuf, String>>>> =
-    OnceLock::new();
+#[derive(Clone, Debug)]
+struct MemoEntry {
+    path: PathBuf,
+    len: u64,
+    modified: Option<std::time::SystemTime>,
+}
+
+fn fingerprint(path: &Path) -> Option<MemoEntry> {
+    let meta = std::fs::metadata(path).ok()?;
+    if !meta.is_file() {
+        return None;
+    }
+    Some(MemoEntry {
+        path: path.to_path_buf(),
+        len: meta.len(),
+        modified: meta.modified().ok(),
+    })
+}
+
+static BINARY_STATE: OnceLock<tokio::sync::Mutex<Option<MemoEntry>>> = OnceLock::new();
 
 /// Test-only: clears the memoized binary path so a test with an isolated
 /// data dir gets a fresh resolution instead of a stale cross-test hit.
@@ -442,25 +481,65 @@ pub(crate) async fn reset_binary_state_for_tests() {
 
 pub async fn ensure_binary(fetch: &impl BinaryFetch) -> Result<PathBuf> {
     let state = BINARY_STATE.get_or_init(|| tokio::sync::Mutex::new(None));
-    let cached_ok = |path: &PathBuf| {
-        path.metadata()
-            .is_ok_and(|m| m.is_file() && m.len() >= MIN_BUNDLED_BYTES)
-    };
+    // Fast path: memo hit with unchanged mtime/size returns without a re-hash.
+    // A changed fingerprint re-checks the dgst sidecar (bundled sidecar-less
+    // paths use the size gate) so a swapped binary self-heals via redownload.
     let snapshot = { state.lock().await.clone() };
-    if let Some(Ok(path)) = &snapshot
-        && cached_ok(path)
-    {
-        return Ok(path.clone());
+    if let Some(memo) = snapshot {
+        if let Some(current) = fingerprint(&memo.path) {
+            let expected_cache = paths::xray_binary_path().ok();
+            let bundled = find_bundled();
+            let is_current_candidate =
+                Some(memo.path.clone()) == bundled || Some(memo.path.clone()) == expected_cache;
+            if is_current_candidate
+                && current.len == memo.len
+                && current.modified == memo.modified
+                && current.len >= MIN_BUNDLED_BYTES
+            {
+                return Ok(memo.path);
+            }
+            if is_current_candidate && current.len >= MIN_BUNDLED_BYTES {
+                let dgst_sidecar = dgst_path(&memo.path);
+                let ok = if !dgst_sidecar.exists() {
+                    // Release bundles carry no sidecar (verified at build):
+                    // the size gate is the validity check.
+                    bundled.as_ref() == Some(&memo.path)
+                } else {
+                    cached_matches_dgst(&memo.path).await
+                };
+                if ok {
+                    let mut guard = state.lock().await;
+                    *guard = Some(current.clone());
+                    return Ok(current.path);
+                }
+                // Fingerprint changed and dgst failed: fall through to resolve
+                // (which deletes the corrupt cache and re-downloads).
+            }
+        }
+        // Memo file gone, stale dir, or failed revalidation: fall through.
     }
     let mut guard = state.lock().await;
-    if let Some(Ok(path)) = &*guard
-        && cached_ok(path)
+    // Re-check under the single-flight lock: a concurrent task may have
+    // refreshed the memo while we were hashing.
+    if let Some(memo) = (*guard).clone()
+        && let Some(current) = fingerprint(&memo.path)
+        && current.len == memo.len
+        && current.modified == memo.modified
+        && current.len >= MIN_BUNDLED_BYTES
     {
-        return Ok(path.clone());
+        return Ok(memo.path);
     }
     let result = resolve_binary(fetch).await;
     match &result {
-        Ok(path) => *guard = Some(Ok(path.clone())),
+        Ok(path) => {
+            if let Some(entry) = fingerprint(path) {
+                *guard = Some(entry);
+            } else {
+                tracing::warn!(
+                    "xray binary resolved but unreadable for memo; the next attempt will retry"
+                );
+            }
+        }
         Err(err) => {
             tracing::warn!("xray binary resolution failed; the next attempt will retry: {err:#}")
         }
@@ -528,11 +607,11 @@ pub async fn download_binary(fetch: &impl BinaryFetch) -> Result<PathBuf> {
     let expected = parse_dgst(&String::from_utf8_lossy(&dgst), asset)?;
 
     let dest = paths::xray_binary_path()?;
-    if dest.exists() {
-        bail!("{} already exists; refusing to overwrite", dest.display());
-    }
     let dgst_dest = dgst_path(&dest);
     let install_dest = dest.clone();
+    // WHY: checksum-then-replace (story 19): the zip digest is verified
+    // BEFORE any filesystem mutation, so a bad download never touches a
+    // working install; a good download atomically replaces it via tmp+rename.
     tokio::task::spawn_blocking(move || -> Result<()> {
         let actual = hex_lower(&Sha256::digest(&zip));
         if actual != expected {
@@ -544,12 +623,6 @@ pub async fn download_binary(fetch: &impl BinaryFetch) -> Result<PathBuf> {
         }
         if let Some(parent) = install_dest.parent() {
             std::fs::create_dir_all(parent)?;
-        }
-        if install_dest.exists() {
-            bail!(
-                "{} already exists; refusing to overwrite",
-                install_dest.display()
-            );
         }
         let tmp = install_dest.with_file_name(format!(
             "{}.tmp-{}-{:08x}",
@@ -563,12 +636,40 @@ pub async fn download_binary(fetch: &impl BinaryFetch) -> Result<PathBuf> {
         extract_xray_from_zip(&zip, &tmp)?;
         make_executable(&tmp)?;
         let _gate = crate::paths::data_write_guard();
-        std::fs::rename(&tmp, &install_dest)?;
-        // The installed file is the extracted entry payload, not the zip:
-        // digest the written file so the sidecar matches cached_matches_dgst.
-        let digest = hex_lower(&Sha256::digest(&std::fs::read(&install_dest)?));
-        std::fs::write(dgst_dest, format!("SHA2-256= {digest}\n"))?;
-        Ok(())
+        #[cfg(windows)]
+        {
+            // Windows rename does not replace: remove first so a verified
+            // re-download heals a corrupt install instead of failing.
+            let _ = std::fs::remove_file(&install_dest);
+        }
+        // Cleanup the tmp on any failure below so secret-adjacent bytes
+        // never linger under a .tmp- sibling.
+        let install_result = (|| -> Result<()> {
+            std::fs::rename(&tmp, &install_dest)?;
+            // The installed file is the extracted entry payload, not the zip:
+            // digest the written file so the sidecar matches cached_matches_dgst.
+            let digest = hex_lower(&Sha256::digest(&std::fs::read(&install_dest)?));
+            let dgst_tmp = dgst_dest.with_file_name(format!(
+                "{}.tmp-{}-{:08x}",
+                dgst_dest
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy(),
+                std::process::id(),
+                random_u32()
+            ));
+            std::fs::write(&dgst_tmp, format!("SHA2-256= {digest}\n"))?;
+            #[cfg(windows)]
+            {
+                let _ = std::fs::remove_file(&dgst_dest);
+            }
+            std::fs::rename(&dgst_tmp, &dgst_dest)?;
+            Ok(())
+        })();
+        if install_result.is_err() {
+            let _ = std::fs::remove_file(&tmp);
+        }
+        install_result
     })
     .await
     .context("xray install task failed")??;
@@ -1279,7 +1380,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn download_binary_refuses_to_overwrite_an_existing_binary() {
+    async fn download_binary_replaces_an_existing_binary_after_checksum() {
         let _guard = crate::paths::test_env::DATA_DIR_LOCK.lock().await;
         let _isolated = isolated_data_dir().await;
         let bin = paths::xray_binary_path().unwrap();
@@ -1296,15 +1397,34 @@ mod tests {
                 }
             }
         }
-        let err = download_binary(&FakeFetch(zip_bytes, zip_dgst))
+        let dest = download_binary(&FakeFetch(zip_bytes, zip_dgst))
+            .await
+            .unwrap();
+        assert_eq!(dest, bin);
+        assert_eq!(
+            std::fs::read(&bin).unwrap(),
+            b"new payload",
+            "a verified re-download must atomically replace the install"
+        );
+        assert!(
+            cached_matches_dgst(&bin).await,
+            "replacement must leave a verifiable dgst"
+        );
+        // A bad checksum must never touch the working install.
+        std::fs::write(&bin, b"good install").unwrap();
+        let digest = hex_lower(&Sha256::digest(b"good install"));
+        std::fs::write(dgst_path(&bin), format!("SHA2-256= {digest}\n")).unwrap();
+        let bad_zip = b"not the right data".to_vec();
+        let bad_dgst = format!("SHA2-256= {}", "0".repeat(64));
+        let err = download_binary(&FakeFetch(bad_zip, bad_dgst))
             .await
             .unwrap_err()
             .to_string();
-        assert!(err.contains("refusing to overwrite"), "{err}");
+        assert!(err.contains("checksum mismatch"), "{err}");
         assert_eq!(
             std::fs::read(&bin).unwrap(),
-            b"existing install",
-            "the existing binary must be untouched"
+            b"good install",
+            "a failed checksum must leave the existing binary untouched"
         );
     }
 
@@ -1461,6 +1581,59 @@ mod tests {
             std::fs::read(&bin).unwrap(),
             b"fresh payload",
             "shrunken cached file must fail the memo size check and re-download"
+        );
+    }
+
+    #[tokio::test]
+    async fn memoized_binary_revalidates_dgst_on_same_size_swap() {
+        let _guard = crate::paths::test_env::DATA_DIR_LOCK.lock().await;
+        let _isolated = isolated_data_dir().await;
+        let bin = paths::xray_binary_path().unwrap();
+        // Same length, different bytes: the size gate alone would miss the swap.
+        let good = vec![b'x'; (MIN_BUNDLED_BYTES as usize) + 16];
+        let mut swapped = good.clone();
+        swapped[0] = b'y';
+        swapped[1] = b'z';
+        assert_eq!(good.len(), swapped.len());
+        std::fs::write(&bin, &good).unwrap();
+        std::fs::write(
+            dgst_path(&bin),
+            format!("SHA2-256= {}\n", hex_lower(&Sha256::digest(&good))),
+        )
+        .unwrap();
+        reset_binary_state().await;
+
+        struct NeverFetch;
+        impl BinaryFetch for NeverFetch {
+            async fn bytes(&self, _url: &str) -> Result<Vec<u8>> {
+                bail!("an intact memo hit must not download")
+            }
+        }
+        let first = ensure_binary(&NeverFetch).await.unwrap();
+        assert_eq!(first, bin);
+
+        // Swap same-size bytes without touching the sidecar: mtime changes,
+        // dgst now mismatches, so the memo must re-hash and redownload.
+        std::fs::write(&bin, &swapped).unwrap();
+        let (zip_bytes, zip_dgst) = fake_zip(b"healed payload");
+        struct HealFetch(Vec<u8>, String);
+        impl BinaryFetch for HealFetch {
+            async fn bytes(&self, url: &str) -> Result<Vec<u8>> {
+                if url.ends_with(".dgst") {
+                    Ok(self.1.clone().into_bytes())
+                } else {
+                    Ok(self.0.clone())
+                }
+            }
+        }
+        let second = ensure_binary(&HealFetch(zip_bytes, zip_dgst))
+            .await
+            .unwrap();
+        assert_eq!(second, bin);
+        assert_eq!(
+            std::fs::read(&bin).unwrap(),
+            b"healed payload",
+            "same-size swap must fail dgst revalidation and heal"
         );
     }
 

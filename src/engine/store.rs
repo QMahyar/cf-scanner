@@ -20,7 +20,7 @@ pub(super) fn merge_sorted(store: &Store, dirty: &AtomicBool, batch: Vec<Verdict
     dirty.store(true, Ordering::Release);
 }
 
-pub(super) type PosIndex = Arc<Mutex<Arc<HashMap<(Ipv4Addr, u16), usize>>>>;
+pub(super) type PosIndex = Arc<Mutex<HashMap<(Ipv4Addr, u16), usize>>>;
 
 pub(super) fn update_verdict_phase2(
     store: &Store,
@@ -31,27 +31,26 @@ pub(super) fn update_verdict_phase2(
     pos_index: &PosIndex,
 ) -> Option<Verdict> {
     let mut results = lock(store);
-    let indexed = {
-        let index = lock(pos_index).clone();
+    // Fast path: O(1) index hit, validated against the row (a lazy
+    // `results()` sort reorders the Vec and stale entries fail validation).
+    let pos = {
+        let index = lock(pos_index);
         index.get(&(ip, port)).copied().filter(|&pos| {
             results
                 .get(pos)
                 .is_some_and(|v| v.ip == IpAddr::V4(ip) && v.port == port)
         })
     };
-    let pos = match indexed {
+    let pos = match pos {
         Some(pos) => pos,
         None => {
+            // Miss (sort-stale or first touch): linear fallback, then lazily
+            // repair just this entry. Repeated misses converge without ever
+            // paying a full-map rebuild per op.
             let found = results
                 .iter()
                 .position(|v| v.ip == IpAddr::V4(ip) && v.port == port)?;
-            let mut fresh: HashMap<(Ipv4Addr, u16), usize> = HashMap::with_capacity(results.len());
-            for (i, v) in results.iter().enumerate() {
-                if let IpAddr::V4(ip4) = v.ip {
-                    fresh.entry((ip4, v.port)).or_insert(i);
-                }
-            }
-            *lock(pos_index) = Arc::new(fresh);
+            lock(pos_index).insert((ip, port), found);
             found
         }
     };
@@ -81,7 +80,9 @@ pub(super) fn set_asn(store: &Store, ip: IpAddr, port: u16, asn: u32, isp: &str)
 /// Drops a stored verdict, unless it already holds a passing phase-2 result.
 /// A rejected-colo latecomer must never delete a kept-colo pass that a racing
 /// worker stored first (both ops are atomic under the store lock, so the
-/// check-and-remove closes the interleave).
+/// check-and-remove closes the interleave). Removal is swap-remove + patch:
+/// O(1), and the position index stays valid (only the moved row is re-keyed).
+/// Lock order is store-then-index everywhere; never invert it.
 pub(super) fn remove_verdict_unless_passed(
     store: &Store,
     ip: Ipv4Addr,
@@ -89,15 +90,38 @@ pub(super) fn remove_verdict_unless_passed(
     pos_index: &PosIndex,
 ) {
     let mut results = lock(store);
-    if let Some(pos) = results
-        .iter()
-        .position(|v| v.ip == IpAddr::V4(ip) && v.port == port)
+    // Fast path via the index; fall back to a linear scan when sort-stale.
+    let pos = lock(pos_index)
+        .get(&(ip, port))
+        .copied()
+        .filter(|&pos| {
+            results
+                .get(pos)
+                .is_some_and(|v| v.ip == IpAddr::V4(ip) && v.port == port)
+        })
+        .or_else(|| {
+            results
+                .iter()
+                .position(|v| v.ip == IpAddr::V4(ip) && v.port == port)
+        });
+    let Some(pos) = pos else {
+        return;
+    };
+    if results[pos].phase2.as_ref().is_some_and(|p| p.passed) {
+        // Lazily repair the index entry for the surviving pass so future
+        // hits stay O(1).
+        lock(pos_index).insert((ip, port), pos);
+        return;
+    }
+    results.swap_remove(pos);
+    let mut index = lock(pos_index);
+    index.remove(&(ip, port));
+    // Patch the row swapped into the hole (if any). V6 rows are never
+    // indexed (phase-2 is V4-only), so only re-key V4 occupants.
+    if let Some(moved) = results.get(pos)
+        && let IpAddr::V4(moved_ip) = moved.ip
     {
-        if results[pos].phase2.as_ref().is_some_and(|p| p.passed) {
-            return;
-        }
-        results.remove(pos);
-        *lock(pos_index) = Arc::new(HashMap::new());
+        index.insert((moved_ip, moved.port), pos);
     }
 }
 
@@ -142,7 +166,7 @@ mod tests {
     #[test]
     fn rejected_colo_removal_keeps_a_stored_pass() {
         let store: Store = Arc::new(Mutex::new(vec![passing("1.2.3.4", 443)]));
-        let pos_index: PosIndex = Arc::new(Mutex::new(Arc::new(HashMap::new())));
+        let pos_index: PosIndex = Arc::new(Mutex::new(HashMap::new()));
         remove_verdict_unless_passed(&store, "1.2.3.4".parse().unwrap(), 443, &pos_index);
         assert_eq!(
             lock(&store).len(),
@@ -158,11 +182,113 @@ mod tests {
     #[test]
     fn rejected_colo_removal_drops_an_unverified_row() {
         let store: Store = Arc::new(Mutex::new(vec![verdict("1.2.3.4", 443)]));
-        let pos_index: PosIndex = Arc::new(Mutex::new(Arc::new(HashMap::new())));
+        let pos_index: PosIndex = Arc::new(Mutex::new(HashMap::new()));
         remove_verdict_unless_passed(&store, "1.2.3.4".parse().unwrap(), 443, &pos_index);
         assert!(
             lock(&store).is_empty(),
             "all-rejected candidates must still be removed"
+        );
+    }
+
+    fn p2v(passed: bool) -> Phase2Verdict {
+        Phase2Verdict {
+            passed,
+            fragment: FragmentPreset::Off,
+            sni: String::new(),
+            latency_ms: passed.then_some(7),
+            error: None,
+            config_index: Some(0),
+            spec_index: None,
+            verifier: None,
+            speed_test_mb_s: None,
+        }
+    }
+
+    fn check_index(store: &Store, pos_index: &PosIndex) {
+        let results = lock(store);
+        let index = lock(pos_index);
+        for (k, &pos) in index.iter() {
+            let row = results
+                .get(pos)
+                .unwrap_or_else(|| panic!("index points out of bounds: {k:?} -> {pos}"));
+            assert_eq!(
+                (row.ip, row.port),
+                (IpAddr::V4(k.0), k.1),
+                "index entry must match the row it points at"
+            );
+        }
+        // Every V4 row present in the store must resolve through the index.
+        for (i, v) in results.iter().enumerate() {
+            if let IpAddr::V4(ip) = v.ip {
+                assert_eq!(
+                    index.get(&(ip, v.port)),
+                    Some(&i),
+                    "every V4 row must be indexed: {ip}:{}",
+                    v.port
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn swap_remove_patches_the_index_without_rebuild() {
+        let store: Store = Arc::new(Mutex::new(vec![
+            verdict("1.2.3.4", 443),
+            verdict("1.2.3.5", 443),
+            verdict("1.2.3.6", 443),
+        ]));
+        let pos_index: PosIndex = Arc::new(Mutex::new(HashMap::from(
+            [
+                ("1.2.3.4".parse().unwrap(), 443, 0),
+                ("1.2.3.5".parse().unwrap(), 443, 1),
+                ("1.2.3.6".parse().unwrap(), 443, 2),
+            ]
+            .map(|(ip, port, pos)| ((ip, port), pos)),
+        )));
+        // Remove the head: the tail swaps into slot 0 and must be re-keyed.
+        remove_verdict_unless_passed(&store, "1.2.3.4".parse().unwrap(), 443, &pos_index);
+        assert_eq!(lock(&store).len(), 2);
+        check_index(&store, &pos_index);
+        // The survivor still updates through the O(1) index path.
+        let updated = update_verdict_phase2(
+            &store,
+            "1.2.3.6".parse().unwrap(),
+            443,
+            p2v(true),
+            None,
+            &pos_index,
+        )
+        .expect("indexed survivor must update");
+        assert!(updated.phase2.as_ref().is_some_and(|p| p.passed));
+        check_index(&store, &pos_index);
+    }
+
+    #[test]
+    fn update_repairs_a_sort_stale_index_entry() {
+        let store: Store = Arc::new(Mutex::new(vec![
+            verdict("1.2.3.4", 443),
+            verdict("1.2.3.5", 443),
+        ]));
+        let pos_index: PosIndex = Arc::new(Mutex::new(HashMap::from([
+            (("1.2.3.4".parse().unwrap(), 443), 1),
+            (("1.2.3.5".parse().unwrap(), 443), 0),
+        ])));
+        // Both entries are stale (swapped): the linear fallback must still
+        // find the row and lazily repair its entry.
+        let updated = update_verdict_phase2(
+            &store,
+            "1.2.3.4".parse().unwrap(),
+            443,
+            p2v(false),
+            None,
+            &pos_index,
+        )
+        .expect("stale index must fall back to the row");
+        assert!(!updated.phase2.as_ref().unwrap().passed);
+        assert_eq!(
+            lock(&pos_index).get(&("1.2.3.4".parse().unwrap(), 443)),
+            Some(&0),
+            "the touched entry must be repaired"
         );
     }
 

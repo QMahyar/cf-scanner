@@ -52,6 +52,13 @@ pub struct ProbeOutcome {
 }
 
 impl ProbeOutcome {
+    // T05 DECISION: single-shot invariant. Real transports dial once per
+    // probe, so a success always reports sent=1/received=1 (loss 0%).
+    // `--loss-threshold` can therefore never filter a real success and is
+    // deprecated (the engine ignores it). A real multi-shot loss probe was
+    // rejected as too invasive: it would triple dials and timeout budgets,
+    // change latency semantics, and still not measure true packet loss (TCP
+    // retransmits hide it).
     pub fn plain(latency_ms: u32) -> Self {
         Self {
             latency_ms,
@@ -209,25 +216,13 @@ impl Transport for TlsTransport {
                     tracing::debug!(error = %e, "probe tls handshake failed");
                     ProbeError::Tls("handshake failed")
                 })?;
-                let _ = tls.shutdown().await;
+                let _ = timeout(SHUTDOWN_TIMEOUT, tls.shutdown()).await;
                 let latency = start.elapsed().as_millis() as u32;
                 Ok((tls, latency))
             };
             match timeout(Duration::from_millis(timeout_ms), fut).await {
                 Ok(Ok((mut tls, latency))) => {
-                    if idle_hold_ms > 0 {
-                        tokio::time::sleep(Duration::from_millis(idle_hold_ms)).await;
-                        let mut byte = [0u8; 1];
-                        let held =
-                            timeout(Duration::from_millis(timeout_ms), tls.read(&mut byte)).await;
-                        match held {
-                            Ok(Ok(0)) | Ok(Err(_)) => {
-                                tracing::debug!("idle-hold probe closed by peer");
-                                return Err(ProbeError::Refused("idle-hold RST"));
-                            }
-                            _ => {}
-                        }
-                    }
+                    idle_hold_check(&mut tls, start, timeout_ms, idle_hold_ms).await?;
                     Ok(ProbeOutcome::plain(latency))
                 }
                 Ok(Err(e)) => Err(e),
@@ -260,20 +255,7 @@ impl Transport for TcpTransport {
             };
             match timeout(Duration::from_millis(timeout_ms), fut).await {
                 Ok(Ok(mut stream)) => {
-                    if idle_hold_ms > 0 {
-                        tokio::time::sleep(Duration::from_millis(idle_hold_ms)).await;
-                        let mut byte = [0u8; 1];
-                        let held =
-                            timeout(Duration::from_millis(timeout_ms), stream.read(&mut byte))
-                                .await;
-                        match held {
-                            Ok(Ok(0)) | Ok(Err(_)) => {
-                                tracing::debug!("idle-hold probe closed by peer");
-                                return Err(ProbeError::Refused("idle-hold RST"));
-                            }
-                            _ => {}
-                        }
-                    }
+                    idle_hold_check(&mut stream, start, timeout_ms, idle_hold_ms).await?;
                     Ok(ProbeOutcome::plain(start.elapsed().as_millis() as u32))
                 }
                 Ok(Err(e)) => Err(e),
@@ -354,6 +336,51 @@ fn tls_budgets(timeout_ms: u64) -> (u64, u64) {
     (connect_ms, tls_ms)
 }
 
+/// Bound for a best-effort TLS close_notify after a successful handshake.
+/// The outer per-probe timeout still applies; this inner cap keeps a peer
+/// that never closes from consuming the whole probe budget (T05).
+const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(1);
+
+/// Single idle-hold stability check shared by all real transports (T05).
+///
+/// Worst-case budget is `timeout_ms + idle_hold_ms`: the outer probe already
+/// consumed part of `timeout_ms` before the hold, so the post-hold stability
+/// read fits inside the *remaining* time instead of a fresh full timeout
+/// (which would allow `timeout + hold + timeout`). A peer that stays open
+/// past the budget (read timeout) or sends bytes counts as stable; only a
+/// clean close (`Ok(0)`) or a read error (RST) fails the probe.
+async fn idle_hold_check<S>(
+    stream: &mut S,
+    start: Instant,
+    timeout_ms: u64,
+    idle_hold_ms: u64,
+) -> Result<(), ProbeError>
+where
+    S: tokio::io::AsyncRead + Unpin,
+{
+    if idle_hold_ms == 0 {
+        return Ok(());
+    }
+    tokio::time::sleep(Duration::from_millis(idle_hold_ms)).await;
+    let elapsed_ms: u64 = start.elapsed().as_millis().try_into().unwrap_or(u64::MAX);
+    let remaining_ms = timeout_ms
+        .saturating_add(idle_hold_ms)
+        .saturating_sub(elapsed_ms);
+    if remaining_ms == 0 {
+        // No budget left but the peer survived the full hold window without
+        // a RST: that is the stability signal, so succeed.
+        return Ok(());
+    }
+    let mut byte = [0u8; 1];
+    match timeout(Duration::from_millis(remaining_ms), stream.read(&mut byte)).await {
+        Ok(Ok(0)) | Ok(Err(_)) => {
+            tracing::debug!("idle-hold probe closed by peer");
+            Err(ProbeError::Refused("idle-hold RST"))
+        }
+        _ => Ok(()),
+    }
+}
+
 impl Transport for HttpTransport {
     fn probe(&self, ip: IpAddr, port: u16, timeout_ms: u64, idle_hold_ms: u64) -> ProbeFuture<'_> {
         let start = Instant::now();
@@ -412,19 +439,7 @@ impl Transport for HttpTransport {
             };
             match timeout(Duration::from_millis(timeout_ms), fut).await {
                 Ok(Ok((mut tls, latency, buf))) => {
-                    if idle_hold_ms > 0 {
-                        tokio::time::sleep(Duration::from_millis(idle_hold_ms)).await;
-                        let mut byte = [0u8; 1];
-                        let held =
-                            timeout(Duration::from_millis(timeout_ms), tls.read(&mut byte)).await;
-                        match held {
-                            Ok(Ok(0)) | Ok(Err(_)) => {
-                                tracing::debug!("idle-hold probe closed by peer");
-                                return Err(ProbeError::Refused("idle-hold RST"));
-                            }
-                            _ => {}
-                        }
-                    }
+                    idle_hold_check(&mut tls, start, timeout_ms, idle_hold_ms).await?;
                     let end_of_headers = find_subsequence(&buf, b"\r\n\r\n")
                         .ok_or(ProbeError::Refused("malformed http response"))?;
                     let head = &buf[..end_of_headers];
@@ -797,6 +812,88 @@ mod tests {
             t.probe("1.2.3.4".parse().unwrap(), 443, 3000, 0).await,
             Ok(ProbeOutcome::plain(9))
         );
+    }
+
+    #[test]
+    fn plain_outcome_always_reports_zero_loss() {
+        // T05 pin: real transports are single-shot, so a success is always
+        // sent=1/received=1 and the engine's loss formula always yields 0.
+        let outcome = ProbeOutcome::plain(7);
+        assert_eq!((outcome.sent, outcome.received), (1, 1));
+        let loss_pct = outcome
+            .sent
+            .saturating_sub(outcome.received)
+            .saturating_mul(100)
+            .checked_div(outcome.sent)
+            .unwrap_or(100);
+        assert_eq!(loss_pct, 0);
+    }
+
+    #[tokio::test]
+    async fn idle_hold_budgets_the_read_from_remaining_time() {
+        // Simulate a slow handshake that already consumed 250ms of a 300ms
+        // timeout. A fresh full timeout after the 100ms hold would take
+        // ~400ms more; the remaining budget is only ~50ms for the read.
+        let start = Instant::now() - Duration::from_millis(250);
+        let mut stream = PendingReader;
+        let begin = Instant::now();
+        idle_hold_check(&mut stream, start, 300, 100)
+            .await
+            .expect("an open peer must pass the hold");
+        assert!(
+            begin.elapsed() < Duration::from_millis(300),
+            "the post-hold read must use the remaining budget, not a fresh timeout: {:?}",
+            begin.elapsed()
+        );
+    }
+
+    #[tokio::test]
+    async fn idle_hold_worst_case_stays_within_timeout_plus_hold() {
+        let start = Instant::now();
+        let mut stream = PendingReader;
+        idle_hold_check(&mut stream, start, 300, 100)
+            .await
+            .expect("an open peer must pass the hold");
+        assert!(
+            start.elapsed() < Duration::from_millis(300 + 100 + 250),
+            "worst case must stay near timeout+hold, not timeout+hold+timeout: {:?}",
+            start.elapsed()
+        );
+        // The zero hold stays a fast no-op.
+        let start = Instant::now();
+        let mut stream = PendingReader;
+        idle_hold_check(&mut stream, start, 300, 0)
+            .await
+            .expect("a zero hold must pass immediately");
+        assert!(
+            start.elapsed() < Duration::from_millis(100),
+            "a zero hold must not sleep: {:?}",
+            start.elapsed()
+        );
+    }
+
+    #[tokio::test]
+    async fn idle_hold_detects_peer_reset() {
+        let (mut open, closed) = tokio::io::duplex(8);
+        drop(closed);
+        let err = idle_hold_check(&mut open, Instant::now(), 3000, 10)
+            .await
+            .expect_err("a peer that closes during the hold must fail");
+        assert_eq!(err, ProbeError::Refused("idle-hold RST"));
+    }
+
+    /// Never-ready reader for the idle-hold budget tests: the post-hold
+    /// stability read must time out (an open peer) rather than fail.
+    struct PendingReader;
+
+    impl tokio::io::AsyncRead for PendingReader {
+        fn poll_read(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+            _buf: &mut tokio::io::ReadBuf<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::task::Poll::Pending
+        }
     }
 
     #[tokio::test]
